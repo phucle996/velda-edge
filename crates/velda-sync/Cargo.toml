@@ -19,6 +19,9 @@ tokio = { version = "1.43", features = ["full"] }
 prost = "0.13"
 tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 flate2 = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -27,8 +30,17 @@ tonic-build = "0.12"
 tempfile = "3"
 
 [[bench]]
-name = "sync"
+name = "stage_providers"
 harness = false
 
+[[bench]]
+name = "stage1_presync"
+harness = false
 
+[[bench]]
+name = "stage2_sync"
+harness = false
 
+[[bench]]
+name = "stage3_postsync"
+harness = false

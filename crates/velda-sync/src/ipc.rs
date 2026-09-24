@@ -42,39 +42,12 @@ impl IpcNotifier {
         }
     }
 
-    /// Path to the UDS socket.
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
-
     /// Dispatches a reload notification over the Unix Domain Socket.
     ///
     /// If the socket file does not exist (e.g. Data Plane is offline or in testing mode),
     /// this safely succeeds without error to preserve autonomous operation.
     pub async fn notify(&self, notif: &SyncNotification) -> Result<(), SyncError> {
         send_notification(&self.socket_path, notif).await
-    }
-}
-
-/// Channel sender for dispatching asynchronous sync completion signals to the IPC worker.
-pub type IpcSignalSender = tokio::sync::mpsc::Sender<SyncNotification>;
-
-/// Channel receiver consumed by the IPC signal worker.
-pub type IpcSignalReceiver = tokio::sync::mpsc::Receiver<SyncNotification>;
-
-/// Creates an asynchronous unbounded/bounded signal channel for decoupling sync completion
-/// from IPC transport dispatch.
-pub fn create_ipc_channel(buffer_size: usize) -> (IpcSignalSender, IpcSignalReceiver) {
-    tokio::sync::mpsc::channel(buffer_size)
-}
-
-/// Asynchronous background worker that receives sync completion signals from a channel
-/// and dispatches notifications across the Unix Domain Socket to Edge Data Plane workers.
-pub async fn run_ipc_signal_worker(mut receiver: IpcSignalReceiver, notifier: IpcNotifier) {
-    while let Some(notif) = receiver.recv().await {
-        if let Err(e) = notifier.notify(&notif).await {
-            eprintln!("[velda-sync::ipc] Failed to deliver IPC notification: {e}");
-        }
     }
 }
 
@@ -174,37 +147,5 @@ mod tests {
 
         let res = notifier.notify(&notif).await;
         assert!(res.is_ok(), "Missing socket should be a safe no-op");
-    }
-
-    #[tokio::test]
-    async fn test_ipc_signal_worker_and_cycle_completed() {
-        let tmp = tempdir().unwrap();
-        let socket_path = tmp.path().join("velda_signal_test.sock");
-
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        let notifier = IpcNotifier::new(&socket_path);
-
-        let (tx, rx) = create_ipc_channel(16);
-        let worker_handle = tokio::spawn(run_ipc_signal_worker(rx, notifier.clone()));
-
-        let notif = SyncNotification {
-            manifest_revision: Some(100),
-            bin_path: "/tmp/runtime/config.bin".into(),
-            changed_domains: vec!["routes".into()],
-            domain_revisions: HashMap::from([("routes".into(), 100)]),
-            domain_bins: HashMap::from([("routes".into(), "/tmp/runtime/routes.bin".into())]),
-        };
-
-        tx.send(notif.clone()).await.unwrap();
-
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-
-        let received: SyncNotification = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(received, notif);
-
-        drop(tx);
-        worker_handle.await.unwrap();
     }
 }

@@ -1,22 +1,21 @@
-use std::fs;
-use std::path::PathBuf;
+//! Purpose: End-to-End happy path reconciliation integration tests.
+//!
+//! Validates the full synchronization lifecycle: multi-domain manifest parsing,
+//! binary compilation, on-disk artifact layout, LKG manifest persistence,
+//! and idempotent re-sync behavior.
 
+mod common;
+
+use std::fs;
 use tempfile::tempdir;
 use velda_sync::post_sync::{listener, plugin, route, tls, upstream};
 use velda_sync::provider::{LocalFileProvider, Provider};
-use velda_sync::{SyncComposition, SyncError, SyncOutcome};
-
-fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("default")
-}
+use velda_sync::{SyncComposition, SyncOutcome};
 
 #[tokio::test]
 async fn test_end_to_end_manifest_sync_composition() {
-    let dir = fixture_dir();
-    assert!(dir.exists(), "Fixture directory must exist at {:?}", dir);
+    let dir = common::example_dir();
+    assert!(dir.exists(), "Example directory must exist at {:?}", dir);
 
     let storage_dir = tempdir().unwrap();
     let socket_path = storage_dir.path().join("edge_test.sock");
@@ -103,49 +102,4 @@ async fn test_end_to_end_manifest_sync_composition() {
         SyncOutcome::Unchanged,
         "Subsequent reconciliation without changes must be Unchanged"
     );
-}
-
-#[tokio::test]
-async fn test_missing_required_file_in_manifest_fails() {
-    let tmp = tempdir().unwrap();
-    let storage_dir = tempdir().unwrap();
-
-    // Copy manifest without required routes.json
-    fs::copy(
-        fixture_dir().join("manifest.json"),
-        tmp.path().join("manifest.json"),
-    )
-    .unwrap();
-    fs::copy(
-        fixture_dir().join("listeners.json"),
-        tmp.path().join("listeners.json"),
-    )
-    .unwrap();
-    // Intentionally omit routes.json
-
-    let provider = Provider::LocalFile(LocalFileProvider::new(tmp.path()));
-    let mut composition = SyncComposition::new(
-        provider,
-        storage_dir.path(),
-        "/tmp/velda_test_non_existent.sock",
-    );
-
-    let res = composition.reconcile().await;
-    assert!(matches!(res, Err(SyncError::Manifest(_))));
-}
-
-#[tokio::test]
-async fn test_missing_manifest_fails() {
-    let tmp = tempdir().unwrap();
-    let storage_dir = tempdir().unwrap();
-
-    let provider = Provider::LocalFile(LocalFileProvider::new(tmp.path()));
-    let mut composition = SyncComposition::new(
-        provider,
-        storage_dir.path(),
-        "/tmp/velda_test_non_existent.sock",
-    );
-
-    let res = composition.reconcile().await;
-    assert!(matches!(res, Err(SyncError::Manifest(_))));
 }

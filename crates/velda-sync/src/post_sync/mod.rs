@@ -1,67 +1,21 @@
-//! # Post-Sync Subsystem Domains
+//! Stage 3: Post-Sync (Domain Compilation & Persistence).
 //!
-//! Autonomous, vertically isolated domain owners (`listener`, `route`, `upstream`, `plugin`, `tls`).
-//! Each domain owns its full lifecycle from schema definition to binary persistence.
+//! Subsystem domain compilers that independently convert raw JSON configurations
+//! into optimized, validated, and checksummed binary runtime artifacts (`*.bin`).
 //!
-//! ```text
-//! post_sync/
-//! │
-//! ├── 1. Logical Dependency Tree (Cross-Domain References)
-//! │   │
-//! │   ├── route ────────────────► references:
-//! │   │                           ├── listener (by listener ID)
-//! │   │                           ├── upstream (by upstream ID)
-//! │   │                           └── plugin   (by plugin ID list)
-//! │   │
-//! │   ├── listener ─────────────► references:
-//! │   │                           └── tls      (by TLS profile name)
-//! │   │
-//! │   ├── upstream ─────────────► (leaf / target backend)
-//! │   ├── plugin ───────────────► (leaf / policy hook)
-//! │   └── tls ──────────────────► (leaf / certificate catalog)
-//! │
-//! └── 2. Domain Caller Tree (Submodule API Lifecycle)
-//!     │
-//!     ├── listener/
-//!     │   ├── Types:      ListenersFile, ListenerConfig, ListenerTlsConfig, DomainHeader
-//!     │   ├── [P2] Parse:    parse_listeners(&[u8]) -> Result<Vec<ListenerConfig>>
-//!     │   ├── [P3] Validate: validate_listeners(&mut [ListenerConfig]) -> Result<()>
-//!     │   ├── [P4] Compile:  compile_listeners_to_binary(&[ListenerConfig], rev, hash) -> Result<Vec<u8>>
-//!     │   │                  unpack_listeners_from_binary(&[u8]) -> Result<(DomainHeader, Vec<ListenerConfig>)>
-//!     │   └── [P5] Persist:  persist_listeners(storage_dir, raw_json, bin_bytes) -> Result<()>
-//!     │
-//!     ├── route/
-//!     │   ├── Types:      RoutesFile, RouteConfig, RouteMatch, RouteTimeouts, DomainHeader
-//!     │   ├── [P2] Parse:    parse_routes(&[u8]) -> Result<Vec<RouteConfig>>
-//!     │   ├── [P3] Validate: validate_routes(&mut [RouteConfig]) -> Result<()>
-//!     │   ├── [P4] Compile:  compile_routes_to_binary(&[RouteConfig], rev, hash) -> Result<Vec<u8>>
-//!     │   │                  unpack_routes_from_binary(&[u8]) -> Result<(DomainHeader, Vec<RouteConfig>)>
-//!     │   └── [P5] Persist:  persist_routes(storage_dir, raw_json, bin_bytes) -> Result<()>
-//!     │
-//!     ├── upstream/
-//!     │   ├── Types:      UpstreamsFile, UpstreamConfig, EndpointConfig, LoadBalancerConfig, DomainHeader
-//!     │   ├── [P2] Parse:    parse_upstreams(&[u8]) -> Result<Vec<UpstreamConfig>>
-//!     │   ├── [P3] Validate: validate_upstreams(&mut [UpstreamConfig]) -> Result<()>
-//!     │   ├── [P4] Compile:  compile_upstreams_to_binary(&[UpstreamConfig], rev, hash) -> Result<Vec<u8>>
-//!     │   │                  unpack_upstreams_from_binary(&[u8]) -> Result<(DomainHeader, Vec<UpstreamConfig>)>
-//!     │   └── [P5] Persist:  persist_upstreams(storage_dir, raw_json, bin_bytes) -> Result<()>
-//!     │
-//!     ├── plugin/
-//!     │   ├── Types:      PluginsFile, PluginConfig, DomainHeader
-//!     │   ├── [P2] Parse:    parse_plugins(&[u8]) -> Result<Vec<PluginConfig>>
-//!     │   ├── [P3] Validate: validate_plugins(&mut [PluginConfig]) -> Result<()>
-//!     │   ├── [P4] Compile:  compile_plugins_to_binary(&[PluginConfig], rev, hash) -> Result<Vec<u8>>
-//!     │   │                  unpack_plugins_from_binary(&[u8]) -> Result<(DomainHeader, Vec<PluginConfig>)>
-//!     │   └── [P5] Persist:  persist_plugins(storage_dir, raw_json, bin_bytes) -> Result<()>
-//!     │
-//!     └── tls/
-//!         ├── Types:      TlsFile, TlsProfileConfig, CertificateFiles, DomainHeader
-//!         ├── [P2] Parse:    parse_tls(&[u8]) -> Result<TlsFile>
-//!         ├── [P3] Validate: validate_tls(&mut TlsFile) -> Result<()>
-//!         ├── [P4] Compile:  compile_tls_to_binary(&TlsFile, rev, hash) -> Result<Vec<u8>>
-//!         │                  unpack_tls_from_binary(&[u8]) -> Result<(DomainHeader, TlsFile)>
-//!         └── [P5] Persist:  persist_tls(storage_dir, raw_json, bin_bytes) -> Result<()>
-//! ```
+//! ### Domain Branches:
+//! - **`route`**: L7 routing rules, path prefix matching, header matches, and upstream targets.
+//! - **`listener`**: Network bind sockets, protocol options (HTTP/HTTPS/TCP), and TLS bindings.
+//! - **`upstream`**: Backend service pools, target endpoints, load-balancing algorithms, and timeouts.
+//! - **`plugin`**: Request/response lifecycle hook policies (rate limiting, auth, WAF).
+//! - **`tls`**: TLS certificates, private keys, and SNI profile catalogs.
+//!
+//! ### Standard 5-Phase Pipeline for Each Domain Branch:
+//! 1. **Phase 1: Entity & Schema Definitions** — Typed domain structs and configuration file schemas.
+//! 2. **Phase 2: Ingest & Parse** (`parse_*`) — Deserializes raw JSON bytes into domain structs.
+//! 3. **Phase 3: Semantic Validation** (`validate_*`) — Enforces structural and business invariants.
+//! 4. **Phase 4: Binary Compilation & Unpack** (`compile_*`, `unpack_*`) — Emits `DomainHeader` + Bincode.
+//! 5. **Phase 5: Atomic Persistence** (`persist_*`) — Atomically writes `config/*.json` and `runtime/*.bin`.
 
 pub mod listener;
 pub mod plugin;

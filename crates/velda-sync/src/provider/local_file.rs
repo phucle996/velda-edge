@@ -1,13 +1,14 @@
-//! Local filesystem configuration provider.
+//! Pure Local Filesystem Configuration Provider.
 //!
-//! Owns reading `manifest.json` and domain configuration files from a local directory.
+//! Provides raw filesystem byte read capabilities from a designated configuration directory.
+//! Free of business pipeline logic and schema decoding.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::{ManifestConfig, SyncError};
+use crate::SyncError;
 
-/// Local filesystem configuration provider (Standalone Mode).
+/// Local filesystem configuration provider.
 #[derive(Debug, Clone)]
 pub struct LocalFileProvider {
     config_dir: PathBuf,
@@ -21,39 +22,7 @@ impl LocalFileProvider {
         }
     }
 
-    /// Path to the configuration directory.
-    pub fn config_dir(&self) -> &Path {
-        &self.config_dir
-    }
-
-    /// Reads and parses `manifest.json` from the configuration directory.
-    pub async fn read_manifest(&self) -> Result<(ManifestConfig, Vec<u8>), SyncError> {
-        let manifest_path = self.config_dir.join("manifest.json");
-        if !manifest_path.is_file() {
-            return Err(SyncError::Manifest(format!(
-                "Required manifest.json missing in configuration directory: {}",
-                self.config_dir.display()
-            )));
-        }
-
-        let bytes = fs::read(&manifest_path)?;
-        let manifest: ManifestConfig =
-            serde_json::from_slice(&bytes).map_err(|e| SyncError::InvalidJson {
-                domain: "manifest".into(),
-                reason: e.to_string(),
-            })?;
-
-        if manifest.schema_version != 1 {
-            return Err(SyncError::Manifest(format!(
-                "Unsupported manifest schema_version {}; expected 1",
-                manifest.schema_version
-            )));
-        }
-
-        Ok((manifest, bytes))
-    }
-
-    /// Reads raw bytes of a domain configuration file relative to the configuration directory.
+    /// Reads raw bytes of a file relative to the configuration directory.
     pub async fn read_file(&self, relative_path: &str) -> Result<Vec<u8>, SyncError> {
         let file_path = self.config_dir.join(relative_path);
         if !file_path.exists() {
@@ -65,5 +34,30 @@ impl LocalFileProvider {
 
         let bytes = fs::read(&file_path)?;
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_local_file_provider_reads_raw_bytes() {
+        let tmp = tempdir().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        fs::write(&file_path, b"hello pure provider").unwrap();
+
+        let provider = LocalFileProvider::new(tmp.path());
+        let content = provider.read_file("test.txt").await.unwrap();
+        assert_eq!(content, b"hello pure provider");
+    }
+
+    #[tokio::test]
+    async fn test_local_file_provider_missing_file_errors() {
+        let tmp = tempdir().unwrap();
+        let provider = LocalFileProvider::new(tmp.path());
+        let res = provider.read_file("nonexistent.json").await;
+        assert!(res.is_err());
     }
 }
