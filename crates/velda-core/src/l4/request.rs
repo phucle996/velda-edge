@@ -6,10 +6,7 @@
 
 use std::net::SocketAddr;
 
-/// Unique identifier for an L4 connection.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConnectionId(pub u64);
+pub use crate::types::ConnectionId;
 
 /// Supported L4 transport protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,9 +22,9 @@
 //! The actual processing is performed by higher-level crates such as
 //! `velda-proxy`, `velda-router`, `velda-plugin`, and `velda-upstream`.
 
-use crate::l4::request::{ConnectionId, L4Request};
+use crate::l4::request::L4Request;
 use crate::l7::request::L7Request;
-use crate::types::{RequestId, RouteId, UpstreamId};
+use crate::types::{ConnectionId, RequestId, RouteId, UpstreamId};
 
 /// Context associated with a network connection.
 ///
@@ -33,7 +33,7 @@ use crate::types::{RequestId, RouteId, UpstreamId};
 ///
 /// Therefore, connection-level information must not be confused
 /// with request-level state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionContext {
     /// L4 connection information.
     pub connection: L4Request,
@@ -41,16 +41,19 @@ pub struct ConnectionContext {
 
 impl ConnectionContext {
     /// Creates a new connection context.
+    #[inline]
     pub fn new(connection: L4Request) -> Self {
         Self { connection }
     }
 
     /// Returns the unique connection identifier.
+    #[inline]
     pub fn id(&self) -> ConnectionId {
         self.connection.connection_id
     }
 
     /// Returns the client IP address.
+    #[inline]
     pub fn client_ip(&self) -> std::net::IpAddr {
         self.connection.client_ip()
     }
@@ -63,7 +66,7 @@ impl ConnectionContext {
 ///
 /// The L4 context is retained because higher-level policy may still
 /// need transport information such as the client address.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestContext {
     /// L4 connection information.
     pub l4: ConnectionContext,
@@ -80,6 +83,7 @@ pub struct RequestContext {
 
 impl RequestContext {
     /// Creates a new request context.
+    #[inline]
     pub fn new(l4: ConnectionContext, l7: L7Request, request_id: RequestId) -> Self {
         Self {
             l4,
@@ -89,21 +93,25 @@ impl RequestContext {
     }
 
     /// Returns the request identifier.
+    #[inline]
     pub fn request_id(&self) -> RequestId {
         self.state.request_id
     }
 
     /// Returns the client IP address.
+    #[inline]
     pub fn client_ip(&self) -> std::net::IpAddr {
         self.l4.client_ip()
     }
 
     /// Returns the selected route, if routing has already completed.
+    #[inline]
     pub fn route(&self) -> Option<RouteId> {
         self.state.route
     }
 
     /// Returns the selected upstream, if one has already been selected.
+    #[inline]
     pub fn upstream(&self) -> Option<UpstreamId> {
         self.state.upstream
     }
@@ -135,7 +143,7 @@ impl RequestContext {
 ///
 /// Keep this structure explicit and strongly typed. Avoid using
 /// `HashMap<String, Box<dyn Any>>` as a generic plugin state store.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestState {
     /// Unique identifier for this request.
     pub request_id: RequestId,
@@ -158,6 +166,7 @@ pub struct RequestState {
 
 impl RequestState {
     /// Creates a new request state.
+    #[inline]
     pub fn new(request_id: RequestId) -> Self {
         Self {
             request_id,
@@ -170,22 +179,26 @@ impl RequestState {
     }
 
     /// Stores the route selected by the router.
+    #[inline]
     pub fn set_route(&mut self, route: RouteId) {
         self.route = Some(route);
         self.routed = true;
     }
 
     /// Stores the upstream selected for the request.
+    #[inline]
     pub fn set_upstream(&mut self, upstream: UpstreamId) {
         self.upstream = Some(upstream);
     }
 
     /// Marks the upstream request as started.
+    #[inline]
     pub fn mark_upstream_started(&mut self) {
         self.upstream_started = true;
     }
 
     /// Marks the upstream request as completed.
+    #[inline]
     pub fn mark_upstream_completed(&mut self) {
         self.upstream_completed = true;
     }

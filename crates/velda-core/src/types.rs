@@ -36,6 +36,34 @@ impl fmt::Display for RequestId {
     }
 }
 
+/// Unique identifier for an L4 connection.
+///
+/// A connection ID identifies a single physical transport-level connection
+/// accepted by Velda, which may serve multiple requests over its lifetime.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionId(pub u64);
+
+impl ConnectionId {
+    /// Creates a new connection identifier.
+    #[inline]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying identifier value.
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Identifier of a configured route.
 ///
 /// A route ID is assigned by the routing/configuration subsystem and
@@ -89,5 +117,28 @@ impl UpstreamId {
 impl fmt::Display for UpstreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strongly_typed_ids() {
+        let req = RequestId::new(1001);
+        let conn = ConnectionId::new(2002);
+        let route = RouteId::new(3003);
+        let up = UpstreamId::new(4004);
+
+        assert_eq!(req.value(), 1001);
+        assert_eq!(conn.value(), 2002);
+        assert_eq!(route.value(), 3003);
+        assert_eq!(up.value(), 4004);
+
+        assert_eq!(format!("{req}"), "1001");
+        assert_eq!(format!("{conn}"), "2002");
+        assert_eq!(format!("{route}"), "3003");
+        assert_eq!(format!("{up}"), "4004");
     }
 }

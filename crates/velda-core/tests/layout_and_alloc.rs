@@ -12,8 +12,8 @@ use http::{HeaderMap, Method, Uri, Version};
 use velda_core::l4::request::{ConnectionId, TransportProtocol};
 use velda_core::l7::request::Body;
 use velda_core::{
-    Action, ConnectionContext, ErrorKind, HookPhase, L4Action, L4HookAction, L4Request, L7Request,
-    Phase, RequestContext, RequestId, RequestState, RouteId, UpstreamId,
+    Action, ConnectionContext, ErrorKind, HookPhase, L4Action, L4Request, L7Request, Phase,
+    RequestContext, RequestId, RequestState, RouteId, UpstreamId,
 };
 
 /// Custom counting allocator to verify zero heap allocation on the hot path.
@@ -102,9 +102,6 @@ fn test_type_sizes_and_alignment() {
     assert_eq!(size_of::<HookPhase>(), 1);
     assert_eq!(size_of::<L4Action>(), 1);
     assert_eq!(size_of::<ErrorKind>(), 1);
-
-    // 4. Hook action enums with payloads
-    assert_eq!(size_of::<L4HookAction>(), 48);
 }
 
 #[test]

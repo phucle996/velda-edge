@@ -117,61 +117,6 @@ impl Error {
     pub fn source_error(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
         self.source.as_deref()
     }
-
-    /// Creates an invalid-request error.
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::InvalidRequest, message)
-    }
-
-    /// Creates a protocol error.
-    pub fn protocol(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Protocol, message)
-    }
-
-    /// Creates a route-not-found error.
-    pub fn route_not_found(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::RouteNotFound, message)
-    }
-
-    /// Creates a route-configuration error.
-    pub fn route_config(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::RouteConfig, message)
-    }
-
-    /// Creates an upstream-unavailable error.
-    pub fn upstream_unavailable(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::UpstreamUnavailable, message)
-    }
-
-    /// Creates an upstream-failure error.
-    pub fn upstream_failure(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::UpstreamFailure, message)
-    }
-
-    /// Creates a timeout error.
-    pub fn timeout(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Timeout, message)
-    }
-
-    /// Creates a connection error.
-    pub fn connection(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Connection, message)
-    }
-
-    /// Creates a request-rejection error.
-    pub fn rejected(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Rejected, message)
-    }
-
-    /// Creates a cancellation error.
-    pub fn canceled(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Canceled, message)
-    }
-
-    /// Creates an internal error.
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Internal, message)
-    }
 }
 
 impl fmt::Display for Error {

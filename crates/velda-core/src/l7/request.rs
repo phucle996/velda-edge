@@ -39,7 +39,7 @@ impl Body {
 }
 
 /// HTTP request processed by the Velda L7 pipeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct L7Request {
     /// HTTP method.
     pub method: Method,

@@ -29,7 +29,7 @@ pub mod types;
 // L4 / L7 Models
 // -----------------------------------------------------------------------------
 
-pub use l4::request::{ConnectionId, L4Request, Peer, TransportProtocol};
+pub use l4::request::{L4Request, Peer, TransportProtocol};
 pub use l4::response::{L4Action, L4Response};
 pub use l7::Body;
 pub use l7::request::L7Request;
@@ -51,10 +51,10 @@ pub use error::{Error, ErrorKind, Result};
 // Lifecycle
 // -----------------------------------------------------------------------------
 
-pub use lifecycle::{Action, Hook, HookPhase, L4Hook, L4HookAction, Phase};
+pub use lifecycle::{Action, Hook, HookPhase, Phase};
 
 // -----------------------------------------------------------------------------
 // Shared identifiers
 // -----------------------------------------------------------------------------
 
-pub use types::{RequestId, RouteId, UpstreamId};
+pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

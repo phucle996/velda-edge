@@ -33,10 +33,7 @@
 
 use std::future::Future;
 
-use crate::{
-    context::RequestContext, error::Error, l4::request::L4Request, l4::response::L4Response,
-    l7::response::L7Response,
-};
+use crate::{context::RequestContext, error::Error, l7::response::L7Response};
 
 /// A phase in the Velda request lifecycle.
 ///
@@ -130,6 +127,24 @@ pub enum Action {
 }
 
 impl Action {
+    /// Constructs a `Continue` action.
+    #[inline]
+    pub const fn r#continue() -> Self {
+        Self::Continue
+    }
+
+    /// Constructs a `Respond` action with the given L7 HTTP response.
+    #[inline]
+    pub fn respond(response: L7Response) -> Self {
+        Self::Respond(response)
+    }
+
+    /// Constructs a `Reject` action with the given core error.
+    #[inline]
+    pub fn reject(error: Error) -> Self {
+        Self::Reject(error)
+    }
+
     /// Returns `true` when processing should continue.
     #[inline]
     pub const fn is_continue(&self) -> bool {
@@ -167,65 +182,6 @@ pub trait Hook: Send + Sync {
     fn handle(&self, ctx: &mut RequestContext) -> impl Future<Output = Action> + Send;
 }
 
-/// Result returned by an L4 hook.
-///
-/// L4 hooks operate on transport-level information and therefore
-/// must not return an HTTP response directly.
-#[derive(Debug)]
-pub enum L4HookAction {
-    /// Continue processing the connection.
-    Continue,
-
-    /// Produce a transport-level response/control decision.
-    Respond(L4Response),
-
-    /// Reject the connection/request.
-    Reject(Error),
-}
-
-impl L4HookAction {
-    /// Returns `true` when L4 processing should continue.
-    #[inline]
-    pub const fn is_continue(&self) -> bool {
-        matches!(self, Self::Continue)
-    }
-
-    /// Returns `true` when the L4 hook produced a response.
-    #[inline]
-    pub const fn is_response(&self) -> bool {
-        matches!(self, Self::Respond(_))
-    }
-
-    /// Returns `true` when the L4 hook rejected processing.
-    #[inline]
-    pub const fn is_rejected(&self) -> bool {
-        matches!(self, Self::Reject(_))
-    }
-}
-
-/// L4 extension point.
-///
-/// This hook works on the transport-level connection model and is
-/// independent of HTTP semantics.
-///
-/// Typical use cases:
-/// - connection ACL
-/// - source IP policy
-/// - L4 rate limiting
-/// - protocol filtering
-pub trait L4Hook: Send + Sync {
-    /// Returns a stable name for the hook.
-    fn name(&self) -> &'static str;
-
-    /// Executes the L4 hook.
-    fn handle(&self, request: &mut L4Request) -> impl Future<Output = L4HookAction> + Send;
-}
-
-/// Describes where a hook is registered.
-///
-/// This type is intentionally limited to the hookable phases so
-/// plugins cannot accidentally register themselves into engine-owned
-/// phases such as route matching or upstream execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPhase {
     /// Runs before route matching.
@@ -247,5 +203,46 @@ impl HookPhase {
             Self::PreUpstream => Phase::PreUpstream,
             Self::PostResponse => Phase::PostResponse,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ErrorKind;
+    use http::StatusCode;
+
+    #[test]
+    fn test_phase_properties() {
+        assert!(Phase::PreRoute.is_l7_hook_phase());
+        assert!(Phase::PreUpstream.is_l7_hook_phase());
+        assert!(Phase::PostResponse.is_l7_hook_phase());
+        assert!(!Phase::Route.is_l7_hook_phase());
+        assert!(Phase::Route.is_engine_phase());
+
+        assert_eq!(HookPhase::PreRoute.lifecycle_phase(), Phase::PreRoute);
+        assert_eq!(HookPhase::PreUpstream.lifecycle_phase(), Phase::PreUpstream);
+        assert_eq!(
+            HookPhase::PostResponse.lifecycle_phase(),
+            Phase::PostResponse
+        );
+    }
+
+    #[test]
+    fn test_action_constructors_and_inspectors() {
+        let c = Action::r#continue();
+        assert!(c.is_continue());
+        assert!(!c.is_response());
+        assert!(!c.is_rejected());
+
+        let r = Action::respond(L7Response::empty(StatusCode::OK));
+        assert!(!r.is_continue());
+        assert!(r.is_response());
+        assert!(!r.is_rejected());
+
+        let rej = Action::reject(Error::new(ErrorKind::Rejected, "blocked by test"));
+        assert!(!rej.is_continue());
+        assert!(!rej.is_response());
+        assert!(rej.is_rejected());
     }
 }
