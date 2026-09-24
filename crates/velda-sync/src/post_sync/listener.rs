@@ -98,8 +98,8 @@ impl L4Protocol {
     #[inline]
     fn from_str_proto(s: &str) -> Option<Self> {
         match s {
-            "http" | "tcp" => Some(Self::Tcp),
-            "udp" => Some(Self::Udp),
+            "tcp" | "http" | "http1" | "http2" => Some(Self::Tcp),
+            "udp" | "http3" | "quic" => Some(Self::Udp),
             _ => None,
         }
     }
@@ -301,13 +301,23 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
                     ),
                 })?;
 
+        if socket_addr.port() == 0 {
+            return Err(SyncError::Validation {
+                domain: "listeners".into(),
+                reason: format!(
+                    "Listener '{}' has invalid port 0 in address '{}'; a valid assigned port (> 0) is strictly required",
+                    listener.id, listener.address
+                ),
+            });
+        }
+
         let l4_proto = match L4Protocol::from_str_proto(&listener.protocol) {
             Some(p) => p,
             None => {
                 return Err(SyncError::Validation {
                     domain: "listeners".into(),
                     reason: format!(
-                        "Listener '{}' has unsupported protocol '{}'; must be explicitly 'http', 'tcp', or 'udp'",
+                        "Listener '{}' has unsupported protocol '{}'; must be 'tcp', 'udp', 'http', 'http/1.1', 'http2', 'http3', or 'quic'",
                         listener.id, listener.protocol
                     ),
                 });

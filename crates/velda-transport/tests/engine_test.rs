@@ -73,7 +73,7 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
                             assert_eq!(handoff.path_hint(), PathKind::Http);
                             assert_eq!(handoff.tls_profile(), None);
                         } else if handoff.listener_id() == "https" {
-                            assert_eq!(handoff.path_hint(), PathKind::Tls);
+                            assert_eq!(handoff.path_hint(), PathKind::Http);
                             assert_eq!(handoff.tls_profile(), Some("default"));
                         }
 
@@ -324,10 +324,10 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
     };
 
     let tcp_bind = IngressBinding::new("tcp", free_tcp, "tcp", false, None).unwrap();
-    let h1_bind = IngressBinding::new("h1", free_h1, "http/1.1", false, None).unwrap();
+    let h1_bind = IngressBinding::new("h1", free_h1, "http1", false, None).unwrap();
     let h2_bind = IngressBinding::new("h2", free_h2, "http2", false, None).unwrap();
     let udp_bind = IngressBinding::new("udp", free_udp, "udp", false, None).unwrap();
-    let h3_bind = IngressBinding::new("h3", free_h3, "http/3", true, Some("tls".into())).unwrap();
+    let h3_bind = IngressBinding::new("h3", free_h3, "http3", true, Some("tls".into())).unwrap();
 
     assert_eq!(tcp_bind.path, PathKind::L4Direct);
     assert_eq!(h1_bind.path, PathKind::Http1);

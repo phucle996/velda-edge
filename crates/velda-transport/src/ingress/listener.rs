@@ -47,36 +47,12 @@ impl IngressBinding {
         let proto_lower = protocol.to_ascii_lowercase();
 
         let path = match proto_lower.as_str() {
-            "tcp" => {
-                if tls_enabled {
-                    PathKind::Tls
-                } else {
-                    PathKind::L4Direct
-                }
-            }
+            "tcp" => PathKind::L4Direct,
             "udp" => PathKind::L4Direct,
-            "http" => {
-                if tls_enabled {
-                    PathKind::Tls
-                } else {
-                    PathKind::Http
-                }
-            }
-            "http1" | "http/1" | "http/1.1" => {
-                if tls_enabled {
-                    PathKind::Tls
-                } else {
-                    PathKind::Http1
-                }
-            }
-            "http2" | "http/2" | "h2" | "h2c" => {
-                if tls_enabled {
-                    PathKind::Tls
-                } else {
-                    PathKind::Http2
-                }
-            }
-            "http3" | "http/3" | "h3" => PathKind::Http3,
+            "http" => PathKind::Http,
+            "http1" => PathKind::Http1,
+            "http2" => PathKind::Http2,
+            "http3" => PathKind::Http3,
             "quic" => PathKind::Quic,
             other => {
                 return Err(TransportError::Io(std::io::Error::new(
@@ -102,7 +78,7 @@ impl IngressBinding {
     pub fn is_udp(&self) -> bool {
         matches!(
             self.protocol.to_ascii_lowercase().as_str(),
-            "udp" | "quic" | "http3" | "http/3" | "h3"
+            "udp" | "http3" | "quic"
         )
     }
 
@@ -212,25 +188,16 @@ impl IngressListener {
                                     peer = %conn.peer(),
                                     "Ingress accepted connection"
                                 );
-                                match path {
-                                    PathKind::L4Direct => {
-                                        tokio::spawn(l4_fn(conn));
-                                    }
-                                    PathKind::Tls
-                                    | PathKind::Http
-                                    | PathKind::Http1
-                                    | PathKind::Http2 => {
-                                        let handoff = crate::forwarding::l7::L7Handoff::new(
-                                            conn,
-                                            path,
-                                            ingress.binding().id.clone(),
-                                            ingress.binding().tls_profile.clone(),
-                                        );
-                                        tokio::spawn(l7_fn(handoff));
-                                    }
-                                    PathKind::Http3 | PathKind::Quic | PathKind::Unknown => {
-                                        tokio::spawn(l4_fn(conn));
-                                    }
+                                if path.is_http() || path == PathKind::Tls || ingress.binding().tls_enabled {
+                                    let handoff = crate::forwarding::l7::L7Handoff::new(
+                                        conn,
+                                        path,
+                                        ingress.binding().id.clone(),
+                                        ingress.binding().tls_profile.clone(),
+                                    );
+                                    tokio::spawn(l7_fn(handoff));
+                                } else {
+                                    tokio::spawn(l4_fn(conn));
                                 }
                             }
                             Err(err) => {
@@ -271,7 +238,8 @@ mod tests {
             Some("default".into()),
         )
         .unwrap();
-        assert_eq!(https_binding.path, PathKind::Tls);
+        assert_eq!(https_binding.path, PathKind::Http);
+        assert!(https_binding.tls_enabled);
         assert_eq!(https_binding.tls_profile.as_deref(), Some("default"));
 
         // Matches listeners.json "tcp-ingress"
@@ -304,7 +272,7 @@ mod tests {
         let h1_binding = IngressBinding::new(
             "h1-ingress",
             "0.0.0.0:8080".parse().unwrap(),
-            "http/1.1",
+            "http1",
             false,
             None,
         )
@@ -328,7 +296,7 @@ mod tests {
         let h3_binding = IngressBinding::new(
             "h3-ingress",
             "0.0.0.0:8443".parse().unwrap(),
-            "http/3",
+            "http3",
             true,
             Some("prod-tls".into()),
         )

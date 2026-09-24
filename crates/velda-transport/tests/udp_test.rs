@@ -266,7 +266,7 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
     let h3_binding = IngressBinding::new(
         "h3-listener",
         server.local_addr(),
-        "http/3",
+        "http3",
         true,
         Some("default-tls".into()),
     )
