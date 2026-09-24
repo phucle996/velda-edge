@@ -6,14 +6,12 @@ members = [
     "crates/velda-transport",
     "crates/velda-tls",
     "crates/velda-http",
-    "crates/velda-session",
     "crates/velda-router",
     "crates/velda-plugin",
     "crates/velda-upstream",
     "crates/velda-lb",
     "crates/velda-pool",
     "crates/velda-observability",
-    "crates/velda-proxy",
     "crates/velda-edge",
 ]
 

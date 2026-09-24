@@ -11,18 +11,19 @@
 `velda-core` nằm ở đáy của đồ thị phụ thuộc (`dependency graph`), không phụ thuộc vào bất kỳ crate nội bộ nào khác trong Velda:
 
 ```text
-       velda-proxy   velda-router   velda-upstream   velda-plugin
-            │              │               │               │
-            └──────────────┴───────┬───────┴───────────────┘
-                                   │ (dùng chung contracts)
-                                   ▼
-                              velda-core
+       velda-transport   velda-router   velda-upstream   velda-plugin
+              │                │               │               │
+              └────────────────┴───────┬───────┴───────────────┘
+                                       │ (dùng chung contracts)
+                                       ▼
+                                  velda-core
 ```
 
 Trong luồng xử lý request runtime (*request pipeline*), `velda-core` **không phải là một bước xử lý (phase)**. Nó là tập hợp các kiểu dữ liệu (`types`) được truyền qua lại giữa các bước:
 
 ```text
-Client ──► Transport ──► TLS ──► HTTP ──► Session ──► Proxy ──► Router ──► Plugin ──► Upstream
+L4: Client ──► velda-transport ──► Router ──► Upstream
+L7: Client ──► velda-transport ──► TLS ──► HTTP ──► Router ──► Plugin ──► Upstream
 ```
 
 ---

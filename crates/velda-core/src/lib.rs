@@ -15,7 +15,7 @@
 //! - Load balancing
 //! - Runtime orchestration
 //!
-//! Higher-level crates such as `velda-proxy`, `velda-router`,
+//! Higher-level crates such as `velda-transport`, `velda-router`,
 //! `velda-plugin`, and `velda-upstream` build on these contracts.
 
 pub mod context;

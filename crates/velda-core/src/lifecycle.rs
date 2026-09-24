@@ -1,8 +1,8 @@
 //! Request lifecycle and extension contracts for Velda Edge.
 //!
 //! The lifecycle describes how a request moves through the data plane.
-//! `velda-core` defines the contract only; the actual orchestration is
-//! implemented by `velda-proxy`.
+//! `velda-core` defines the contract only; the actual execution is
+//! driven by the traffic and protocol engines (`velda-transport` and `velda-http`).
 //!
 //! High-level lifecycle:
 //!

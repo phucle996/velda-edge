@@ -48,8 +48,7 @@ pub struct ListenersFile {
 pub struct ListenerConfig {
     pub id: String,
     pub address: String,  // e.g. "0.0.0.0:80" or "0.0.0.0:443"
-    pub protocol: String, // "http", "tcp"
-    pub enabled: bool,
+    pub protocol: String, // "http", "tcp", "udp"
     pub tls: ListenerTlsConfig,
 }
 
@@ -86,7 +85,26 @@ pub fn parse_listeners(payload: &[u8]) -> Result<Vec<ListenerConfig>, SyncError>
 }
 
 // ============================================================================
-// Phase 3: Integrity Check & Semantic Validation
+// Phase 3: Integrity Check & Semantic Validation (Inline Port Conflicts)
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum L4Protocol {
+    Tcp,
+    Udp,
+}
+
+impl L4Protocol {
+    #[inline]
+    fn from_str_proto(s: &str) -> Option<Self> {
+        match s {
+            "http" | "tcp" => Some(Self::Tcp),
+            "udp" => Some(Self::Udp),
+            _ => None,
+        }
+    }
+}
+
 #[inline]
 fn trim_in_place(s: &mut String) {
     let trimmed_len = s.trim().len();
@@ -95,11 +113,153 @@ fn trim_in_place(s: &mut String) {
     }
 }
 
-/// Validates listener rules strictly without silent fallbacks.
+#[inline]
+fn ip_addresses_overlap(a: std::net::IpAddr, b: std::net::IpAddr) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a, b) {
+        (std::net::IpAddr::V4(v4_a), std::net::IpAddr::V4(v4_b)) => {
+            v4_a.is_unspecified() || v4_b.is_unspecified() || v4_a == v4_b
+        }
+        (std::net::IpAddr::V6(v6_a), std::net::IpAddr::V6(v6_b)) => {
+            v6_a.is_unspecified() || v6_b.is_unspecified() || v6_a == v6_b
+        }
+        (std::net::IpAddr::V4(v4), std::net::IpAddr::V6(v6)) => {
+            v6.is_unspecified() || (v4.is_unspecified() && v6.to_ipv4_mapped().is_some())
+        }
+        (std::net::IpAddr::V6(v6), std::net::IpAddr::V4(v4)) => {
+            v6.is_unspecified() || (v4.is_unspecified() && v6.to_ipv4_mapped().is_some())
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HostListeningSocket {
+    proto: L4Protocol,
+    ip: std::net::IpAddr,
+    port: u16,
+}
+
+fn parse_proc_net_content(
+    content: &str,
+    proto: L4Protocol,
+    is_ipv6: bool,
+    out: &mut Vec<HostListeningSocket>,
+) {
+    for line in content.lines().skip(1) {
+        let mut tokens = line.split_whitespace();
+        // Token 0: sl
+        let _ = tokens.next();
+        // Token 1: local_address (HEX_IP:HEX_PORT)
+        let Some(local_addr) = tokens.next() else {
+            continue;
+        };
+        // Token 2: rem_address
+        let _ = tokens.next();
+        // Token 3: st
+        let Some(state) = tokens.next() else { continue };
+
+        let is_listening = match proto {
+            L4Protocol::Tcp => state.eq_ignore_ascii_case("0A"),
+            L4Protocol::Udp => state.eq_ignore_ascii_case("07"),
+        };
+
+        if !is_listening {
+            continue;
+        }
+
+        let Some((hex_ip, hex_port)) = local_addr.split_once(':') else {
+            continue;
+        };
+        let Ok(port) = u16::from_str_radix(hex_port, 16) else {
+            continue;
+        };
+
+        let ip = if is_ipv6 {
+            if hex_ip.len() != 32 {
+                continue;
+            }
+            let mut octets = [0u8; 16];
+            let mut valid = true;
+            for i in 0..4 {
+                let chunk = &hex_ip[i * 8..(i + 1) * 8];
+                match u32::from_str_radix(chunk, 16) {
+                    Ok(val) => {
+                        let bytes = val.to_ne_bytes();
+                        octets[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
+                    }
+                    Err(_) => {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if !valid {
+                continue;
+            }
+            std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        } else {
+            if hex_ip.len() != 8 {
+                continue;
+            }
+            match u32::from_str_radix(hex_ip, 16) {
+                Ok(val) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(val.to_ne_bytes())),
+                Err(_) => continue,
+            }
+        };
+
+        out.push(HostListeningSocket { proto, ip, port });
+    }
+}
+
+fn collect_host_listening_sockets() -> Vec<HostListeningSocket> {
+    let mut sockets = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = fs::read_to_string("/proc/net/tcp") {
+            parse_proc_net_content(&content, L4Protocol::Tcp, false, &mut sockets);
+        }
+        if let Ok(content) = fs::read_to_string("/proc/net/tcp6") {
+            parse_proc_net_content(&content, L4Protocol::Tcp, true, &mut sockets);
+        }
+        if let Ok(content) = fs::read_to_string("/proc/net/udp") {
+            parse_proc_net_content(&content, L4Protocol::Udp, false, &mut sockets);
+        }
+        if let Ok(content) = fs::read_to_string("/proc/net/udp6") {
+            parse_proc_net_content(&content, L4Protocol::Udp, true, &mut sockets);
+        }
+    }
+    sockets
+}
+
+fn probe_socket_conflict(addr: std::net::SocketAddr, proto: L4Protocol) -> bool {
+    match proto {
+        L4Protocol::Tcp => match std::net::TcpListener::bind(addr) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+            Err(_) => false,
+        },
+        L4Protocol::Udp => match std::net::UdpSocket::bind(addr) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+            Err(_) => false,
+        },
+    }
+}
+
+/// Validates listener rules strictly without silent fallbacks:
+/// 1. Schema integrity & string trimming.
+/// 2. Protocol validity (explicitly "http", "tcp", or "udp").
+/// 3. TLS profile configuration completeness.
+/// 4. Internal port collisions among configured listeners (preventing overlapping bindings).
+/// 5. Host OS port conflict detection (verifying port availability against host services).
 pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(listeners.len());
+    let mut parsed_bindings: Vec<(&str, L4Protocol, std::net::SocketAddr)> =
+        Vec::with_capacity(listeners.len());
 
-    for listener in listeners {
+    for listener in listeners.iter_mut() {
         trim_in_place(&mut listener.id);
         trim_in_place(&mut listener.address);
         trim_in_place(&mut listener.protocol);
@@ -129,17 +289,30 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
             });
         }
 
-        let is_http = listener.protocol == "http";
-        let is_tcp = listener.protocol == "tcp";
-        if !is_http && !is_tcp {
-            return Err(SyncError::Validation {
-                domain: "listeners".into(),
-                reason: format!(
-                    "Listener '{}' has unsupported protocol '{}'; must be explicitly 'http' or 'tcp'",
-                    listener.id, listener.protocol
-                ),
-            });
-        }
+        let socket_addr: std::net::SocketAddr =
+            listener
+                .address
+                .parse()
+                .map_err(|e| SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Listener '{}' has invalid socket address '{}': {e}",
+                        listener.id, listener.address
+                    ),
+                })?;
+
+        let l4_proto = match L4Protocol::from_str_proto(&listener.protocol) {
+            Some(p) => p,
+            None => {
+                return Err(SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Listener '{}' has unsupported protocol '{}'; must be explicitly 'http', 'tcp', or 'udp'",
+                        listener.id, listener.protocol
+                    ),
+                });
+            }
+        };
 
         if listener.tls.enabled {
             match &listener.tls.profile {
@@ -154,6 +327,63 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
                     });
                 }
             }
+        }
+
+        // ====================================================================
+        // Internal Port Conflict Check
+        // ====================================================================
+        for &(prev_id, prev_proto, prev_addr) in &parsed_bindings {
+            if prev_proto == l4_proto
+                && prev_addr.port() == socket_addr.port()
+                && ip_addresses_overlap(prev_addr.ip(), socket_addr.ip())
+            {
+                return Err(SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Internal port conflict: listener '{}' and listener '{}' both bind to {} ({:?})",
+                        listener.id, prev_id, listener.address, l4_proto
+                    ),
+                });
+            }
+        }
+
+        parsed_bindings.push((&listener.id, l4_proto, socket_addr));
+    }
+
+    // ========================================================================
+    // Inline Host OS Port Conflict Check
+    // ========================================================================
+    let host_sockets = collect_host_listening_sockets();
+    let has_proc_data = !host_sockets.is_empty();
+
+    for &(id, proto, socket_addr) in &parsed_bindings {
+        let mut in_use = false;
+
+        if has_proc_data {
+            for host in &host_sockets {
+                if host.proto == proto
+                    && host.port == socket_addr.port()
+                    && ip_addresses_overlap(host.ip, socket_addr.ip())
+                {
+                    in_use = true;
+                    break;
+                }
+            }
+        }
+
+        // Fallback / active probe check
+        if !in_use && probe_socket_conflict(socket_addr, proto) {
+            in_use = true;
+        }
+
+        if in_use {
+            return Err(SyncError::Validation {
+                domain: "listeners".into(),
+                reason: format!(
+                    "Host OS port conflict: listener '{}' cannot bind to {} ({:?}); port is already in use by another service on the host",
+                    id, socket_addr, proto
+                ),
+            });
         }
     }
 
@@ -298,21 +528,20 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn cfg(id: &str, addr: &str, proto: &str) -> ListenerConfig {
+        ListenerConfig {
+            id: id.into(),
+            address: addr.into(),
+            protocol: proto.into(),
+            tls: Default::default(),
+        }
+    }
+
     #[test]
     fn test_parse_valid_listeners() {
         let json = r#"{
             "schema_version": 1,
-            "listeners": [
-                {
-                    "id": "http",
-                    "address": " 0.0.0.0:80 ",
-                    "protocol": "HTTP",
-                    "enabled": true,
-                    "tls": {
-                        "enabled": false
-                    }
-                }
-            ]
+            "listeners": [{ "id": "http", "address": " 0.0.0.0:80 ", "protocol": "HTTP", "tls": { "enabled": false } }]
         }"#;
 
         let mut listeners = parse_listeners(json.as_bytes()).unwrap();
@@ -324,14 +553,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_protocol_fails() {
-        let mut listeners = vec![ListenerConfig {
-            id: "bad".into(),
-            address: "0.0.0.0:80".into(),
-            protocol: "unsupported_proto".into(),
-            enabled: true,
-            tls: Default::default(),
-        }];
-
+        let mut listeners = vec![cfg("bad", "0.0.0.0:80", "unsupported_proto")];
         assert!(matches!(
             validate_listeners(&mut listeners),
             Err(SyncError::Validation { .. })
@@ -341,22 +563,9 @@ mod tests {
     #[test]
     fn test_duplicate_listener_id_fails() {
         let mut listeners = vec![
-            ListenerConfig {
-                id: "http".into(),
-                address: "0.0.0.0:80".into(),
-                protocol: "http".into(),
-                enabled: true,
-                tls: Default::default(),
-            },
-            ListenerConfig {
-                id: "http".into(),
-                address: "0.0.0.0:8080".into(),
-                protocol: "http".into(),
-                enabled: true,
-                tls: Default::default(),
-            },
+            cfg("http", "0.0.0.0:80", "http"),
+            cfg("http", "0.0.0.0:8080", "http"),
         ];
-
         assert!(matches!(
             validate_listeners(&mut listeners),
             Err(SyncError::Validation { .. })
@@ -364,27 +573,58 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_port_conflict_fails() {
+        let mut listeners = vec![
+            cfg("http-1", "127.0.0.1:18080", "http"),
+            cfg("tcp-1", "127.0.0.1:18080", "tcp"), // both HTTP and TCP use L4 TCP
+        ];
+        let err = validate_listeners(&mut listeners).unwrap_err();
+        assert!(err.to_string().contains("Internal port conflict"));
+    }
+
+    #[test]
+    fn test_internal_port_wildcard_overlap_fails() {
+        let mut listeners = vec![
+            cfg("all", "0.0.0.0:18081", "http"),
+            cfg("loopback", "127.0.0.1:18081", "tcp"),
+        ];
+        let err = validate_listeners(&mut listeners).unwrap_err();
+        assert!(err.to_string().contains("Internal port conflict"));
+    }
+
+    #[test]
+    fn test_tcp_and_udp_coexist_on_same_port() {
+        let mut listeners = vec![
+            cfg("dns-tcp", "127.0.0.1:18082", "tcp"),
+            cfg("dns-udp", "127.0.0.1:18082", "udp"),
+        ];
+        assert!(validate_listeners(&mut listeners).is_ok());
+    }
+
+    #[test]
+    fn test_host_os_port_conflict_detected() {
+        let host_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = host_socket.local_addr().unwrap().port();
+        let mut listeners = vec![cfg("host-conflict", &format!("127.0.0.1:{port}"), "tcp")];
+
+        let err = validate_listeners(&mut listeners).unwrap_err();
+        assert!(err.to_string().contains("Host OS port conflict"));
+
+        drop(host_socket);
+        assert!(validate_listeners(&mut listeners).is_ok());
+    }
+
+    #[test]
     fn test_listener_binary_roundtrip_and_persistence() {
         let tmp = tempdir().unwrap();
-        let listeners = vec![ListenerConfig {
-            id: "http".into(),
-            address: "0.0.0.0:80".into(),
-            protocol: "http".into(),
-            enabled: true,
-            tls: Default::default(),
-        }];
+        let listeners = vec![cfg("http", "0.0.0.0:80", "http")];
+        let binary = compile_listeners_to_binary(&listeners, 5, [0x11u8; 32]).unwrap();
 
-        let json_bytes = b"{\"listeners\": []}";
-        let binary = compile_listeners_to_binary(&listeners, 5, [0x11u8; 32])
-            .expect("Should compile listeners");
-
-        let (header, restored) =
-            unpack_listeners_from_binary(&binary).expect("Should unpack listeners");
+        let (header, restored) = unpack_listeners_from_binary(&binary).unwrap();
         assert_eq!(header.revision, 5);
         assert_eq!(restored, listeners);
 
-        persist_listeners(tmp.path(), json_bytes, &binary)
-            .expect("Should persist listeners atomically");
+        persist_listeners(tmp.path(), b"{\"listeners\": []}", &binary).unwrap();
         assert!(tmp.path().join("config/listeners.json").exists());
         assert!(tmp.path().join("runtime/listeners.bin").exists());
     }

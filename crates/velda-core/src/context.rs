@@ -20,7 +20,7 @@
 //! ```
 //!
 //! The actual processing is performed by higher-level crates such as
-//! `velda-proxy`, `velda-router`, `velda-plugin`, and `velda-upstream`.
+//! `velda-transport`, `velda-router`, `velda-plugin`, and `velda-upstream`.
 
 use crate::l4::request::L4Request;
 use crate::l7::request::L7Request;

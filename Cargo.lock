@@ -24,6 +24,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1532,9 +1541,17 @@ dependencies = [
 name = "velda-edge"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "velda-core",
- "velda-proxy",
  "velda-sync",
+ "velda-transport",
 ]
 
 [[package]]
@@ -1573,21 +1590,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "velda-proxy"
-version = "0.1.0"
-dependencies = [
- "velda-core",
-]
-
-[[package]]
 name = "velda-router"
-version = "0.1.0"
-dependencies = [
- "velda-core",
-]
-
-[[package]]
-name = "velda-session"
 version = "0.1.0"
 dependencies = [
  "velda-core",
@@ -1625,6 +1628,10 @@ dependencies = [
 name = "velda-transport"
 version = "0.1.0"
 dependencies = [
+ "socket2 0.5.10",
+ "thiserror",
+ "tokio",
+ "tracing",
  "velda-core",
 ]
 
