@@ -1,0 +1,321 @@
+import React, { useEffect, useState, useMemo } from 'react';
+import { extensionsApi } from '../../lib/api';
+import {
+  ExtensionItem,
+  ExtensionCategory,
+  ExtensionsApiResponse,
+  ExtensionStatsData,
+} from './types';
+import { CATEGORIES_META } from './data/catalog';
+import { ExtensionFilters } from './components/ExtensionFilters';
+import { ExtensionCard } from './components/ExtensionCard';
+import { ExtensionTable } from './components/ExtensionTable';
+import { ExtensionConfigModal } from './components/ExtensionConfigModal';
+import { Blocks, RotateCw, AlertCircle, RefreshCw, Sparkles } from 'lucide-react';
+
+export default function ExtensionsPage() {
+  const [extensions, setExtensions] = useState<ExtensionItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<ExtensionCategory>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
+
+  // Interactive states
+  const [togglingIds, setTogglingIds] = useState<Record<string, boolean>>({});
+  const [configuringExt, setConfiguringExt] = useState<ExtensionItem | null>(null);
+
+  const fetchExtensions = async (isManual = false) => {
+    if (isManual) setIsRefreshing(true);
+    try {
+      const res = await extensionsApi.list();
+      setExtensions(res.extensions || []);
+      setError(null);
+    } catch (e) {
+      setExtensions([]);
+      setError(e instanceof Error ? e.message : 'Failed to fetch live extensions from API');
+    } finally {
+      setLoading(false);
+      if (isManual) setIsRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchExtensions();
+  }, []);
+
+  // Compute stats across 11 groups
+  const stats: ExtensionStatsData = useMemo(() => {
+    let enabled = 0;
+    const byCategory: Record<string, number> = {
+      security_engine: 0,
+      authentication: 0,
+      authorization_security: 0,
+      traffic_control: 0,
+      request_transformation: 0,
+      response_transformation: 0,
+      observability: 0,
+      resilience_upstream: 0,
+      cache_content: 0,
+      integration_runtime: 0,
+      ai_gateway: 0,
+    };
+
+    extensions.forEach((ext) => {
+      if (ext.enabled) enabled++;
+
+      // Map legacy category keys to modern group keys if needed
+      let catKey = ext.category;
+      if (catKey === 'security') catKey = 'security_engine';
+      if (catKey === 'auth') catKey = 'authentication';
+      if (catKey === 'traffic') catKey = 'traffic_control';
+      if (catKey === 'runtime') catKey = 'integration_runtime';
+
+      if (byCategory[catKey] !== undefined) {
+        byCategory[catKey]++;
+      }
+    });
+
+    return {
+      total: extensions.length,
+      enabled,
+      disabled: Math.max(0, extensions.length - enabled),
+      byCategory,
+    };
+  }, [extensions]);
+
+  // Filter extensions
+  const filteredExtensions = useMemo(() => {
+    return extensions.filter((ext) => {
+      // Normalize category comparison
+      let catKey = ext.category;
+      if (catKey === 'security') catKey = 'security_engine';
+      if (catKey === 'auth') catKey = 'authentication';
+      if (catKey === 'traffic') catKey = 'traffic_control';
+      if (catKey === 'runtime') catKey = 'integration_runtime';
+
+      // Category filter
+      if (selectedCategory !== 'all' && catKey !== selectedCategory) {
+        return false;
+      }
+
+      // Status filter
+      if (statusFilter === 'enabled' && !ext.enabled) return false;
+      if (statusFilter === 'disabled' && ext.enabled) return false;
+
+      // Search query (matches name, id, description, category, and tags)
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const matchName = ext.name.toLowerCase().includes(q);
+        const matchID = ext.id.toLowerCase().includes(q);
+        const matchDesc = ext.description.toLowerCase().includes(q);
+        const matchCat = ext.category.toLowerCase().includes(q);
+        const matchTags = ext.tags ? ext.tags.some((t) => t.toLowerCase().includes(q)) : false;
+
+        if (!matchName && !matchID && !matchDesc && !matchCat && !matchTags) return false;
+      }
+
+      return true;
+    });
+  }, [extensions, selectedCategory, statusFilter, searchQuery]);
+
+  // Toggle extension status
+  const handleToggleStatus = async (id: string, newEnabled: boolean) => {
+    setTogglingIds((prev) => ({ ...prev, [id]: true }));
+
+    // Optimistic update
+    setExtensions((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, enabled: newEnabled } : item))
+    );
+    setConfiguringExt((prev) => (prev && prev.id === id ? { ...prev, enabled: newEnabled } : prev));
+
+    try {
+      await extensionsApi.updateStatus(id, newEnabled);
+    } catch (e) {
+      // Rollback on failure
+      setExtensions((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, enabled: !newEnabled } : item))
+      );
+      setConfiguringExt((prev) => (prev && prev.id === id ? { ...prev, enabled: !newEnabled } : prev));
+      setError(e instanceof Error ? e.message : 'Failed to update extension status');
+    } finally {
+      setTogglingIds((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+  };
+
+  // Save extension configuration
+  const handleSaveConfig = async (id: string, configJSON: string): Promise<boolean> => {
+    try {
+      await extensionsApi.updateConfig(id, configJSON);
+
+      // Update in local state
+      setExtensions((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, config_json: configJSON } : item))
+      );
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update extension config');
+      return false;
+    }
+  };
+
+  const selectedCategoryMeta =
+    selectedCategory !== 'all' ? CATEGORIES_META[selectedCategory] : null;
+
+  return (
+    <div className="p-6 w-full space-y-6 font-sans">
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-primary/10 text-primary shadow-2xs transition-transform duration-300 hover:scale-105">
+              <Blocks className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold text-foreground tracking-tight">
+                  Extensions Hub
+                </h1>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-none text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20 animate-ext-pulse">
+                  <Sparkles className="w-3 h-3" />
+                  Installed manifests
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Declarative security engines, API gateway capabilities, traffic shaping, and runtime
+                extensions.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Refresh button */}
+        <button
+          type="button"
+          onClick={() => void fetchExtensions(true)}
+          disabled={isRefreshing}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-xs font-medium text-muted-foreground hover:text-foreground bg-card hover:bg-muted/50 transition-all duration-200 active:scale-95 cursor-pointer shadow-2xs"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+          <span>Refresh</span>
+        </button>
+      </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="p-3.5 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-500/40 rounded-md flex items-center justify-between text-xs text-rose-700 dark:text-rose-400 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchExtensions(true)}
+            className="underline hover:no-underline font-medium cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Filters & Navigation */}
+      <ExtensionFilters
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        selectedCategory={selectedCategory}
+        onCategoryChange={setSelectedCategory}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        categoryCounts={stats.byCategory}
+      />
+
+      {/* Category Banner if filtered */}
+      {selectedCategoryMeta && (
+        <div className="p-3 bg-card/60 border border-border/80 rounded-lg flex items-center justify-between text-xs animate-in fade-in slide-in-from-top-1 duration-200">
+          <div className="flex items-center gap-2">
+            <span
+              className={`px-2 py-0.5 rounded-none text-[10px] font-bold border uppercase tracking-wider ${selectedCategoryMeta.badgeClass}`}
+            >
+              {selectedCategoryMeta.label}
+            </span>
+            <span className="text-muted-foreground">{selectedCategoryMeta.description}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedCategory('all')}
+            className="text-primary hover:underline font-medium text-[11px] cursor-pointer"
+          >
+            Show all groups
+          </button>
+        </div>
+      )}
+
+      {/* Main Content: Cards or Table */}
+      {loading ? (
+        <div className="py-20 text-center text-muted-foreground flex flex-col items-center justify-center gap-2.5 animate-in fade-in duration-200">
+          <RotateCw className="w-6 h-6 animate-spin text-primary" />
+          <span className="text-xs font-medium">Loading extensions catalog...</span>
+        </div>
+      ) : filteredExtensions.length === 0 ? (
+        <div className="py-16 text-center text-muted-foreground border border-border border-dashed rounded-lg bg-muted/10 p-8 space-y-2 animate-in fade-in zoom-in-98 duration-200">
+          <div className="animate-ext-float inline-block">
+            <Blocks className="w-8 h-8 mx-auto text-muted-foreground opacity-50" />
+          </div>
+          <p className="text-sm font-semibold text-foreground">No extensions found</p>
+          <p className="text-xs text-muted-foreground">
+            No extension matched your search query or selected category filter.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('');
+              setSelectedCategory('all');
+              setStatusFilter('all');
+            }}
+            className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer"
+          >
+            Reset all filters
+          </button>
+        </div>
+      ) : viewMode === 'grid' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+          {filteredExtensions.map((ext, idx) => (
+            <ExtensionCard
+              key={ext.id}
+              extension={ext}
+              index={idx}
+              isToggling={Boolean(togglingIds[ext.id])}
+              onToggle={handleToggleStatus}
+              onConfigure={(item) => setConfiguringExt(item)}
+            />
+          ))}
+        </div>
+      ) : (
+        <ExtensionTable
+          extensions={filteredExtensions}
+          togglingIds={togglingIds}
+          onToggle={handleToggleStatus}
+          onConfigure={(item) => setConfiguringExt(item)}
+        />
+      )}
+
+      {/* Configuration Modal */}
+      <ExtensionConfigModal
+        extension={configuringExt}
+        onClose={() => setConfiguringExt(null)}
+        onSave={handleSaveConfig}
+        onToggleStatus={handleToggleStatus}
+      />
+    </div>
+  );
+}

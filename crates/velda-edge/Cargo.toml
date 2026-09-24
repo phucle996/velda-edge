@@ -1,0 +1,14 @@
+[package]
+name = "velda-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "velda-edge"
+path = "src/main.rs"
+
+[dependencies]
+velda-core = { path = "../velda-core" }
+velda-proxy = { path = "../velda-proxy" }
+velda-sync = { path = "../velda-sync" }

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "listeners": [
+    {
+      "id": "http",
+      "address": "0.0.0.0:80",
+      "protocol": "http",
+      "enabled": true,
+      "tls": {
+        "enabled": false
+      }
+    },
+    {
+      "id": "https",
+      "address": "0.0.0.0:443",
+      "protocol": "http",
+      "enabled": true,
+      "tls": {
+        "enabled": true,
+        "profile": "default"
+      }
+    },
+    {
+      "id": "tcp-ingress",
+      "address": "0.0.0.0:9000",
+      "protocol": "tcp",
+      "enabled": true,
+      "tls": {
+        "enabled": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package sync.v1;
+
+option go_package = "velda-control-plane/internal/transport/grpc/v1;syncv1";
+
+// Configuration synchronization service between Control Plane and Data Plane nodes.
+service ControlPlaneSyncService {
+    // Unary Polling: Client sends current manifest and domain revisions,
+    // server responds with status UP_TO_DATE (empty payload) or MODIFIED (delta payload).
+    rpc FetchDelta(FetchDeltaRequest) returns (FetchDeltaResponse);
+}
+
+message FetchDeltaRequest {
+    uint64 manifest_revision = 1;               // Current manifest revision on the edge node
+    map<string, uint64> domain_revisions = 2;   // Current domain revisions: {"routes": 42, "upstreams": 10, ...}
+}
+
+enum SyncStatus {
+    SYNC_STATUS_UNSPECIFIED = 0;
+    UP_TO_DATE = 1;                             // Configurations match, edge retains current LKG
+    MODIFIED = 2;                               // New revisions available, edge applies delta updates
+}
+
+message FetchDeltaResponse {
+    SyncStatus status = 1;
+    uint64 manifest_revision = 2;               // Latest manifest revision on Control Plane
+    repeated DomainDelta updated_domains = 3;   // Only populated when status == MODIFIED
+}
+
+message DomainDelta {
+    string domain = 1;                          // "routes", "upstreams", "listeners", "plugins", "tls"
+    uint64 revision = 2;                        // New revision for this domain
+    bytes compressed_json = 3;                  // Compressed binary JSON payload (gzip or zstd)
+    bytes sha256 = 4;                           // 32-byte SHA-256 checksum of uncompressed canonical JSON
+}

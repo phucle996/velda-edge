@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "default",
+      "mode": "server",
+      "certificate": {
+        "cert_file": "/etc/velda/tls/server.crt",
+        "key_file": "/etc/velda/tls/server.key"
+      },
+      "protocols": [
+        "tls1.2",
+        "tls1.3"
+      ],
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ]
+    },
+    {
+      "id": "internal-grpc",
+      "mode": "server",
+      "certificate": {
+        "cert_file": "/etc/velda/tls/internal-grpc.crt",
+        "key_file": "/etc/velda/tls/internal-grpc.key"
+      },
+      "protocols": [
+        "tls1.3"
+      ],
+      "alpn": [
+        "h2"
+      ]
+    }
+  ]
+}

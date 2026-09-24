@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "routes": [
+    {
+      "id": "api",
+      "kind": "l7",
+      "listener": "https",
+      "match": {
+        "host": "api.example.com",
+        "path_prefix": "/api"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 60000
+      },
+      "upstream": "users",
+      "plugins": [
+        "auth-jwt",
+        "api-resource-limit",
+        "api-rate-limit",
+        "security-headers",
+        "access-log"
+      ]
+    },
+    {
+      "id": "events",
+      "kind": "l7",
+      "listener": "https",
+      "match": {
+        "host": "api.example.com",
+        "path": "/events"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 900000
+      },
+      "upstream": "events",
+      "plugins": [
+        "auth-jwt",
+        "stream-resource-limit",
+        "access-log"
+      ]
+    },
+    {
+      "id": "grpc-users",
+      "kind": "l7",
+      "listener": "https",
+      "match": {
+        "host": "grpc.example.com",
+        "path_prefix": "/users."
+      },
+      "timeouts": {
+        "downstream_idle_ms": 300000
+      },
+      "upstream": "grpc-users",
+      "plugins": [
+        "auth-jwt",
+        "grpc-resource-limit",
+        "access-log"
+      ]
+    },
+    {
+      "id": "websocket",
+      "kind": "l7",
+      "listener": "https",
+      "match": {
+        "host": "ws.example.com",
+        "path_prefix": "/ws"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 1800000
+      },
+      "upstream": "realtime",
+      "plugins": [
+        "auth-jwt",
+        "realtime-resource-limit",
+        "access-log"
+      ]
+    },
+    {
+      "id": "tcp-stream",
+      "kind": "l4",
+      "listener": "tcp-ingress",
+      "match": {
+        "protocol": "tcp"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 300000
+      },
+      "upstream": "tcp-backend",
+      "plugins": [
+        "tcp-resource-limit",
+        "access-log"
+      ]
+    }
+  ]
+}

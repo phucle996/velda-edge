@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "upstreams": [
+    {
+      "id": "users",
+      "mode": "dns",
+      "target": {
+        "host": "users.default.svc.cluster.local",
+        "port": 8080
+      },
+      "resolver": {
+        "mode": "custom",
+        "nameservers": [
+          "10.96.0.10:53"
+        ],
+        "timeout_ms": 200,
+        "retries": 2
+      },
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 5000,
+        "idle_ms": 30000
+      }
+    },
+    {
+      "id": "events",
+      "mode": "endpoints",
+      "endpoints": [
+        {
+          "address": "10.10.20.11:8080",
+          "weight": 1
+        },
+        {
+          "address": "10.10.20.12:8080",
+          "weight": 1
+        },
+        {
+          "address": "10.10.20.13:8080",
+          "weight": 1
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "least_connections"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 30000,
+        "idle_ms": 60000
+      }
+    },
+    {
+      "id": "grpc-users",
+      "mode": "dns",
+      "target": {
+        "host": "users-grpc.default.svc.cluster.local",
+        "port": 50051
+      },
+      "resolver": {
+        "mode": "system"
+      },
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 30000,
+        "idle_ms": 120000
+      }
+    },
+    {
+      "id": "realtime",
+      "mode": "endpoints",
+      "endpoints": [
+        {
+          "address": "10.10.30.11:8080",
+          "weight": 1
+        },
+        {
+          "address": "10.10.30.12:8080",
+          "weight": 1
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "least_connections"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 300000,
+        "idle_ms": 600000
+      }
+    },
+    {
+      "id": "tcp-backend",
+      "mode": "endpoints",
+      "endpoints": [
+        {
+          "address": "10.10.40.11:9000",
+          "weight": 1
+        },
+        {
+          "address": "10.10.40.12:9000",
+          "weight": 1
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 1000,
+        "request_ms": 300000,
+        "idle_ms": 300000
+      }
+    }
+  ]
+}

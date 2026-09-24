@@ -1,0 +1,66 @@
+name: velda-edge-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: velda-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_strong_password}
+      POSTGRES_DB: ${POSTGRES_DB:-velda_edge}
+    volumes:
+      - postgres-prod-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-velda_edge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    container_name: velda-control-plane
+    restart: always
+    ports:
+      - "8080:8080"
+      - "9099:9099"
+    environment:
+      - PORT=8080
+      - GRPC_PORT=9099
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${POSTGRES_USER:-postgres}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-postgres_strong_password}
+      - DB_NAME=${POSTGRES_DB:-velda_edge}
+      - DB_SSLMODE=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  edge:
+    build:
+      context: .
+      dockerfile: crates/Dockerfile
+    container_name: velda-edge
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443/tcp"
+      - "443:443/udp"
+    environment:
+      - VELDA_CONTROL_PLANE_ENDPOINT=http://control-plane:9099
+      - RUST_LOG=info
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+volumes:
+  postgres-prod-data:

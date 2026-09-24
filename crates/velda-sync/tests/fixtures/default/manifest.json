@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "revision": 42,
+  "configuration": {
+    "files": [
+      {
+        "name": "listeners",
+        "path": "listeners.json",
+        "required": true
+      },
+      {
+        "name": "routes",
+        "path": "routes.json",
+        "required": true
+      },
+      {
+        "name": "upstreams",
+        "path": "upstreams.json",
+        "required": true
+      },
+      {
+        "name": "plugins",
+        "path": "plugins.json",
+        "required": true
+      },
+      {
+        "name": "tls",
+        "path": "tls.json",
+        "required": false
+      }
+    ]
+  }
+}

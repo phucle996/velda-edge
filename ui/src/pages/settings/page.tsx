@@ -1,0 +1,28 @@
+import React, { useState } from 'react';
+import { SettingsHeader, type SettingsTab } from './components/SettingsHeader';
+import { GeneralTab } from './tabs/general/GeneralTab';
+import { SecurityTab } from './tabs/security/SecurityTab';
+import { NotificationsTab } from './tabs/notifications/NotificationsTab';
+import { LoggingTab } from './tabs/logging/LoggingTab';
+import { BackupRestoreTab } from './tabs/backup-restore/BackupRestoreTab';
+
+export default function SettingsPage() {
+  const [activeTab, setActiveTab] = useState<SettingsTab>('General');
+
+  return (
+    <div className="p-6 w-full space-y-6">
+      {/* Header & Tabs */}
+      <SettingsHeader
+        activeTab={activeTab}
+        onTabChange={(tab) => setActiveTab(tab)}
+      />
+
+      {/* Tab Contents */}
+      {activeTab === 'General' && <GeneralTab />}
+      {activeTab === 'Security' && <SecurityTab />}
+      {activeTab === 'Notifications' && <NotificationsTab />}
+      {activeTab === 'Logging' && <LoggingTab />}
+      {activeTab === 'Backup & Restore' && <BackupRestoreTab />}
+    </div>
+  );
+}

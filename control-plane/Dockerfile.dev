@@ -1,0 +1,13 @@
+FROM golang:1.27-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+EXPOSE 8080
+EXPOSE 9099
+
+CMD ["go", "run", "./cmd/main.go"]

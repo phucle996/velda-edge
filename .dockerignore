@@ -1,0 +1,38 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Rust build artifacts
+target/
+**/target/
+
+# Node & Frontend dependencies
+**/node_modules/
+ui/dist/
+ui/.vite/
+
+# Database & Local data
+data/
+*.db
+*.db-wal
+*.db-shm
+postgres-data/
+postgres-dev-data/
+postgres-prod-data/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Documentation & IDE
+docs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

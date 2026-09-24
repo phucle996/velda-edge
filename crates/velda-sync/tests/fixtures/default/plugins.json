@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "auth-jwt",
+      "type": "jwt_auth",
+      "phase": "pre_route",
+      "config": {
+        "issuer": "https://identity.example.com",
+        "audience": [
+          "velda-api"
+        ],
+        "jwks_url": "https://identity.example.com/.well-known/jwks.json",
+        "required": true
+      }
+    },
+    {
+      "id": "api-resource-limit",
+      "type": "resource_limit",
+      "phase": "pre_route",
+      "config": {
+        "max_body_size_bytes": 10485760,
+        "max_concurrent_requests": 1000
+      }
+    },
+    {
+      "id": "stream-resource-limit",
+      "type": "resource_limit",
+      "phase": "pre_route",
+      "config": {
+        "max_body_size_bytes": 1048576,
+        "max_concurrent_requests": 500
+      }
+    },
+    {
+      "id": "grpc-resource-limit",
+      "type": "resource_limit",
+      "phase": "pre_route",
+      "config": {
+        "max_body_size_bytes": 4194304,
+        "max_concurrent_requests": 500
+      }
+    },
+    {
+      "id": "realtime-resource-limit",
+      "type": "resource_limit",
+      "phase": "pre_route",
+      "config": {
+        "max_concurrent_requests": 200
+      }
+    },
+    {
+      "id": "tcp-resource-limit",
+      "type": "resource_limit",
+      "phase": "pre_route",
+      "config": {
+        "max_concurrent_connections": 10000
+      }
+    },
+    {
+      "id": "api-rate-limit",
+      "type": "rate_limit",
+      "phase": "pre_route",
+      "config": {
+        "algorithm": "token_bucket",
+        "capacity": 1000,
+        "refill_rate_per_second": 500,
+        "key": "client_ip"
+      }
+    },
+    {
+      "id": "security-headers",
+      "type": "security_headers",
+      "phase": "post_response",
+      "config": {
+        "strict_transport_security": true,
+        "x_content_type_options": "nosniff",
+        "x_frame_options": "DENY",
+        "referrer_policy": "strict-origin-when-cross-origin"
+      }
+    },
+    {
+      "id": "access-log",
+      "type": "access_log",
+      "phase": "post_response",
+      "config": {
+        "include_request_id": true,
+        "include_route_id": true,
+        "include_upstream": true,
+        "include_latency": true
+      }
+    },
+    {
+      "id": "api-waf",
+      "type": "waf",
+      "phase": "pre_route",
+      "config": {
+        "mode": "block",
+        "ruleset": "owasp_core"
+      }
+    }
+  ]
+}

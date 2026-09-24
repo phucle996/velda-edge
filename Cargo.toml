@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/velda-core",
+    "crates/velda-sync",
+    "crates/velda-transport",
+    "crates/velda-tls",
+    "crates/velda-http",
+    "crates/velda-session",
+    "crates/velda-router",
+    "crates/velda-plugin",
+    "crates/velda-upstream",
+    "crates/velda-lb",
+    "crates/velda-pool",
+    "crates/velda-observability",
+    "crates/velda-proxy",
+    "crates/velda-edge",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
