@@ -74,11 +74,19 @@ impl EdgeSupervisor {
         let runtime_dir = self.config.runtime_dir();
         let shared_runtime = self.shared_runtime.clone();
 
+        let engine_handle = self.engine.handle();
+
         // 1. Spawn UDS IPC listener task in background
         let ipc_shutdown = shutdown.clone();
         let ipc_task = tokio::spawn(async move {
-            if let Err(e) =
-                run_ipc_server(socket_path, runtime_dir, shared_runtime, ipc_shutdown).await
+            if let Err(e) = run_ipc_server(
+                socket_path,
+                runtime_dir,
+                shared_runtime,
+                Some(engine_handle),
+                ipc_shutdown,
+            )
+            .await
             {
                 tracing::error!(error = %e, "IPC server task exited with error");
             }

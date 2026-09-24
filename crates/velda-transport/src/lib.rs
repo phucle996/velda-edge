@@ -19,9 +19,11 @@ pub mod tcp;
 pub mod udp;
 
 pub use connection::{Connection, ConnectionReader, ConnectionWriter, next_connection_id};
-pub use engine::TrafficEngine;
+pub use engine::{EngineHandle, TrafficEngine};
 pub use error::{Result, TransportError};
-pub use forwarding::{L7Handoff, forward_tcp_direct, forward_tcp_stream, forward_udp_direct};
+pub use forwarding::{
+    L7Handoff, UdpL7Handoff, forward_tcp_direct, forward_tcp_stream, forward_udp_direct,
+};
 pub use ingress::{IngressBinding, IngressListener, PathKind, classify_bytes, peek_and_classify};
 pub use tcp::{
     TcpListener, TcpListenerConfig, TransferStats, connect_and_forward, forward_bidirectional,

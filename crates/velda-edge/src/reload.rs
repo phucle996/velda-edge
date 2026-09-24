@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use velda_sync::ipc::SyncNotification;
+use velda_transport::EngineHandle;
 
 use crate::config::{
     EdgeError, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
@@ -29,10 +30,14 @@ pub struct ReloadOutcome {
 }
 
 /// Applies a reload notification from `velda-sync` against the active shared runtime.
-pub fn apply_reload(
+///
+/// If listener definitions changed and an [`EngineHandle`] is provided, submits the new
+/// desired ingress bindings to `velda-transport` for dynamic declarative reconciliation.
+pub async fn apply_reload(
     shared_runtime: &SharedRuntime,
     runtime_dir: &Path,
     notif: &SyncNotification,
+    engine_handle: Option<&EngineHandle>,
 ) -> Result<ReloadOutcome, EdgeError> {
     let current = shared_runtime.load();
     let new_revision = notif.manifest_revision.unwrap_or(current.revision + 1);
@@ -79,7 +84,15 @@ pub fn apply_reload(
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings
-    candidate.active_bindings()?;
+    let bindings = candidate.active_bindings()?;
+
+    // If listeners changed, notify TrafficEngine to reconcile ports dynamically
+    if let (true, Some(engine)) = (listeners_changed, engine_handle) {
+        engine
+            .reconcile(bindings)
+            .await
+            .map_err(EdgeError::Transport)?;
+    }
 
     // Lock-free atomic swap of active runtime snapshot
     shared_runtime.store(Arc::new(candidate));
@@ -106,8 +119,8 @@ mod tests {
     use tempfile::tempdir;
     use velda_sync::post_sync::listener::{ListenerConfig, compile_listeners_to_binary};
 
-    #[test]
-    fn test_apply_reload_atomic_swap() {
+    #[tokio::test]
+    async fn test_apply_reload_atomic_swap() {
         let tmp = tempdir().unwrap();
         let runtime_dir = tmp.path();
 
@@ -134,7 +147,9 @@ mod tests {
             domain_bins: HashMap::new(),
         };
 
-        let outcome = apply_reload(&shared, runtime_dir, &notif).unwrap();
+        let outcome = apply_reload(&shared, runtime_dir, &notif, None)
+            .await
+            .unwrap();
         assert_eq!(outcome.revision, 42);
         assert!(outcome.listeners_changed);
         assert_eq!(shared.load().revision, 42);

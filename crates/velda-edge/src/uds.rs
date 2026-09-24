@@ -11,6 +11,7 @@ use tokio::net::UnixListener;
 use tokio::sync::watch;
 
 use velda_sync::ipc::SyncNotification;
+use velda_transport::EngineHandle;
 
 use crate::config::EdgeError;
 use crate::reload::apply_reload;
@@ -24,6 +25,7 @@ pub async fn run_ipc_server(
     socket_path: PathBuf,
     runtime_dir: PathBuf,
     shared_runtime: SharedRuntime,
+    engine_handle: Option<EngineHandle>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EdgeError> {
     // Ensure parent directory exists
@@ -52,8 +54,9 @@ pub async fn run_ipc_server(
                     Ok((stream, _addr)) => {
                         let shared = shared_runtime.clone();
                         let rdir = runtime_dir.clone();
+                        let engine = engine_handle.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_ipc_client(stream, &shared, &rdir).await {
+                            if let Err(e) = handle_ipc_client(stream, &shared, &rdir, engine.as_ref()).await {
                                 tracing::error!(error = %e, "Failed to process IPC client connection");
                             }
                         });
@@ -78,6 +81,7 @@ async fn handle_ipc_client(
     stream: tokio::net::UnixStream,
     shared_runtime: &SharedRuntime,
     runtime_dir: &Path,
+    engine_handle: Option<&EngineHandle>,
 ) -> Result<(), EdgeError> {
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();
@@ -91,7 +95,9 @@ async fn handle_ipc_client(
         match serde_json::from_str::<SyncNotification>(trimmed) {
             Ok(notif) => {
                 tracing::debug!(changed = ?notif.changed_domains, "Received IPC sync notification");
-                if let Err(e) = apply_reload(shared_runtime, runtime_dir, &notif) {
+                if let Err(e) =
+                    apply_reload(shared_runtime, runtime_dir, &notif, engine_handle).await
+                {
                     tracing::error!(error = %e, "Failed to apply runtime reload from IPC notification");
                 }
             }
@@ -140,10 +146,9 @@ mod tests {
         let r_dir = runtime_dir.clone();
         let s_runtime = shared.clone();
 
-        let server_task =
-            tokio::spawn(
-                async move { run_ipc_server(s_path, r_dir, s_runtime, shutdown_rx).await },
-            );
+        let server_task = tokio::spawn(async move {
+            run_ipc_server(s_path, r_dir, s_runtime, None, shutdown_rx).await
+        });
 
         // Give UDS server a moment to bind
         tokio::time::sleep(Duration::from_millis(50)).await;

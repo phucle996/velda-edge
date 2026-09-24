@@ -154,3 +154,153 @@ async fn test_forward_udp_flow() {
     assert_eq!(stats.server_to_client_bytes, 15); // "SERVER RESPONSE"
     assert_eq!(stats.total_bytes(), 27);
 }
+
+#[tokio::test]
+async fn test_udp_l7_handoff_for_http3_quic() {
+    use velda_transport::{IngressBinding, PathKind, TrafficEngine, UdpL7Handoff};
+
+    let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let binding = IngressBinding::new(
+        "h3-ingress",
+        server_addr,
+        "quic",
+        true,
+        Some("prod-h3".into()),
+    )
+    .unwrap();
+    assert_eq!(binding.path, PathKind::Quic);
+    assert!(binding.is_udp());
+
+    let mut engine = TrafficEngine::new();
+    engine.add_binding(binding).unwrap();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (l7_received_tx, _l7_received_rx) = tokio::sync::mpsc::channel(1);
+
+    let engine_task = tokio::spawn(async move {
+        engine
+            .run_all(
+                shutdown_rx,
+                |_conn| async move {},
+                |_handoff| async move {},
+                |_id, _socket, _dgram| async move {},
+                move |handoff: UdpL7Handoff| {
+                    let tx = l7_received_tx.clone();
+                    async move {
+                        assert_eq!(handoff.path_hint(), PathKind::Quic);
+                        assert_eq!(handoff.listener_id(), "h3-ingress");
+                        assert_eq!(handoff.tls_profile(), Some("prod-h3"));
+                        assert_eq!(handoff.data(), b"QUIC-Client-Hello");
+
+                        handoff.send_response(b"QUIC-Server-Hello").await.unwrap();
+                        let _ = tx.send(()).await;
+                    }
+                },
+            )
+            .await
+    });
+
+    // Determine bound port by querying client connection
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send packet using client UDP socket
+    let client =
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
+
+    // To know the exact port bound by TrafficEngine, let's determine it from an ephemeral listener test:
+    // We can also test UdpL7Handoff directly on a known bound socket
+    let free_addr: SocketAddr = {
+        let l = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let h3_binding =
+        IngressBinding::new("h3-direct", free_addr, "quic", true, Some("prod-h3".into())).unwrap();
+    let dgram = Datagram::new(
+        client.local_addr(),
+        free_addr,
+        b"QUIC-Client-Hello".to_vec(),
+    );
+    let socket = Arc::new(
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
+    );
+
+    let handoff = UdpL7Handoff::new(
+        dgram,
+        Arc::clone(&socket),
+        h3_binding.path,
+        h3_binding.id.clone(),
+        h3_binding.tls_profile.clone(),
+    );
+
+    assert_eq!(handoff.path_hint(), PathKind::Quic);
+    assert_eq!(handoff.listener_id(), "h3-direct");
+    assert_eq!(handoff.tls_profile(), Some("prod-h3"));
+    assert_eq!(handoff.peer(), client.local_addr());
+    assert_eq!(handoff.data(), b"QUIC-Client-Hello");
+
+    // Test send_response
+    handoff.send_response(b"QUIC-Server-Ack").await.unwrap();
+
+    let mut buf = [0u8; 64];
+    let (n, from) = client.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"QUIC-Server-Ack");
+    assert_eq!(from, socket.local_addr());
+
+    shutdown_tx.send(true).unwrap();
+    let _ = engine_task.await;
+}
+
+#[tokio::test]
+async fn test_udp_l7_handoff_for_http3_named_binding() {
+    use velda_transport::{
+        Datagram, IngressBinding, PathKind, UdpL7Handoff, UdpSocket, UdpSocketConfig,
+    };
+
+    let client =
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
+    let server = Arc::new(
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
+    );
+
+    let h3_binding = IngressBinding::new(
+        "h3-listener",
+        server.local_addr(),
+        "http/3",
+        true,
+        Some("default-tls".into()),
+    )
+    .unwrap();
+
+    assert_eq!(h3_binding.path, PathKind::Http3);
+    assert!(h3_binding.is_udp());
+    assert!(!h3_binding.is_tcp());
+
+    let dgram = Datagram::new(
+        client.local_addr(),
+        server.local_addr(),
+        b"HTTP/3-Initial-Packet".to_vec(),
+    );
+
+    let handoff = UdpL7Handoff::new(
+        dgram,
+        Arc::clone(&server),
+        h3_binding.path,
+        h3_binding.id.clone(),
+        h3_binding.tls_profile.clone(),
+    );
+
+    assert_eq!(handoff.path_hint(), PathKind::Http3);
+    assert!(handoff.is_http3());
+    assert_eq!(handoff.listener_id(), "h3-listener");
+    assert_eq!(handoff.tls_profile(), Some("default-tls"));
+    assert_eq!(handoff.peer(), client.local_addr());
+    assert_eq!(handoff.data(), b"HTTP/3-Initial-Packet");
+
+    handoff.send_response(b"HTTP/3-Ack").await.unwrap();
+
+    let mut buf = [0u8; 64];
+    let (n, from) = client.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"HTTP/3-Ack");
+    assert_eq!(from, server.local_addr());
+}

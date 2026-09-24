@@ -146,4 +146,84 @@ impl UdpSocket {
     pub fn into_inner(self) -> TokioUdpSocket {
         self.socket
     }
+
+    /// Spawns a UDP receive loop on the provided `JoinSet`, dispatching to L4 or L7 handoff based on path kind.
+    pub fn spawn_receive_loop<UdpL4H, UdpL7H, FutL4, FutL7>(
+        socket: std::sync::Arc<Self>,
+        binding: crate::ingress::listener::IngressBinding,
+        tasks: &mut tokio::task::JoinSet<()>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        udp_l4_fn: UdpL4H,
+        udp_l7_fn: UdpL7H,
+    ) where
+        UdpL4H: Fn(String, std::sync::Arc<Self>, Datagram) -> FutL4 + Send + Sync + Clone + 'static,
+        FutL4: std::future::Future<Output = ()> + Send + 'static,
+        UdpL7H: Fn(crate::forwarding::l7::UdpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        FutL7: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tasks.spawn(async move {
+            let mut shutdown = shutdown;
+            let local_addr = socket.local_addr();
+            tracing::info!(
+                listener_id = %binding.id,
+                listen_addr = %local_addr,
+                path = %binding.path,
+                "UDP ingress loop running"
+            );
+
+            let mut buf = [0u8; 65535];
+
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            tracing::info!(
+                                listener_id = %binding.id,
+                                listen_addr = %local_addr,
+                                "UDP ingress loop shutting down"
+                            );
+                            break;
+                        }
+                    }
+                    res = socket.recv_from(&mut buf) => {
+                        match res {
+                            Ok((n, peer)) => {
+                                let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
+                                match binding.path {
+                                    crate::ingress::classifier::PathKind::Http3
+                                    | crate::ingress::classifier::PathKind::Quic => {
+                                        let handoff = crate::forwarding::l7::UdpL7Handoff::new(
+                                            dgram,
+                                            std::sync::Arc::clone(&socket),
+                                            binding.path,
+                                            binding.id.clone(),
+                                            binding.tls_profile.clone(),
+                                        );
+                                        tokio::spawn(udp_l7_fn(handoff));
+                                    }
+                                    _ => {
+                                        let sock_clone = std::sync::Arc::clone(&socket);
+                                        let id_clone = binding.id.clone();
+                                        tokio::spawn(udp_l4_fn(id_clone, sock_clone, dgram));
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    listener_id = %binding.id,
+                                    listen_addr = %local_addr,
+                                    error = %err,
+                                    "UDP recv error"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 }

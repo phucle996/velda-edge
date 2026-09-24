@@ -5,17 +5,63 @@ use tokio::net::TcpStream;
 
 use crate::error::{Result, TransportError};
 
-/// Identified traffic protocol/path kind for an incoming connection.
+/// Identified traffic protocol/path kind for an incoming connection or datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathKind {
-    /// Pure L4 raw streaming (direct byte forward to upstream, e.g. DB, custom TCP).
+    /// Pure L4 raw streaming (direct byte forward to upstream, e.g. DB, custom TCP/UDP).
     L4Direct,
     /// TLS encrypted traffic (needs TLS termination via `velda-tls`).
     Tls,
-    /// Cleartext HTTP traffic (HTTP/1.1 or HTTP/2 cleartext preface H2C).
+    /// Cleartext HTTP/1.x traffic.
+    Http1,
+    /// Cleartext HTTP/2 traffic (HTTP/2 cleartext preface H2C).
+    Http2,
+    /// HTTP/3 traffic over QUIC/UDP.
+    Http3,
+    /// Generic cleartext HTTP traffic (HTTP/1 or HTTP/2).
     Http,
+    /// QUIC packet for HTTP/3 over UDP.
+    Quic,
     /// Traffic could not be definitively classified with current bytes.
     Unknown,
+}
+
+impl PathKind {
+    /// Returns `true` if this path is any HTTP version (HTTP/1, HTTP/2, HTTP/3, or generic HTTP).
+    #[inline]
+    pub const fn is_http(&self) -> bool {
+        matches!(self, Self::Http | Self::Http1 | Self::Http2 | Self::Http3)
+    }
+
+    /// Returns `true` if this path is HTTP/1.x.
+    #[inline]
+    pub const fn is_http1(&self) -> bool {
+        matches!(self, Self::Http1)
+    }
+
+    /// Returns `true` if this path is HTTP/2.
+    #[inline]
+    pub const fn is_http2(&self) -> bool {
+        matches!(self, Self::Http2)
+    }
+
+    /// Returns `true` if this path is HTTP/3 or QUIC.
+    #[inline]
+    pub const fn is_http3(&self) -> bool {
+        matches!(self, Self::Http3 | Self::Quic)
+    }
+
+    /// Returns `true` if this path is raw L4 direct forwarding.
+    #[inline]
+    pub const fn is_l4(&self) -> bool {
+        matches!(self, Self::L4Direct)
+    }
+
+    /// Returns `true` if this path requires TLS termination.
+    #[inline]
+    pub const fn is_tls(&self) -> bool {
+        matches!(self, Self::Tls)
+    }
 }
 
 impl fmt::Display for PathKind {
@@ -23,7 +69,11 @@ impl fmt::Display for PathKind {
         match self {
             Self::L4Direct => f.write_str("L4Direct"),
             Self::Tls => f.write_str("Tls"),
+            Self::Http1 => f.write_str("Http1"),
+            Self::Http2 => f.write_str("Http2"),
+            Self::Http3 => f.write_str("Http3"),
             Self::Http => f.write_str("Http"),
+            Self::Quic => f.write_str("Quic"),
             Self::Unknown => f.write_str("Unknown"),
         }
     }
@@ -55,12 +105,12 @@ pub fn classify_bytes(bytes: &[u8]) -> PathKind {
     }
 
     if bytes.len() >= 14 && bytes.starts_with(HTTP2_PREFACE_PREFIX) {
-        return PathKind::Http;
+        return PathKind::Http2;
     }
 
     for method in HTTP_METHODS {
         if bytes.len() >= method.len() && bytes.starts_with(method) {
-            return PathKind::Http;
+            return PathKind::Http1;
         }
     }
 
@@ -102,23 +152,29 @@ mod tests {
     fn test_classify_http1() {
         assert_eq!(
             classify_bytes(b"GET /index.html HTTP/1.1\r\n"),
-            PathKind::Http
+            PathKind::Http1
         );
         assert_eq!(
             classify_bytes(b"POST /api/v1/resource HTTP/1.1\r\n"),
-            PathKind::Http
+            PathKind::Http1
         );
         assert_eq!(
             classify_bytes(b"DELETE /item/1 HTTP/1.1\r\n"),
-            PathKind::Http
+            PathKind::Http1
         );
-        assert_eq!(classify_bytes(b"OPTIONS * HTTP/1.1\r\n"), PathKind::Http);
+        assert_eq!(classify_bytes(b"OPTIONS * HTTP/1.1\r\n"), PathKind::Http1);
+        assert!(PathKind::Http1.is_http());
+        assert!(PathKind::Http1.is_http1());
+        assert!(!PathKind::Http1.is_http2());
     }
 
     #[test]
     fn test_classify_http2() {
         let h2_preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        assert_eq!(classify_bytes(h2_preface), PathKind::Http);
+        assert_eq!(classify_bytes(h2_preface), PathKind::Http2);
+        assert!(PathKind::Http2.is_http());
+        assert!(PathKind::Http2.is_http2());
+        assert!(!PathKind::Http2.is_http1());
     }
 
     #[test]
@@ -129,6 +185,8 @@ mod tests {
             0x00, 0x00,
         ];
         assert_eq!(classify_bytes(&postgres_startup), PathKind::L4Direct);
+        assert!(PathKind::L4Direct.is_l4());
+        assert!(!PathKind::L4Direct.is_http());
     }
 
     #[test]

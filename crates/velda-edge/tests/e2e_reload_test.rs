@@ -49,7 +49,12 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
         "velda.sock must exist while edge is running"
     );
 
-    // 4. Hot Reload: velda-sync publishes revision 2 with an updated listener
+    // 4. Hot Reload: velda-sync publishes revision 2 with a dynamic port listener
+    let dynamic_port: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
     let updated_listeners = vec![
         ListenerConfig {
             id: "initial-http".into(),
@@ -59,7 +64,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
-            address: dummy_addr.to_string(),
+            address: dynamic_port.to_string(),
             protocol: "tcp".into(),
             tls: Default::default(),
         },
@@ -78,13 +83,20 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
     // Send reload notification over UDS
     send_notification(&socket_path, &notif).await.unwrap();
 
-    // Give a brief tick for the atomic swap to execute
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Give a brief tick for the atomic swap and engine reconcile to execute
+    tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Verify atomic swap to revision 2 occurred in-memory without downtime
     assert_eq!(shared.load().revision, 2);
     assert_eq!(shared.load().listener_count(), 2);
     assert_eq!(shared.load().listeners[1].id, "reloaded-tcp");
+
+    // Verify TrafficEngine dynamically bound and opened the new OS port
+    let stream_res = tokio::net::TcpStream::connect(dynamic_port).await;
+    assert!(
+        stream_res.is_ok(),
+        "TrafficEngine must dynamically bind and accept connections on reloaded port"
+    );
 
     // 5. Signal graceful shutdown
     shutdown_tx.send(true).unwrap();
