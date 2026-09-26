@@ -94,9 +94,9 @@ impl Discovery {
                         match resolver.resolve(&host, port).await {
                             Ok(endpoints) => {
                                 current_gen += 1;
-                                let new_set = EndpointSet::new(endpoints, current_gen);
-                                disc_clone.current.store(Arc::new(new_set));
+                                disc_clone.update_endpoints(endpoints, current_gen);
                             }
+
                             Err(e) => {
                                 tracing::warn!(
                                     host = %host,
@@ -122,6 +122,12 @@ impl Discovery {
     #[inline]
     pub fn current_endpoints(&self) -> Arc<EndpointSet> {
         self.current.load_full()
+    }
+
+    /// Atomically updates the active endpoint snapshot with a new generation.
+    pub fn update_endpoints(&self, endpoints: Vec<Endpoint>, generation: u64) {
+        let new_set = EndpointSet::new(endpoints, generation);
+        self.current.store(Arc::new(new_set));
     }
 
     /// Signals the background refresh loop to gracefully shut down.

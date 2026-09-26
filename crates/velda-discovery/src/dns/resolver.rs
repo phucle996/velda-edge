@@ -76,6 +76,8 @@ impl Default for DnsResolverConfig {
 // 3. Primary Resolver Provider
 // ============================================================================
 
+type InflightMap = HashMap<String, broadcast::Sender<Result<Arc<[IpAddr]>>>>;
+
 /// Primary DNS resolver coordinating cache lookups, hosts resolution, singleflight, and wire queries.
 pub struct DnsResolverProvider<S: DnsServerProvider, T: DnsTransport> {
     servers: S,
@@ -83,9 +85,9 @@ pub struct DnsResolverProvider<S: DnsServerProvider, T: DnsTransport> {
     transport: T,
     cache: DnsCache,
     config: DnsResolverConfig,
-    lkg: RwLock<HashMap<String, Vec<Endpoint>>>,
+    lkg: RwLock<HashMap<String, Arc<[IpAddr]>>>,
     // FIX (Blocker 3 - Cache Stampede / Thundering Herd): In-flight query deduplication map
-    inflight: tokio::sync::Mutex<HashMap<String, broadcast::Sender<Result<Vec<Endpoint>>>>>,
+    inflight: tokio::sync::Mutex<InflightMap>,
 }
 
 impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
@@ -123,7 +125,7 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         &self.cache
     }
 
-    /// Resolves `host` into a list of endpoints with `port`.
+    /// Resolves `host` into a list of IP addresses with zero heap allocations on cache hits.
     ///
     /// Resolution Order:
     /// 1. `DnsCache::get` (Positive Hit -> Return Ok; Negative Hit -> Return Err)
@@ -131,16 +133,14 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
     /// 3. In-flight Deduplication (Singleflight): Coalesces simultaneous requests for the same domain.
     /// 4. Upstream Nameserver Wire Query with Timeout & Failover.
     /// 5. Fallback to Last-Known-Good (LKG) or populate negative cache.
-    pub async fn resolve(&self, host: &str, port: u16) -> Result<Vec<Endpoint>> {
-        let key = host.to_lowercase();
-
+    pub async fn resolve_ips(&self, host: &str) -> Result<Arc<[IpAddr]>> {
         // -------------------------------------------------------------
         // Step 1: DnsCache is the Single Source of Truth on Hot Path
+        // FIX (Optimization): Pass &str directly to DnsCache without allocating a lowercase String
         // -------------------------------------------------------------
-        match self.cache.get(&key) {
+        match self.cache.get(host) {
             CacheLookup::Hit(ips) => {
-                let endpoints = ips_to_endpoints(&key, port, ips);
-                return Ok(endpoints);
+                return Ok(ips);
             }
             CacheLookup::NegativeHit => {
                 return Err(DiscoveryError::NegativeCacheHit {
@@ -150,17 +150,18 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
             CacheLookup::Miss => {}
         }
 
+        let key = host.to_lowercase();
+
         // -------------------------------------------------------------
         // Step 2: Local Hosts File Lookup
         // -------------------------------------------------------------
         if let Some(ip) = self.hosts.lookup(&key) {
-            let ips = vec![ip];
+            let ips: Arc<[IpAddr]> = Arc::from([ip]);
             // Cache static hosts entry uniformly into DnsCache
             self.cache
-                .insert_positive(&key, ips.clone(), self.config.hosts_ttl);
+                .insert_positive(&key, vec![ip], self.config.hosts_ttl);
 
-            let endpoints = ips_to_endpoints(&key, port, ips);
-            return Ok(endpoints);
+            return Ok(ips);
         }
 
         // -------------------------------------------------------------
@@ -179,7 +180,7 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
                 drop(inflight);
 
                 // Execute the resolution workflow
-                let outcome = self.execute_wire_query(host, &key, port).await;
+                let outcome = self.execute_wire_query(host, &key).await;
 
                 // Remove from inflight map and broadcast result to all awaiting subscriber tasks
                 let mut inflight = self.inflight.lock().await;
@@ -196,13 +197,19 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
             Ok(result) => result,
             Err(_) => {
                 // If leader cancelled or channel dropped, retry direct resolution
-                self.execute_wire_query(host, &key, port).await
+                self.execute_wire_query(host, &key).await
             }
         }
     }
 
+    /// Resolves `host` into a list of endpoints with `port`.
+    pub async fn resolve(&self, host: &str, port: u16) -> Result<Vec<Endpoint>> {
+        let ips = self.resolve_ips(host).await?;
+        Ok(ips_to_endpoints(host, port, &ips))
+    }
+
     /// Internal execution of wire queries against nameservers with timeouts and failover.
-    async fn execute_wire_query(&self, host: &str, key: &str, port: u16) -> Result<Vec<Endpoint>> {
+    async fn execute_wire_query(&self, host: &str, key: &str) -> Result<Arc<[IpAddr]>> {
         let server_list = self.servers.servers();
         if server_list.is_empty() {
             return Err(DiscoveryError::EmptyServerList);
@@ -213,20 +220,20 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
             // FIX (Blocker 4 - UDP Hang / Timeout): Wrap wire query with strict timeout to prevent indefinite hangs
             let query_future = self.transport.query(server, key);
             match tokio::time::timeout(self.config.query_timeout, query_future).await {
-                Ok(Ok(ips)) if !ips.is_empty() => {
+                Ok(Ok(ips_vec)) if !ips_vec.is_empty() => {
+                    let ips: Arc<[IpAddr]> = Arc::from(ips_vec);
+
                     // Populate positive cache
                     self.cache
-                        .insert_positive(key, ips.clone(), self.config.positive_ttl);
-
-                    let endpoints = ips_to_endpoints(key, port, ips);
+                        .insert_positive(key, ips.to_vec(), self.config.positive_ttl);
 
                     // Update LKG (Last-Known-Good)
                     self.lkg
                         .write()
                         .unwrap()
-                        .insert(key.to_string(), endpoints.clone());
+                        .insert(key.to_string(), Arc::clone(&ips));
 
-                    return Ok(endpoints);
+                    return Ok(ips);
                 }
                 Ok(Ok(_)) => {
                     // Empty IP list from this nameserver -> record error and failover to next server
@@ -257,12 +264,18 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         // -------------------------------------------------------------
         // Step 4: Resilience Fallback (LKG) or Negative Cache
         // -------------------------------------------------------------
-        if let Some(lkg_endpoints) = self.lkg.read().unwrap().get(key) {
+        if let Some(lkg_ips) = self.lkg.read().unwrap().get(key) {
             tracing::warn!(
                 host = %host,
-                "DNS lookup failed across all nameservers; falling back to Last-Known-Good (LKG) endpoints"
+                "DNS lookup failed across all nameservers; falling back to Last-Known-Good (LKG) addresses"
             );
-            return Ok(lkg_endpoints.clone());
+            // FIX (Resilience & Anti-Storm - Stale-If-Error RFC 5861):
+            // Cache the Last-Known-Good addresses for a short grace period (`negative_ttl`).
+            // This prevents thundering herds and endless 14-alloc query loops from hammering
+            // dead upstream nameservers on every subsequent request during an outage!
+            self.cache
+                .insert_positive(key, lkg_ips.to_vec(), self.config.negative_ttl);
+            return Ok(Arc::clone(lkg_ips));
         }
 
         // Populate negative cache on complete failure
@@ -278,9 +291,9 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
 }
 
 /// Helper converting IP addresses and a port into canonical `Endpoint` entities.
-fn ips_to_endpoints(host: &str, port: u16, ips: Vec<IpAddr>) -> Vec<Endpoint> {
-    ips.into_iter()
-        .map(|ip| {
+fn ips_to_endpoints(host: &str, port: u16, ips: &[IpAddr]) -> Vec<Endpoint> {
+    ips.iter()
+        .map(|&ip| {
             let addr = SocketAddr::new(ip, port);
             Endpoint::new(host, addr, 1)
         })

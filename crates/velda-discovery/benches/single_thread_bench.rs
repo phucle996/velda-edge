@@ -1,12 +1,11 @@
-//! Comprehensive Performance, Memory Allocation & Big-O Benchmark Suite for velda-discovery.
+//! Single-threaded Performance, Latency & Big-O Benchmark Suite for velda-discovery.
 //!
 //! Stages:
 //! 1. In-Memory DnsCache Lookup (Positive Hit vs Negative Hit vs Miss & Allocations)
 //! 2. EndpointSet Lock-Free ArcSwap Load (Hot-Path Serving Invariant)
 //! 3. Static Hosts File Lookup Scaling (O(1) Verification across N = 10 .. 10,000)
-//! 4. Multicore Concurrency Scaling (1 .. 64 Workers Cache Contention)
-//! 5. DnsServer Target Resolution Latency (Direct IP vs /etc/hosts)
-//! 6. End-to-End Resolver Hot-Path Throughput & Latency
+//! 4. DnsServer Target Resolution Latency (Direct IP vs /etc/hosts)
+//! 5. End-to-End Resolver Hot-Path Throughput & Latency
 
 mod common;
 
@@ -202,69 +201,11 @@ fn bench_hosts_file_lookup_scaling() {
 }
 
 // ============================================================================
-// Stage 4: Multicore Concurrency Scaling (1 .. 64 Workers)
-// ============================================================================
-
-fn bench_multicore_concurrency_scaling() {
-    println!("### 4. Multicore Concurrency Scaling Benchmark (Cache Read Contention)\n");
-
-    let thread_counts = [1, 2, 4, 8, 16, 32, 64];
-    let ops_per_thread = 50_000;
-
-    let cache = Arc::new(DnsCache::new());
-    cache.insert_positive(
-        "api.internal",
-        vec!["10.0.0.1".parse().unwrap()],
-        Duration::from_secs(300),
-    );
-
-    println!(
-        "| Workers | Total Operations | Total Time | Aggregate Throughput | Avg Latency / op |"
-    );
-    println!("| :--- | :--- | :--- | :--- | :--- |");
-
-    for &workers in &thread_counts {
-        let start = Instant::now();
-        let mut handles = Vec::with_capacity(workers);
-
-        for _ in 0..workers {
-            let cache_clone = Arc::clone(&cache);
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..ops_per_thread {
-                    let res = cache_clone.get("api.internal");
-                    std::hint::black_box(res);
-                }
-            }));
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let elapsed = start.elapsed();
-        let total_ops = workers * ops_per_thread;
-        let throughput = (total_ops as f64 / elapsed.as_secs_f64()) as u64;
-        let avg_latency_ns = elapsed.as_nanos() as f64 / total_ops as f64;
-
-        println!(
-            "| {:<7} | {:<16} | {:<10} | {:<16} ops/s | {:<10.2} ns |",
-            workers,
-            total_ops,
-            format_duration(elapsed),
-            throughput,
-            avg_latency_ns
-        );
-    }
-
-    println!();
-}
-
-// ============================================================================
-// Stage 5: DnsServer Target Resolution Latency
+// Stage 4: DnsServer Target Resolution Latency
 // ============================================================================
 
 fn bench_dns_server_target_resolution() {
-    println!("### 5. DnsServer Target Resolution Benchmark\n");
+    println!("### 4. DnsServer Target Resolution Benchmark\n");
 
     let iters = 200_000;
 
@@ -293,7 +234,7 @@ fn bench_dns_server_target_resolution() {
     let (host_allocs, _) = ALLOCATOR.snapshot();
 
     println!("| Target Type | Total Time | Latency / op | Allocs / op | Throughput |");
-    println!("| :--- | :--- | :--- | :--- | :--- |");
+    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
     let ip_ns = elapsed_ip.as_nanos() as f64 / iters as f64;
     let ip_ops = (iters as f64 / elapsed_ip.as_secs_f64()) as u64;
@@ -319,11 +260,11 @@ fn bench_dns_server_target_resolution() {
 }
 
 // ============================================================================
-// Stage 6: End-to-End Resolver Hot-Path Throughput
+// Stage 5: End-to-End Resolver Hot-Path Throughput
 // ============================================================================
 
-fn bench_end_to_end_resolver() {
-    println!("### 6. End-to-End Resolver Hot-Path Resolution Benchmark\n");
+fn bench_end_to_end_cached_resolver() {
+    println!("### 5. End-to-End Resolver Hot-Path Resolution Benchmark\n");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -352,7 +293,6 @@ fn bench_end_to_end_resolver() {
         let elapsed = start.elapsed();
         let (allocs, _bytes) = ALLOCATOR.snapshot();
 
-
         let ns_op = elapsed.as_nanos() as f64 / iters as f64;
         let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
 
@@ -376,23 +316,18 @@ fn bench_end_to_end_resolver() {
     });
 }
 
-// ============================================================================
-// Main Benchmark Runner
-// ============================================================================
-
 fn main() {
     println!("\n=================================================================");
-    println!("         Velda Edge — Stage 1: velda-discovery Benchmark Suite    ");
+    println!("    velda-discovery — Single Thread & Big-O Benchmark Suite      ");
     println!("=================================================================\n");
 
     bench_dns_cache_hit_vs_miss();
     bench_endpoint_set_arc_swap_read();
     bench_hosts_file_lookup_scaling();
-    bench_multicore_concurrency_scaling();
     bench_dns_server_target_resolution();
-    bench_end_to_end_resolver();
+    bench_end_to_end_cached_resolver();
 
     println!("=================================================================");
-    println!("         All velda-discovery Benchmarks Completed Successfully   ");
+    println!("    Single-Thread Benchmarks Completed Successfully              ");
     println!("=================================================================\n");
 }

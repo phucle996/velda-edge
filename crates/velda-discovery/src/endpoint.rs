@@ -46,6 +46,18 @@ impl EndpointSet {
         &self.endpoints
     }
 
+    /// Returns an iterator over all discovered socket addresses.
+    #[inline]
+    pub fn addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.endpoints.iter().map(|ep| ep.address)
+    }
+
+    /// Returns an iterator over all discovered IP addresses.
+    #[inline]
+    pub fn ips(&self) -> impl Iterator<Item = std::net::IpAddr> + '_ {
+        self.endpoints.iter().map(|ep| ep.address.ip())
+    }
+
     /// Finds an endpoint by its socket address.
     #[inline]
     pub fn find_by_addr(&self, addr: &SocketAddr) -> Option<&Endpoint> {

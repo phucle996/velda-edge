@@ -20,6 +20,7 @@ pub mod service;
 pub use dns::{
     CacheLookup, DnsCache, DnsResolverConfig, DnsResolverProvider, DnsServer, DnsServerProvider,
     DnsServerTarget, DnsTransport, HostsFileSource, ResolvConfServerProvider, StaticServerProvider,
+    SystemDnsTransport, UdpDnsTransport,
 };
 
 pub use endpoint::{Endpoint, EndpointId, EndpointSet};

@@ -58,7 +58,7 @@ pub fn format_duration(dur: Duration) -> String {
     } else if nanos < 1_000_000 {
         format!("{:.2} µs", nanos as f64 / 1_000.0)
     } else if nanos < 1_000_000_000 {
-        format!("{:.2} ms", nanos as f64 / 1_000.0)
+        format!("{:.2} ms", nanos as f64 / 1_000_000.0)
     } else {
         format!("{:.2} s", dur.as_secs_f64())
     }
@@ -100,6 +100,14 @@ impl BenchDnsTransport {
             .write()
             .unwrap()
             .insert((server, host.to_lowercase()), ips);
+    }
+
+    pub fn query_count(&self) -> usize {
+        self.query_count.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_query_count(&self) {
+        self.query_count.store(0, Ordering::Relaxed);
     }
 }
 

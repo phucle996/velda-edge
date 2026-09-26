@@ -1,106 +1,145 @@
 # velda-discovery
 
-`velda-discovery` is Stage 1 of the backend lifecycle in the Velda Edge Data Plane.
+Stage 1 — Backend Topology Discovery for the Velda Edge Data Plane.
 
-It is dedicated to answering a single topological question: **"Where are the backends located?"**
-
-> [!IMPORTANT]
-> **Stage 1 Invariants**:
-> - **Topology Only**: Discovery resolves and tracks backend IP addresses and ports (`EndpointSet`). It has no awareness of health checks, circuit breakers, draining states, or load balancing algorithms.
-> - **Zero DNS on Request Hot Path**: Request serving reads lock-free in-memory snapshots (`ArcSwap<EndpointSet>`). DNS queries execute strictly within background refresh tasks.
-> - **Unified Cache as Single Source of Truth**: All resolved addresses (from static `/etc/hosts` or upstream DNS queries) are cached in `DnsCache`.
-> - **Zero Hardcoded Nameservers**: Upstream nameservers are resolved dynamically from `/etc/resolv.conf` or user configuration manifests.
-> - **Resilient LKG Fallback**: If upstream nameservers fail, time out, or return errors, the Last-Known-Good (LKG) endpoint set is preserved.
-> - **Negative Caching**: NXDOMAIN responses are cached with a dedicated negative TTL to prevent DNS query storms.
+Dedicated to answering a single topological invariant: **"Where are the backends located?"**
 
 ---
 
-## 1. Architectural Role in the 4-Stage Pipeline
+## Internal Topology
 
 ```text
-                RoutePlan
-                   │
-                UpstreamId
-                   │
-                   ▼
-┌──────────────────────────────┐
-│ 1. velda-discovery           │
-│                              │
-│ DNS / static discovery       │
-│ resolver + in-memory cache   │
-└──────────────┬───────────────┘
-               │
-          EndpointSet (Topology)
-               │
-               ▼
-┌──────────────────────────────┐
-│ 2. velda-upstream            │
-│                              │
-│ logical upstream domain      │
-│ endpoint health & state      │
-└──────────────────────────────┘
+                                Background Reconciliation Loop
+                                              │
+    ┌─────────────────────────────────────────┼─────────────────────────────────────────┐
+    ▼                                         ▼                                         ▼
+Phase 1: Bootstrap                 Phase 2: Server Connect                   Phase 3: Resolver
+HostsFileSource (/etc/hosts)       DnsServerTarget (IP / Host)               DnsResolverProvider
+ResolvConf (/etc/resolv.conf)      StaticServerProvider                      UdpDnsTransport (RFC 1035 UDP)
+(Zero disk I/O at runtime)         (Zero hardcoded nameservers)              SystemDnsTransport (OS Fallback)
+    │                                         │                                         │
+    │                                         │                              Singleflight Coalescing
+    │                                         │                              Failover & LKG Resiliency
+    └─────────────────────────────────────────┼─────────────────────────────────────────┘
+                                              │
+                                              ▼
+                                   Phase 4: In-Memory Cache
+                                           DnsCache
+                              (Single Source of Truth in RAM)
+                                ├── Positive Cache (TTL: 30s)
+                                └── Negative Cache (NXDOMAIN: 5s)
+                                              │
+                                              ▼
+                              Discovery.update_endpoints(...)
+                                              │
+                                              ▼
+                                    ArcSwap<EndpointSet>
+                                              │
+                    ══════════════════════════╪══════════════════════════
+                                              │ Request Hot Path (Serving)
+                                              ▼
+                                 discovery.current_endpoints()
+                                    [ 20.0 ns | 0 Allocations ]
 ```
 
 ---
 
-## 2. Core Capabilities
+## Resolution & Hot-Path Serving Flow
 
-- **Bootstrap Fast Path**: Prioritizes local `/etc/hosts` entries for zero-network resolution of cluster-local names.
-- **Unified In-Memory Cache**: Positive caching respects TTL; negative caching prevents query storms during transient outages or typos.
-- **Nameserver Failover**: Queries primary and secondary nameservers sequentially before engaging LKG fallback.
-- **Lock-Free Atomic Updates**: Publishes generation-tracked `EndpointSet` snapshots via `ArcSwap` with zero read locks.
-
----
-
-## 3. 4-Phase DNS Subsystem Architecture
-
-The DNS discovery subsystem is structured cleanly into 4 sequential processing phases across 4 dedicated files:
-
-- **Phase 1: Bootstrap** ([`src/dns/bootstrap.rs`](src/dns/bootstrap.rs)): Eagerly loads local `/etc/hosts` ([`HostsFileSource`](src/dns/bootstrap.rs)) and `/etc/resolv.conf` ([`ResolvConfServerProvider`](src/dns/bootstrap.rs)) ahead-of-time into memory.
-- **Phase 2: DNS Server Connect** ([`src/dns/server.rs`](src/dns/server.rs)): Manages upstream DNS nameservers ([`DnsServer`](src/dns/server.rs)), target specifications ([`DnsServerTarget`](src/dns/server.rs)), provider contracts ([`DnsServerProvider`](src/dns/server.rs), [`StaticServerProvider`](src/dns/server.rs)), and UDP socket connectivity.
-- **Phase 3: Resolver** ([`src/dns/resolver.rs`](src/dns/resolver.rs)): Coordinates wire transport ([`DnsTransport`](src/dns/resolver.rs)), sequential nameserver failover, and Last-Known-Good (LKG) fallback ([`DnsResolverProvider`](src/dns/resolver.rs)).
-- **Phase 4: Cache** ([`src/dns/cache.rs`](src/dns/cache.rs)): Provides the in-memory Single Source of Truth ([`DnsCache`](src/dns/cache.rs), [`CacheLookup`](src/dns/cache.rs)) with positive TTL and negative TTL (NXDOMAIN protection).
-
-Additional components:
-- [`Endpoint`](src/endpoint.rs) and [`EndpointSet`](src/endpoint.rs): Canonical topological destinations re-exported from `velda-core`.
-- [`Discovery`](src/service.rs) and [`DiscoveryMode`](src/service.rs): Background reconciliation service managing periodic updates and atomic snapshot swaps.
-
-
----
-
-## 4. Integration & Testing
-
-For executable implementations and test verification, refer directly to:
-
-- [`tests/static_test.rs`](tests/static_test.rs): Explicit static endpoint discovery and snapshot retrieval.
-- [`tests/dns_test.rs`](tests/dns_test.rs): Fast-path bootstrap, nameserver failover, positive/negative caching, and LKG fallback under server failure.
-
----
-
-## 5. Performance Benchmarks
-
-Detailed empirical benchmarks measuring allocations, latency, and Big-O scaling are documented in:
-
-- [`benchmark.md`](benchmark.md): Comprehensive empirical benchmark report across 6 stages.
-- [`benches/discovery_bench.rs`](benches/discovery_bench.rs): Executable benchmark suite.
-
-Summary of Results:
-- **Hot-Path Snapshot Read** (`current_endpoints()`): 20.34 ns, 0.00 allocations (49.1M ops/s).
-- **Direct IP Target Resolution**: 7.81 ns, 0.00 allocations (128.0M ops/s).
-- **In-Memory DnsCache Hit**: 79.02 ns (12.6M ops/s).
-- **Negative Cache Shield** (NXDOMAIN): 76.73 ns (13.0M ops/s).
-- **Static Hosts Lookup Scaling**: Verified O(1) across N = 10 .. 10,000 domains.
-- **Multicore Concurrency (64 Workers)**: 9.53M ops/s aggregate throughput (104.89 ns).
-- **End-to-End Cached Resolution**: 151.54 ns (6.6M ops/s).
+```text
+                     Request Ingress (Hot Path)
+                                 │
+                                 ▼
+                   discovery.current_endpoints()
+                                 │
+                                 ▼
+                     Arc<EndpointSet> Snapshot
+                    (20.0 ns, 0 heap allocs)
+                                 │
+           ──────────────────────┼──────────────────────
+                                 │ Background Sync Task
+                                 ▼
+                   resolver.resolve(host, port)
+                                 │
+            ┌────────────────────┴────────────────────┐
+         [HIT]                                     [MISS]
+            │                                         │
+            ▼                                         ▼
+    DnsCache.get(host)                       HostsFileSource (/etc/hosts)
+    (53.7 ns, zero wire I/O)                          │
+            │                                  ┌──────┴──────┐
+            │                               [HIT]         [MISS]
+            │                                  │             │
+            │                         Insert DnsCache        ▼
+            │                         (hosts_ttl: 300s) Singleflight Mutex
+            │                                  │             │
+            │                                  │    Execute Wire Query
+            │                                  │    (UdpDnsTransport RFC 1035)
+            │                                  │             │
+            │                                  │      ┌──────┴──────┐
+            │                                  │   [SUCCESS]     [OUTAGE]
+            │                                  │      │             │
+            │                                  │  Positive Cache   LKG Fallback
+            │                                  │  (TTL: 30s)       (10.3M ops/s)
+            └──────────────────────────────────┴──────┬─────────────┘
+                                                      │
+                                                      ▼
+                                       EndpointSet::new(endpoints, gen)
+                                                      │
+                                                      ▼
+                                           current.store(new_set)
+```
 
 ---
 
-## 6. Verification Commands
+## Component Roles
 
-Run standard quality gate checks from the repository root:
+| Component | Responsibility | Invariant |
+| :--- | :--- | :--- |
+| [`DnsCache`](src/dns/cache.rs) | Single Source of Truth in RAM | Sub-microsecond cache hits; negative cache shield prevents query storms |
+| [`HostsFileSource`](src/dns/bootstrap.rs) | `/etc/hosts` in-memory table | Eager zero-IO bootstrap; strictly $\mathcal{O}(1)$ lookup complexity |
+| [`ResolvConfServerProvider`](src/dns/bootstrap.rs) | `/etc/resolv.conf` parser | Zero hardcoded nameservers; extracts upstream DNS dynamically |
+| [`DnsServerTarget`](src/dns/server.rs) | Nameserver target resolution | Resolves IP literals and Host:Port targets via bootstrap hosts without deadlock |
+| [`UdpDnsTransport`](src/dns/transport.rs) | RFC 1035 UDP wire transport | Pure zero-dependency wire serialization; dual A/AAAA query; atomic TX ID |
+| [`SystemDnsTransport`](src/dns/transport.rs) | OS fallback resolver | Delegates domain resolution to `tokio::net::lookup_host` |
+| [`DnsResolverProvider`](src/dns/resolver.rs) | Phase 3 resolver coordinator | Singleflight deduplication; sequential nameserver failover; LKG resilience |
+| [`Endpoint`](src/endpoint.rs) | Canonical physical destination | Re-exported from `velda-core`; strictly represents `address: SocketAddr` + `weight` |
+| [`EndpointSet`](src/endpoint.rs) | Immutable generational snapshot | Generation-tracked topology; lock-free iteration via `.ips()` and `.addresses()` |
+| [`Discovery`](src/service.rs) | Top-level lifecycle orchestrator | Background refresh task; lock-free `ArcSwap` snapshot publication |
 
-- Formatting: `cargo fmt --check`
-- Linter: `cargo clippy -p velda-discovery --all-targets --all-features -- -D warnings`
-- Tests: `cargo test -p velda-discovery`
-- Benchmarks: `cargo bench -p velda-discovery`
+---
 
+## Benchmark Highlights
+
+- **Zero-Allocation In-Memory Lookups**: **0 Bytes / 0 Heap Allocations** across Positive Cache Hit, Negative Hit, and Cache Miss.
+- **Hot-Path Snapshot Load**: **20.24 ns** latency (**49.41 Million ops/s** throughput, 0 allocs).
+- **Positive Cache Hit**: **53.81 ns** (**18.58 Million ops/s** in-memory throughput, **0.00 allocs / 0.00 B**).
+- **Negative Cache Shield (NXDOMAIN)**: **76.38 ns** (**13.09 Million ops/s**, **0.00 allocs / 0.00 B**; 100% of query storms absorbed in RAM with **zero upstream wire packets**).
+- **Cache Miss**: **55.11 ns** (**18.14 Million ops/s**, **0.00 allocs / 0.00 B**).
+- **Hosts File Lookup Scaling**: Strictly $\mathcal{O}(1)$ (flat 30 - 49 ns from $N = 10$ to $10,000$ entries).
+- **Direct IP Target Resolution**: **7.14 ns** (**139.99 Million ops/s**, 0 heap allocs).
+- **Multicore Concurrency Scaling**: **18.75 Million ops/s** single-thread scaling to **9.74 Million ops/s** under 64-thread contention.
+- **Lock-Free Readers Under Refresh**: **25.77 Million ops/s** read throughput while background writer continuously updates snapshots.
+- **Singleflight Stampede Defense**: **99.5% coalescing ratio** under concurrent storm (199 / 200 tasks coalesced into 1 upstream query).
+- **Resilient Failover**: Primary nameserver failure automatically fails over to secondary backup in **~2.07 ms** (100% success).
+- **Total Nameserver Blackout (LKG Active)**: Serves uninterrupted at **10.16 Million ops/s** (**98.41 ns**, 2 allocs) via RFC 5861 `stale-if-error` grace period caching.
+
+
+---
+
+## Verification
+
+```bash
+# Code Style & Lints
+cargo fmt --check
+cargo clippy -p velda-discovery --all-targets --all-features -- -D warnings
+
+# Unit & Integration Tests (34 tests)
+cargo test -p velda-discovery
+
+
+# Performance & Scalability Benchmarks
+cargo bench -p velda-discovery --bench single_thread_bench
+cargo bench -p velda-discovery --bench multi_thread_bench
+cargo bench -p velda-discovery --bench adversarial_bench
+```

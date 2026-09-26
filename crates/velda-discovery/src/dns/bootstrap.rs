@@ -74,7 +74,11 @@ impl HostsFileSource {
 
     /// Looks up a hostname in the local hosts table.
     pub fn lookup(&self, host: &str) -> Option<IpAddr> {
-        self.hosts_table.get(&host.to_lowercase()).copied()
+        if host.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.hosts_table.get(&host.to_lowercase()).copied()
+        } else {
+            self.hosts_table.get(host).copied()
+        }
     }
 
     /// Returns the number of static host mappings loaded.
