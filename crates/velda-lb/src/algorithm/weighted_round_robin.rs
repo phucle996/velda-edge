@@ -9,12 +9,11 @@ use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
 
-const NUM_SHARDS: usize = 16;
-
 thread_local! {
+    /// Worker thread monotonic identifier for SWRR shard routing.
     static WORKER_SHARD_ID: usize = {
         static NEXT_SHARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        NEXT_SHARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % NUM_SHARDS
+        NEXT_SHARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     };
 }
 
@@ -22,9 +21,9 @@ thread_local! {
 ///
 /// Weight ranges from 1 to 100 per endpoint.
 pub struct WeightedRoundRobin {
-    // OPTIMIZATION: Thread-sharded Mutex array (16 shards) eliminates lock contention across worker threads.
+    // OPTIMIZATION: Thread-sharded Mutex array eliminates lock contention across worker threads.
     // Each worker thread maps to a dedicated shard, achieving near-zero contention similar to Nginx's per-worker model.
-    shards: [Mutex<SwrrState>; NUM_SHARDS],
+    shards: Box<[Mutex<SwrrState>]>,
 }
 
 #[derive(Default)]
@@ -39,11 +38,25 @@ impl Default for WeightedRoundRobin {
 }
 
 impl WeightedRoundRobin {
-    /// Creates a new weighted round-robin balancer with sharded state.
+    /// Creates a new weighted round-robin balancer detecting worker concurrency from runtime.
     pub fn new() -> Self {
-        Self {
-            shards: std::array::from_fn(|_| Mutex::new(SwrrState::default())),
-        }
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(16);
+        Self::with_workers(workers)
+    }
+
+    /// Creates a new weighted round-robin balancer with explicit worker count
+    /// injected by the caller (`velda-edge` supervisor).
+    ///
+    /// OPTIMIZATION: Shard count scales 1:1 with worker concurrency to eliminate Mutex lock contention.
+    pub fn with_workers(workers: usize) -> Self {
+        let count = workers.max(1).next_power_of_two();
+        let shards = (0..count)
+            .map(|_| Mutex::new(SwrrState::default()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { shards }
     }
 }
 
@@ -57,7 +70,7 @@ impl LoadBalancer for WeightedRoundRobin {
         }
 
         // OPTIMIZATION: Retrieve thread-dedicated shard to avoid cross-thread lock contention.
-        let shard_idx = WORKER_SHARD_ID.with(|id| *id);
+        let shard_idx = WORKER_SHARD_ID.with(|id| *id) % self.shards.len();
 
         // BLOCKER FIX: Prevent poisoned mutex cascade panic. If another worker thread panics
         // while holding this lock, recover the inner state instead of panicking on all subsequent requests.
@@ -150,5 +163,18 @@ mod tests {
         let ctx = SelectionContext::NONE;
         let selected = balancer.select(&endpoints, &ctx);
         assert!(selected.is_some());
+    }
+
+    #[test]
+    fn test_swrr_with_workers_probed_scaling() {
+        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let endpoints = vec![Endpoint::new("e1", ep1, 1)];
+        let ctx = SelectionContext::NONE;
+
+        for workers in [1, 2, 4, 8, 16, 64] {
+            let swrr = WeightedRoundRobin::with_workers(workers);
+            assert_eq!(swrr.shards.len(), workers.next_power_of_two());
+            assert!(swrr.select(&endpoints, &ctx).is_some());
+        }
     }
 }
