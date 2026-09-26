@@ -63,19 +63,31 @@ impl RingHash {
     }
 
     fn rebuild_ring(endpoints: &[Endpoint]) -> Vec<Vnode> {
-        let mut vnodes = Vec::new();
+        let total_vnodes: usize = endpoints
+            .iter()
+            .map(|ep| (ep.weight.clamp(1, 100) * VNODES_PER_WEIGHT_UNIT) as usize)
+            .sum();
+        let mut vnodes = Vec::with_capacity(total_vnodes);
 
         for (idx, ep) in endpoints.iter().enumerate() {
             let num_vnodes = ep.weight.clamp(1, 100) * VNODES_PER_WEIGHT_UNIT;
-            let addr_bytes = match ep.address {
-                std::net::SocketAddr::V4(v4) => v4.ip().octets().to_vec(),
-                std::net::SocketAddr::V6(v6) => v6.ip().octets().to_vec(),
+            let (ip_bytes, ip_len) = match ep.address {
+                std::net::SocketAddr::V4(v4) => {
+                    let mut b = [0u8; 24];
+                    b[..4].copy_from_slice(&v4.ip().octets());
+                    (b, 4)
+                }
+                std::net::SocketAddr::V6(v6) => {
+                    let mut b = [0u8; 24];
+                    b[..16].copy_from_slice(&v6.ip().octets());
+                    (b, 16)
+                }
             };
 
             for v in 0..num_vnodes {
-                let mut seed = addr_bytes.clone();
-                seed.extend_from_slice(&v.to_be_bytes());
-                let h = fnv1a_hash(&seed);
+                let mut seed = ip_bytes;
+                seed[ip_len..ip_len + 4].copy_from_slice(&v.to_be_bytes());
+                let h = fnv1a_hash(&seed[..ip_len + 4]);
                 vnodes.push(Vnode {
                     hash: h,
                     endpoint_idx: idx,

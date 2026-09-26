@@ -109,11 +109,10 @@ impl Maglev {
         let mut skip = Vec::with_capacity(n);
 
         for ep in endpoints {
-            let addr_bytes = match ep.address {
-                std::net::SocketAddr::V4(v4) => v4.ip().octets().to_vec(),
-                std::net::SocketAddr::V6(v6) => v6.ip().octets().to_vec(),
+            let h1 = match ep.address {
+                std::net::SocketAddr::V4(v4) => fnv1a_hash(&v4.ip().octets()),
+                std::net::SocketAddr::V6(v6) => fnv1a_hash(&v6.ip().octets()),
             };
-            let h1 = fnv1a_hash(&addr_bytes);
             let h2 = h1.wrapping_mul(0x517cc1b727220a95).wrapping_add(1);
 
             offset.push((h1 as usize) % m);
