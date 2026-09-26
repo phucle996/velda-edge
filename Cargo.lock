@@ -1538,6 +1538,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "velda-discovery"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
 name = "velda-edge"
 version = "0.1.0"
 dependencies = [
@@ -1562,13 +1575,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "velda-lb"
-version = "0.1.0"
-dependencies = [
- "velda-core",
-]
-
-[[package]]
 name = "velda-observability"
 version = "0.1.0"
 dependencies = [
@@ -1586,6 +1592,8 @@ dependencies = [
 name = "velda-pool"
 version = "0.1.0"
 dependencies = [
+ "tokio",
+ "tracing",
  "velda-core",
 ]
 
@@ -1639,7 +1647,13 @@ dependencies = [
 name = "velda-upstream"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
  "velda-core",
+ "velda-pool",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@
 //! `velda-plugin`, and `velda-upstream` build on these contracts.
 
 pub mod context;
+pub mod endpoint;
 pub mod error;
 pub mod l4;
 pub mod l7;
@@ -54,7 +55,8 @@ pub use error::{Error, ErrorKind, Result};
 pub use lifecycle::{Action, Hook, HookPhase, Phase};
 
 // -----------------------------------------------------------------------------
-// Shared identifiers
+// Shared identifiers & Endpoints
 // -----------------------------------------------------------------------------
 
+pub use endpoint::{Endpoint, EndpointId};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
