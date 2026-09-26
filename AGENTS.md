@@ -13,7 +13,7 @@ Velda Edge is a performance-oriented, polyglot edge platform built around:
 - **In-memory hot paths** (Zero JSON parsing, zero disk I/O, zero RPC calls in request serving)
 - **Autonomous Data Plane** (Operates independently from persisted LKG even if Control Plane is offline)
 - **Unified Polyglot Monorepo**:
-  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (12 bounded crates).
+  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (11 bounded crates).
   - `control-plane/`: Go 1.27 Clean Architecture Control Plane (PostgreSQL / `pgx/v5`).
   - `ui/`: Modern React 19.3 + TypeScript + Vite 8.3 + Tailwind CSS v4 + Shadcn UI Console.
 
@@ -59,20 +59,27 @@ All configuration is parsed, validated, and compiled into RAM (`RuntimeSnapshot`
 A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS resolution, clock/time, crypto, TLS backend).
 - A Provider **must not** own request business flow or decide route selection, plugin ordering, or upstream policies.
 
+### 2.6 Canonical Monorepo Vocabulary: The `Endpoint` Invariant
+`Endpoint` (`velda_core::Endpoint`) is strictly reserved across the entire codebase to denote a **physical backend destination target** (`address: SocketAddr`, `weight: u32`).
+- **Forbidden collisions**: Subsystems MUST NOT use the word `Endpoint` for:
+  - Ingress ports / listeners (use `Listener`, `Binding`, or `PortBinding`).
+  - Client sockets (use `Peer` or `ClientAddr`).
+  - HTTP routes / API paths (use `Route`, `Path`, or `Prefix`).
+
 ---
 
 ## 3. Subsystem Invariants & Crate Boundaries
 
 ### 3.1 Rust Data Plane (`crates/`)
-- `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs). No business logic, no routing, no upstream logic.
+- `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
 - `velda-transport`: Edge Traffic Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff).
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
 - `velda-http`: Owns L7 HTTP protocol lifecycle (HTTP/1.1 keep-alive, HTTP/2 multiplexing, HTTP/3 streams, and request/response codec).
 - `velda-router`: Owns route matching (Path, Host, Method, Headers) and route selection.
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
-- `velda-upstream`: Owns logical backends, discovery integration, and target selection.
-- `velda-lb`: Owns load-balancing algorithms only (Round Robin, Least Connection, etc.).
-- `velda-pool`: Owns upstream connection reuse and pooling.
+- `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).
+- `velda-upstream`: [Stage 2] Logical backends, endpoint lifecycle, passive health tracking, and eligible candidate management.
+- `velda-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.
 - `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, initializes subsystem states, and starts `velda-transport` engine).

@@ -6,3 +6,15 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+arc-swap = "1.7"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full", "test-util"] }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false

@@ -1575,6 +1575,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "velda-lb"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "tokio",
+ "velda-core",
+]
+
+[[package]]
 name = "velda-observability"
 version = "0.1.0"
 dependencies = [
