@@ -197,15 +197,16 @@ fn verify_maglev_and_ring_hash_rebuild_churn_no_leak() {
         }
     };
 
-    // Cycle 1: establish stabilized baseline
+    // Stabilize lazy allocator structures (arc_swap debt pool & thread cache)
+    run_churn_cycle();
     run_churn_cycle();
     let baseline_bytes = TRACKER.live_bytes();
 
-    // Cycle 2: execute 32,000 requests under concurrent rebuild churn
+    // Execute 32,000 requests under concurrent rebuild churn
     run_churn_cycle();
     let cycle2_bytes = TRACKER.live_bytes();
 
-    // Cycle 3: execute another 32,000 requests under concurrent rebuild churn
+    // Execute another 32,000 requests under concurrent rebuild churn
     run_churn_cycle();
     let cycle3_bytes = TRACKER.live_bytes();
 

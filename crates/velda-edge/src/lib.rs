@@ -14,11 +14,13 @@
 
 pub mod bootstrap;
 pub mod config;
+pub mod hardware;
 pub mod reload;
 pub mod runtime;
 pub mod uds;
 
 pub use bootstrap::{EdgeSupervisor, start};
 pub use config::{EdgeConfig, EdgeError};
+pub use hardware::{HardwareTopology, global_hardware_topology};
 pub use reload::{ReloadOutcome, apply_reload};
 pub use runtime::{Runtime, SharedRuntime, new_shared_runtime};

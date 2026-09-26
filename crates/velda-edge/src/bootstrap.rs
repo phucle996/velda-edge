@@ -11,12 +11,14 @@ use tokio::sync::watch;
 use velda_transport::{Connection, L7Handoff, TrafficEngine};
 
 use crate::config::{EdgeConfig, EdgeError};
+use crate::hardware::HardwareTopology;
 use crate::runtime::{Runtime, SharedRuntime, new_shared_runtime};
 use crate::uds::run_ipc_server;
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
 pub struct EdgeSupervisor {
     config: EdgeConfig,
+    hardware: HardwareTopology,
     shared_runtime: SharedRuntime,
     engine: TrafficEngine,
 }
@@ -24,6 +26,9 @@ pub struct EdgeSupervisor {
 impl EdgeSupervisor {
     /// Cold-starts the supervisor from disk artifacts according to specified configuration.
     pub fn bootstrap(config: EdgeConfig) -> Result<Self, EdgeError> {
+        // Probe host hardware topology once during cold-start bootstrap
+        let hardware = HardwareTopology::probe();
+
         let runtime_dir = config.runtime_dir();
 
         // Load initial LKG state if available on disk
@@ -53,14 +58,22 @@ impl EdgeSupervisor {
             listeners = initial_listeners,
             routes = initial_routes,
             storage = %config.storage_dir.display(),
+            workers = hardware.worker_threads,
             "Velda Edge supervisor bootstrapped successfully"
         );
 
         Ok(Self {
             config,
+            hardware,
             shared_runtime,
             engine,
         })
+    }
+
+    /// Returns the hardware topology probed during cold-start bootstrap.
+    #[inline]
+    pub fn hardware(&self) -> HardwareTopology {
+        self.hardware
     }
 
     /// Returns a reference to the active shared runtime container.
