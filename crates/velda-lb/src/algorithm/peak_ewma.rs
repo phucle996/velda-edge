@@ -36,6 +36,27 @@ impl LoadBalancer for PeakEwma {
             r2 += 1;
         }
 
+        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
+        // Direct array indexing eliminates SipHash computation in HashMap.
+        if let Some(metrics) = ctx.metrics_slice {
+            let cost_at = |idx: usize| -> f64 {
+                if let Some(m) = metrics.get(idx) {
+                    let latency = m.latency_ewma_nanos().max(1_000);
+                    let inflight = m.inflight_requests() as u64;
+                    let cost = latency.saturating_mul(inflight.saturating_add(1));
+                    cost as f64 / endpoints[idx].weight.max(1) as f64
+                } else {
+                    1_000.0 / endpoints[idx].weight.max(1) as f64
+                }
+            };
+
+            return if cost_at(r1) <= cost_at(r2) {
+                Some(r1)
+            } else {
+                Some(r2)
+            };
+        }
+
         let Some(metrics_map) = ctx.metrics_map else {
             return Some(r1);
         };

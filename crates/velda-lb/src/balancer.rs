@@ -66,6 +66,31 @@ impl<T: LoadBalancer + ?Sized> LoadBalancer for Arc<T> {
     }
 }
 
+impl<T: LoadBalancer + ?Sized> LoadBalancer for Box<T> {
+    #[inline]
+    fn select_index(&self, endpoints: &[Endpoint], ctx: &SelectionContext<'_>) -> Option<usize> {
+        (**self).select_index(endpoints, ctx)
+    }
+
+    #[inline]
+    fn select_addr(
+        &self,
+        endpoints: &[Endpoint],
+        ctx: &SelectionContext<'_>,
+    ) -> Option<SocketAddr> {
+        (**self).select_addr(endpoints, ctx)
+    }
+
+    #[inline]
+    fn select<'a>(
+        &self,
+        endpoints: &'a [Endpoint],
+        ctx: &SelectionContext<'_>,
+    ) -> Option<&'a Endpoint> {
+        (**self).select(endpoints, ctx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

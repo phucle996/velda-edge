@@ -36,6 +36,25 @@ impl LoadBalancer for PowerOfTwoChoices {
             r2 += 1;
         }
 
+        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
+        // Direct array indexing eliminates SipHash computation in HashMap.
+        if let Some(metrics) = ctx.metrics_slice {
+            let load_at = |idx: usize| -> f64 {
+                if let Some(m) = metrics.get(idx) {
+                    let load = m.active_connections() + m.inflight_requests();
+                    load as f64 / endpoints[idx].weight.max(1) as f64
+                } else {
+                    0.0
+                }
+            };
+
+            return if load_at(r1) <= load_at(r2) {
+                Some(r1)
+            } else {
+                Some(r2)
+            };
+        }
+
         let Some(metrics_map) = ctx.metrics_map else {
             return Some(r1);
         };
