@@ -1,0 +1,30 @@
+[package]
+name = "velda-connection-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+velda-core = { path = "../velda-core" }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full", "test-util"] }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "profile_bench"
+harness = false
+
+
