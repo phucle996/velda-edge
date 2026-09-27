@@ -5,6 +5,7 @@
 //! Wrapped in [`ArcSwap`] to enable zero-overhead, lock-free $O(1)$ reads on the
 //! request serving hot path, and atomic swaps upon configuration reloads.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,8 +18,7 @@ use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_transport::IngressBinding;
 
 use crate::config::{
-    EdgeError, listener_to_binding, load_listeners, load_plugins, load_routes, load_tls,
-    load_upstreams,
+    EdgeError, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
 };
 
 /// Read-only snapshot of all active runtime domains compiled in RAM.
@@ -98,9 +98,35 @@ pub fn new_shared_runtime(initial: Runtime) -> SharedRuntime {
     Arc::new(ArcSwap::from_pointee(initial))
 }
 
+/// Converts a declarative `ListenerConfig` into a `velda-transport` `IngressBinding`.
+fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, EdgeError> {
+    let addr: SocketAddr = config
+        .address
+        .parse()
+        .map_err(|e| EdgeError::InvalidAddress {
+            id: config.id.clone(),
+            addr: config.address.clone(),
+            reason: format!("{e}"),
+        })?;
+
+    let binding = IngressBinding::from_protocols(
+        &config.id,
+        addr,
+        &config.transport.protocol,
+        &config.application.protocol,
+        config.tls.enabled,
+    )?;
+
+    Ok(binding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_sync::post_sync::listener::{
+        ListenerApplicationConfig, ListenerTlsConfig, ListenerTransportConfig,
+    };
+    use velda_transport::PathKind;
 
     #[test]
     fn test_empty_runtime() {
@@ -125,5 +151,77 @@ mod tests {
         };
         shared.store(Arc::new(updated));
         assert_eq!(shared.load().revision, 2);
+    }
+
+    #[test]
+    fn test_listener_to_binding_mapping() {
+        // Raw TCP -> L4Direct
+        let raw_tcp = ListenerConfig {
+            id: "tcp-raw".into(),
+            address: "127.0.0.1:9000".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "raw".into(),
+                version: None,
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&raw_tcp).unwrap();
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L4Direct);
+
+        // HTTP/1.1 over TCP -> L7Handoff
+        let http1 = ListenerConfig {
+            id: "http".into(),
+            address: "127.0.0.1:80".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("1.1".into()),
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&http1).unwrap();
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
+
+        // HTTP/2 over TCP -> L7Handoff
+        let http2 = ListenerConfig {
+            id: "http2".into(),
+            address: "127.0.0.1:8080".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("2".into()),
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&http2).unwrap();
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
+
+        // HTTP over UDP -> L7Handoff
+        let http3 = ListenerConfig {
+            id: "http3".into(),
+            address: "127.0.0.1:443".into(),
+            transport: ListenerTransportConfig {
+                protocol: "udp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("3".into()),
+            },
+            tls: ListenerTlsConfig { enabled: true },
+        };
+        let binding = listener_to_binding(&http3).unwrap();
+        assert_eq!(binding.protocol, "udp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
+        assert!(binding.tls_enabled);
     }
 }
