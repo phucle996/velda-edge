@@ -79,7 +79,7 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
 - `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).
 - `velda-upstream`: [Stage 2] Logical backends, endpoint lifecycle, passive health tracking, and eligible candidate management.
-- `velda-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
+- `velda-connection-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.
 - `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, initializes subsystem states, and starts `velda-transport` engine).

@@ -21,6 +21,7 @@
 pub mod context;
 pub mod endpoint;
 pub mod error;
+pub mod hardware;
 pub mod l4;
 pub mod l7;
 pub mod lifecycle;
@@ -59,4 +60,5 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 // -----------------------------------------------------------------------------
 
 pub use endpoint::{Endpoint, EndpointId};
+pub use hardware::{HardwareTopology, global_hardware_topology, init_hardware_topology};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

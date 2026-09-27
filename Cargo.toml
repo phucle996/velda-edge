@@ -11,7 +11,7 @@ members = [
     "crates/velda-discovery",
     "crates/velda-upstream",
     "crates/velda-lb",
-    "crates/velda-pool",
+    "crates/velda-connection-pool",
     "crates/velda-observability",
     "crates/velda-edge",
 ]

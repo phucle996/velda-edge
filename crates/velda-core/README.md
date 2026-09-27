@@ -131,7 +131,7 @@ pub enum ErrorKind {
 - ❌ Parse HTTP wire format *(thuộc `velda-http`)*.
 - ❌ Thực thi thuật toán so khớp route *(thuộc `velda-router`)*.
 - ❌ Thực thi phân giải DNS hoặc Load Balancing *(thuộc `velda-lb` và `velda-upstream`)*.
-- ❌ Quản lý kết nối connection pool *(thuộc `velda-pool`)*.
+- ❌ Quản lý kết nối connection pool *(thuộc `velda-connection-pool`)*.
 - ❌ Quản lý danh sách và thứ tự chạy plugin *(thuộc `velda-plugin`)*.
 - ❌ Quản lý Tokio runtime hoặc background tasks *(thuộc `velda-edge`)*.
 - ❌ Đọc/Parse file cấu hình JSON *(thuộc `velda-sync`)*.

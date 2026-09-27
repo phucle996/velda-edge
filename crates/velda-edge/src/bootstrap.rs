@@ -8,10 +8,10 @@
 //! 5. Supervises execution until process termination signal.
 
 use tokio::sync::watch;
+use velda_core::hardware::{HardwareTopology, init_hardware_topology};
 use velda_transport::{Connection, L7Handoff, TrafficEngine};
 
 use crate::config::{EdgeConfig, EdgeError};
-use crate::hardware::HardwareTopology;
 use crate::runtime::{Runtime, SharedRuntime, new_shared_runtime};
 use crate::uds::run_ipc_server;
 
@@ -26,8 +26,9 @@ pub struct EdgeSupervisor {
 impl EdgeSupervisor {
     /// Cold-starts the supervisor from disk artifacts according to specified configuration.
     pub fn bootstrap(config: EdgeConfig) -> Result<Self, EdgeError> {
-        // Probe host hardware topology once during cold-start bootstrap
+        // Probe host hardware topology once during cold-start bootstrap and cache in RAM
         let hardware = HardwareTopology::probe();
+        let _ = init_hardware_topology(hardware);
 
         let runtime_dir = config.runtime_dir();
 
