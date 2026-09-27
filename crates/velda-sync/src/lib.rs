@@ -30,8 +30,9 @@ pub use post_sync::tls::{
     CertificateFiles, DomainHeader as TlsDomainHeader, TlsFile, TlsProfileConfig,
 };
 pub use post_sync::upstream::{
-    DnsTarget, DomainHeader as UpstreamDomainHeader, EndpointConfig, LoadBalancerConfig,
-    ResolverConfig, UpstreamConfig, UpstreamTimeouts, UpstreamsFile,
+    ActiveHealthConfig, DnsTarget, DomainHeader as UpstreamDomainHeader, EndpointConfig,
+    HealthCheckConfig, LoadBalancerConfig, PassiveHealthConfig, ResolverConfig, UpstreamConfig,
+    UpstreamTimeouts, UpstreamsFile,
 };
 
 // ============================================================================
