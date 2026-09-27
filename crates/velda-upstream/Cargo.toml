@@ -6,3 +6,46 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+velda-discovery = { path = "../velda-discovery" }
+velda-lb = { path = "../velda-lb" }
+velda-connection-pool = { path = "../velda-connection-pool" }
+tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros", "time", "rt"] }
+thiserror = "2.0"
+tracing = "0.1"
+arc-swap = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+
+[features]
+default = []
+test-utils = []
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full", "test-util"] }
+velda-upstream = { path = ".", features = ["test-utils"] }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "profile_bench"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "resource_regression_bench"
+harness = false
+required-features = ["test-utils"]
+
+
