@@ -1,175 +1,116 @@
 # velda-transport
 
-`velda-transport` is the high-performance **Edge Traffic Engine** for Velda Edge, responsible for **traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loops, zero-copy protocol classification, bidirectional byte streaming, and L7 protocol handoff**.
+Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Handoff for the Velda Edge Data Plane.
 
 > [!IMPORTANT]
-> **Hot-Path Invariant**: `velda-transport` operates strictly within the Data Plane serving hot path. It performs **zero JSON parsing, zero disk I/O, and zero Control Plane RPCs**. Ingress ports, load paths, and forwarding behaviors are driven entirely by compiled in-memory declarations passed from the composition root (`velda-edge`).
+> **Subsystem Invariant**: `Transport = Edge Traffic Ingress & L4 Lifecycle Engine`.
+> Transport is neither an HTTP parser, TLS terminator, router, nor upstream load balancer.
+> It orchestrates 5 core functions: **Listener Ingress & Declarative Reconcile, L4 Connection & Tracking, Zero-Copy Protocol Sniffing, L4 Direct Forwarding, and Symmetrical L7 Protocol Handoff**.
 
 ---
 
-## 1. Core Architecture & Request Flow
+## 1. Subsystem Architecture & Request Flow
 
 ```text
- ┌────────────────────────────────────────────────────────────────────────┐
- │                              velda-edge                                │
- │   (Bootstrap / Composition Root / LKG Artifact Loader / IPC Receiver)  │
- └──────────────────────────────────┬─────────────────────────────────────┘
-                                    │ EngineHandle::reconcile(desired_bindings)
-                                    ▼
- ┌────────────────────────────────────────────────────────────────────────┐
- │                           velda-transport                              │
- │                                                                        │
- │  ┌──────────────────────────────────────────────────────────────────┐  │
- │  │                  engine::runner (TrafficEngine)                  │  │
- │  │  • JoinSet-managed concurrent TCP listeners & UDP sockets        │  │
- │  │  • Graceful shutdown propagation via watch::Receiver<bool>       │  │
- │  │  • Declarative topology reconciliation via engine::reconcile     │  │
- │  └───────────────────────────────┬──────────────────────────────────┘  │
- │                                  │                                     │
- │        ┌─────────────────────────┴─────────────────────────┐           │
- │        ▼                                                   ▼           │
- │  ┌─────────────┐                                     ┌─────────────┐   │
- │  │ TCP Ingress │                                     │ UDP Ingress │   │
- │  │ (listeners) │                                     │  (sockets)  │   │
- │  └──────┬──────┘                                     └──────┬──────┘   │
- │         │ Connection                                        │ Datagram │
- │         ▼                                                   ▼          │
- │  ┌─────────────────────────────────┐                 ┌─────────────┐   │
- │  │   Protocol Classifier (peek)    │                 │ Path Decider│   │
- │  │  • HTTP/1.1  (GET, POST, etc.)  │                 │ • Raw UDP   │   │
- │  │  • HTTP/2    (PRI * HTTP/2.0)   │                 │ • HTTP/3    │   │
- │  │  • TLS       (0x16 0x03 Client) │                 │   (QUIC)    │   │
- │  │  • L4Direct  (Raw TCP stream)   │                 │             │   │
- │  └──────┬──────────────────┬───────┘                 └─┬─────────┬─┘   │
- └─────────┼──────────────────┼───────────────────────────┼─────────┼─────┘
-           │                  │                           │         │
-           ▼                  │                           ▼         │
- ┌───────────────────┐        │                 ┌───────────────────┐
- │   L4 TCP Stream   │        │                 │    L4 UDP Flow    │
- │   Fast-Path       │        │                 │    Fast-Path      │
- │ (Byte Forwarding) │        │                 │(Datagram Sessions)│
- └───────────────────┘        ▼                 └───────────────────┘
-                    ┌───────────────────┐                 ▼
-                    │   TcpL7Handoff    │       ┌───────────────────┐
-                    │   (velda-tls /    │       │   UdpL7Handoff    │
-                    │    velda-http)    │       │   (velda-http /   │
-                    └───────────────────┘       │    HTTP/3 QUIC)   │
-                                                └───────────────────┘
+                             Client Ingress Traffic
+                                (TCP / UDP)
+                                     │
+                                     ▼
+                 ╔═══════════════════════════════════════╗
+                 ║            velda-transport            ║
+                 ║         (Edge Traffic Engine)         ║
+                 ╚═══════════════════╤═══════════════════╝
+                                     │
+         ┌───────────────────────────┴───────────────────────────┐
+         ▼                                                       ▼
+  1. TCP Ingress Loop                                     1. UDP Ingress Loop
+  IngressListener (JoinSet)                               UdpSocket (JoinSet)
+  reconcile_active_listeners                              reconcile_active_listeners
+         │                                                       │
+         ▼                                                       ▼
+    Connection                                                Datagram
+  (stream, peer, local, bytes)                             (payload, peer, local)
+         │                                                       │
+         ▼                                                       ▼
+  2. Protocol Classifier                                  2. Ingress Path
+  peek_and_classify (3.01 ns)                             PathKind derived
+  0x16 0x03 -> Tls                                        http3 / quic -> L7
+  GET / POST -> Http1                                     udp raw -> L4Direct
+  PRI * HTTP/2.0 -> Http2                                        │
+  raw bytes -> L4Direct                                          │
+         │                                                       │
+         ├───────────────────────────┬───────────────────────────┤
+         │                           │                           │
+         ▼                           ▼                           ▼
+  3. L4 Fast-Path Direct     4. TCP L7 Handoff           5. UDP L7 Handoff
+  forward_tcp_direct / stream TcpL7Handoff                UdpL7Handoff
+  copy_bidirectional          (conn, id, path_hint)       (dgram, sock, id, path_hint)
+         │                           │                           │
+         ▼                           ▼                           ▼
+  Upstream L4 Target         velda-composer              velda-composer / velda-http
+  (Raw TCP Proxy)            (TLS, HTTP/1, HTTP/2)       (HTTP/3 QUIC Engine)
 ```
 
 ---
 
-## 2. Subsystem Structure
+## 2. Five Core Functions
 
-`velda-transport` is organized into clean, single-responsibility modules:
-
-```text
-crates/velda-transport/src/
-├── connection.rs       # Connection lifecycle, monotonic IDs, lock-free split halves, atomic counters
-├── error.rs            # Concrete transport error taxonomy and Result alias
-├── forwarding/         # Fast-path byte forwarding and protocol handoff
-│   ├── l4.rs           # Zero-copy L4 TCP bidirectional stream proxying
-│   ├── l7.rs           # L7 handoff container (Connection + PathKind + metadata)
-│   └── mod.rs          # Re-exports
-├── ingress/            # Ingress bindings, configuration models, and classification
-│   ├── binding.rs      # Declarative IngressBinding representation matching listeners.json
-│   ├── classifier.rs   # Zero-copy protocol sniffing (HTTP/1, HTTP/2, TLS, L4 raw)
-│   ├── listener.rs     # IngressListener and dedicated TCP accept loop
-│   └── mod.rs          # Re-exports
-├── tcp/                # TCP transport implementation
-│   ├── config.rs       # Socket options (backlog, buffer sizes, nodelay, keepalive)
-│   ├── forward.rs      # Bidirectional streaming and transfer statistics
-│   ├── listener.rs     # Low-level TCP listener wrapping Tokio TcpListener
-│   └── mod.rs          # Re-exports
-├── udp/                # UDP datagram implementation
-│   ├── config.rs       # UDP buffer and socket options
-│   ├── datagram.rs     # Datagram wrapper with peer, local address, and payload
-│   ├── forward.rs      # Datagram proxying and bidirectional UDP flow sessions
-│   ├── socket.rs       # Shared UdpSocket with atomic byte counters and receive loop
-│   └── mod.rs          # Re-exports
-└── engine/             # Multi-port lifecycle coordination and reconciliation
-    ├── handle.rs       # EngineHandle providing non-blocking asynchronous reconcile channel
-    ├── reconcile.rs    # Topology diffing: opens new ports, closes obsolete ones, keeps identical live
-    ├── runner.rs       # TrafficEngine: JoinSet orchestrator and event loop
-    └── mod.rs          # Module declarations and re-exports (pure export layer)
-```
+| # | Function | Subsystem Role | Delegated / Partner Subsystem |
+|---|---|---|---|
+| **1** | **Ingress & Reconcile** | Binds TCP listeners and UDP sockets dynamically matching `listeners.json`. Diffs topology changes with zero downtime. | Config parsed into RAM by [`velda-sync`](../velda-sync). Orchestrated by [`velda-edge`](../velda-edge). |
+| **2** | **L4 Connection Tracking** | Wraps raw sockets in [`Connection`](src/connection.rs); generates monotonic `ConnectionId`; tracks bytes read/written with lock-free atomics. | Vocabulary types defined in [`velda-core`](../velda-core). |
+| **3** | **Zero-Copy Sniffing** | Peeks at the initial incoming bytes (3.01 ns) to classify traffic into `PathKind` (`Tls`, `Http1`, `Http2`, `L4Direct`) without consuming stream. | Application protocol resolution delegated to [`velda-composer`](../velda-composer). |
+| **4** | **L4 Direct Forwarding** | High-throughput raw byte proxying via `copy_bidirectional` for TCP and stateless datagram/flow sessions for UDP. | Upstream backend discovery and connection leasing owned by [`velda-upstream`](../velda-upstream). |
+| **5** | **Symmetrical L7 Handoff** | Envelopes classified streams into [`TcpL7Handoff`](src/forwarding/l7.rs) and [`UdpL7Handoff`](src/forwarding/l7.rs) containing only carrier, `listener_id`, and `path_hint`. | Protocol composition, TLS termination, and ALPN coordination owned by [`velda-composer`](../velda-composer). |
 
 ---
 
-## 3. Declarative Port Management & Reconciliation
+## 3. Invariants & Guarantees
 
-Ingress configuration strictly adheres to a **declarative reconciliation pattern**:
-
-- **No Hardcoded Defaults**: There are no implicit ports (e.g. 80 or 443 are only bound if explicitly declared in `listeners.json`).
-- **Unified Cold-Start & Hot-Reload**: Cold-start initialization and live runtime reloads execute through the exact same declarative reconciliation pipeline.
-- **Topology Diffing**:
-  - **Removed / Modified Listeners**: The engine signals the running loop via `watch::Sender<bool>`, gracefully shutting down the accept/receive loop and releasing the OS port.
-  - **New / Modified Listeners**: The engine binds the new TCP socket or UDP port and spawns its accept/receive loop into the active `JoinSet`.
-  - **Identical Listeners**: Untouched and kept running with **zero connection drops and zero downtime**.
-
----
-
-## 4. Zero-Copy Protocol Classification
-
-Incoming TCP connections and UDP datagrams undergo non-destructive inspection via `peek_and_classify` / `classify_bytes` before dispatching:
-
-| Protocol | Transport | Signature / Identification | Resolved Path | Dispatched Handling |
-|---|---|---|---|---|
-| **TCP** | TCP | Raw byte stream without TLS/HTTP headers | `PathKind::L4Direct` | L4 bidirectional byte proxy |
-| **UDP** | UDP | Raw UDP datagrams (DNS, Syslog, custom) | `PathKind::L4Direct` | L4 datagram flow session proxy |
-| **HTTP/1** | TCP | `GET `, `POST `, `PUT `, `DELETE `, `HEAD `, etc. | `PathKind::Http1` | `TcpL7Handoff` -> `velda-http` (HTTP/1.1) |
-| **HTTP/2** | TCP | `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` (H2C Preface) | `PathKind::Http2` | `TcpL7Handoff` -> `velda-http` (HTTP/2) |
-| **HTTP/3** | UDP | QUIC Initial / 0-RTT / 1-RTT datagrams | `PathKind::Http3` | `UdpL7Handoff` -> `velda-http` (HTTP/3) |
-| **TLS** | TCP | `0x16 0x03` (TLS 1.0 - 1.3 ClientHello) | `PathKind::Tls` | `TcpL7Handoff` -> `velda-tls` (TLS Engine) |
-
-Classification completes in **3.01 ns** ($O(1)$) with zero heap allocations.
+1. **Zero-IO Hot Path**:
+   Serving path never parses JSON, never reads disk, and never makes Control Plane RPCs. Ingress bindings, socket options, and forwarding paths execute entirely from pre-compiled RAM structures.
+2. **Strict Symmetrical Handoff Contract**:
+   Transport provides clean, symmetrical handoff structures for both transport protocols:
+   - [`TcpL7Handoff`](src/forwarding/l7.rs): Hands off `(Connection, listener_id, path_hint)`.
+   - [`UdpL7Handoff`](src/forwarding/l7.rs): Hands off `(Datagram, Arc<UdpSocket>, listener_id, path_hint)`.
+   Transport never makes application-layer assumptions (zero `is_http1`, `is_http2`, `is_grpc` methods).
+3. **Zero-Copy Protocol Classification**:
+   Uses non-destructive socket peeking (`MSG_PEEK`). Classification runs in **3.01 ns** ($O(1)$) with **0 bytes allocated**.
+4. **Declarative Listener Reconciliation**:
+   Cold-start and live runtime updates use the exact same diffing engine:
+   - **New listeners**: Bound and added to the Tokio `JoinSet`.
+   - **Removed listeners**: Signaled via `watch::Sender<bool>`, shutting down accept loops and releasing ports cleanly.
+   - **Unchanged listeners**: Kept running continuously with **zero dropped connections and zero downtime**.
+5. **Lock-Free Atomic Accounting**:
+   Transfer statistics and byte counters utilize atomic 64-bit counters, eliminating lock contention across multicore workers.
 
 ---
 
-## 5. Forwarding & Handoff Models
-
-### 1. L4 TCP Streaming (`forwarding::l4`, `tcp::forward`)
-- Streams bytes directly between downstream client and upstream server using `tokio::io::copy_bidirectional`.
-- Propagates TCP half-closes (`shutdown(Write)`) in both directions.
-- Automatically records cumulative transfer metrics into `TransferStats` and connection atomic counters without locks.
-
-### 2. L4 UDP Forwarding (`udp::forward`)
-- **Direct Datagram Forwarding**: Statelessly relays single datagrams to target addresses.
-- **Bidirectional UDP Flow Session**: Manages a stateful proxy session between client and upstream backend, routing responses back through downstream sockets with atomic packet and byte counters.
-
-### 3. TCP L7 Handoff (`forwarding::l7::TcpL7Handoff`)
-- Hands off accepted connections to `velda-tls` (TLS termination) or `velda-http` (HTTP/1.1 or HTTP/2 codec and multiplexing) along with listener metadata.
-
-### 4. UDP L7 Handoff (`forwarding::l7::UdpL7Handoff`)
-- Hands off UDP datagrams and shared sockets to `velda-http` (HTTP/3 QUIC connection state engine) for zero-copy packet processing and bidirectional response dispatch.
-
----
-
-## 6. Performance Characteristics
+## 4. Benchmark Highlights
 
 Benchmarked via Criterion on bare-metal Linux (`x86_64`):
 
-| Component / Workflow | Complexity | Throughput / Latency | Allocation Overhead |
-|---|---|---|---|
-| **Protocol Sniffing (`classify_bytes`)** | $O(1)$ | **3.01 ns** / probe | 0 bytes (zero-copy) |
-| **TCP Full Ingress & Forwarding** | $O(1)$ | **1.89 GB/s** (1,894.2 MB/s) | 0 bytes per transfer |
-| **UDP Ingest & Datagram Flow** | $O(1)$ | **348,000 pps** (2.87 µs / pkt) | 0 bytes per packet |
-| **Monotonic ID Generator** | $O(1)$ | **1.22 ns** / ID | 0 bytes |
+| Operation / Component | Latency / op | Throughput | Allocations | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Protocol Sniffing (`classify_bytes`)** | **3.01 ns** | **332M ops/s** | **0 B (Zero-Alloc)** | $O(1)$ non-destructive byte inspection |
+| **Monotonic ID Generator** | **1.22 ns** | **819M IDs/s** | **0 B (Zero-Alloc)** | Atomic fetch-add sequence |
+| **TCP Ingress & Streaming** | **Streaming** | **1.89 GB/s** | **0 B per transfer** | Direct `tokio::io::copy_bidirectional` |
+| **UDP Ingest & Datagram Flow** | **2.87 µs** | **348,000 pps** | **0 B per packet** | Lock-free atomic datagram relay |
 
 ---
 
-## 7. Verification & Testing
+## 5. Verification Commands
+
+Run standard quality gate checks from the repository root:
 
 ```bash
-# Code formatting
-cargo fmt --check
-
-# Strict Clippy check with zero warnings
+# Code Style & Lints
+cargo fmt --check -p velda-transport
 cargo clippy -p velda-transport --all-targets --all-features -- -D warnings
 
-# Run all unit and integration tests
+# Unit & Integration Tests (14 unit tests, 4 integration suites)
 cargo test -p velda-transport
 
-# Run Criterion micro-benchmarks
+# Performance Benchmarks
 cargo bench -p velda-transport
 ```
