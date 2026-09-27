@@ -36,7 +36,7 @@ In Velda Edge, `velda-lb` intentionally has **zero awareness** of `ConnectionKey
 
 - **Pure Physical Selection**: The load balancer's sole responsibility is algorithmic selection—given candidate endpoints, determine which physical destination (`SocketAddr`) receives the request.
 - **Transport & Protocol Independence**: A `ConnectionKey` requires transport protocol details (`"http1"`, `"http2"`, `"tcp"`) and TLS metadata (`SNI`, `ALPN`). The load balancer does not and should not know whether the request is HTTP/1.1, HTTP/2, or what SNI is configured.
-- **Architectural Boundary**: The caller (`velda-upstream`) receives the physical `SocketAddr` from `velda-lb` via [`select_addr`](src/balancer.rs), combines it with its own configured protocol and TLS settings to construct the `ConnectionKey`, and queries the connection pool (`velda-pool`). This keeps `velda-lb` pure, stateless, and free from transport coupling.
+- **Architectural Boundary**: The caller (`velda-upstream`) receives the physical `SocketAddr` from `velda-lb` via [`select_addr`](src/balancer.rs), combines it with its own configured protocol and TLS settings to construct the `ConnectionKey`, and queries the connection pool (`velda-connection-pool`). This keeps `velda-lb` pure, stateless, and free from transport coupling.
 
 ---
 

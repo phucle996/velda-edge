@@ -38,12 +38,9 @@ impl Default for WeightedRoundRobin {
 }
 
 impl WeightedRoundRobin {
-    /// Creates a new weighted round-robin balancer detecting worker concurrency from runtime.
+    /// Creates a new weighted round-robin balancer reading worker concurrency from RAM.
     pub fn new() -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(16);
-        Self::with_workers(workers)
+        Self::with_workers(velda_core::global_hardware_topology().worker_threads)
     }
 
     /// Creates a new weighted round-robin balancer with explicit worker count

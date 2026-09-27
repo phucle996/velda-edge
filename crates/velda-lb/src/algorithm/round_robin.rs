@@ -38,13 +38,10 @@ impl Default for RoundRobin {
 }
 
 impl RoundRobin {
-    /// Creates a new sharded round-robin load balancer detecting worker concurrency from runtime.
+    /// Creates a new sharded round-robin load balancer reading worker concurrency from RAM.
     #[inline]
     pub fn new() -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(16);
-        Self::with_workers(workers)
+        Self::with_workers(velda_core::global_hardware_topology().worker_threads)
     }
 
     /// Creates a new sharded round-robin load balancer configured with explicit worker count

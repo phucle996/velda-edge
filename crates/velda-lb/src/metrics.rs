@@ -56,13 +56,10 @@ impl Default for EndpointMetrics {
 }
 
 impl EndpointMetrics {
-    /// Creates a new sharded metric container detecting worker concurrency from runtime.
+    /// Creates a new sharded metric container reading worker concurrency from RAM.
     #[inline]
     pub fn new() -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(16);
-        Self::with_workers(workers)
+        Self::with_workers(velda_core::global_hardware_topology().worker_threads)
     }
 
     /// Creates a new sharded metric container configured with explicit worker count

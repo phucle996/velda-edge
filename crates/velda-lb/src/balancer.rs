@@ -18,7 +18,7 @@ pub trait LoadBalancer: Send + Sync {
     /// Decides and returns the physical backend socket address (`IP:Port`) directly.
     ///
     /// This is the primary zero-copy method used by Stage 2 (`velda-upstream`)
-    /// to immediately construct a `ConnectionKey` for Stage 4 (`velda-pool`).  
+    /// to immediately construct a `ConnectionKey` for Stage 4 (`velda-connection-pool`).  
     #[inline]
     fn select_addr(
         &self,
