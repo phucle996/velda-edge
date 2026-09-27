@@ -7,7 +7,7 @@ It sits between the raw transport layer (`velda-transport`) and application prot
 ```text
 velda-transport
       │
-      │ L7Handoff
+      │ TcpL7Handoff / UdpL7Handoff
       ▼
 velda-composer
       │
@@ -55,7 +55,7 @@ crates/velda-composer/
 │   ├── context.rs      # ComposerContext with connection, SNI, and ALPN metadata
 │   └── error.rs        # Structured ComposerError classification
 └── tests/
-    └── handoff_test.rs # Integration test verifying L7Handoff from TrafficEngine
+    └── handoff_test.rs # Integration test verifying TcpL7Handoff from TrafficEngine
 ```
 
 ---

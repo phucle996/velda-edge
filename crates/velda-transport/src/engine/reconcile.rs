@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::connection::Connection;
-use crate::forwarding::l7::{L7Handoff, UdpL7Handoff};
+use crate::forwarding::l7::{TcpL7Handoff, UdpL7Handoff};
 use crate::ingress::listener::{IngressBinding, IngressListener};
 use crate::udp::datagram::Datagram;
 use crate::udp::socket::UdpSocket;
@@ -27,7 +27,7 @@ pub fn reconcile_active_listeners<L4H, L7H, UdpL4H, UdpL7H, FutL4, FutL7, FutUdp
 ) where
     L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
     FutL4: std::future::Future<Output = ()> + Send + 'static,
-    L7H: Fn(L7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+    L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
     FutL7: std::future::Future<Output = ()> + Send + 'static,
     UdpL4H: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdpL4 + Send + Sync + Clone + 'static,
     FutUdpL4: std::future::Future<Output = ()> + Send + 'static,

@@ -9,7 +9,7 @@ use super::handle::EngineHandle;
 use super::reconcile::reconcile_active_listeners;
 use crate::connection::Connection;
 use crate::error::Result;
-use crate::forwarding::l7::{L7Handoff, UdpL7Handoff};
+use crate::forwarding::l7::{TcpL7Handoff, UdpL7Handoff};
 use crate::ingress::classifier::PathKind;
 use crate::ingress::listener::{IngressBinding, IngressListener};
 use crate::udp::datagram::Datagram;
@@ -102,7 +102,7 @@ impl TrafficEngine {
     where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(L7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         self.run_with_udp(
@@ -126,7 +126,7 @@ impl TrafficEngine {
     where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(L7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
         UdpH: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
         FutUdp: std::future::Future<Output = ()> + Send + 'static,
@@ -154,7 +154,7 @@ impl TrafficEngine {
     where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(L7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
         UdpL4H: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdpL4 + Send + Sync + Clone + 'static,
         FutUdpL4: std::future::Future<Output = ()> + Send + 'static,

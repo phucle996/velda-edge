@@ -22,7 +22,7 @@ pub use connection::{Connection, ConnectionReader, ConnectionWriter, next_connec
 pub use engine::{EngineHandle, TrafficEngine};
 pub use error::{Result, TransportError};
 pub use forwarding::{
-    L7Handoff, UdpL7Handoff, forward_tcp_direct, forward_tcp_stream, forward_udp_direct,
+    TcpL7Handoff, UdpL7Handoff, forward_tcp_direct, forward_tcp_stream, forward_udp_direct,
 };
 pub use ingress::{IngressBinding, IngressListener, PathKind, classify_bytes, peek_and_classify};
 pub use tcp::{

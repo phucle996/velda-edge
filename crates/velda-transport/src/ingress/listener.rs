@@ -145,7 +145,7 @@ impl IngressListener {
     ) where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(crate::forwarding::l7::L7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(crate::forwarding::l7::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         tasks.spawn(async move {
@@ -185,7 +185,7 @@ impl IngressListener {
                                     "Ingress accepted connection"
                                 );
                                 if path.is_http() || path == PathKind::Tls || ingress.binding().tls_enabled {
-                                    let handoff = crate::forwarding::l7::L7Handoff::new(
+                                    let handoff = crate::forwarding::l7::TcpL7Handoff::new(
                                         conn,
                                         path,
                                         ingress.binding().id.clone(),

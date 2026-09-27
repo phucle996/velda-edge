@@ -1,12 +1,12 @@
 //! Core Composer implementation.
 //!
-//! Owns the composition boundary: receives `L7Handoff` from `velda-transport`,
+//! Owns the composition boundary: receives `TcpL7Handoff` from `velda-transport`,
 //! resolves the execution plan (TLS, protocol selection), creates connection context,
 //! and dispatches to the appropriate protocol processor.
 
 use std::collections::HashMap;
 
-use velda_transport::{Connection, L7Handoff, PathKind};
+use velda_transport::{Connection, PathKind, TcpL7Handoff};
 
 use crate::config::{ApplicationProtocol, CompiledListenerComposition};
 use crate::context::ComposerContext;
@@ -122,7 +122,10 @@ impl Composer {
     ///
     /// Validates protocol consistency against the configured listener,
     /// sets up the `ComposerContext`, and decides whether TLS termination is required.
-    pub fn compose_tcp_handoff(&self, handoff: L7Handoff) -> Result<ComposedStream, ComposerError> {
+    pub fn compose_tcp_handoff(
+        &self,
+        handoff: TcpL7Handoff,
+    ) -> Result<ComposedStream, ComposerError> {
         let listener_id = handoff.listener_id();
         let path_hint = handoff.path_hint();
 
@@ -201,7 +204,7 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::net::{TcpListener, TcpStream};
     use velda_core::ConnectionId;
-    use velda_transport::{Connection, L7Handoff, PathKind};
+    use velda_transport::{Connection, PathKind, TcpL7Handoff};
 
     async fn create_dummy_connection() -> (Connection, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -219,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn test_compose_cleartext_http_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = L7Handoff::new(conn, PathKind::Http, "http-public", false);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Http, "http-public", false);
 
         let composer = Composer::new();
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
@@ -233,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_compose_tls_https_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = L7Handoff::new(conn, PathKind::Tls, "https-secure", true);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Tls, "https-secure", true);
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
@@ -258,7 +261,7 @@ mod tests {
     async fn test_compose_protocol_mismatch_fails_closed() {
         let (conn, _addr) = create_dummy_connection().await;
         // Client arrived with cleartext HTTP/1 preface, but listener is configured as strict HTTP/2 only
-        let handoff = L7Handoff::new(conn, PathKind::Http1, "grpc-listener", false);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Http1, "grpc-listener", false);
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(

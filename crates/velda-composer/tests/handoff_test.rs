@@ -1,4 +1,4 @@
-//! Integration tests verifying L7Handoff integration with velda-transport.
+//! Integration tests verifying TcpL7Handoff integration with velda-transport.
 
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

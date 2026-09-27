@@ -37,7 +37,7 @@ impl TlsMetadata {
 
 /// Enriched connection-level context owned by Composer.
 ///
-/// Created when `L7Handoff` is received from `velda-transport` and enriched
+/// Created when `TcpL7Handoff` is received from `velda-transport` and enriched
 /// after optional TLS termination with SNI and ALPN details.
 #[derive(Debug, Clone)]
 pub struct ComposerContext {

@@ -9,7 +9,7 @@
 
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
-use velda_transport::{Connection, L7Handoff, TrafficEngine};
+use velda_transport::{Connection, TcpL7Handoff, TrafficEngine};
 
 use crate::config::{EdgeConfig, EdgeError};
 use crate::runtime::{Runtime, SharedRuntime, new_shared_runtime};
@@ -115,7 +115,7 @@ impl EdgeSupervisor {
             }
         };
 
-        let l7_handler = move |_handoff: L7Handoff| {
+        let l7_handler = move |_handoff: TcpL7Handoff| {
             let _rt = runtime_for_traffic.load();
             async move {
                 // In full vertical slice, dispatches to velda-http / velda-router

@@ -50,7 +50,7 @@
  │ (Byte Forwarding) │        │                 │(Datagram Sessions)│
  └───────────────────┘        ▼                 └───────────────────┘
                     ┌───────────────────┐                 ▼
-                    │    TCP L7Handoff  │       ┌───────────────────┐
+                    │   TcpL7Handoff    │       ┌───────────────────┐
                     │   (velda-tls /    │       │   UdpL7Handoff    │
                     │    velda-http)    │       │   (velda-http /   │
                     └───────────────────┘       │    HTTP/3 QUIC)   │
@@ -117,10 +117,10 @@ Incoming TCP connections and UDP datagrams undergo non-destructive inspection vi
 |---|---|---|---|---|
 | **TCP** | TCP | Raw byte stream without TLS/HTTP headers | `PathKind::L4Direct` | L4 bidirectional byte proxy |
 | **UDP** | UDP | Raw UDP datagrams (DNS, Syslog, custom) | `PathKind::L4Direct` | L4 datagram flow session proxy |
-| **HTTP/1** | TCP | `GET `, `POST `, `PUT `, `DELETE `, `HEAD `, etc. | `PathKind::Http1` | `L7Handoff` -> `velda-http` (HTTP/1.1) |
-| **HTTP/2** | TCP | `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` (H2C Preface) | `PathKind::Http2` | `L7Handoff` -> `velda-http` (HTTP/2) |
+| **HTTP/1** | TCP | `GET `, `POST `, `PUT `, `DELETE `, `HEAD `, etc. | `PathKind::Http1` | `TcpL7Handoff` -> `velda-http` (HTTP/1.1) |
+| **HTTP/2** | TCP | `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` (H2C Preface) | `PathKind::Http2` | `TcpL7Handoff` -> `velda-http` (HTTP/2) |
 | **HTTP/3** | UDP | QUIC Initial / 0-RTT / 1-RTT datagrams | `PathKind::Http3` | `UdpL7Handoff` -> `velda-http` (HTTP/3) |
-| **TLS** | TCP | `0x16 0x03` (TLS 1.0 - 1.3 ClientHello) | `PathKind::Tls` | `L7Handoff` -> `velda-tls` (TLS Engine) |
+| **TLS** | TCP | `0x16 0x03` (TLS 1.0 - 1.3 ClientHello) | `PathKind::Tls` | `TcpL7Handoff` -> `velda-tls` (TLS Engine) |
 
 Classification completes in **3.01 ns** ($O(1)$) with zero heap allocations.
 
@@ -137,8 +137,8 @@ Classification completes in **3.01 ns** ($O(1)$) with zero heap allocations.
 - **Direct Datagram Forwarding**: Statelessly relays single datagrams to target addresses.
 - **Bidirectional UDP Flow Session**: Manages a stateful proxy session between client and upstream backend, routing responses back through downstream sockets with atomic packet and byte counters.
 
-### 3. TCP L7 Handoff (`forwarding::l7::L7Handoff`)
-- Hands off accepted connections to `velda-tls` (TLS termination) or `velda-http` (HTTP/1.1 or HTTP/2 codec and multiplexing) along with listener metadata and TLS profile.
+### 3. TCP L7 Handoff (`forwarding::l7::TcpL7Handoff`)
+- Hands off accepted connections to `velda-tls` (TLS termination) or `velda-http` (HTTP/1.1 or HTTP/2 codec and multiplexing) along with listener metadata.
 
 ### 4. UDP L7 Handoff (`forwarding::l7::UdpL7Handoff`)
 - Hands off UDP datagrams and shared sockets to `velda-http` (HTTP/3 QUIC connection state engine) for zero-copy packet processing and bidirectional response dispatch.

@@ -7,11 +7,11 @@ use velda_core::{ConnectionContext, ConnectionId, L4Request};
 use crate::connection::Connection;
 use crate::ingress::classifier::PathKind;
 
-/// A classified connection prepared for handoff to L7 protocol engines.
+/// A classified TCP connection prepared for handoff to L7 protocol engines.
 ///
 /// Holds the underlying [`Connection`], its endpoints, listener ID, TLS status, and path hint.
 #[derive(Debug)]
-pub struct L7Handoff {
+pub struct TcpL7Handoff {
     id: ConnectionId,
     connection: Connection,
     peer: SocketAddr,
@@ -21,7 +21,7 @@ pub struct L7Handoff {
     tls_enabled: bool,
 }
 
-impl L7Handoff {
+impl TcpL7Handoff {
     /// Creates a new L7 handoff envelope from an accepted connection, listener ID, and TLS flag.
     pub fn new(
         connection: Connection,
