@@ -1,0 +1,16 @@
+[package]
+name = "velda-composer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Composition/runtime boundary coordinating TLS and application protocol engines for Velda Edge"
+
+[dependencies]
+velda-core = { path = "../velda-core" }
+velda-transport = { path = "../velda-transport" }
+tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros"] }
+tracing = "0.1"
+thiserror = "2.0"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full"] }

@@ -73,6 +73,7 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 ### 3.1 Rust Data Plane (`crates/`)
 - `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
 - `velda-transport`: Edge Traffic Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff).
+- `velda-composer`: Protocol composition and runtime coordination boundary (bridges `velda-transport` with `velda-tls` and application protocol engines like `velda-http`). Does NOT implement protocols, parsing, or routing.
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
 - `velda-http`: Owns L7 HTTP protocol lifecycle (HTTP/1.1 keep-alive, HTTP/2 multiplexing, HTTP/3 streams, and request/response codec).
 - `velda-router`: Owns route matching (Path, Host, Method, Headers) and route selection.
