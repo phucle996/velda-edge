@@ -1,141 +1,94 @@
-//! L7 stream handoff contract for protocol layers (TLS, HTTP).
+//! L7 stream handoff contract for protocol layers (TLS, HTTP, etc.).
 
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
-use velda_core::{ConnectionContext, ConnectionId, L4Request};
+use velda_core::ConnectionId;
 
 use crate::connection::Connection;
 use crate::ingress::classifier::PathKind;
 
 /// A classified TCP connection prepared for handoff to L7 protocol engines.
 ///
-/// Holds the underlying [`Connection`], its endpoints, listener ID, TLS status, and path hint.
+/// Holds the underlying [`Connection`], listener ID, and initial classification path hint.
 #[derive(Debug)]
 pub struct TcpL7Handoff {
-    id: ConnectionId,
     connection: Connection,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    path_hint: PathKind,
     listener_id: String,
-    tls_enabled: bool,
+    path_hint: PathKind,
 }
 
 impl TcpL7Handoff {
-    /// Creates a new L7 handoff envelope from an accepted connection, listener ID, and TLS flag.
+    /// Creates a new TCP L7 handoff envelope from an accepted connection, path hint, and listener ID.
     pub fn new(
         connection: Connection,
         path_hint: PathKind,
         listener_id: impl Into<String>,
-        tls_enabled: bool,
     ) -> Self {
-        let id = connection.id();
-        let peer = connection.peer();
-        let local_addr = connection.local_addr();
-
         Self {
-            id,
             connection,
-            peer,
-            local_addr,
             path_hint,
             listener_id: listener_id.into(),
-            tls_enabled,
         }
+    }
+
+    /// Returns a reference to the underlying [`Connection`].
+    #[inline]
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Returns a mutable reference to the underlying [`Connection`].
+    #[inline]
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    /// Consumes the handoff envelope, returning the underlying [`Connection`].
+    #[inline]
+    pub fn into_connection(self) -> Connection {
+        self.connection
     }
 
     /// Returns the unique connection identifier.
     #[inline]
-    pub const fn id(&self) -> ConnectionId {
-        self.id
+    pub fn id(&self) -> ConnectionId {
+        self.connection.id()
     }
 
     /// Returns the remote peer address.
     #[inline]
-    pub const fn peer(&self) -> SocketAddr {
-        self.peer
+    pub fn peer(&self) -> SocketAddr {
+        self.connection.peer()
     }
 
-    /// Returns the local address on which the connection was received.
+    /// Returns the local address on which the connection was accepted.
     #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+    pub fn local_addr(&self) -> SocketAddr {
+        self.connection.local_addr()
     }
 
-    /// Returns the detected traffic protocol hint ([`PathKind::Tls`], [`PathKind::Http`], [`PathKind::Http1`], or [`PathKind::Http2`]).
+    /// Returns the detected traffic protocol hint.
     #[inline]
     pub const fn path_hint(&self) -> PathKind {
         self.path_hint
     }
 
-    /// Returns `true` if this connection was classified or configured as HTTP/1.x.
-    #[inline]
-    pub const fn is_http1(&self) -> bool {
-        self.path_hint.is_http1()
-    }
-
-    /// Returns `true` if this connection was classified or configured as HTTP/2.
-    #[inline]
-    pub const fn is_http2(&self) -> bool {
-        self.path_hint.is_http2()
-    }
-
-    /// Returns `true` if this connection is any HTTP version.
-    #[inline]
-    pub const fn is_http(&self) -> bool {
-        self.path_hint.is_http()
-    }
-
-    /// Returns `true` if this connection requires TLS termination.
-    #[inline]
-    pub const fn is_tls(&self) -> bool {
-        self.tls_enabled || self.path_hint.is_tls()
-    }
-
-    /// Returns whether TLS is enabled on the ingress listener.
-    #[inline]
-    pub const fn tls_enabled(&self) -> bool {
-        self.tls_enabled
-    }
-
-    /// Returns the declared listener identifier (from listeners.json).
+    /// Returns the declared listener identifier.
     #[inline]
     pub fn listener_id(&self) -> &str {
         &self.listener_id
-    }
-
-    /// Converts this handoff into a [`L4Request`] metadata descriptor.
-    pub fn to_l4_request(&self) -> L4Request {
-        self.connection.to_l4_request()
-    }
-
-    /// Converts this handoff into a [`ConnectionContext`].
-    pub fn to_connection_context(&self) -> ConnectionContext {
-        self.connection.to_connection_context()
-    }
-
-    /// Consumes the handoff envelope, returning the underlying [`Connection`].
-    pub fn into_connection(self) -> Connection {
-        self.connection
-    }
-
-    /// Consumes the handoff envelope, returning the raw [`TcpStream`].
-    pub fn into_stream(self) -> TcpStream {
-        self.connection.into_stream()
     }
 }
 
 /// A classified UDP datagram and socket prepared for handoff to L7 protocol engines (HTTP/3, QUIC).
 ///
 /// Holds the incoming [`Datagram`], the underlying shared [`UdpSocket`], listener ID,
-/// TLS enabled flag, and path hint.
+/// and path hint.
 #[derive(Debug, Clone)]
 pub struct UdpL7Handoff {
     datagram: crate::udp::datagram::Datagram,
     socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
-    path_hint: PathKind,
     listener_id: String,
-    tls_enabled: bool,
+    path_hint: PathKind,
 }
 
 impl UdpL7Handoff {
@@ -145,14 +98,12 @@ impl UdpL7Handoff {
         socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
         path_hint: PathKind,
         listener_id: impl Into<String>,
-        tls_enabled: bool,
     ) -> Self {
         Self {
             datagram,
             socket,
-            path_hint,
             listener_id: listener_id.into(),
-            tls_enabled,
+            path_hint,
         }
     }
 
@@ -192,28 +143,10 @@ impl UdpL7Handoff {
         self.datagram.data()
     }
 
-    /// Returns the traffic protocol hint ([`PathKind::Http3`], [`PathKind::Quic`], or similar).
+    /// Returns the traffic protocol hint.
     #[inline]
     pub const fn path_hint(&self) -> PathKind {
         self.path_hint
-    }
-
-    /// Returns `true` if this datagram was received for HTTP/3 or QUIC.
-    #[inline]
-    pub const fn is_http3(&self) -> bool {
-        self.path_hint.is_http3()
-    }
-
-    /// Returns `true` if this datagram requires TLS/QUIC encryption handling.
-    #[inline]
-    pub const fn is_tls(&self) -> bool {
-        self.tls_enabled || self.path_hint.is_tls() || self.path_hint.is_http3()
-    }
-
-    /// Returns whether TLS is enabled on the ingress listener.
-    #[inline]
-    pub const fn tls_enabled(&self) -> bool {
-        self.tls_enabled
     }
 
     /// Returns the declared listener identifier.

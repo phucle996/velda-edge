@@ -144,7 +144,7 @@ impl Composer {
                     PathKind::Http3 => ApplicationProtocol::Http3,
                     _ => ApplicationProtocol::Http,
                 };
-                let tls_enabled = handoff.is_tls();
+                let tls_enabled = path_hint == PathKind::Tls;
                 (proto, tls_enabled)
             }
         };
@@ -222,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn test_compose_cleartext_http_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = TcpL7Handoff::new(conn, PathKind::Http, "http-public", false);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Http, "http-public");
 
         let composer = Composer::new();
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
@@ -236,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_compose_tls_https_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = TcpL7Handoff::new(conn, PathKind::Tls, "https-secure", true);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Tls, "https-secure");
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
@@ -261,7 +261,7 @@ mod tests {
     async fn test_compose_protocol_mismatch_fails_closed() {
         let (conn, _addr) = create_dummy_connection().await;
         // Client arrived with cleartext HTTP/1 preface, but listener is configured as strict HTTP/2 only
-        let handoff = TcpL7Handoff::new(conn, PathKind::Http1, "grpc-listener", false);
+        let handoff = TcpL7Handoff::new(conn, PathKind::Http1, "grpc-listener");
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(

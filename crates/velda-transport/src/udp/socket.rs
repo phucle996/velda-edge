@@ -201,7 +201,6 @@ impl UdpSocket {
                                             std::sync::Arc::clone(&socket),
                                             binding.path,
                                             binding.id.clone(),
-                                            binding.tls_enabled,
                                         );
                                         tokio::spawn(udp_l7_fn(handoff));
                                     }

@@ -182,7 +182,6 @@ async fn test_udp_l7_handoff_for_http3_quic() {
                     async move {
                         assert_eq!(handoff.path_hint(), PathKind::Quic);
                         assert_eq!(handoff.listener_id(), "h3-ingress");
-                        assert!(handoff.tls_enabled());
                         assert_eq!(handoff.data(), b"QUIC-Client-Hello");
 
                         handoff.send_response(b"QUIC-Server-Hello").await.unwrap();
@@ -222,12 +221,10 @@ async fn test_udp_l7_handoff_for_http3_quic() {
         Arc::clone(&socket),
         h3_binding.path,
         h3_binding.id.clone(),
-        h3_binding.tls_enabled,
     );
 
     assert_eq!(handoff.path_hint(), PathKind::Quic);
     assert_eq!(handoff.listener_id(), "h3-direct");
-    assert!(handoff.tls_enabled());
     assert_eq!(handoff.peer(), client.local_addr());
     assert_eq!(handoff.data(), b"QUIC-Client-Hello");
 
@@ -273,13 +270,10 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
         Arc::clone(&server),
         h3_binding.path,
         h3_binding.id.clone(),
-        h3_binding.tls_enabled,
     );
 
     assert_eq!(handoff.path_hint(), PathKind::Http3);
-    assert!(handoff.is_http3());
     assert_eq!(handoff.listener_id(), "h3-listener");
-    assert!(handoff.tls_enabled());
     assert_eq!(handoff.peer(), client.local_addr());
     assert_eq!(handoff.data(), b"HTTP/3-Initial-Packet");
 

@@ -61,12 +61,8 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
                     let cnt = Arc::clone(&l7_clone);
                     async move {
                         // Verify listener metadata attached to handoff
-                        if handoff.listener_id() == "http" {
+                        if handoff.listener_id() == "http" || handoff.listener_id() == "https" {
                             assert_eq!(handoff.path_hint(), PathKind::Http);
-                            assert!(!handoff.tls_enabled());
-                        } else if handoff.listener_id() == "https" {
-                            assert_eq!(handoff.path_hint(), PathKind::Http);
-                            assert!(handoff.tls_enabled());
                         }
 
                         cnt.fetch_add(1, Ordering::SeqCst);
@@ -346,12 +342,10 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
                     let _ = conn.write_all(b"tcp-ack").await;
                 },
                 |handoff| async move {
-                    if handoff.is_http1() {
-                        assert_eq!(handoff.path_hint(), PathKind::Http1);
+                    if handoff.path_hint() == PathKind::Http1 {
                         let mut conn = handoff.into_connection();
                         let _ = conn.write_all(b"h1-ack").await;
-                    } else if handoff.is_http2() {
-                        assert_eq!(handoff.path_hint(), PathKind::Http2);
+                    } else if handoff.path_hint() == PathKind::Http2 {
                         let mut conn = handoff.into_connection();
                         let _ = conn.write_all(b"h2-ack").await;
                     }
@@ -360,7 +354,6 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
                     let _ = sock.send_to(b"udp-ack", dgram.peer()).await;
                 },
                 |handoff: UdpL7Handoff| async move {
-                    assert!(handoff.is_http3());
                     assert_eq!(handoff.path_hint(), PathKind::Http3);
                     let _ = handoff.send_response(b"h3-ack").await;
                 },

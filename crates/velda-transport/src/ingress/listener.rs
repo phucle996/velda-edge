@@ -189,7 +189,6 @@ impl IngressListener {
                                         conn,
                                         path,
                                         ingress.binding().id.clone(),
-                                        ingress.binding().tls_enabled,
                                     );
                                     tokio::spawn(l7_fn(handoff));
                                 } else {
