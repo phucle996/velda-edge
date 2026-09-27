@@ -88,10 +88,13 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         let shard = self.shards.shard_for(key);
         let mut table = shard.lock();
 
-        let subpool = table
-            .entry(key.clone())
-            .or_insert_with(|| SubPool::new(self.config.max_idle_per_key));
-        subpool.release(resource);
+        if let Some(subpool) = table.get_mut(key) {
+            subpool.release(resource);
+        } else {
+            let mut subpool = SubPool::new(self.config.max_idle_per_key);
+            subpool.release(resource);
+            table.insert(key.clone(), subpool);
+        }
         shard.record_release();
     }
 }
