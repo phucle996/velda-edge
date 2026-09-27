@@ -171,13 +171,102 @@ pub fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, Ed
             reason: format!("{e}"),
         })?;
 
-    let binding = IngressBinding::new(
-        &config.id,
-        addr,
-        &config.protocol,
-        config.tls.enabled,
-        config.tls.profile.clone(),
-    )?;
+    let proto_str = match config.application.protocol.as_str() {
+        "raw" => config.transport.protocol.as_str(),
+        "http" => match (
+            config.transport.protocol.as_str(),
+            config.application.version.as_deref(),
+        ) {
+            ("udp", _) | (_, Some("3")) => "http3",
+            (_, Some("2")) => "http2",
+            (_, Some("1.1") | Some("1.0")) => "http1",
+            _ => "http",
+        },
+        other => other,
+    };
+
+    let binding = IngressBinding::new(&config.id, addr, proto_str, config.tls.enabled)?;
 
     Ok(binding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use velda_sync::post_sync::listener::{
+        ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+    };
+    use velda_transport::PathKind;
+
+    #[test]
+    fn test_listener_to_binding_mapping() {
+        // Raw TCP -> L4Direct
+        let raw_tcp = ListenerConfig {
+            id: "tcp-raw".into(),
+            address: "127.0.0.1:9000".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "raw".into(),
+                version: None,
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&raw_tcp).unwrap();
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L4Direct);
+
+        // HTTP/1.1 over TCP -> Http1
+        let http1 = ListenerConfig {
+            id: "http".into(),
+            address: "127.0.0.1:80".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("1.1".into()),
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&http1).unwrap();
+        assert_eq!(binding.protocol, "http1");
+        assert_eq!(binding.path, PathKind::Http1);
+
+        // HTTP/2 over TCP -> Http2
+        let http2 = ListenerConfig {
+            id: "http2".into(),
+            address: "127.0.0.1:8080".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("2".into()),
+            },
+            tls: ListenerTlsConfig::default(),
+        };
+        let binding = listener_to_binding(&http2).unwrap();
+        assert_eq!(binding.protocol, "http2");
+        assert_eq!(binding.path, PathKind::Http2);
+
+        // HTTP over UDP -> Http3
+        let http3 = ListenerConfig {
+            id: "http3".into(),
+            address: "127.0.0.1:443".into(),
+            transport: ListenerTransportConfig {
+                protocol: "udp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("3".into()),
+            },
+            tls: ListenerTlsConfig { enabled: true },
+        };
+        let binding = listener_to_binding(&http3).unwrap();
+        assert_eq!(binding.protocol, "http3");
+        assert_eq!(binding.path, PathKind::Http3);
+        assert!(binding.tls_enabled);
+    }
 }

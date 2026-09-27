@@ -66,7 +66,6 @@ impl TrafficEngine {
             addr,
             protocol: "udp".into(),
             tls_enabled: false,
-            tls_profile: None,
             path: PathKind::L4Direct,
             tcp_config: Default::default(),
         };

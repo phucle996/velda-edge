@@ -25,8 +25,6 @@ pub struct IngressBinding {
     pub protocol: String,
     /// Whether TLS is enabled for this listener.
     pub tls_enabled: bool,
-    /// Declared TLS profile name (e.g. "default") when TLS is enabled.
-    pub tls_profile: Option<String>,
     /// Resolved path kind derived strictly from user's declared protocol and TLS state.
     pub path: PathKind,
     /// TCP socket listener options (e.g. nodelay, backlog, buffer sizes).
@@ -40,7 +38,6 @@ impl IngressBinding {
         addr: SocketAddr,
         protocol: impl Into<String>,
         tls_enabled: bool,
-        tls_profile: Option<String>,
     ) -> Result<Self> {
         let id = id.into();
         let protocol = protocol.into();
@@ -67,7 +64,6 @@ impl IngressBinding {
             addr,
             protocol,
             tls_enabled,
-            tls_profile,
             path,
             tcp_config: TcpListenerConfig::default(),
         })
@@ -193,7 +189,7 @@ impl IngressListener {
                                         conn,
                                         path,
                                         ingress.binding().id.clone(),
-                                        ingress.binding().tls_profile.clone(),
+                                        ingress.binding().tls_enabled,
                                     );
                                     tokio::spawn(l7_fn(handoff));
                                 } else {
@@ -224,46 +220,28 @@ mod tests {
     fn test_ingress_binding_from_user_json_schema() {
         // Matches listeners.json "http"
         let http_binding =
-            IngressBinding::new("http", "0.0.0.0:80".parse().unwrap(), "http", false, None)
-                .unwrap();
+            IngressBinding::new("http", "0.0.0.0:80".parse().unwrap(), "http", false).unwrap();
         assert_eq!(http_binding.path, PathKind::Http);
-        assert_eq!(http_binding.tls_profile, None);
+        assert!(!http_binding.tls_enabled);
 
         // Matches listeners.json "https"
-        let https_binding = IngressBinding::new(
-            "https",
-            "0.0.0.0:443".parse().unwrap(),
-            "http",
-            true,
-            Some("default".into()),
-        )
-        .unwrap();
+        let https_binding =
+            IngressBinding::new("https", "0.0.0.0:443".parse().unwrap(), "http", true).unwrap();
         assert_eq!(https_binding.path, PathKind::Http);
         assert!(https_binding.tls_enabled);
-        assert_eq!(https_binding.tls_profile.as_deref(), Some("default"));
 
         // Matches listeners.json "tcp-ingress"
-        let tcp_binding = IngressBinding::new(
-            "tcp-ingress",
-            "0.0.0.0:9000".parse().unwrap(),
-            "tcp",
-            false,
-            None,
-        )
-        .unwrap();
+        let tcp_binding =
+            IngressBinding::new("tcp-ingress", "0.0.0.0:9000".parse().unwrap(), "tcp", false)
+                .unwrap();
         assert_eq!(tcp_binding.path, PathKind::L4Direct);
         assert!(tcp_binding.is_tcp());
         assert!(!tcp_binding.is_udp());
 
         // UDP L4 binding
-        let udp_binding = IngressBinding::new(
-            "udp-ingress",
-            "0.0.0.0:53".parse().unwrap(),
-            "udp",
-            false,
-            None,
-        )
-        .unwrap();
+        let udp_binding =
+            IngressBinding::new("udp-ingress", "0.0.0.0:53".parse().unwrap(), "udp", false)
+                .unwrap();
         assert_eq!(udp_binding.path, PathKind::L4Direct);
         assert!(udp_binding.is_udp());
         assert!(!udp_binding.is_tcp());
@@ -274,7 +252,6 @@ mod tests {
             "0.0.0.0:8080".parse().unwrap(),
             "http1",
             false,
-            None,
         )
         .unwrap();
         assert_eq!(h1_binding.path, PathKind::Http1);
@@ -286,21 +263,15 @@ mod tests {
             "0.0.0.0:8082".parse().unwrap(),
             "http2",
             false,
-            None,
         )
         .unwrap();
         assert_eq!(h2_binding.path, PathKind::Http2);
         assert!(h2_binding.is_tcp());
 
         // HTTP/3 binding (over UDP)
-        let h3_binding = IngressBinding::new(
-            "h3-ingress",
-            "0.0.0.0:8443".parse().unwrap(),
-            "http3",
-            true,
-            Some("prod-tls".into()),
-        )
-        .unwrap();
+        let h3_binding =
+            IngressBinding::new("h3-ingress", "0.0.0.0:8443".parse().unwrap(), "http3", true)
+                .unwrap();
         assert_eq!(h3_binding.path, PathKind::Http3);
         assert!(h3_binding.is_udp());
         assert!(!h3_binding.is_tcp());
@@ -311,7 +282,6 @@ mod tests {
             "0.0.0.0:4433".parse().unwrap(),
             "quic",
             true,
-            Some("prod-tls".into()),
         )
         .unwrap();
         assert_eq!(quic_binding.path, PathKind::Quic);
@@ -325,7 +295,6 @@ mod tests {
             "0.0.0.0:80".parse().unwrap(),
             "unsupported_proto",
             false,
-            None,
         );
         assert!(result.is_err());
     }
@@ -333,8 +302,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingress_listener_binds_ephemeral_socket() {
         let binding =
-            IngressBinding::new("active", "127.0.0.1:0".parse().unwrap(), "tcp", false, None)
-                .unwrap();
+            IngressBinding::new("active", "127.0.0.1:0".parse().unwrap(), "tcp", false).unwrap();
 
         let listener = IngressListener::bind(binding).unwrap();
         assert_ne!(listener.local_addr().port(), 0);

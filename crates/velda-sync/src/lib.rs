@@ -20,7 +20,8 @@ pub use provider::{ControlPlaneProvider, LocalFileProvider, Provider};
 pub use sync::{SyncComposition, SyncOutcome};
 
 pub use post_sync::listener::{
-    DomainHeader as ListenerDomainHeader, ListenerConfig, ListenerTlsConfig, ListenersFile,
+    DomainHeader as ListenerDomainHeader, ListenerApplicationConfig, ListenerConfig,
+    ListenerTlsConfig, ListenerTransportConfig, ListenersFile,
 };
 pub use post_sync::plugin::{DomainHeader as PluginDomainHeader, PluginConfig, PluginsFile};
 pub use post_sync::route::{

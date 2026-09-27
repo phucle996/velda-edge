@@ -7,7 +7,9 @@ use tokio::sync::watch;
 
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::ipc::{SyncNotification, send_notification};
-use velda_sync::post_sync::listener::{ListenerConfig, compile_listeners_to_binary};
+use velda_sync::post_sync::listener::{
+    ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig, compile_listeners_to_binary,
+};
 
 #[tokio::test]
 async fn test_end_to_end_cold_start_and_uds_hot_reload() {
@@ -22,7 +24,13 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
     let initial_listeners = vec![ListenerConfig {
         id: "initial-http".into(),
         address: dummy_addr.to_string(),
-        protocol: "http".into(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http".into(),
+            version: Some("1.1".into()),
+        },
         tls: Default::default(),
     }];
 
@@ -59,13 +67,25 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
         ListenerConfig {
             id: "initial-http".into(),
             address: dummy_addr.to_string(),
-            protocol: "http".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("1.1".into()),
+            },
             tls: Default::default(),
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
             address: dynamic_port.to_string(),
-            protocol: "tcp".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "raw".into(),
+                version: None,
+            },
             tls: Default::default(),
         },
     ];

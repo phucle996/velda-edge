@@ -117,7 +117,10 @@ mod tests {
     use crate::runtime::new_shared_runtime;
     use std::collections::HashMap;
     use tempfile::tempdir;
-    use velda_sync::post_sync::listener::{ListenerConfig, compile_listeners_to_binary};
+    use velda_sync::post_sync::listener::{
+        ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
+        compile_listeners_to_binary,
+    };
 
     #[tokio::test]
     async fn test_apply_reload_atomic_swap() {
@@ -128,7 +131,13 @@ mod tests {
         let listeners = vec![ListenerConfig {
             id: "http-reloaded".into(),
             address: "127.0.0.1:8080".into(),
-            protocol: "http".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: Some("1.1".into()),
+            },
             tls: Default::default(),
         }];
         let bin = compile_listeners_to_binary(&listeners, 10, [0u8; 32]).unwrap();

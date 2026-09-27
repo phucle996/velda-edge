@@ -9,7 +9,7 @@ use crate::ingress::classifier::PathKind;
 
 /// A classified connection prepared for handoff to L7 protocol engines.
 ///
-/// Holds the underlying [`Connection`], its endpoints, listener ID, TLS profile, and path hint.
+/// Holds the underlying [`Connection`], its endpoints, listener ID, TLS status, and path hint.
 #[derive(Debug)]
 pub struct L7Handoff {
     id: ConnectionId,
@@ -18,16 +18,16 @@ pub struct L7Handoff {
     local_addr: SocketAddr,
     path_hint: PathKind,
     listener_id: String,
-    tls_profile: Option<String>,
+    tls_enabled: bool,
 }
 
 impl L7Handoff {
-    /// Creates a new L7 handoff envelope from an accepted connection, listener ID, and TLS profile.
+    /// Creates a new L7 handoff envelope from an accepted connection, listener ID, and TLS flag.
     pub fn new(
         connection: Connection,
         path_hint: PathKind,
         listener_id: impl Into<String>,
-        tls_profile: Option<String>,
+        tls_enabled: bool,
     ) -> Self {
         let id = connection.id();
         let peer = connection.peer();
@@ -40,7 +40,7 @@ impl L7Handoff {
             local_addr,
             path_hint,
             listener_id: listener_id.into(),
-            tls_profile,
+            tls_enabled,
         }
     }
 
@@ -89,19 +89,19 @@ impl L7Handoff {
     /// Returns `true` if this connection requires TLS termination.
     #[inline]
     pub const fn is_tls(&self) -> bool {
-        self.path_hint.is_tls()
+        self.tls_enabled || self.path_hint.is_tls()
+    }
+
+    /// Returns whether TLS is enabled on the ingress listener.
+    #[inline]
+    pub const fn tls_enabled(&self) -> bool {
+        self.tls_enabled
     }
 
     /// Returns the declared listener identifier (from listeners.json).
     #[inline]
     pub fn listener_id(&self) -> &str {
         &self.listener_id
-    }
-
-    /// Returns the associated TLS profile name, if any (from listeners.json).
-    #[inline]
-    pub fn tls_profile(&self) -> Option<&str> {
-        self.tls_profile.as_deref()
     }
 
     /// Converts this handoff into a [`L4Request`] metadata descriptor.
@@ -128,14 +128,14 @@ impl L7Handoff {
 /// A classified UDP datagram and socket prepared for handoff to L7 protocol engines (HTTP/3, QUIC).
 ///
 /// Holds the incoming [`Datagram`], the underlying shared [`UdpSocket`], listener ID,
-/// TLS profile name, and path hint.
+/// TLS enabled flag, and path hint.
 #[derive(Debug, Clone)]
 pub struct UdpL7Handoff {
     datagram: crate::udp::datagram::Datagram,
     socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
     path_hint: PathKind,
     listener_id: String,
-    tls_profile: Option<String>,
+    tls_enabled: bool,
 }
 
 impl UdpL7Handoff {
@@ -145,14 +145,14 @@ impl UdpL7Handoff {
         socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
         path_hint: PathKind,
         listener_id: impl Into<String>,
-        tls_profile: Option<String>,
+        tls_enabled: bool,
     ) -> Self {
         Self {
             datagram,
             socket,
             path_hint,
             listener_id: listener_id.into(),
-            tls_profile,
+            tls_enabled,
         }
     }
 
@@ -204,16 +204,22 @@ impl UdpL7Handoff {
         self.path_hint.is_http3()
     }
 
+    /// Returns `true` if this datagram requires TLS/QUIC encryption handling.
+    #[inline]
+    pub const fn is_tls(&self) -> bool {
+        self.tls_enabled || self.path_hint.is_tls() || self.path_hint.is_http3()
+    }
+
+    /// Returns whether TLS is enabled on the ingress listener.
+    #[inline]
+    pub const fn tls_enabled(&self) -> bool {
+        self.tls_enabled
+    }
+
     /// Returns the declared listener identifier.
     #[inline]
     pub fn listener_id(&self) -> &str {
         &self.listener_id
-    }
-
-    /// Returns the associated TLS profile name, if any.
-    #[inline]
-    pub fn tls_profile(&self) -> Option<&str> {
-        self.tls_profile.as_deref()
     }
 
     /// Sends a response datagram back to the originating client.

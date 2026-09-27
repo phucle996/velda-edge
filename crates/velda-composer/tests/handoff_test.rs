@@ -12,19 +12,11 @@ async fn test_traffic_engine_to_composer_handoff_lifecycle() {
     let dummy_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     // 1. Setup listeners in TrafficEngine: one cleartext HTTP, one HTTPS
-    let http_binding =
-        IngressBinding::new("http-listener", dummy_addr, "http", false, None).unwrap();
+    let http_binding = IngressBinding::new("http-listener", dummy_addr, "http", false).unwrap();
     let http_listener = IngressListener::bind(http_binding).unwrap();
     let http_addr = http_listener.local_addr();
 
-    let https_binding = IngressBinding::new(
-        "https-listener",
-        dummy_addr,
-        "http",
-        true,
-        Some("prod-tls".into()),
-    )
-    .unwrap();
+    let https_binding = IngressBinding::new("https-listener", dummy_addr, "http", true).unwrap();
     let https_listener = IngressListener::bind(https_binding).unwrap();
     let https_addr = https_listener.local_addr();
 
@@ -38,13 +30,11 @@ async fn test_traffic_engine_to_composer_handoff_lifecycle() {
         "http-listener",
         ApplicationProtocol::Http1,
         false,
-        None,
     ));
     composer.register_listener(CompiledListenerComposition::new(
         "https-listener",
         ApplicationProtocol::Http,
         true,
-        Some("prod-tls".into()),
     ));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

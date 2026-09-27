@@ -13,27 +13,19 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
 
     // 1. Mirror listeners.json "http" listener:
     // { "id": "http", "address": "0.0.0.0:80", "protocol": "http", "tls": { "enabled": false } }
-    let http_binding = IngressBinding::new("http", dummy_ephemeral, "http", false, None).unwrap();
+    let http_binding = IngressBinding::new("http", dummy_ephemeral, "http", false).unwrap();
     let http_listener = IngressListener::bind(http_binding).unwrap();
     let http_addr = http_listener.local_addr();
 
     // 2. Mirror listeners.json "https" listener:
-    // { "id": "https", "address": "0.0.0.0:443", "protocol": "http", "tls": { "enabled": true, "profile": "default" } }
-    let https_binding = IngressBinding::new(
-        "https",
-        dummy_ephemeral,
-        "http",
-        true,
-        Some("default".into()),
-    )
-    .unwrap();
+    // { "id": "https", "address": "0.0.0.0:443", "protocol": "http", "tls": { "enabled": true } }
+    let https_binding = IngressBinding::new("https", dummy_ephemeral, "http", true).unwrap();
     let https_listener = IngressListener::bind(https_binding).unwrap();
     let https_addr = https_listener.local_addr();
 
     // 3. Mirror listeners.json "tcp-ingress" listener:
     // { "id": "tcp-ingress", "address": "0.0.0.0:9000", "protocol": "tcp", "tls": { "enabled": false } }
-    let tcp_binding =
-        IngressBinding::new("tcp-ingress", dummy_ephemeral, "tcp", false, None).unwrap();
+    let tcp_binding = IngressBinding::new("tcp-ingress", dummy_ephemeral, "tcp", false).unwrap();
     let tcp_listener = IngressListener::bind(tcp_binding).unwrap();
     let tcp_addr = tcp_listener.local_addr();
 
@@ -71,10 +63,10 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
                         // Verify listener metadata attached to handoff
                         if handoff.listener_id() == "http" {
                             assert_eq!(handoff.path_hint(), PathKind::Http);
-                            assert_eq!(handoff.tls_profile(), None);
+                            assert!(!handoff.tls_enabled());
                         } else if handoff.listener_id() == "https" {
                             assert_eq!(handoff.path_hint(), PathKind::Http);
-                            assert_eq!(handoff.tls_profile(), Some("default"));
+                            assert!(handoff.tls_enabled());
                         }
 
                         cnt.fetch_add(1, Ordering::SeqCst);
@@ -141,32 +133,26 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
 
     // 2 HTTP listeners on different ports
     engine
-        .add_binding(
-            IngressBinding::new("http-public", dummy_ephemeral, "http", false, None).unwrap(),
-        )
+        .add_binding(IngressBinding::new("http-public", dummy_ephemeral, "http", false).unwrap())
         .unwrap();
     engine
-        .add_binding(
-            IngressBinding::new("http-internal", dummy_ephemeral, "http", false, None).unwrap(),
-        )
+        .add_binding(IngressBinding::new("http-internal", dummy_ephemeral, "http", false).unwrap())
         .unwrap();
 
     // 2 TCP listeners on different ports
     engine
-        .add_binding(IngressBinding::new("tcp-db-pg", dummy_ephemeral, "tcp", false, None).unwrap())
+        .add_binding(IngressBinding::new("tcp-db-pg", dummy_ephemeral, "tcp", false).unwrap())
         .unwrap();
     engine
-        .add_binding(IngressBinding::new("tcp-redis", dummy_ephemeral, "tcp", false, None).unwrap())
+        .add_binding(IngressBinding::new("tcp-redis", dummy_ephemeral, "tcp", false).unwrap())
         .unwrap();
 
     // 2 UDP listeners on different ports
     engine
-        .add_binding(IngressBinding::new("udp-dns", dummy_ephemeral, "udp", false, None).unwrap())
+        .add_binding(IngressBinding::new("udp-dns", dummy_ephemeral, "udp", false).unwrap())
         .unwrap();
     engine
-        .add_binding(
-            IngressBinding::new("udp-metrics", dummy_ephemeral, "udp", false, None).unwrap(),
-        )
+        .add_binding(IngressBinding::new("udp-metrics", dummy_ephemeral, "udp", false).unwrap())
         .unwrap();
 
     assert_eq!(engine.tcp_listener_count(), 4);
@@ -230,7 +216,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
     let handle = engine.handle();
 
     // Initial binding: port 1 only
-    let binding1 = IngressBinding::new("listener-1", free_addr1, "tcp", false, None).unwrap();
+    let binding1 = IngressBinding::new("listener-1", free_addr1, "tcp", false).unwrap();
     engine.add_binding(binding1).unwrap();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -265,7 +251,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
     }
 
     // 2. Reconcile: remove listener 1, add listener 2
-    let binding2 = IngressBinding::new("listener-2", free_addr2, "tcp", false, None).unwrap();
+    let binding2 = IngressBinding::new("listener-2", free_addr2, "tcp", false).unwrap();
     handle
         .reconcile(vec![binding2])
         .await
@@ -323,11 +309,11 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
         s.local_addr().unwrap()
     };
 
-    let tcp_bind = IngressBinding::new("tcp", free_tcp, "tcp", false, None).unwrap();
-    let h1_bind = IngressBinding::new("h1", free_h1, "http1", false, None).unwrap();
-    let h2_bind = IngressBinding::new("h2", free_h2, "http2", false, None).unwrap();
-    let udp_bind = IngressBinding::new("udp", free_udp, "udp", false, None).unwrap();
-    let h3_bind = IngressBinding::new("h3", free_h3, "http3", true, Some("tls".into())).unwrap();
+    let tcp_bind = IngressBinding::new("tcp", free_tcp, "tcp", false).unwrap();
+    let h1_bind = IngressBinding::new("h1", free_h1, "http1", false).unwrap();
+    let h2_bind = IngressBinding::new("h2", free_h2, "http2", false).unwrap();
+    let udp_bind = IngressBinding::new("udp", free_udp, "udp", false).unwrap();
+    let h3_bind = IngressBinding::new("h3", free_h3, "http3", true).unwrap();
 
     assert_eq!(tcp_bind.path, PathKind::L4Direct);
     assert_eq!(h1_bind.path, PathKind::Http1);

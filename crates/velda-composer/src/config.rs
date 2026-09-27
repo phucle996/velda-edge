@@ -56,8 +56,6 @@ pub struct CompiledListenerComposition {
     pub protocol: ApplicationProtocol,
     /// Whether TLS termination is required before protocol handling.
     pub tls_enabled: bool,
-    /// TLS profile reference name if TLS is enabled (e.g. "default", "prod-tls").
-    pub tls_profile: Option<String>,
     /// TLS handshake timeout in milliseconds (default 5,000 ms).
     pub handshake_timeout_ms: u64,
 }
@@ -68,13 +66,11 @@ impl CompiledListenerComposition {
         listener_id: impl Into<String>,
         protocol: ApplicationProtocol,
         tls_enabled: bool,
-        tls_profile: Option<String>,
     ) -> Self {
         Self {
             listener_id: listener_id.into(),
             protocol,
             tls_enabled,
-            tls_profile,
             handshake_timeout_ms: 5000,
         }
     }

@@ -4,7 +4,13 @@
     {
       "id": "http",
       "address": "0.0.0.0:80",
-      "protocol": "http",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "protocol": "http",
+        "version": "1.1"
+      },
       "tls": {
         "enabled": false
       }
@@ -12,20 +18,29 @@
     {
       "id": "https",
       "address": "0.0.0.0:443",
-      "protocol": "http",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "protocol": "http",
+        "version": "1.1"
+      },
       "tls": {
-        "enabled": true,
-        "profile": "default"
+        "enabled": true
       }
     },
     {
       "id": "tcp-ingress",
       "address": "0.0.0.0:9000",
-      "protocol": "tcp",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "protocol": "raw"
+      },
       "tls": {
         "enabled": false
       }
     }
   ]
 }
-

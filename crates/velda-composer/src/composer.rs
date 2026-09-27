@@ -26,8 +26,6 @@ pub enum ComposedStream {
     TlsRequired {
         /// Active connection wrapper.
         connection: Connection,
-        /// TLS profile reference name to use for handshake.
-        profile: String,
         /// Initialized connection context.
         context: ComposerContext,
     },
@@ -129,11 +127,11 @@ impl Composer {
         let path_hint = handoff.path_hint();
 
         // 1. Resolve composition from compiled configuration if present, or derive from handoff metadata
-        let (protocol, tls_enabled, tls_profile) = match self.listeners.get(listener_id) {
+        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
             Some(cfg) => {
                 // Validate path hint against compiled protocol configuration
                 Self::validate_path_compatibility(listener_id, path_hint, cfg.protocol)?;
-                (cfg.protocol, cfg.tls_enabled, cfg.tls_profile.clone())
+                (cfg.protocol, cfg.tls_enabled)
             }
             None => {
                 // Fallback: derive directly from handoff metadata
@@ -143,9 +141,8 @@ impl Composer {
                     PathKind::Http3 => ApplicationProtocol::Http3,
                     _ => ApplicationProtocol::Http,
                 };
-                let tls_enabled = handoff.is_tls() || handoff.tls_profile().is_some();
-                let tls_profile = handoff.tls_profile().map(String::from);
-                (proto, tls_enabled, tls_profile)
+                let tls_enabled = handoff.is_tls();
+                (proto, tls_enabled)
             }
         };
 
@@ -162,10 +159,8 @@ impl Composer {
 
         // 3. Decide composition outcome
         if tls_enabled {
-            let profile = tls_profile.unwrap_or_else(|| "default".to_string());
             Ok(ComposedStream::TlsRequired {
                 connection,
-                profile,
                 context,
             })
         } else {
@@ -224,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn test_compose_cleartext_http_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = L7Handoff::new(conn, PathKind::Http, "http-public", None);
+        let handoff = L7Handoff::new(conn, PathKind::Http, "http-public", false);
 
         let composer = Composer::new();
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
@@ -238,29 +233,20 @@ mod tests {
     #[tokio::test]
     async fn test_compose_tls_https_handoff() {
         let (conn, _addr) = create_dummy_connection().await;
-        let handoff = L7Handoff::new(
-            conn,
-            PathKind::Tls,
-            "https-secure",
-            Some("prod-cert".to_string()),
-        );
+        let handoff = L7Handoff::new(conn, PathKind::Tls, "https-secure", true);
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
             "https-secure",
             ApplicationProtocol::Http,
             true,
-            Some("prod-cert".to_string()),
         ));
 
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
 
         assert!(composed.is_tls_required());
         match composed {
-            ComposedStream::TlsRequired {
-                profile, context, ..
-            } => {
-                assert_eq!(profile, "prod-cert");
+            ComposedStream::TlsRequired { context, .. } => {
                 assert_eq!(context.listener_id, "https-secure");
                 assert_eq!(context.protocol, ApplicationProtocol::Http);
             }
@@ -272,14 +258,13 @@ mod tests {
     async fn test_compose_protocol_mismatch_fails_closed() {
         let (conn, _addr) = create_dummy_connection().await;
         // Client arrived with cleartext HTTP/1 preface, but listener is configured as strict HTTP/2 only
-        let handoff = L7Handoff::new(conn, PathKind::Http1, "grpc-listener", None);
+        let handoff = L7Handoff::new(conn, PathKind::Http1, "grpc-listener", false);
 
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
             "grpc-listener",
             ApplicationProtocol::Http2,
             false,
-            None,
         ));
 
         let res = composer.compose_tcp_handoff(handoff);

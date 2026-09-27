@@ -118,7 +118,10 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use velda_sync::ipc::send_notification;
-    use velda_sync::post_sync::listener::{ListenerConfig, compile_listeners_to_binary};
+    use velda_sync::post_sync::listener::{
+        ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
+        compile_listeners_to_binary,
+    };
 
     #[tokio::test]
     async fn test_ipc_server_receives_and_applies_reload() {
@@ -131,7 +134,13 @@ mod tests {
         let listeners = vec![ListenerConfig {
             id: "ipc-test".into(),
             address: "127.0.0.1:9099".into(),
-            protocol: "tcp".into(),
+            transport: ListenerTransportConfig {
+                protocol: "tcp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "raw".into(),
+                version: None,
+            },
             tls: Default::default(),
         }];
         let bin = compile_listeners_to_binary(&listeners, 77, [0u8; 32]).unwrap();

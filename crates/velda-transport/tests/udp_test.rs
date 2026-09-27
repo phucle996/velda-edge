@@ -160,14 +160,7 @@ async fn test_udp_l7_handoff_for_http3_quic() {
     use velda_transport::{IngressBinding, PathKind, TrafficEngine, UdpL7Handoff};
 
     let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let binding = IngressBinding::new(
-        "h3-ingress",
-        server_addr,
-        "quic",
-        true,
-        Some("prod-h3".into()),
-    )
-    .unwrap();
+    let binding = IngressBinding::new("h3-ingress", server_addr, "quic", true).unwrap();
     assert_eq!(binding.path, PathKind::Quic);
     assert!(binding.is_udp());
 
@@ -189,7 +182,7 @@ async fn test_udp_l7_handoff_for_http3_quic() {
                     async move {
                         assert_eq!(handoff.path_hint(), PathKind::Quic);
                         assert_eq!(handoff.listener_id(), "h3-ingress");
-                        assert_eq!(handoff.tls_profile(), Some("prod-h3"));
+                        assert!(handoff.tls_enabled());
                         assert_eq!(handoff.data(), b"QUIC-Client-Hello");
 
                         handoff.send_response(b"QUIC-Server-Hello").await.unwrap();
@@ -214,8 +207,7 @@ async fn test_udp_l7_handoff_for_http3_quic() {
         l.local_addr().unwrap()
     };
 
-    let h3_binding =
-        IngressBinding::new("h3-direct", free_addr, "quic", true, Some("prod-h3".into())).unwrap();
+    let h3_binding = IngressBinding::new("h3-direct", free_addr, "quic", true).unwrap();
     let dgram = Datagram::new(
         client.local_addr(),
         free_addr,
@@ -230,12 +222,12 @@ async fn test_udp_l7_handoff_for_http3_quic() {
         Arc::clone(&socket),
         h3_binding.path,
         h3_binding.id.clone(),
-        h3_binding.tls_profile.clone(),
+        h3_binding.tls_enabled,
     );
 
     assert_eq!(handoff.path_hint(), PathKind::Quic);
     assert_eq!(handoff.listener_id(), "h3-direct");
-    assert_eq!(handoff.tls_profile(), Some("prod-h3"));
+    assert!(handoff.tls_enabled());
     assert_eq!(handoff.peer(), client.local_addr());
     assert_eq!(handoff.data(), b"QUIC-Client-Hello");
 
@@ -263,14 +255,8 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
         UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
     );
 
-    let h3_binding = IngressBinding::new(
-        "h3-listener",
-        server.local_addr(),
-        "http3",
-        true,
-        Some("default-tls".into()),
-    )
-    .unwrap();
+    let h3_binding =
+        IngressBinding::new("h3-listener", server.local_addr(), "http3", true).unwrap();
 
     assert_eq!(h3_binding.path, PathKind::Http3);
     assert!(h3_binding.is_udp());
@@ -287,13 +273,13 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
         Arc::clone(&server),
         h3_binding.path,
         h3_binding.id.clone(),
-        h3_binding.tls_profile.clone(),
+        h3_binding.tls_enabled,
     );
 
     assert_eq!(handoff.path_hint(), PathKind::Http3);
     assert!(handoff.is_http3());
     assert_eq!(handoff.listener_id(), "h3-listener");
-    assert_eq!(handoff.tls_profile(), Some("default-tls"));
+    assert!(handoff.tls_enabled());
     assert_eq!(handoff.peer(), client.local_addr());
     assert_eq!(handoff.data(), b"HTTP/3-Initial-Packet");
 
