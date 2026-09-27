@@ -79,23 +79,7 @@ impl fmt::Display for PathKind {
     }
 }
 
-/// Known HTTP/1.1 method prefixes for sniffing cleartext HTTP.
-const HTTP_METHODS: &[&[u8]] = &[
-    b"GET ",
-    b"POST ",
-    b"PUT ",
-    b"DELETE ",
-    b"HEAD ",
-    b"OPTIONS ",
-    b"CONNECT ",
-    b"PATCH ",
-    b"TRACE ",
-];
-
-/// HTTP/2 client connection preface magic string.
-const HTTP2_PREFACE_PREFIX: &[u8] = b"PRI * HTTP/2.0";
-
-/// Inspects bytes peeked from a stream to determine its likely [`PathKind`].
+/// Inspects bytes peeked from a stream to determine if it is TLS handshake or raw L4 stream.
 pub fn classify_bytes(bytes: &[u8]) -> PathKind {
     if bytes.len() >= 3 {
         // TLS record header: ContentType::handshake (0x16), Major version (0x03), Minor (0x00..=0x04)
@@ -104,18 +88,8 @@ pub fn classify_bytes(bytes: &[u8]) -> PathKind {
         }
     }
 
-    if bytes.len() >= 14 && bytes.starts_with(HTTP2_PREFACE_PREFIX) {
-        return PathKind::Http2;
-    }
-
-    for method in HTTP_METHODS {
-        if bytes.len() >= method.len() && bytes.starts_with(method) {
-            return PathKind::Http1;
-        }
-    }
-
     if bytes.len() >= 16 {
-        // Sufficient bytes peeked without matching TLS or HTTP headers -> L4 raw protocol
+        // Sufficient bytes peeked without matching TLS record -> raw L4 protocol
         PathKind::L4Direct
     } else {
         PathKind::Unknown
@@ -146,35 +120,6 @@ mod tests {
 
         let tls13_record = [0x16, 0x03, 0x03, 0x01, 0x00];
         assert_eq!(classify_bytes(&tls13_record), PathKind::Tls);
-    }
-
-    #[test]
-    fn test_classify_http1() {
-        assert_eq!(
-            classify_bytes(b"GET /index.html HTTP/1.1\r\n"),
-            PathKind::Http1
-        );
-        assert_eq!(
-            classify_bytes(b"POST /api/v1/resource HTTP/1.1\r\n"),
-            PathKind::Http1
-        );
-        assert_eq!(
-            classify_bytes(b"DELETE /item/1 HTTP/1.1\r\n"),
-            PathKind::Http1
-        );
-        assert_eq!(classify_bytes(b"OPTIONS * HTTP/1.1\r\n"), PathKind::Http1);
-        assert!(PathKind::Http1.is_http());
-        assert!(PathKind::Http1.is_http1());
-        assert!(!PathKind::Http1.is_http2());
-    }
-
-    #[test]
-    fn test_classify_http2() {
-        let h2_preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        assert_eq!(classify_bytes(h2_preface), PathKind::Http2);
-        assert!(PathKind::Http2.is_http());
-        assert!(PathKind::Http2.is_http2());
-        assert!(!PathKind::Http2.is_http1());
     }
 
     #[test]

@@ -33,8 +33,6 @@ fn bench_protocol_classification() {
     let tls_sample = [
         0x16, 0x03, 0x03, 0x00, 0x20, 0x01, 0x00, 0x00, 0x1c, 0x03, 0x03,
     ];
-    let http1_sample = b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    let http2_sample = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     let l4_sample = [
         0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11,
         0x22,
@@ -61,10 +59,8 @@ fn bench_protocol_classification() {
         let start = Instant::now();
 
         for i in 0..n {
-            let sample = match i % 4 {
+            let sample = match i % 2 {
                 0 => &tls_sample[..],
-                1 => &http1_sample[..],
-                2 => &http2_sample[..],
                 _ => &l4_sample[..],
             };
             let kind = std::hint::black_box(classify_bytes(sample));

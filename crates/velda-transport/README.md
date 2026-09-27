@@ -28,23 +28,20 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
   reconcile_active_listeners                              reconcile_active_listeners
          │                                                       │
          ▼                                                       ▼
-    Connection                                                Datagram
+     Connection                                               Datagram
   (stream, peer, local, bytes)                             (payload, peer, local)
          │                                                       │
          ▼                                                       ▼
-  2. Protocol Classifier                                  2. Ingress Path
-  peek_and_classify (3.01 ns)                             PathKind derived
-  0x16 0x03 -> Tls                                        http3 / quic -> L7
-  GET / POST -> Http1                                     udp raw -> L4Direct
-  PRI * HTTP/2.0 -> Http2                                        │
-  raw bytes -> L4Direct                                          │
+   Declared Path                                           Declared Path
+  (binding.path)                                          (binding.path)
          │                                                       │
          ├───────────────────────────┬───────────────────────────┤
          │                           │                           │
          ▼                           ▼                           ▼
-  3. L4 Fast-Path Direct     4. TCP L7 Handoff           5. UDP L7 Handoff
-  forward_tcp_direct / stream TcpL7Handoff                UdpL7Handoff
-  copy_bidirectional          (conn, id, path_hint)       (dgram, sock, id, path_hint)
+  2. L4 Fast-Path Direct     3. TCP L7 Handoff           4. UDP L7 Handoff
+  (path == L4Direct)         (path != L4Direct)          (path == Http3 / Quic)
+  forward_tcp_direct/stream  TcpL7Handoff                UdpL7Handoff
+  copy_bidirectional         (conn, id, path_hint)       (dgram, sock, id, path_hint)
          │                           │                           │
          ▼                           ▼                           ▼
   Upstream L4 Target         velda-composer              velda-composer / velda-http
@@ -59,7 +56,7 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
 |---|---|---|---|
 | **1** | **Ingress & Reconcile** | Binds TCP listeners and UDP sockets dynamically matching `listeners.json`. Diffs topology changes with zero downtime. | Config parsed into RAM by [`velda-sync`](../velda-sync). Orchestrated by [`velda-edge`](../velda-edge). |
 | **2** | **L4 Connection Tracking** | Wraps raw sockets in [`Connection`](src/connection.rs); generates monotonic `ConnectionId`; tracks bytes read/written with lock-free atomics. | Vocabulary types defined in [`velda-core`](../velda-core). |
-| **3** | **Zero-Copy Sniffing** | Peeks at the initial incoming bytes (3.01 ns) to classify traffic into `PathKind` (`Tls`, `Http1`, `Http2`, `L4Direct`) without consuming stream. | Application protocol resolution delegated to [`velda-composer`](../velda-composer). |
+| **3** | **Zero-Copy TLS Sniffing** | Optional non-destructive inspection (`0x16 0x03` TLS ClientHello, 3.01 ns) when dynamic TLS detection is required. Never parses L7 HTTP verbs. | Application protocol resolution and HTTP codec delegated to [`velda-composer`](../velda-composer). |
 | **4** | **L4 Direct Forwarding** | High-throughput raw byte proxying via `copy_bidirectional` for TCP and stateless datagram/flow sessions for UDP. | Upstream backend discovery and connection leasing owned by [`velda-upstream`](../velda-upstream). |
 | **5** | **Symmetrical L7 Handoff** | Envelopes classified streams into [`TcpL7Handoff`](src/forwarding/l7.rs) and [`UdpL7Handoff`](src/forwarding/l7.rs) containing only carrier, `listener_id`, and `path_hint`. | Protocol composition, TLS termination, and ALPN coordination owned by [`velda-composer`](../velda-composer). |
 
@@ -74,8 +71,8 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
    - [`TcpL7Handoff`](src/forwarding/l7.rs): Hands off `(Connection, listener_id, path_hint)`.
    - [`UdpL7Handoff`](src/forwarding/l7.rs): Hands off `(Datagram, Arc<UdpSocket>, listener_id, path_hint)`.
    Transport never makes application-layer assumptions (zero `is_http1`, `is_http2`, `is_grpc` methods).
-3. **Zero-Copy Protocol Classification**:
-   Uses non-destructive socket peeking (`MSG_PEEK`). Classification runs in **3.01 ns** ($O(1)$) with **0 bytes allocated**.
+3. **Zero-Copy TLS Sniffing (TLS Only)**:
+   Uses non-destructive socket peeking (`0x16 0x03` TLS record header, 3.01 ns, 0 heap allocs) when dynamic handshake detection is needed. Transport never inspects or parses application-layer HTTP verbs (`GET`, `POST`, etc.).
 4. **Declarative Listener Reconciliation**:
    Cold-start and live runtime updates use the exact same diffing engine:
    - **New listeners**: Bound and added to the Tokio `JoinSet`.

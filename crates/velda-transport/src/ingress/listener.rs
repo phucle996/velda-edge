@@ -184,7 +184,7 @@ impl IngressListener {
                                     peer = %conn.peer(),
                                     "Ingress accepted connection"
                                 );
-                                if path.is_http() || path == PathKind::Tls || ingress.binding().tls_enabled {
+                                if path != PathKind::L4Direct || ingress.binding().tls_enabled {
                                     let handoff = crate::forwarding::l7::TcpL7Handoff::new(
                                         conn,
                                         path,
