@@ -10,78 +10,98 @@ use crate::tcp::listener::TcpListener;
 
 /// Ingress binding configuration matching the user's declared listener definition in listeners.json.
 ///
-/// Strictly mirrors the user configuration without hardcoded gateway defaults:
-/// - `id`: listener identifier (e.g. "http", "https", "tcp-ingress")
-/// - `address`: socket address (e.g. "0.0.0.0:80")
-/// - `protocol`: declared protocol ("http", "tcp", "udp")
-/// - `tls`: TLS enablement and profile name
+/// Strictly separates transport (L4) and application (L7) dimensions:
+/// - `transport.protocol`: "tcp" or "udp" (determines socket type)
+/// - `application.protocol`: "raw" -> [`PathKind::L4Direct`], != "raw" -> [`PathKind::L7Handoff`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressBinding {
     /// Unique listener identifier declared in listeners.json.
     pub id: String,
     /// Local address to bind and listen on.
     pub addr: SocketAddr,
-    /// Declared protocol string ("http", "tcp", or "udp").
+    /// Declared transport protocol ("tcp" or "udp").
     pub protocol: String,
     /// Whether TLS is enabled for this listener.
     pub tls_enabled: bool,
-    /// Resolved path kind derived strictly from user's declared protocol and TLS state.
+    /// Resolved dispatch path (L4Direct for raw proxying, L7Handoff for Composer).
     pub path: PathKind,
     /// TCP socket listener options (e.g. nodelay, backlog, buffer sizes).
     pub tcp_config: TcpListenerConfig,
 }
 
 impl IngressBinding {
-    /// Creates a new ingress binding matching the user's explicit configuration.
+    /// Creates a new ingress binding matching explicit transport protocol and dispatch path.
     pub fn new(
         id: impl Into<String>,
         addr: SocketAddr,
-        protocol: impl Into<String>,
+        transport_protocol: impl Into<String>,
+        path: PathKind,
         tls_enabled: bool,
     ) -> Result<Self> {
         let id = id.into();
-        let protocol = protocol.into();
+        let protocol = transport_protocol.into();
         let proto_lower = protocol.to_ascii_lowercase();
 
-        let path = match proto_lower.as_str() {
-            "tcp" => PathKind::L4Direct,
-            "udp" => PathKind::L4Direct,
-            "http" => PathKind::Http,
-            "http1" => PathKind::Http1,
-            "http2" => PathKind::Http2,
-            "http3" => PathKind::Http3,
-            "quic" => PathKind::Quic,
-            other => {
-                return Err(TransportError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unsupported listener protocol '{other}' for listener '{id}'"),
-                )));
-            }
-        };
+        if proto_lower != "tcp" && proto_lower != "udp" {
+            return Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "unsupported transport protocol '{protocol}' for listener '{id}' (must be 'tcp' or 'udp')"
+                ),
+            )));
+        }
 
         Ok(Self {
             id,
             addr,
-            protocol,
+            protocol: proto_lower,
             tls_enabled,
             path,
             tcp_config: TcpListenerConfig::default(),
         })
     }
 
-    /// Returns whether this binding is for UDP-based transport (raw UDP or HTTP/3 / QUIC).
-    #[inline]
-    pub fn is_udp(&self) -> bool {
-        matches!(
-            self.protocol.to_ascii_lowercase().as_str(),
-            "udp" | "http3" | "quic"
-        )
+    /// Creates an ingress binding directly from declared transport and application protocol dimensions:
+    /// - `application_protocol == "raw"` -> [`PathKind::L4Direct`]
+    /// - `application_protocol != "raw"` -> [`PathKind::L7Handoff`]
+    pub fn from_protocols(
+        id: impl Into<String>,
+        addr: SocketAddr,
+        transport_protocol: impl Into<String>,
+        application_protocol: impl Into<String>,
+        tls_enabled: bool,
+    ) -> Result<Self> {
+        let app_proto = application_protocol.into();
+        let path = if app_proto.eq_ignore_ascii_case("raw") {
+            PathKind::L4Direct
+        } else {
+            PathKind::L7Handoff
+        };
+        Self::new(id, addr, transport_protocol, path, tls_enabled)
     }
 
-    /// Returns whether this binding is for TCP-based transport (HTTP/1, HTTP/2, TLS, or raw TCP).
+    /// Returns whether this binding is for UDP-based transport.
+    #[inline]
+    pub fn is_udp(&self) -> bool {
+        self.protocol.eq_ignore_ascii_case("udp")
+    }
+
+    /// Returns whether this binding is for TCP-based transport.
     #[inline]
     pub fn is_tcp(&self) -> bool {
-        !self.is_udp()
+        self.protocol.eq_ignore_ascii_case("tcp")
+    }
+
+    /// Returns whether this binding is pure L4 direct proxying.
+    #[inline]
+    pub fn is_l4(&self) -> bool {
+        self.path == PathKind::L4Direct
+    }
+
+    /// Returns whether this binding requires L7 handoff.
+    #[inline]
+    pub fn is_l7(&self) -> bool {
+        self.path == PathKind::L7Handoff
     }
 
     /// Configures the TCP listener socket parameters.
@@ -99,13 +119,13 @@ pub struct IngressListener {
 }
 
 impl IngressListener {
-    /// Binds an ingress listener according to the specified user binding configuration.
+    /// Binds an ingress listener to the address configured in its binding.
     pub fn bind(binding: IngressBinding) -> Result<Self> {
         let listener = TcpListener::bind(binding.addr, binding.tcp_config.clone())?;
         Ok(Self { listener, binding })
     }
 
-    /// Returns the local bound address of this ingress listener.
+    /// Returns the bound local socket address.
     #[inline]
     pub const fn local_addr(&self) -> SocketAddr {
         self.listener.local_addr()
@@ -149,13 +169,29 @@ impl IngressListener {
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         tasks.spawn(async move {
-            let mut shutdown = shutdown;
-            let local_addr = ingress.local_addr();
+            Self::run_tcp_accept_loop(ingress, shutdown, l4_fn, l7_fn).await;
+        });
+    }
+
+    /// Internal accept loop driving connection ingress and dispatch.
+    pub async fn run_tcp_accept_loop<L4H, L7H, FutL4, FutL7>(
+        ingress: std::sync::Arc<Self>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        l4_fn: L4H,
+        l7_fn: L7H,
+    ) where
+        L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
+        FutL4: std::future::Future<Output = ()> + Send + 'static,
+        L7H: Fn(crate::forwarding::l7::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        FutL7: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let local_addr = ingress.local_addr();
+        tokio::spawn(async move {
             tracing::info!(
                 listener_id = %ingress.id(),
                 listen_addr = %local_addr,
                 path = %ingress.path(),
-                "TCP ingress loop running"
+                "TCP ingress listener bound and serving"
             );
 
             loop {
@@ -184,15 +220,17 @@ impl IngressListener {
                                     peer = %conn.peer(),
                                     "Ingress accepted connection"
                                 );
-                                if path != PathKind::L4Direct || ingress.binding().tls_enabled {
-                                    let handoff = crate::forwarding::l7::TcpL7Handoff::new(
-                                        conn,
-                                        path,
-                                        ingress.binding().id.clone(),
-                                    );
-                                    tokio::spawn(l7_fn(handoff));
-                                } else {
-                                    tokio::spawn(l4_fn(conn));
+                                match path {
+                                    PathKind::L4Direct => {
+                                        tokio::spawn(l4_fn(conn));
+                                    }
+                                    PathKind::L7Handoff => {
+                                        let handoff = crate::forwarding::l7::TcpL7Handoff::new(
+                                            conn,
+                                            ingress.binding().id.clone(),
+                                        );
+                                        tokio::spawn(l7_fn(handoff));
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -217,82 +255,79 @@ mod tests {
 
     #[test]
     fn test_ingress_binding_from_user_json_schema() {
-        // Matches listeners.json "http"
-        let http_binding =
-            IngressBinding::new("http", "0.0.0.0:80".parse().unwrap(), "http", false).unwrap();
-        assert_eq!(http_binding.path, PathKind::Http);
+        // Matches listeners.json "http": application "http" -> L7Handoff
+        let http_binding = IngressBinding::from_protocols(
+            "http",
+            "0.0.0.0:80".parse().unwrap(),
+            "tcp",
+            "http",
+            false,
+        )
+        .unwrap();
+        assert_eq!(http_binding.path, PathKind::L7Handoff);
         assert!(!http_binding.tls_enabled);
+        assert!(http_binding.is_tcp());
+        assert!(!http_binding.is_udp());
 
-        // Matches listeners.json "https"
-        let https_binding =
-            IngressBinding::new("https", "0.0.0.0:443".parse().unwrap(), "http", true).unwrap();
-        assert_eq!(https_binding.path, PathKind::Http);
+        // Matches listeners.json "https": application "http", tls true -> L7Handoff
+        let https_binding = IngressBinding::from_protocols(
+            "https",
+            "0.0.0.0:443".parse().unwrap(),
+            "tcp",
+            "http",
+            true,
+        )
+        .unwrap();
+        assert_eq!(https_binding.path, PathKind::L7Handoff);
         assert!(https_binding.tls_enabled);
+        assert!(https_binding.is_tcp());
 
-        // Matches listeners.json "tcp-ingress"
-        let tcp_binding =
-            IngressBinding::new("tcp-ingress", "0.0.0.0:9000".parse().unwrap(), "tcp", false)
-                .unwrap();
+        // Matches listeners.json "tcp-ingress": application "raw" -> L4Direct
+        let tcp_binding = IngressBinding::from_protocols(
+            "tcp-ingress",
+            "0.0.0.0:9000".parse().unwrap(),
+            "tcp",
+            "raw",
+            false,
+        )
+        .unwrap();
         assert_eq!(tcp_binding.path, PathKind::L4Direct);
         assert!(tcp_binding.is_tcp());
         assert!(!tcp_binding.is_udp());
 
-        // UDP L4 binding
-        let udp_binding =
-            IngressBinding::new("udp-ingress", "0.0.0.0:53".parse().unwrap(), "udp", false)
-                .unwrap();
+        // UDP L4 binding: application "raw" -> L4Direct
+        let udp_binding = IngressBinding::from_protocols(
+            "udp-ingress",
+            "0.0.0.0:53".parse().unwrap(),
+            "udp",
+            "raw",
+            false,
+        )
+        .unwrap();
         assert_eq!(udp_binding.path, PathKind::L4Direct);
         assert!(udp_binding.is_udp());
         assert!(!udp_binding.is_tcp());
 
-        // HTTP/1 binding
-        let h1_binding = IngressBinding::new(
-            "h1-ingress",
-            "0.0.0.0:8080".parse().unwrap(),
-            "http1",
-            false,
-        )
-        .unwrap();
-        assert_eq!(h1_binding.path, PathKind::Http1);
-        assert!(h1_binding.is_tcp());
-
-        // HTTP/2 binding (cleartext H2C)
-        let h2_binding = IngressBinding::new(
-            "h2-ingress",
-            "0.0.0.0:8082".parse().unwrap(),
-            "http2",
-            false,
-        )
-        .unwrap();
-        assert_eq!(h2_binding.path, PathKind::Http2);
-        assert!(h2_binding.is_tcp());
-
-        // HTTP/3 binding (over UDP)
-        let h3_binding =
-            IngressBinding::new("h3-ingress", "0.0.0.0:8443".parse().unwrap(), "http3", true)
-                .unwrap();
-        assert_eq!(h3_binding.path, PathKind::Http3);
-        assert!(h3_binding.is_udp());
-        assert!(!h3_binding.is_tcp());
-
-        // QUIC binding
-        let quic_binding = IngressBinding::new(
-            "quic-ingress",
-            "0.0.0.0:4433".parse().unwrap(),
-            "quic",
+        // UDP HTTP/3 binding: application "http" -> L7Handoff
+        let h3_binding = IngressBinding::from_protocols(
+            "h3-ingress",
+            "0.0.0.0:8443".parse().unwrap(),
+            "udp",
+            "http",
             true,
         )
         .unwrap();
-        assert_eq!(quic_binding.path, PathKind::Quic);
-        assert!(quic_binding.is_udp());
+        assert_eq!(h3_binding.path, PathKind::L7Handoff);
+        assert!(h3_binding.is_udp());
     }
 
     #[test]
-    fn test_unsupported_protocol_fails() {
+    fn test_unsupported_transport_protocol_fails() {
         let result = IngressBinding::new(
             "bad",
             "0.0.0.0:80".parse().unwrap(),
             "unsupported_proto",
+            PathKind::L7Handoff,
             false,
         );
         assert!(result.is_err());
@@ -300,8 +335,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingress_listener_binds_ephemeral_socket() {
-        let binding =
-            IngressBinding::new("active", "127.0.0.1:0".parse().unwrap(), "tcp", false).unwrap();
+        let binding = IngressBinding::new(
+            "active",
+            "127.0.0.1:0".parse().unwrap(),
+            "tcp",
+            PathKind::L4Direct,
+            false,
+        )
+        .unwrap();
 
         let listener = IngressListener::bind(binding).unwrap();
         assert_ne!(listener.local_addr().port(), 0);

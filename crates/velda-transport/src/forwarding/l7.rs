@@ -4,28 +4,21 @@ use std::net::SocketAddr;
 use velda_core::ConnectionId;
 
 use crate::connection::Connection;
-use crate::ingress::classifier::PathKind;
 
 /// A classified TCP connection prepared for handoff to L7 protocol engines.
 ///
-/// Holds the underlying [`Connection`], listener ID, and initial classification path hint.
+/// Holds the underlying [`Connection`] and listener ID.
 #[derive(Debug)]
 pub struct TcpL7Handoff {
     connection: Connection,
     listener_id: String,
-    path_hint: PathKind,
 }
 
 impl TcpL7Handoff {
-    /// Creates a new TCP L7 handoff envelope from an accepted connection, path hint, and listener ID.
-    pub fn new(
-        connection: Connection,
-        path_hint: PathKind,
-        listener_id: impl Into<String>,
-    ) -> Self {
+    /// Creates a new TCP L7 handoff envelope from an accepted connection and listener ID.
+    pub fn new(connection: Connection, listener_id: impl Into<String>) -> Self {
         Self {
             connection,
-            path_hint,
             listener_id: listener_id.into(),
         }
     }
@@ -66,12 +59,6 @@ impl TcpL7Handoff {
         self.connection.local_addr()
     }
 
-    /// Returns the detected traffic protocol hint.
-    #[inline]
-    pub const fn path_hint(&self) -> PathKind {
-        self.path_hint
-    }
-
     /// Returns the declared listener identifier.
     #[inline]
     pub fn listener_id(&self) -> &str {
@@ -79,16 +66,14 @@ impl TcpL7Handoff {
     }
 }
 
-/// A classified UDP datagram and socket prepared for handoff to L7 protocol engines (HTTP/3, QUIC).
+/// A classified UDP datagram and socket prepared for handoff to L7 protocol engines.
 ///
-/// Holds the incoming [`Datagram`], the underlying shared [`UdpSocket`], listener ID,
-/// and path hint.
+/// Holds the incoming [`Datagram`], the underlying shared [`UdpSocket`], and listener ID.
 #[derive(Debug, Clone)]
 pub struct UdpL7Handoff {
     datagram: crate::udp::datagram::Datagram,
     socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
     listener_id: String,
-    path_hint: PathKind,
 }
 
 impl UdpL7Handoff {
@@ -96,14 +81,12 @@ impl UdpL7Handoff {
     pub fn new(
         datagram: crate::udp::datagram::Datagram,
         socket: std::sync::Arc<crate::udp::socket::UdpSocket>,
-        path_hint: PathKind,
         listener_id: impl Into<String>,
     ) -> Self {
         Self {
             datagram,
             socket,
             listener_id: listener_id.into(),
-            path_hint,
         }
     }
 
@@ -141,12 +124,6 @@ impl UdpL7Handoff {
     #[inline]
     pub fn data(&self) -> &[u8] {
         self.datagram.data()
-    }
-
-    /// Returns the traffic protocol hint.
-    #[inline]
-    pub const fn path_hint(&self) -> PathKind {
-        self.path_hint
     }
 
     /// Returns the declared listener identifier.

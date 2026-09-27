@@ -171,21 +171,13 @@ pub fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, Ed
             reason: format!("{e}"),
         })?;
 
-    let proto_str = match config.application.protocol.as_str() {
-        "raw" => config.transport.protocol.as_str(),
-        "http" => match (
-            config.transport.protocol.as_str(),
-            config.application.version.as_deref(),
-        ) {
-            ("udp", _) | (_, Some("3")) => "http3",
-            (_, Some("2")) => "http2",
-            (_, Some("1.1") | Some("1.0")) => "http1",
-            _ => "http",
-        },
-        other => other,
-    };
-
-    let binding = IngressBinding::new(&config.id, addr, proto_str, config.tls.enabled)?;
+    let binding = IngressBinding::from_protocols(
+        &config.id,
+        addr,
+        &config.transport.protocol,
+        &config.application.protocol,
+        config.tls.enabled,
+    )?;
 
     Ok(binding)
 }
@@ -217,7 +209,7 @@ mod tests {
         assert_eq!(binding.protocol, "tcp");
         assert_eq!(binding.path, PathKind::L4Direct);
 
-        // HTTP/1.1 over TCP -> Http1
+        // HTTP/1.1 over TCP -> L7Handoff
         let http1 = ListenerConfig {
             id: "http".into(),
             address: "127.0.0.1:80".into(),
@@ -231,10 +223,10 @@ mod tests {
             tls: ListenerTlsConfig::default(),
         };
         let binding = listener_to_binding(&http1).unwrap();
-        assert_eq!(binding.protocol, "http1");
-        assert_eq!(binding.path, PathKind::Http1);
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
 
-        // HTTP/2 over TCP -> Http2
+        // HTTP/2 over TCP -> L7Handoff
         let http2 = ListenerConfig {
             id: "http2".into(),
             address: "127.0.0.1:8080".into(),
@@ -248,10 +240,10 @@ mod tests {
             tls: ListenerTlsConfig::default(),
         };
         let binding = listener_to_binding(&http2).unwrap();
-        assert_eq!(binding.protocol, "http2");
-        assert_eq!(binding.path, PathKind::Http2);
+        assert_eq!(binding.protocol, "tcp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
 
-        // HTTP over UDP -> Http3
+        // HTTP over UDP -> L7Handoff
         let http3 = ListenerConfig {
             id: "http3".into(),
             address: "127.0.0.1:443".into(),
@@ -265,8 +257,8 @@ mod tests {
             tls: ListenerTlsConfig { enabled: true },
         };
         let binding = listener_to_binding(&http3).unwrap();
-        assert_eq!(binding.protocol, "http3");
-        assert_eq!(binding.path, PathKind::Http3);
+        assert_eq!(binding.protocol, "udp");
+        assert_eq!(binding.path, PathKind::L7Handoff);
         assert!(binding.tls_enabled);
     }
 }

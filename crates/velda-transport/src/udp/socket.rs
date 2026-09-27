@@ -194,17 +194,15 @@ impl UdpSocket {
                             Ok((n, peer)) => {
                                 let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
                                 match binding.path {
-                                    crate::ingress::classifier::PathKind::Http3
-                                    | crate::ingress::classifier::PathKind::Quic => {
+                                    crate::ingress::classifier::PathKind::L7Handoff => {
                                         let handoff = crate::forwarding::l7::UdpL7Handoff::new(
                                             dgram,
                                             std::sync::Arc::clone(&socket),
-                                            binding.path,
                                             binding.id.clone(),
                                         );
                                         tokio::spawn(udp_l7_fn(handoff));
                                     }
-                                    _ => {
+                                    crate::ingress::classifier::PathKind::L4Direct => {
                                         let sock_clone = std::sync::Arc::clone(&socket);
                                         let id_clone = binding.id.clone();
                                         tokio::spawn(udp_l4_fn(id_clone, sock_clone, dgram));

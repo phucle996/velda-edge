@@ -12,20 +12,21 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
     let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     // 1. Mirror listeners.json "http" listener:
-    // { "id": "http", "address": "0.0.0.0:80", "protocol": "http", "tls": { "enabled": false } }
-    let http_binding = IngressBinding::new("http", dummy_ephemeral, "http", false).unwrap();
+    let http_binding =
+        IngressBinding::from_protocols("http", dummy_ephemeral, "tcp", "http", false).unwrap();
     let http_listener = IngressListener::bind(http_binding).unwrap();
     let http_addr = http_listener.local_addr();
 
     // 2. Mirror listeners.json "https" listener:
-    // { "id": "https", "address": "0.0.0.0:443", "protocol": "http", "tls": { "enabled": true } }
-    let https_binding = IngressBinding::new("https", dummy_ephemeral, "http", true).unwrap();
+    let https_binding =
+        IngressBinding::from_protocols("https", dummy_ephemeral, "tcp", "http", true).unwrap();
     let https_listener = IngressListener::bind(https_binding).unwrap();
     let https_addr = https_listener.local_addr();
 
     // 3. Mirror listeners.json "tcp-ingress" listener:
-    // { "id": "tcp-ingress", "address": "0.0.0.0:9000", "protocol": "tcp", "tls": { "enabled": false } }
-    let tcp_binding = IngressBinding::new("tcp-ingress", dummy_ephemeral, "tcp", false).unwrap();
+    let tcp_binding =
+        IngressBinding::from_protocols("tcp-ingress", dummy_ephemeral, "tcp", "raw", false)
+            .unwrap();
     let tcp_listener = IngressListener::bind(tcp_binding).unwrap();
     let tcp_addr = tcp_listener.local_addr();
 
@@ -61,9 +62,9 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
                     let cnt = Arc::clone(&l7_clone);
                     async move {
                         // Verify listener metadata attached to handoff
-                        if handoff.listener_id() == "http" || handoff.listener_id() == "https" {
-                            assert_eq!(handoff.path_hint(), PathKind::Http);
-                        }
+                        assert!(
+                            handoff.listener_id() == "http" || handoff.listener_id() == "https"
+                        );
 
                         cnt.fetch_add(1, Ordering::SeqCst);
                         let mut conn = handoff.into_connection();
@@ -129,26 +130,44 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
 
     // 2 HTTP listeners on different ports
     engine
-        .add_binding(IngressBinding::new("http-public", dummy_ephemeral, "http", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("http-public", dummy_ephemeral, "tcp", "http", false)
+                .unwrap(),
+        )
         .unwrap();
     engine
-        .add_binding(IngressBinding::new("http-internal", dummy_ephemeral, "http", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("http-internal", dummy_ephemeral, "tcp", "http", false)
+                .unwrap(),
+        )
         .unwrap();
 
     // 2 TCP listeners on different ports
     engine
-        .add_binding(IngressBinding::new("tcp-db-pg", dummy_ephemeral, "tcp", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("tcp-db-pg", dummy_ephemeral, "tcp", "raw", false)
+                .unwrap(),
+        )
         .unwrap();
     engine
-        .add_binding(IngressBinding::new("tcp-redis", dummy_ephemeral, "tcp", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("tcp-redis", dummy_ephemeral, "tcp", "raw", false)
+                .unwrap(),
+        )
         .unwrap();
 
     // 2 UDP listeners on different ports
     engine
-        .add_binding(IngressBinding::new("udp-dns", dummy_ephemeral, "udp", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("udp-dns", dummy_ephemeral, "udp", "raw", false)
+                .unwrap(),
+        )
         .unwrap();
     engine
-        .add_binding(IngressBinding::new("udp-metrics", dummy_ephemeral, "udp", false).unwrap())
+        .add_binding(
+            IngressBinding::from_protocols("udp-metrics", dummy_ephemeral, "udp", "raw", false)
+                .unwrap(),
+        )
         .unwrap();
 
     assert_eq!(engine.tcp_listener_count(), 4);
@@ -212,7 +231,8 @@ async fn test_traffic_engine_declarative_reconciliation() {
     let handle = engine.handle();
 
     // Initial binding: port 1 only
-    let binding1 = IngressBinding::new("listener-1", free_addr1, "tcp", false).unwrap();
+    let binding1 =
+        IngressBinding::from_protocols("listener-1", free_addr1, "tcp", "raw", false).unwrap();
     engine.add_binding(binding1).unwrap();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -247,7 +267,8 @@ async fn test_traffic_engine_declarative_reconciliation() {
     }
 
     // 2. Reconcile: remove listener 1, add listener 2
-    let binding2 = IngressBinding::new("listener-2", free_addr2, "tcp", false).unwrap();
+    let binding2 =
+        IngressBinding::from_protocols("listener-2", free_addr2, "tcp", "raw", false).unwrap();
     handle
         .reconcile(vec![binding2])
         .await
@@ -305,17 +326,17 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
         s.local_addr().unwrap()
     };
 
-    let tcp_bind = IngressBinding::new("tcp", free_tcp, "tcp", false).unwrap();
-    let h1_bind = IngressBinding::new("h1", free_h1, "http1", false).unwrap();
-    let h2_bind = IngressBinding::new("h2", free_h2, "http2", false).unwrap();
-    let udp_bind = IngressBinding::new("udp", free_udp, "udp", false).unwrap();
-    let h3_bind = IngressBinding::new("h3", free_h3, "http3", true).unwrap();
+    let tcp_bind = IngressBinding::from_protocols("tcp", free_tcp, "tcp", "raw", false).unwrap();
+    let h1_bind = IngressBinding::from_protocols("h1", free_h1, "tcp", "http", false).unwrap();
+    let h2_bind = IngressBinding::from_protocols("h2", free_h2, "tcp", "http", false).unwrap();
+    let udp_bind = IngressBinding::from_protocols("udp", free_udp, "udp", "raw", false).unwrap();
+    let h3_bind = IngressBinding::from_protocols("h3", free_h3, "udp", "http3", true).unwrap();
 
     assert_eq!(tcp_bind.path, PathKind::L4Direct);
-    assert_eq!(h1_bind.path, PathKind::Http1);
-    assert_eq!(h2_bind.path, PathKind::Http2);
+    assert_eq!(h1_bind.path, PathKind::L7Handoff);
+    assert_eq!(h2_bind.path, PathKind::L7Handoff);
     assert_eq!(udp_bind.path, PathKind::L4Direct);
-    assert_eq!(h3_bind.path, PathKind::Http3);
+    assert_eq!(h3_bind.path, PathKind::L7Handoff);
 
     assert!(tcp_bind.is_tcp());
     assert!(h1_bind.is_tcp());
@@ -342,10 +363,10 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
                     let _ = conn.write_all(b"tcp-ack").await;
                 },
                 |handoff| async move {
-                    if handoff.path_hint() == PathKind::Http1 {
+                    if handoff.listener_id() == "h1" {
                         let mut conn = handoff.into_connection();
                         let _ = conn.write_all(b"h1-ack").await;
-                    } else if handoff.path_hint() == PathKind::Http2 {
+                    } else if handoff.listener_id() == "h2" {
                         let mut conn = handoff.into_connection();
                         let _ = conn.write_all(b"h2-ack").await;
                     }
@@ -354,7 +375,7 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
                     let _ = sock.send_to(b"udp-ack", dgram.peer()).await;
                 },
                 |handoff: UdpL7Handoff| async move {
-                    assert_eq!(handoff.path_hint(), PathKind::Http3);
+                    assert_eq!(handoff.listener_id(), "h3");
                     let _ = handoff.send_response(b"h3-ack").await;
                 },
             )

@@ -3,5 +3,5 @@
 pub mod classifier;
 pub mod listener;
 
-pub use classifier::{PathKind, classify_bytes, peek_and_classify};
+pub use classifier::PathKind;
 pub use listener::{IngressBinding, IngressListener};

@@ -1,5 +1,5 @@
 //! Comprehensive Performance & Big-O Benchmark Suite for velda-transport:
-//! 1. Ingress Protocol Sniffing & Classification (TLS, HTTP/1, HTTP/2, L4Direct)
+//! 1. Ingress PathKind & Binding Resolution (L4Direct vs L7Handoff)
 //! 2. TCP Bidirectional Raw Stream Forwarding (64 KB .. 25 MB)
 //! 3. UDP Datagram Transmission & Atomic Accounting (100 .. 10,000 packets)
 //! 4. Connection Lifecycle & Context Projection Operations
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use velda_transport::{
-    UdpSocket, UdpSocketConfig, classify_bytes, forward_bidirectional, next_connection_id,
+    IngressBinding, UdpSocket, UdpSocketConfig, forward_bidirectional, next_connection_id,
 };
 
 use common::{
@@ -22,21 +22,14 @@ use common::{
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 // ============================================================================
-// Stage 1: Ingress Protocol Sniffing & Classification
+// Stage 1: Ingress PathKind & Binding Resolution
 // ============================================================================
 
-fn bench_protocol_classification() {
-    println!("### 1. Ingress Protocol Classification & Sniffing Benchmark\n");
+fn bench_ingress_path_resolution() {
+    println!("### 1. Ingress PathKind & Binding Resolution Benchmark\n");
 
     let scales = [10, 100, 1_000, 10_000, 100_000];
-
-    let tls_sample = [
-        0x16, 0x03, 0x03, 0x00, 0x20, 0x01, 0x00, 0x00, 0x1c, 0x03, 0x03,
-    ];
-    let l4_sample = [
-        0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11,
-        0x22,
-    ];
+    let dummy_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
 
     let mut results: Vec<(usize, Duration)> = Vec::new();
 
@@ -52,19 +45,23 @@ fn bench_protocol_classification() {
     for &n in &scales {
         // Warmup
         for _ in 0..100 {
-            std::hint::black_box(classify_bytes(&tls_sample));
+            let _ = std::hint::black_box(IngressBinding::from_protocols(
+                "http", dummy_addr, "tcp", "http", false,
+            ));
         }
 
         ALLOCATOR.reset();
         let start = Instant::now();
 
         for i in 0..n {
-            let sample = match i % 2 {
-                0 => &tls_sample[..],
-                _ => &l4_sample[..],
+            let app_proto = match i % 2 {
+                0 => "raw",
+                _ => "http",
             };
-            let kind = std::hint::black_box(classify_bytes(sample));
-            std::hint::black_box(kind);
+            let binding =
+                IngressBinding::from_protocols("test-id", dummy_addr, "tcp", app_proto, false)
+                    .unwrap();
+            std::hint::black_box(binding);
         }
 
         let elapsed = start.elapsed();
@@ -88,7 +85,7 @@ fn bench_protocol_classification() {
 
     let (notation, alpha) = calculate_big_o(&results);
     println!(
-        "\n> **Classification Complexity Verification**: `{notation}` (Scaling power α = {alpha:.3}, Zero heap allocations confirmed).\n"
+        "\n> **Resolution Complexity Verification**: `{notation}` (Scaling power α = {alpha:.3}, Zero-copy path resolution confirmed).\n"
     );
 }
 
@@ -333,7 +330,7 @@ async fn main() {
     println!("           VELDA EDGE: VELDA-TRANSPORT COMPREHENSIVE BENCHMARK SUITE");
     println!("================================================================================\n");
 
-    bench_protocol_classification();
+    bench_ingress_path_resolution();
     bench_tcp_stream_forwarding().await;
     bench_udp_datagram_throughput().await;
     bench_connection_lifecycle();
