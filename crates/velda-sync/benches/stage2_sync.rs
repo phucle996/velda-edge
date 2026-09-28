@@ -15,7 +15,7 @@ use common::{
 };
 use tempfile::TempDir;
 use velda_sync::post_sync::plugin::PluginsFile;
-use velda_sync::post_sync::tls::{CertificateFiles, TlsFile, TlsProfileConfig};
+use velda_sync::post_sync::tls::{TlsConfig, TlsFile};
 use velda_sync::provider::{LocalFileProvider, Provider};
 use velda_sync::{ManifestConfig, ManifestFileEntry, ManifestFiles, SyncComposition, SyncOutcome};
 
@@ -73,30 +73,21 @@ impl ReconcileBenchFixture {
         fs::write(&cert_path, "MOCK_CERT").unwrap();
         fs::write(&key_path, "MOCK_KEY").unwrap();
 
-        let tls_bytes = if let Ok(mut tls_file) = serde_json::from_slice::<TlsFile>(
-            &fs::read(example.join("tls.json")).unwrap_or_default(),
-        ) {
-            for prof in &mut tls_file.profiles {
-                prof.certificate.cert_file = cert_path.to_str().unwrap().into();
-                prof.certificate.key_file = key_path.to_str().unwrap().into();
-            }
-            serde_json::to_vec(&tls_file).unwrap()
-        } else {
-            let tls_file = TlsFile {
-                schema_version: 1,
-                profiles: vec![TlsProfileConfig {
-                    id: "default_tls".into(),
-                    mode: "server".into(),
-                    certificate: CertificateFiles {
-                        cert_file: cert_path.to_str().unwrap().into(),
-                        key_file: key_path.to_str().unwrap().into(),
-                    },
-                    protocols: vec!["TLSv1.3".into()],
-                    alpn: vec!["h2".into(), "http/1.1".into()],
-                }],
-            };
-            serde_json::to_vec(&tls_file).unwrap()
+        let key = rcgen::generate_simple_self_signed(vec!["api.example.com".into()]).unwrap();
+        let cert_pem = key.cert.pem();
+        let key_pem = key.signing_key.serialize_pem();
+        let tls_file = TlsFile {
+            schema_version: 1,
+            tls: vec![TlsConfig {
+                sni: vec![],
+                cert_pem,
+                key_pem,
+                client_ca_pem: None,
+                versions: vec!["tls1.3".into()],
+                alpn: vec!["h2".into(), "http/1.1".into()],
+            }],
         };
+        let tls_bytes = serde_json::to_vec(&tls_file).unwrap();
         fs::write(config_dir.join("domains/tls.json"), tls_bytes).unwrap();
 
         // Initial Manifest (Revision 1)
@@ -277,18 +268,18 @@ impl ReconcileBenchFixture {
             fs::write(self.config_dir.join("domains/plugins.json"), bytes).unwrap();
         }
         if change_domain == Some("tls") || change_domain.is_none() {
-            let cert_path = self.config_dir.join("certs/server.crt");
-            let key_path = self.config_dir.join("certs/server.key");
+            let key =
+                rcgen::generate_simple_self_signed(vec![format!("api_{rev}.example.com")]).unwrap();
+            let cert_pem = key.cert.pem();
+            let key_pem = key.signing_key.serialize_pem();
             let tls_file = TlsFile {
                 schema_version: 1,
-                profiles: vec![TlsProfileConfig {
-                    id: format!("default_tls_{rev}"),
-                    mode: "server".into(),
-                    certificate: CertificateFiles {
-                        cert_file: cert_path.to_str().unwrap().into(),
-                        key_file: key_path.to_str().unwrap().into(),
-                    },
-                    protocols: vec!["TLSv1.3".into()],
+                tls: vec![TlsConfig {
+                    sni: vec![],
+                    cert_pem,
+                    key_pem,
+                    client_ca_pem: None,
+                    versions: vec!["tls1.3".into()],
                     alpn: vec!["h2".into(), "http/1.1".into()],
                 }],
             };

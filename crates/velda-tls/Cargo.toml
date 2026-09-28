@@ -6,3 +6,15 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2.2"
+quinn-proto = { version = "0.11", default-features = false, features = ["rustls"] }
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["io-util", "sync", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+rcgen = "0.14.10"
+tokio = { version = "1.43", features = ["full", "test-util"] }

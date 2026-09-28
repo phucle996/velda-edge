@@ -1,12 +1,13 @@
 //! Core Composer implementation.
 //!
-//! Owns the composition boundary: receives `TcpL7Handoff` from `velda-transport`,
-//! resolves the execution plan (TLS, protocol selection), creates connection context,
-//! and dispatches to the appropriate protocol processor.
+//! Owns the composition boundary: receives `TcpL7Handoff` / `UdpL7Handoff`
+//! from `velda-transport`, resolves the execution plan (TLS, protocol selection),
+//! creates connection context, and dispatches to the appropriate protocol processor.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use velda_transport::{Connection, TcpL7Handoff};
+use velda_transport::{Connection, Datagram, TcpL7Handoff, UdpL7Handoff, UdpSocket};
 
 use crate::config::{ApplicationProtocol, CompiledListenerComposition};
 use crate::context::ComposerContext;
@@ -81,6 +82,83 @@ impl ComposedStream {
     }
 }
 
+/// The resolved composition state for an incoming UDP datagram.
+#[derive(Debug)]
+pub enum ComposedDatagram {
+    /// Datagram is cleartext and ready for application protocol handling.
+    Cleartext {
+        /// Incoming datagram payload and metadata.
+        datagram: Datagram,
+        /// Shared UDP socket for continued I/O (responses, further receives).
+        socket: Arc<UdpSocket>,
+        /// Initialized connection context.
+        context: ComposerContext,
+    },
+    /// Datagram requires TLS/QUIC processing before application protocol handling.
+    TlsRequired {
+        /// Incoming datagram payload and metadata.
+        datagram: Datagram,
+        /// Shared UDP socket for continued I/O (QUIC handshake, responses).
+        socket: Arc<UdpSocket>,
+        /// Initialized connection context.
+        context: ComposerContext,
+    },
+}
+
+impl ComposedDatagram {
+    /// Returns a reference to the incoming datagram.
+    #[inline]
+    pub const fn datagram(&self) -> &Datagram {
+        match self {
+            Self::Cleartext { datagram, .. } => datagram,
+            Self::TlsRequired { datagram, .. } => datagram,
+        }
+    }
+
+    /// Returns a reference to the shared UDP socket.
+    #[inline]
+    pub fn socket(&self) -> &Arc<UdpSocket> {
+        match self {
+            Self::Cleartext { socket, .. } => socket,
+            Self::TlsRequired { socket, .. } => socket,
+        }
+    }
+
+    /// Consumes the composed datagram, returning the underlying datagram and socket.
+    #[inline]
+    pub fn into_parts(self) -> (Datagram, Arc<UdpSocket>) {
+        match self {
+            Self::Cleartext {
+                datagram, socket, ..
+            } => (datagram, socket),
+            Self::TlsRequired {
+                datagram, socket, ..
+            } => (datagram, socket),
+        }
+    }
+
+    /// Returns a reference to the connection context.
+    #[inline]
+    pub const fn context(&self) -> &ComposerContext {
+        match self {
+            Self::Cleartext { context, .. } => context,
+            Self::TlsRequired { context, .. } => context,
+        }
+    }
+
+    /// Returns whether this datagram requires TLS/QUIC processing.
+    #[inline]
+    pub const fn is_tls_required(&self) -> bool {
+        matches!(self, Self::TlsRequired { .. })
+    }
+
+    /// Returns the resolved application protocol.
+    #[inline]
+    pub const fn protocol(&self) -> ApplicationProtocol {
+        self.context().protocol
+    }
+}
+
 /// The Composer composition engine.
 ///
 /// Decides whether TLS is required, determines the configured application protocol,
@@ -129,18 +207,26 @@ impl Composer {
         let listener_id = handoff.listener_id();
 
         // 1. Resolve composition from compiled configuration if present, or derive default HTTP cleartext
-        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
+        let (configured_proto, tls_enabled) = match self.listeners.get(listener_id) {
             Some(cfg) => (cfg.protocol, cfg.tls_enabled),
             None => (ApplicationProtocol::Http, false),
         };
 
+        // For cleartext TCP, generic HTTP has no ALPN negotiation and resolves directly to concrete HTTP/1.1.
+        // For TLS streams, generic HTTP will be resolved into HTTP/2 or HTTP/1.1 upon handshake completion via ALPN.
+        let initial_proto = if !tls_enabled && configured_proto == ApplicationProtocol::Http {
+            ApplicationProtocol::Http1
+        } else {
+            configured_proto
+        };
+
         // 2. Initialize connection context
-        let context = ComposerContext::new(
+        let context = ComposerContext::new_tcp(
             handoff.id(),
             listener_id,
             handoff.peer(),
             handoff.local_addr(),
-            protocol,
+            initial_proto,
         );
 
         let connection = handoff.into_connection();
@@ -154,6 +240,45 @@ impl Composer {
         } else {
             Ok(ComposedStream::Cleartext {
                 connection,
+                context,
+            })
+        }
+    }
+
+    /// Composes an incoming UDP L7 handoff from `velda-transport`.
+    ///
+    /// Validates protocol consistency against the configured listener,
+    /// sets up the `ComposerContext`, and decides whether TLS/QUIC processing is required.
+    pub fn compose_udp_handoff(
+        &self,
+        handoff: UdpL7Handoff,
+    ) -> Result<ComposedDatagram, ComposerError> {
+        let listener_id = handoff.listener_id();
+
+        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3
+        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
+            Some(cfg) => (cfg.protocol, cfg.tls_enabled),
+            None => (ApplicationProtocol::Http3, true),
+        };
+
+        // 2. Initialize connection context (UDP uses peer address as connection identifier)
+        let context =
+            ComposerContext::new_udp(listener_id, handoff.peer(), handoff.local_addr(), protocol);
+
+        let socket = handoff.socket().clone();
+        let datagram = handoff.into_datagram();
+
+        // 3. Decide composition outcome
+        if tls_enabled {
+            Ok(ComposedDatagram::TlsRequired {
+                datagram,
+                socket,
+                context,
+            })
+        } else {
+            Ok(ComposedDatagram::Cleartext {
+                datagram,
+                socket,
                 context,
             })
         }
@@ -190,13 +315,16 @@ mod tests {
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
 
         assert!(!composed.is_tls_required());
-        assert_eq!(composed.protocol(), ApplicationProtocol::Http);
+        // Cleartext HTTP automatically resolves to concrete Http1
+        assert_eq!(composed.protocol(), ApplicationProtocol::Http1);
         assert_eq!(composed.context().listener_id, "http-public");
         assert_eq!(composed.context().connection_id, ConnectionId::new(101));
     }
 
     #[tokio::test]
     async fn test_compose_tls_https_handoff() {
+        use crate::context::TlsMetadata;
+
         let (conn, _addr) = create_dummy_connection().await;
         let handoff = TcpL7Handoff::new(conn, "https-secure");
 
@@ -214,8 +342,64 @@ mod tests {
             ComposedStream::TlsRequired { context, .. } => {
                 assert_eq!(context.listener_id, "https-secure");
                 assert_eq!(context.protocol, ApplicationProtocol::Http);
+
+                // After TLS handshake, enriched context resolves to concrete HTTP/2
+                let enriched = context.with_tls_metadata(TlsMetadata::new(
+                    Some("api.example.com".into()),
+                    Some("h2".into()),
+                ));
+                assert_eq!(enriched.protocol, ApplicationProtocol::Http2);
             }
             ComposedStream::Cleartext { .. } => panic!("Expected TLS required"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_compose_udp_h3_handoff_default_tls() {
+        let socket =
+            velda_transport::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), Default::default())
+                .unwrap();
+        let local_addr = socket.local_addr();
+        let peer: SocketAddr = "192.168.1.50:12345".parse().unwrap();
+
+        let datagram = Datagram::new(peer, local_addr, b"quic-initial".to_vec());
+        let handoff = UdpL7Handoff::new(datagram, Arc::new(socket), "h3-ingress");
+
+        // No explicit config → defaults to Http3 + TLS required
+        let composer = Composer::new();
+        let composed = composer.compose_udp_handoff(handoff).unwrap();
+
+        assert!(composed.is_tls_required());
+        assert_eq!(composed.protocol(), ApplicationProtocol::Http3);
+        assert_eq!(composed.context().listener_id, "h3-ingress");
+        assert_eq!(composed.datagram().data(), b"quic-initial");
+        assert_eq!(composed.datagram().peer(), peer);
+    }
+
+    #[tokio::test]
+    async fn test_compose_udp_registered_cleartext() {
+        let socket =
+            velda_transport::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), Default::default())
+                .unwrap();
+        let local_addr = socket.local_addr();
+        let peer: SocketAddr = "10.0.0.1:9999".parse().unwrap();
+
+        let datagram = Datagram::new(peer, local_addr, b"custom-udp".to_vec());
+        let handoff = UdpL7Handoff::new(datagram, Arc::new(socket), "udp-custom");
+
+        let mut composer = Composer::new();
+        composer.register_listener(CompiledListenerComposition::new(
+            "udp-custom",
+            ApplicationProtocol::Http,
+            false,
+        ));
+
+        let composed = composer.compose_udp_handoff(handoff).unwrap();
+
+        assert!(!composed.is_tls_required());
+        assert_eq!(composed.protocol(), ApplicationProtocol::Http);
+
+        let (dgram, _sock) = composed.into_parts();
+        assert_eq!(dgram.data(), b"custom-udp");
     }
 }

@@ -27,13 +27,11 @@ pub use post_sync::plugin::{DomainHeader as PluginDomainHeader, PluginConfig, Pl
 pub use post_sync::route::{
     DomainHeader as RouteDomainHeader, RouteConfig, RouteMatch, RouteTimeouts, RoutesFile,
 };
-pub use post_sync::tls::{
-    CertificateFiles, DomainHeader as TlsDomainHeader, TlsFile, TlsProfileConfig,
-};
+pub use post_sync::tls::{DomainHeader as TlsDomainHeader, TlsConfig, TlsFile};
 pub use post_sync::upstream::{
     ActiveHealthConfig, DnsTarget, DomainHeader as UpstreamDomainHeader, EndpointConfig,
     HealthCheckConfig, LoadBalancerConfig, PassiveHealthConfig, ResolverConfig, UpstreamConfig,
-    UpstreamTimeouts, UpstreamsFile,
+    UpstreamTimeouts, UpstreamTlsConfig, UpstreamsFile,
 };
 
 // ============================================================================

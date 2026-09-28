@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use velda_sync::ipc::SyncNotification;
 use velda_transport::EngineHandle;
 
-use crate::config::EdgeError;
+use crate::error::EdgeError;
 use crate::reload::apply_reload;
 use crate::runtime::SharedRuntime;
 
@@ -178,7 +178,7 @@ mod tests {
 
         assert_eq!(shared.load().revision, 77);
         assert_eq!(shared.load().listener_count(), 1);
-        assert_eq!(shared.load().listeners[0].id, "ipc-test");
+        assert_eq!(shared.load().config.listeners[0].id, "ipc-test");
 
         // Shut down IPC server
         shutdown_tx.send(true).unwrap();

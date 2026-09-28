@@ -9,10 +9,17 @@
 
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
-use velda_transport::{Connection, TcpL7Handoff, TrafficEngine};
+use velda_transport::{Connection, TcpL7Handoff, TrafficEngine, UdpL7Handoff};
 
-use crate::config::{EdgeConfig, EdgeError};
-use crate::runtime::{Runtime, SharedRuntime, new_shared_runtime};
+use crate::config::{
+    EdgeConfig, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
+};
+use crate::error::EdgeError;
+use crate::pipeline::{dispatch_l4, dispatch_tcp_l7, dispatch_udp_l4, dispatch_udp_l7};
+use crate::runtime::composer::build_composer;
+use crate::runtime::h3::compile_h3_engine;
+use crate::runtime::tls::compile_tls_server;
+use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
 use crate::uds::run_ipc_server;
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
@@ -34,7 +41,27 @@ impl EdgeSupervisor {
 
         // Load initial LKG state if available on disk
         let initial_runtime = if runtime_dir.exists() {
-            Runtime::load_from_storage(&runtime_dir, 1)?
+            let listeners = load_listeners(&runtime_dir)?;
+            let tls = load_tls(&runtime_dir)?;
+            let tls_server = compile_tls_server(&tls)?;
+            let h3_engine = compile_h3_engine(tls_server.as_ref());
+            let composer = build_composer(&listeners)?;
+
+            let runtime_config = RuntimeConfig {
+                listeners,
+                routes: load_routes(&runtime_dir)?,
+                upstreams: load_upstreams(&runtime_dir)?,
+                plugins: load_plugins(&runtime_dir)?,
+                tls,
+            };
+
+            Runtime {
+                revision: 1,
+                config: runtime_config,
+                composer,
+                tls_server,
+                h3_engine,
+            }
         } else {
             tracing::info!(
                 path = %runtime_dir.display(),
@@ -107,22 +134,48 @@ impl EdgeSupervisor {
         });
 
         // 2. Run TrafficEngine accept and dispatch loops
-        let runtime_for_traffic = self.shared_runtime.clone();
-
-        let l4_handler = move |_conn: Connection| {
+        let runtime_l4 = self.shared_runtime.clone();
+        let l4_handler = move |conn: Connection| {
+            let rt = runtime_l4.clone();
             async move {
-                // In full vertical slice, dispatches to L4 router / upstream
+                dispatch_l4(conn, &rt).await;
             }
         };
 
-        let l7_handler = move |_handoff: TcpL7Handoff| {
-            let _rt = runtime_for_traffic.load();
+        let runtime_l7 = self.shared_runtime.clone();
+        let l7_handler = move |handoff: TcpL7Handoff| {
+            let rt = runtime_l7.clone();
             async move {
-                // In full vertical slice, dispatches to velda-http / velda-router
+                dispatch_tcp_l7(handoff, &rt).await;
             }
         };
 
-        let engine_result = self.engine.run(shutdown, l4_handler, l7_handler).await;
+        let runtime_udp_l4 = self.shared_runtime.clone();
+        let udp_l4_handler = move |id, socket, dgram| {
+            let rt = runtime_udp_l4.clone();
+            async move {
+                dispatch_udp_l4(id, socket, dgram, &rt).await;
+            }
+        };
+
+        let runtime_udp_l7 = self.shared_runtime.clone();
+        let udp_l7_handler = move |handoff: UdpL7Handoff| {
+            let rt = runtime_udp_l7.clone();
+            async move {
+                dispatch_udp_l7(handoff, &rt).await;
+            }
+        };
+
+        let engine_result = self
+            .engine
+            .run_all(
+                shutdown,
+                l4_handler,
+                l7_handler,
+                udp_l4_handler,
+                udp_l7_handler,
+            )
+            .await;
 
         // 3. Await background IPC task termination
         let _ = ipc_task.await;

@@ -44,7 +44,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
 
     assert_eq!(shared.load().revision, 1);
     assert_eq!(shared.load().listener_count(), 1);
-    assert_eq!(shared.load().listeners[0].id, "initial-http");
+    assert_eq!(shared.load().config.listeners[0].id, "initial-http");
 
     // 3. Launch Edge supervisor in background task
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -109,7 +109,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
     // Verify atomic swap to revision 2 occurred in-memory without downtime
     assert_eq!(shared.load().revision, 2);
     assert_eq!(shared.load().listener_count(), 2);
-    assert_eq!(shared.load().listeners[1].id, "reloaded-tcp");
+    assert_eq!(shared.load().config.listeners[1].id, "reloaded-tcp");
 
     // Verify TrafficEngine dynamically bound and opened the new OS port
     let stream_res = tokio::net::TcpStream::connect(dynamic_port).await;

@@ -1,34 +1,28 @@
 {
   "schema_version": 1,
-  "profiles": [
+  "tls": [
     {
-      "id": "default",
-      "mode": "server",
-      "certificate": {
-        "cert_file": "/etc/velda/tls/server.crt",
-        "key_file": "/etc/velda/tls/server.key"
-      },
-      "protocols": [
-        "tls1.2",
-        "tls1.3"
-      ],
       "alpn": [
         "h2",
         "http/1.1"
+      ],
+      "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBZDCCAQqgAwIBAgIUSdVp7pXSyltfQyfJkT8hhnZjduUwCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJXc1+FN8Dsp+JjPnrk0\nnVWssMWB5mIuMRsFl3i9fu+yF+JcqWnJkKL84GiGa8+HkMhQtvw7NiZw/PKSfwsc\nbeKjHjAcMBoGA1UdEQQTMBGCD2FwaS5leGFtcGxlLmNvbTAKBggqhkjOPQQDAgNI\nADBFAiEAlCR6yTsYT0UOY/hX9rNaChiqqWhx6jygVCBPzcdipd4CIEAI8TtvL2US\nbzS+GoJdeJoeKH3I4FpJ2SnjQpSxuuYs\n-----END CERTIFICATE-----\n",
+      "client_ca_pem": null,
+      "key_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2w5h9zWVXzUo5xTd\nqa2Ve24ctYYbxjIMtpP9JEBFLEGhRANCAASV3NfhTfA7KfiYz565NJ1VrLDFgeZi\nLjEbBZd4vX7vshfiXKlpyZCi/OBohmvPh5DIULb8OzYmcPzykn8LHG3i\n-----END PRIVATE KEY-----\n",
+      "versions": [
+        "tls1.2",
+        "tls1.3"
       ]
     },
     {
-      "id": "internal-grpc",
-      "mode": "server",
-      "certificate": {
-        "cert_file": "/etc/velda/tls/internal-grpc.crt",
-        "key_file": "/etc/velda/tls/internal-grpc.key"
-      },
-      "protocols": [
-        "tls1.3"
-      ],
       "alpn": [
         "h2"
+      ],
+      "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBZTCCAQygAwIBAgIUYyDC6HjTAE+k+AwgOME9cIj8ep8wCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJtI3+kiKZ9zROWlnWIu\nSq2fBmb+atCoM1la3KJv+5ES5Ew1OYjJLd2lpTVhm0TVLe80hMMiRKvSu9L/kOyl\n54SjIDAeMBwGA1UdEQQVMBOCEWFkbWluLmV4YW1wbGUuY29tMAoGCCqGSM49BAMC\nA0cAMEQCIG3dkBSTR5kRiHlCTtIz5YuPPPLWvZawUsMbkLnkLjlbAiBsYeM1loQA\nGoUhtY/MGqH8m0GZUMfy/UIVOXExphGKOA==\n-----END CERTIFICATE-----\n",
+      "client_ca_pem": "-----BEGIN CERTIFICATE-----\nMIIBZjCCAQygAwIBAgIUFMPUbJepgolcK6Y7Nlrt+VXx+ccwCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJq7zcW+Brn4pkSTwb5p\ntNMlzZzdftKe2pzJKdmuIWVtb/5H5IXpD0OFmcXwosJAfPQvL1aOSm3MBRgZ00pE\nz7ujIDAeMBwGA1UdEQQVMBOCEWFkbWluLWNhLmludGVybmFsMAoGCCqGSM49BAMC\nA0gAMEUCIQDhyyelwXxvKj+keCJT+MV+FHha3UQMAetqO3myl7n9NwIgRYPLOTwp\ngVAo4D48o1cu+jYjKW/RGOCwXGrgDOULB7s=\n-----END CERTIFICATE-----\n",
+      "key_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIDqvhYeVNzfqN7hv\nXBGufP2D5G8R2mZ2n8w4D+RuOGOhRANCAASbSN/pIimfc0TlpZ1iLkqtnwZm/mrQ\nqDNZWtyib/uREuRMNTmIyS3dpaU1YZtE1S3vNITDIkSr0rvS/5DspeeE\n-----END PRIVATE KEY-----\n",
+      "versions": [
+        "tls1.3"
       ]
     }
   ]

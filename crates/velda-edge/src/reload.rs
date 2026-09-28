@@ -13,9 +13,10 @@ use std::sync::Arc;
 use velda_sync::ipc::SyncNotification;
 use velda_transport::EngineHandle;
 
-use crate::config::{
-    EdgeError, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
-};
+use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_upstreams};
+use crate::error::EdgeError;
+use crate::runtime::composer::build_composer;
+use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, SharedRuntime};
 
 /// Summary of a successfully applied hot reload operation.
@@ -42,31 +43,29 @@ pub async fn apply_reload(
     let current = shared_runtime.load();
     let new_revision = notif.manifest_revision.unwrap_or(current.revision + 1);
 
-    let mut listeners = current.listeners.clone();
-    let mut routes = current.routes.clone();
-    let mut upstreams = current.upstreams.clone();
-    let mut plugins = current.plugins.clone();
-    let mut tls = current.tls.clone();
+    let mut config = current.config.clone();
+    let mut tls_server = current.tls_server.clone();
 
     let mut listeners_changed = false;
 
     for domain in &notif.changed_domains {
         match domain.as_str() {
             "listeners" => {
-                listeners = load_listeners(runtime_dir)?;
+                config.listeners = load_listeners(runtime_dir)?;
                 listeners_changed = true;
             }
             "routes" => {
-                routes = load_routes(runtime_dir)?;
+                config.routes = load_routes(runtime_dir)?;
             }
             "upstreams" => {
-                upstreams = load_upstreams(runtime_dir)?;
+                config.upstreams = load_upstreams(runtime_dir)?;
             }
             "plugins" => {
-                plugins = load_plugins(runtime_dir)?;
+                config.plugins = load_plugins(runtime_dir)?;
             }
             "tls" => {
-                tls = load_tls(runtime_dir)?;
+                config.tls = load_tls(runtime_dir)?;
+                tls_server = compile_tls_server(&config.tls)?;
             }
             other => {
                 tracing::warn!(domain = %other, "Unknown domain in reload notification; skipping");
@@ -74,13 +73,21 @@ pub async fn apply_reload(
         }
     }
 
+    // Recompile Composer only if listeners changed
+    let composer = if listeners_changed {
+        build_composer(&config.listeners)?
+    } else {
+        current.composer.clone()
+    };
+
+    let h3_engine = crate::runtime::h3::compile_h3_engine(tls_server.as_ref());
+
     let candidate = Runtime {
         revision: new_revision,
-        listeners,
-        routes,
-        upstreams,
-        plugins,
-        tls,
+        config,
+        composer,
+        tls_server,
+        h3_engine,
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings
@@ -163,6 +170,53 @@ mod tests {
         assert!(outcome.listeners_changed);
         assert_eq!(shared.load().revision, 42);
         assert_eq!(shared.load().listener_count(), 1);
-        assert_eq!(shared.load().listeners[0].id, "http-reloaded");
+        assert_eq!(shared.load().config.listeners[0].id, "http-reloaded");
+    }
+
+    #[tokio::test]
+    async fn test_apply_reload_with_tls_compiles_composer() {
+        use rcgen::generate_simple_self_signed;
+        use velda_sync::post_sync::tls::{TlsConfig, compile_tls_to_binary};
+
+        let tmp = tempdir().unwrap();
+        let runtime_dir = tmp.path();
+
+        let cert = generate_simple_self_signed(vec!["api.example.com".into()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.signing_key.serialize_pem();
+
+        let tls = vec![TlsConfig {
+            sni: vec![],
+            cert_pem,
+            key_pem,
+            client_ca_pem: None,
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+        }];
+        let bin = compile_tls_to_binary(&tls, 1, [0u8; 32]).unwrap();
+        std::fs::write(runtime_dir.join("tls.bin"), bin).unwrap();
+
+        let initial_runtime = Runtime::empty();
+        let shared = new_shared_runtime(initial_runtime);
+        assert!(shared.load().config.tls.is_empty());
+
+        let notif = SyncNotification {
+            manifest_revision: Some(2),
+            bin_path: "runtime/tls.bin".into(),
+            changed_domains: vec!["tls".into()],
+            domain_revisions: HashMap::new(),
+            domain_bins: HashMap::new(),
+        };
+
+        let outcome = apply_reload(&shared, runtime_dir, &notif, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.revision, 2);
+        assert!(!outcome.listeners_changed);
+
+        // Runtime snapshot in RAM now holds active TLS configuration and precompiled TLS server!
+        assert_eq!(shared.load().config.tls.len(), 1);
+        assert_eq!(shared.load().config.tls[0].sni, vec!["api.example.com"]);
+        assert!(shared.load().tls_server.is_some());
     }
 }

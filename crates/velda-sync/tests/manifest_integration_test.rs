@@ -90,7 +90,7 @@ async fn test_end_to_end_manifest_sync_composition() {
     let tls_bytes = fs::read(&tls_bin).unwrap();
     let (t_header, t_file) = tls::unpack_tls_from_binary(&tls_bytes).unwrap();
     assert_eq!(t_header.revision, 42);
-    assert_eq!(t_file.profiles.len(), 2);
+    assert_eq!(t_file.len(), 2);
 
     // 4. Second sync with identical content must be a no-op
     let second_run = composition

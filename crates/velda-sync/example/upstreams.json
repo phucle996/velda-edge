@@ -43,7 +43,10 @@
           "healthy_threshold": 2,
           "check_type": "http",
           "path": "/healthz",
-          "expected_statuses": [200, 204]
+          "expected_statuses": [
+            200,
+            204
+          ]
         }
       }
     },
@@ -83,6 +86,19 @@
           "max_consecutive_failures": 3,
           "cooldown_ms": 10000
         }
+      },
+      "tls": {
+        "ca_pem": "-----BEGIN CERTIFICATE-----\nMIIBdDCCARugAwIBAgIUZnxvzvTmQvKMSGZFRnJeRsAWp+MwCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABFIgDlg71I/T17kmmCzo\nbfeF02wDN7UPFQ5M1FY/oRRLaZ3I7wgZOQZM48kwZoOq6Fyla/UhmxlwGSuAdWfJ\npyqjLzAtMCsGA1UdEQQkMCKCEGJhY2tlbmQuaW50ZXJuYWyCDiouaW50ZXJuYWwu\nbmV0MAoGCCqGSM49BAMCA0cAMEQCIDA0wwLzIZAYdi43B083s5drqgCCyTq+zEtl\nV5evfLQsAiAe1lWjO29X+65OKPcWtxYDeMiD/Wt17JpMM9ytyHLg2Q==\n-----END CERTIFICATE-----\n",
+        "client_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBaDCCAQ+gAwIBAgIUXyhSC7RZnaYFGqEJsqBXfNSckgQwCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDIx/LHwPgDdTPNzQJ1Y\nsDdrTzZrBO/dUIl0wgU5MNPjr54dzOKSXWCgNpiCo8d4EBF4Oea+pMMMohizTIc3\nqH+jIzAhMB8GA1UdEQQYMBaCFGVkZ2UtY2xpZW50LmludGVybmFsMAoGCCqGSM49\nBAMCA0cAMEQCIBKMBC6wlhZsvylARJA9gGNw4pJyVZMCJ7ztjClJatCHAiBbDR73\nhxmogZMzqzjJi7Ikz8ayriXOXbTapWgVz4vVZQ==\n-----END CERTIFICATE-----\n",
+        "client_key_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgxi//ws10ZUEUKrQf\nbc5pVQZBVUgtGUHWRAZc6/2b8DehRANCAAQyMfyx8D4A3Uzzc0CdWLA3a082awTv\n3VCJdMIFOTDT46+eHczikl1goDaYgqPHeBAReDnmvqTDDKIYs0yHN6h/\n-----END PRIVATE KEY-----\n",
+        "versions": [
+          "tls1.2",
+          "tls1.3"
+        ],
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
       }
     },
     {

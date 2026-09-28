@@ -17,7 +17,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 
-pub use composer::{ComposedStream, Composer};
+pub use composer::{ComposedDatagram, ComposedStream, Composer};
 pub use config::{ApplicationProtocol, CompiledListenerComposition};
 pub use context::{ComposerContext, TlsMetadata};
 pub use error::ComposerError;

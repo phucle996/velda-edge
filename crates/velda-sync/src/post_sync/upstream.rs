@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::tls as tls_domain;
 use crate::SyncError;
 
 // ============================================================================
@@ -65,6 +66,28 @@ pub struct UpstreamConfig {
     pub timeouts: UpstreamTimeouts,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    pub tls: Option<UpstreamTlsConfig>,
+}
+
+/// Upstream TLS configuration for secure backend connections.
+/// In JSON: inline PEM strings without `sni` (sni is auto-extracted during compilation).
+/// In Binary: contains auto-extracted `sni` hostnames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpstreamTlsConfig {
+    #[serde(default)]
+    pub ca_pem: Option<String>,
+    #[serde(default)]
+    pub client_cert_pem: Option<String>,
+    #[serde(default)]
+    pub client_key_pem: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<String>,
+    #[serde(default)]
+    pub alpn: Vec<String>,
+    /// Auto-extracted SNIs compiled into binary (not present in raw JSON).
+    #[serde(default)]
+    pub sni: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,9 +549,158 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                 }
             }
         }
+
+        // Validation: TLS configuration if configured
+        if let Some(ref mut tls) = upstream.tls {
+            if let Some(ref mut ca) = tls.ca_pem {
+                trim_in_place(ca);
+            }
+            if let Some(ref mut cert) = tls.client_cert_pem {
+                trim_in_place(cert);
+            }
+            if let Some(ref mut key) = tls.client_key_pem {
+                trim_in_place(key);
+            }
+
+            if let Some(ca) = &tls.ca_pem
+                && !ca.is_empty()
+            {
+                tls_domain::validate_ca_bundle_pem(ca)?;
+            }
+
+            // Both client_cert_pem and client_key_pem must be present if mTLS is configured
+            match (&tls.client_cert_pem, &tls.client_key_pem) {
+                (Some(cert), Some(key)) => {
+                    if cert.is_empty() {
+                        return Err(SyncError::Validation {
+                            domain: "upstreams".into(),
+                            reason: format!(
+                                "Upstream '{}': client_cert_pem cannot be empty when specified",
+                                upstream.id
+                            ),
+                        });
+                    }
+                    if key.is_empty() {
+                        return Err(SyncError::Validation {
+                            domain: "upstreams".into(),
+                            reason: format!(
+                                "Upstream '{}': client_key_pem cannot be empty when specified",
+                                upstream.id
+                            ),
+                        });
+                    }
+                    let _ = tls_domain::extract_cert_snis(cert)?;
+                    tls_domain::validate_private_key_pem(key)?;
+                }
+                (Some(_), None) => {
+                    return Err(SyncError::Validation {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Upstream '{}': specified client_cert_pem without client_key_pem",
+                            upstream.id
+                        ),
+                    });
+                }
+                (None, Some(_)) => {
+                    return Err(SyncError::Validation {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Upstream '{}': specified client_key_pem without client_cert_pem",
+                            upstream.id
+                        ),
+                    });
+                }
+                (None, None) => {}
+            }
+
+            // Auto-extract SNI from certificate or DNS target host
+            let snis =
+                extract_upstream_snis(&upstream.id, &upstream.mode, upstream.target.as_ref(), tls)?;
+            if snis.is_empty() {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!("Upstream '{}': TLS SNI list cannot be empty", upstream.id),
+                });
+            }
+            tls.sni = snis;
+
+            if tls.versions.is_empty() {
+                tls.versions = vec!["tls1.2".into(), "tls1.3".into()];
+            } else {
+                for v in &mut tls.versions {
+                    trim_in_place(v);
+                    v.make_ascii_lowercase();
+                    if !matches!(v.as_str(), "tls1.2" | "tls1.3" | "tlsv1.2" | "tlsv1.3") {
+                        return Err(SyncError::Validation {
+                            domain: "upstreams".into(),
+                            reason: format!(
+                                "Upstream '{}': Unsupported TLS version '{v}'; must be tls1.2 or tls1.3",
+                                upstream.id
+                            ),
+                        });
+                    }
+                }
+            }
+
+            if tls.alpn.is_empty() {
+                tls.alpn = vec!["h2".into(), "http/1.1".into()];
+            } else {
+                for alpn in &mut tls.alpn {
+                    trim_in_place(alpn);
+                    alpn.make_ascii_lowercase();
+                    if alpn.is_empty() {
+                        return Err(SyncError::Validation {
+                            domain: "upstreams".into(),
+                            reason: format!(
+                                "Upstream '{}': ALPN entry cannot be empty",
+                                upstream.id
+                            ),
+                        });
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn extract_upstream_snis(
+    id: &str,
+    mode: &str,
+    target: Option<&DnsTarget>,
+    tls: &UpstreamTlsConfig,
+) -> Result<Vec<String>, SyncError> {
+    if let Some(ca) = &tls.ca_pem
+        && !ca.trim().is_empty()
+        && let Ok(snis) = tls_domain::extract_cert_snis(ca)
+        && !snis.is_empty()
+    {
+        return Ok(snis);
+    }
+
+    if let Some(client_cert) = &tls.client_cert_pem
+        && !client_cert.trim().is_empty()
+        && let Ok(snis) = tls_domain::extract_cert_snis(client_cert)
+        && !snis.is_empty()
+    {
+        return Ok(snis);
+    }
+
+    if mode == "dns"
+        && let Some(target) = target
+        && !target.host.trim().is_empty()
+    {
+        let h = target.host.trim().to_ascii_lowercase();
+        return Ok(vec![h]);
+    }
+
+    Err(SyncError::Validation {
+        domain: "upstreams".into(),
+        reason: format!(
+            "Upstream '{id}' has TLS enabled but failed to extract SNI (no SAN/CN in ca_pem/client_cert_pem and no valid DNS target host)"
+        ),
+    })
 }
 
 // ============================================================================
@@ -541,6 +713,29 @@ pub fn compile_upstreams_to_binary(
     revision: u64,
     source_checksum: [u8; 32],
 ) -> Result<Vec<u8>, SyncError> {
+    // Invariant: Verify that if TLS is enabled, SNI list is populated and not empty
+    for upstream in upstreams {
+        if let Some(tls) = &upstream.tls {
+            if tls.sni.is_empty() {
+                return Err(SyncError::Compile {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}' has TLS enabled but empty SNI list",
+                        upstream.id
+                    ),
+                });
+            }
+            for sni in &tls.sni {
+                if sni.trim().is_empty() {
+                    return Err(SyncError::Compile {
+                        domain: "upstreams".into(),
+                        reason: format!("Upstream '{}' contains an empty SNI entry", upstream.id),
+                    });
+                }
+            }
+        }
+    }
+
     // Single contiguous buffer: reserve header slot then serialize payload directly
     let mut binary_output = vec![0; DOMAIN_HEADER_SIZE];
 
@@ -630,6 +825,32 @@ pub fn unpack_upstreams_from_binary(
             reason: format!("Failed to deserialize: {e}"),
         })?;
 
+    // Invariant: Enforce non-empty SNI for any upstream with TLS configured
+    for upstream in &upstreams {
+        if let Some(tls) = &upstream.tls {
+            if tls.sni.is_empty() {
+                return Err(SyncError::Compile {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Corrupted upstreams artifact: upstream '{}' has TLS enabled but empty SNI list",
+                        upstream.id
+                    ),
+                });
+            }
+            for sni in &tls.sni {
+                if sni.trim().is_empty() {
+                    return Err(SyncError::Compile {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Corrupted upstreams artifact: upstream '{}' contains an empty SNI entry",
+                            upstream.id
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     Ok((header, upstreams))
 }
 
@@ -694,6 +915,7 @@ mod tests {
                 idle_ms: 30000,
             },
             health_check: None,
+            tls: None,
         }
     }
 
@@ -885,5 +1107,48 @@ mod tests {
             }]
         }"#;
         assert!(parse_upstreams(json_no_idle.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_upstream_tls_auto_extract_sni_and_compile() {
+        let certified_key =
+            rcgen::generate_simple_self_signed(vec!["backend.internal.svc".into()]).unwrap();
+        let ca_cert = certified_key.cert.pem();
+
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "upstreams": [{
+                "id": "secure_upstream",
+                "mode": "endpoints",
+                "protocol": { "transport": "tcp", "application": "http", "version": "1.1" },
+                "endpoints": [{ "address": "10.0.0.1:8443", "weight": 1 }],
+                "load_balancer": { "algorithm": "round_robin" },
+                "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
+                "tls": {
+                    "ca_pem": ca_cert,
+                    "versions": ["tls1.3"],
+                    "alpn": ["h2"]
+                }
+            }]
+        });
+
+        let mut upstreams = parse_upstreams(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            upstreams[0].tls.as_ref().unwrap().sni.is_empty(),
+            "JSON input must not specify sni"
+        );
+
+        validate_upstreams(&mut upstreams).unwrap();
+        assert_eq!(
+            upstreams[0].tls.as_ref().unwrap().sni,
+            vec!["backend.internal.svc".to_string()]
+        );
+
+        let bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+        let (_, unpacked) = unpack_upstreams_from_binary(&bin).unwrap();
+        assert_eq!(
+            unpacked[0].tls.as_ref().unwrap().sni,
+            vec!["backend.internal.svc".to_string()]
+        );
     }
 }

@@ -5,53 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
 use velda_sync::post_sync::listener::{self, ListenerConfig};
 use velda_sync::post_sync::plugin::{self, PluginConfig};
 use velda_sync::post_sync::route::{self, RouteConfig};
-use velda_sync::post_sync::tls::{self, TlsProfileConfig};
+use velda_sync::post_sync::tls::{self, TlsConfig};
 use velda_sync::post_sync::upstream::{self, UpstreamConfig};
 
-/// Error conditions encountered within `velda-edge`.
-#[derive(Debug, Error)]
-pub enum EdgeError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Sync domain error in '{domain}': {reason}")]
-    SyncDomain { domain: String, reason: String },
-
-    #[error("Invalid socket address '{addr}' for listener '{id}': {reason}")]
-    InvalidAddress {
-        id: String,
-        addr: String,
-        reason: String,
-    },
-
-    #[error("Transport error: {0}")]
-    Transport(#[from] velda_transport::TransportError),
-
-    #[error("Configuration reload failed: {0}")]
-    Reload(String),
-}
-
-impl From<velda_sync::SyncError> for EdgeError {
-    fn from(err: velda_sync::SyncError) -> Self {
-        match err {
-            velda_sync::SyncError::Io(e) => EdgeError::Io(e),
-            velda_sync::SyncError::Compile { domain, reason } => {
-                EdgeError::SyncDomain { domain, reason }
-            }
-            velda_sync::SyncError::Validation { domain, reason } => {
-                EdgeError::SyncDomain { domain, reason }
-            }
-            other => EdgeError::SyncDomain {
-                domain: "edge".into(),
-                reason: other.to_string(),
-            },
-        }
-    }
-}
+use crate::error::EdgeError;
 
 /// Static configuration parameters for the `velda-edge` process.
 #[derive(Debug, Clone)]
@@ -148,12 +108,12 @@ pub fn load_plugins(runtime_dir: &Path) -> Result<Vec<PluginConfig>, EdgeError> 
 }
 
 /// Reads and unpacks `tls.bin` from storage if present.
-pub fn load_tls(runtime_dir: &Path) -> Result<Vec<TlsProfileConfig>, EdgeError> {
+pub fn load_tls(runtime_dir: &Path) -> Result<Vec<TlsConfig>, EdgeError> {
     let path = runtime_dir.join("tls.bin");
     if !path.exists() {
         return Ok(Vec::new());
     }
     let bytes = std::fs::read(&path)?;
-    let (_header, file) = tls::unpack_tls_from_binary(&bytes)?;
-    Ok(file.profiles)
+    let (_header, tls) = tls::unpack_tls_from_binary(&bytes)?;
+    Ok(tls)
 }

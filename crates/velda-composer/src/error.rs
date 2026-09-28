@@ -45,6 +45,12 @@ pub enum ComposerError {
     Internal(String),
 }
 
+impl From<velda_tls::TlsError> for ComposerError {
+    fn from(err: velda_tls::TlsError) -> Self {
+        ComposerError::Tls(err.to_string())
+    }
+}
+
 impl From<ComposerError> for CoreError {
     fn from(err: ComposerError) -> Self {
         match err {

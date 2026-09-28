@@ -22,11 +22,14 @@ flate2 = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+x509-parser = "0.18.1"
+rustls-pemfile = "2.2"
 
 [build-dependencies]
 tonic-build = "0.12"
 
 [dev-dependencies]
+rcgen = "0.14.10"
 tempfile = "3"
 
 [[bench]]
