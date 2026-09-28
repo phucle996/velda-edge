@@ -20,22 +20,46 @@ use velda_sync::post_sync::upstream::{
     validate_upstreams,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocSnapshot {
+    pub alloc_count: u64,
+    pub dealloc_count: u64,
+    pub bytes_allocated: u64,
+    pub bytes_deallocated: u64,
+}
+
+impl AllocSnapshot {
+    pub fn net_bytes(&self) -> i64 {
+        self.bytes_allocated as i64 - self.bytes_deallocated as i64
+    }
+
+    pub fn net_allocs(&self) -> i64 {
+        self.alloc_count as i64 - self.dealloc_count as i64
+    }
+}
+
 pub struct CountingAllocator {
     alloc_count: AtomicU64,
+    dealloc_count: AtomicU64,
     bytes_allocated: AtomicU64,
+    bytes_deallocated: AtomicU64,
 }
 
 impl CountingAllocator {
     pub const fn new() -> Self {
         Self {
             alloc_count: AtomicU64::new(0),
+            dealloc_count: AtomicU64::new(0),
             bytes_allocated: AtomicU64::new(0),
+            bytes_deallocated: AtomicU64::new(0),
         }
     }
 
     pub fn reset(&self) {
         self.alloc_count.store(0, Ordering::SeqCst);
+        self.dealloc_count.store(0, Ordering::SeqCst);
         self.bytes_allocated.store(0, Ordering::SeqCst);
+        self.bytes_deallocated.store(0, Ordering::SeqCst);
     }
 
     pub fn snapshot(&self) -> (u64, u64) {
@@ -43,6 +67,15 @@ impl CountingAllocator {
             self.alloc_count.load(Ordering::SeqCst),
             self.bytes_allocated.load(Ordering::SeqCst),
         )
+    }
+
+    pub fn detailed_snapshot(&self) -> AllocSnapshot {
+        AllocSnapshot {
+            alloc_count: self.alloc_count.load(Ordering::SeqCst),
+            dealloc_count: self.dealloc_count.load(Ordering::SeqCst),
+            bytes_allocated: self.bytes_allocated.load(Ordering::SeqCst),
+            bytes_deallocated: self.bytes_deallocated.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -56,7 +89,22 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.dealloc_count.fetch_add(1, Ordering::Relaxed);
+        self.bytes_deallocated
+            .fetch_add(layout.size() as u64, Ordering::Relaxed);
         unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+pub fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 

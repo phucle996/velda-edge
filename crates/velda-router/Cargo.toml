@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "adversarial_bench"
 harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false
