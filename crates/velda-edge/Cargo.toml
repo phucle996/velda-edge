@@ -17,6 +17,8 @@ velda-transport = { path = "../velda-transport" }
 velda-composer = { path = "../velda-composer" }
 velda-tls = { path = "../velda-tls" }
 velda-http = { path = "../velda-http" }
+velda-router = { path = "../velda-router" }
+velda-upstream = { path = "../velda-upstream" }
 velda-sync = { path = "../velda-sync" }
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

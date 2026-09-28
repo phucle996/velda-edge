@@ -1881,9 +1881,11 @@ dependencies = [
  "velda-composer",
  "velda-core",
  "velda-http",
+ "velda-router",
  "velda-sync",
  "velda-tls",
  "velda-transport",
+ "velda-upstream",
 ]
 
 [[package]]
@@ -1930,7 +1932,17 @@ dependencies = [
 name = "velda-router"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "bincode",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
  "velda-core",
+ "velda-sync",
 ]
 
 [[package]]

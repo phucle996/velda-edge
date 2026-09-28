@@ -222,6 +222,7 @@ impl IngressListener {
                                 );
                                 match path {
                                     PathKind::L4Direct => {
+                                        let conn = conn.with_listener_id(ingress.id());
                                         tokio::spawn(l4_fn(conn));
                                     }
                                     PathKind::L7Handoff => {

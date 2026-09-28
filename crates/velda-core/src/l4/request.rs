@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 pub use crate::types::ConnectionId;
 
 /// Supported L4 transport protocols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
     Tcp,
     Udp,

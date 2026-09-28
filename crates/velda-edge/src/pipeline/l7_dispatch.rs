@@ -1,17 +1,12 @@
-//! Traffic dispatcher bridging `velda-transport` handoffs to protocol composition and handlers.
+//! Layer 7 (L7) traffic dispatching for HTTP/1.1, HTTP/2, TLS termination, and HTTP/3 QUIC.
 
 use velda_composer::{ComposedStream, TlsMetadata};
 use velda_http::HttpVersion;
 use velda_tls::TlsServerEngine;
-use velda_transport::{Connection, TcpL7Handoff};
+use velda_transport::{TcpL7Handoff, UdpL7Handoff};
 
 use crate::pipeline::http::handle_http_stream;
 use crate::runtime::SharedRuntime;
-
-/// Dispatches raw L4 connection to routing or direct upstream proxying.
-pub async fn dispatch_l4(_conn: Connection, _runtime: &SharedRuntime) {
-    // In full vertical slice, dispatches to L4 router / upstream
-}
 
 /// Dispatches an accepted TCP L7 handoff through protocol composition, downstream TLS termination,
 /// and L7 HTTP stream decoding.
@@ -92,18 +87,8 @@ pub async fn dispatch_tcp_l7(handoff: TcpL7Handoff, runtime: &SharedRuntime) {
     }
 }
 
-/// Dispatches raw UDP L4 datagrams to direct proxying or routing.
-pub async fn dispatch_udp_l4(
-    _listener_id: String,
-    _socket: std::sync::Arc<velda_transport::UdpSocket>,
-    _datagram: velda_transport::Datagram,
-    _runtime: &SharedRuntime,
-) {
-    // In full vertical slice, dispatches to L4 UDP router
-}
-
 /// Dispatches an accepted UDP L7 handoff through protocol composition to the HTTP/3 state machine.
-pub async fn dispatch_udp_l7(handoff: velda_transport::UdpL7Handoff, runtime: &SharedRuntime) {
+pub async fn dispatch_udp_l7(handoff: UdpL7Handoff, runtime: &SharedRuntime) {
     let rt = runtime.load();
     let composed = match rt.composer.compose_udp_handoff(handoff) {
         Ok(c) => c,

@@ -16,6 +16,7 @@ use velda_transport::EngineHandle;
 use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_upstreams};
 use crate::error::EdgeError;
 use crate::runtime::composer::build_composer;
+use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, SharedRuntime};
 
@@ -47,6 +48,8 @@ pub async fn apply_reload(
     let mut tls_server = current.tls_server.clone();
 
     let mut listeners_changed = false;
+    let mut routes_changed = false;
+    let mut upstreams_changed = false;
 
     for domain in &notif.changed_domains {
         match domain.as_str() {
@@ -56,9 +59,11 @@ pub async fn apply_reload(
             }
             "routes" => {
                 config.routes = load_routes(runtime_dir)?;
+                routes_changed = true;
             }
             "upstreams" => {
                 config.upstreams = load_upstreams(runtime_dir)?;
+                upstreams_changed = true;
             }
             "plugins" => {
                 config.plugins = load_plugins(runtime_dir)?;
@@ -80,12 +85,20 @@ pub async fn apply_reload(
         current.composer.clone()
     };
 
+    // Recompile Router if routes or upstreams changed
+    let router = if routes_changed || upstreams_changed {
+        build_router(&config.routes, &config.upstreams)?
+    } else {
+        current.router.clone()
+    };
+
     let h3_engine = crate::runtime::h3::compile_h3_engine(tls_server.as_ref());
 
     let candidate = Runtime {
         revision: new_revision,
         config,
         composer,
+        router,
         tls_server,
         h3_engine,
     };

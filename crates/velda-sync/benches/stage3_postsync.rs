@@ -288,7 +288,9 @@ fn benchmark_routes_domain() {
 // ============================================================================
 
 fn benchmark_upstreams_scale(n: usize) -> DomainBenchResult {
-    let (upstreams, json_bytes, json_lines) = generate_upstreams_workload(n);
+    let (mut upstreams, json_bytes, json_lines) = generate_upstreams_workload(n);
+    let raw_upstreams = upstreams.clone();
+    validate_upstreams(&mut upstreams).unwrap();
 
     let iterations = match n {
         0..=200 => 30,
@@ -305,7 +307,7 @@ fn benchmark_upstreams_scale(n: usize) -> DomainBenchResult {
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let mut u = upstreams.clone();
+        let mut u = raw_upstreams.clone();
         validate_upstreams(&mut u).unwrap();
         std::hint::black_box(u);
     }

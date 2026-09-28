@@ -26,6 +26,7 @@ pub struct Connection {
     local_addr: SocketAddr,
     bytes_read: u64,
     bytes_written: u64,
+    listener_id: Option<String>,
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +55,7 @@ impl Connection {
             local_addr,
             bytes_read: 0,
             bytes_written: 0,
+            listener_id: None,
         }
     }
 
@@ -81,6 +83,19 @@ impl Connection {
     #[inline]
     pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Attaches an ingress listener identifier to this connection.
+    #[inline]
+    pub fn with_listener_id(mut self, id: impl Into<String>) -> Self {
+        self.listener_id = Some(id.into());
+        self
+    }
+
+    /// Returns the ingress listener identifier that accepted this connection, if known.
+    #[inline]
+    pub fn listener_id(&self) -> Option<&str> {
+        self.listener_id.as_deref()
     }
 
     /// Returns the total number of bytes read from this connection.

@@ -18,6 +18,7 @@ use crate::error::EdgeError;
 use crate::pipeline::{dispatch_l4, dispatch_tcp_l7, dispatch_udp_l4, dispatch_udp_l7};
 use crate::runtime::composer::build_composer;
 use crate::runtime::h3::compile_h3_engine;
+use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
 use crate::uds::run_ipc_server;
@@ -42,15 +43,18 @@ impl EdgeSupervisor {
         // Load initial LKG state if available on disk
         let initial_runtime = if runtime_dir.exists() {
             let listeners = load_listeners(&runtime_dir)?;
+            let routes = load_routes(&runtime_dir)?;
+            let upstreams = load_upstreams(&runtime_dir)?;
             let tls = load_tls(&runtime_dir)?;
             let tls_server = compile_tls_server(&tls)?;
             let h3_engine = compile_h3_engine(tls_server.as_ref());
             let composer = build_composer(&listeners)?;
+            let router = build_router(&routes, &upstreams)?;
 
             let runtime_config = RuntimeConfig {
                 listeners,
-                routes: load_routes(&runtime_dir)?,
-                upstreams: load_upstreams(&runtime_dir)?,
+                routes,
+                upstreams,
                 plugins: load_plugins(&runtime_dir)?,
                 tls,
             };
@@ -59,6 +63,7 @@ impl EdgeSupervisor {
                 revision: 1,
                 config: runtime_config,
                 composer,
+                router,
                 tls_server,
                 h3_engine,
             }

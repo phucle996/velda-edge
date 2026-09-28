@@ -7,6 +7,7 @@
 
 pub(crate) mod composer;
 pub(crate) mod h3;
+pub(crate) mod router;
 pub(crate) mod tls;
 mod transport;
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use velda_composer::Composer;
+use velda_router::Router;
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
@@ -74,6 +76,8 @@ pub struct Runtime {
     pub config: RuntimeConfig,
     /// Pre-compiled Composer with typed listener composition entries for O(1) hot-path lookup.
     pub composer: Composer,
+    /// Pre-compiled Router with O(1) L4 and linear L7 route lookup tables.
+    pub router: Router,
     /// Pre-compiled downstream TLS server engine for O(1) hot-path handshake execution.
     pub tls_server: Option<TlsServerEngine>,
     /// Pre-compiled packet-driven HTTP/3 QUIC engine (shared state across multiplexed UDP datagrams).
