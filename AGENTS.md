@@ -13,7 +13,7 @@ Velda Edge is a performance-oriented, polyglot edge platform built around:
 - **In-memory hot paths** (Zero JSON parsing, zero disk I/O, zero RPC calls in request serving)
 - **Autonomous Data Plane** (Operates independently from persisted LKG even if Control Plane is offline)
 - **Unified Polyglot Monorepo**:
-  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (11 bounded crates).
+  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (12 bounded crates).
   - `control-plane/`: Go 1.27 Clean Architecture Control Plane (PostgreSQL / `pgx/v5`).
   - `ui/`: Modern React 19.3 + TypeScript + Vite 8.3 + Tailwind CSS v4 + Shadcn UI Console.
 
@@ -66,6 +66,14 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
   - Client sockets (use `Peer` or `ClientAddr`).
   - HTTP routes / API paths (use `Route`, `Path`, or `Prefix`).
 
+### 2.7 Explicit Ingress Protocol & Pipeline Isolation Invariant (HTTP vs gRPC)
+- **Declared Protocol Over Dynamic Sniffing**: Listeners must declare their application protocol explicitly (`raw` $\to$ `PathKind::L4Direct`, `http` $\to$ HTTP pipeline, `grpc` $\to$ dedicated gRPC pipeline).
+- **Zero Dynamic Sniffing on Hot Path**: The request serving hot path must **never** inspect payloads or sniff HTTP headers (such as `Content-Type: application/grpc`) to dynamically branch between protocols.
+- **Strict Workflow Isolation**:
+  - `http` listeners strictly serve HTTP Web/REST traffic through `HttpRouter` and `handle_http_stream`. They do NOT evaluate gRPC routes or fall back into gRPC semantics.
+  - `grpc` listeners are dedicated RPC ingress pipelines (transported over HTTP/2 binary framing) through `GrpcRouter` and `handle_grpc_stream`. They do NOT evaluate HTTP routes.
+- **HTTP is HTTP, gRPC is gRPC**: Both protocols have distinct semantics, routing algorithms, status codes (`grpc-status` trailers vs HTTP status codes), and upstream forwarding paths. They must remain completely decoupled.
+
 ---
 
 ## 3. Subsystem Invariants & Crate Boundaries
@@ -73,9 +81,12 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 ### 3.1 Rust Data Plane (`crates/`)
 - `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
 - `velda-transport`: Edge Traffic Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff).
-- `velda-composer`: Protocol composition and runtime coordination boundary (bridges `velda-transport` with `velda-tls` and application protocol engines like `velda-http`). Does NOT implement protocols, parsing, or routing.
+- `velda-composer`: Protocol composition and runtime coordination boundary (bridges `velda-transport` with `velda-tls` and application protocol engines `velda-http1`, `velda-http2`, `velda-http3`, and `velda-grpc`). Does NOT implement protocols, parsing, or routing.
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
-- `velda-http`: Owns L7 HTTP protocol lifecycle (HTTP/1.1 keep-alive, HTTP/2 multiplexing, HTTP/3 streams, and request/response codec).
+- `velda-http1`: Owns L7 HTTP/1.1 protocol lifecycle (RFC 9112: text streaming, keep-alive, zero-copy parsing, and downstream connection handling).
+- `velda-http2`: Owns L7 HTTP/2 protocol engine (RFC 9113: binary framing, flow control, multiplexed stream lifecycle, and responder).
+- `velda-http3`: Owns L7 HTTP/3 protocol engine (RFC 9114: QUIC datagrams, frame encoding/decoding, packet-driven state machine).
+- `velda-grpc`: Owns L7 gRPC protocol engine (length-prefixed message framing, canonical status codes, server/client H2 stream lifecycle, and full-duplex bidirectional streaming proxying). Completely decoupled from HTTP crates.
 - `velda-router`: Owns route matching (Path, Host, Method, Headers) and route selection.
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
 - `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).
