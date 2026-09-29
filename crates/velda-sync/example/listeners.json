@@ -2,28 +2,26 @@
   "schema_version": 1,
   "listeners": [
     {
-      "id": "http",
-      "address": "0.0.0.0:80",
-      "transport": {
-        "protocol": "tcp"
-      },
-      "application": {
-        "protocol": "http",
-        "version": "1.1"
-      },
-      "tls": {
-        "enabled": false
-      }
-    },
-    {
-      "id": "https",
+      "id": "web-in",
       "address": "0.0.0.0:443",
       "transport": {
         "protocol": "tcp"
       },
       "application": {
-        "protocol": "http",
-        "version": "1.1"
+        "protocol": "http2"
+      },
+      "tls": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "grpc-in",
+      "address": "0.0.0.0:50051",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "protocol": "grpc"
       },
       "tls": {
         "enabled": true

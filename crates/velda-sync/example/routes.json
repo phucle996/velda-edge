@@ -4,7 +4,7 @@
     {
       "id": "api",
       "kind": "l7",
-      "listener": "https",
+      "listener": "web-in",
       "match": {
         "host": "api.example.com",
         "path_prefix": "/api"
@@ -24,7 +24,7 @@
     {
       "id": "events",
       "kind": "l7",
-      "listener": "https",
+      "listener": "web-in",
       "match": {
         "host": "api.example.com",
         "path": "/events"
@@ -42,7 +42,7 @@
     {
       "id": "grpc-users",
       "kind": "l7",
-      "listener": "https",
+      "listener": "grpc-in",
       "match": {
         "host": "grpc.example.com",
         "path_prefix": "/users."
@@ -60,7 +60,7 @@
     {
       "id": "websocket",
       "kind": "l7",
-      "listener": "https",
+      "listener": "web-in",
       "match": {
         "host": "ws.example.com",
         "path_prefix": "/ws"

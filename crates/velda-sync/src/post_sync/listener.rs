@@ -51,9 +51,9 @@ pub struct ListenerTransportConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerApplicationConfig {
-    pub protocol: String, // "raw", "http"
+    pub protocol: String, // "raw", "http1", "http2", "http3", "grpc"
     #[serde(default)]
-    pub version: Option<String>, // "1.0", "1.1", "2", "3"
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,7 +250,7 @@ fn probe_socket_conflict(addr: std::net::SocketAddr, proto: L4Protocol) -> bool 
 
 /// Validates listener rules strictly without silent fallbacks:
 /// 1. Schema integrity & string trimming.
-/// 2. Protocol validity (explicitly "http", "tcp", or "udp").
+/// 2. Protocol validity (transport: "tcp" or "udp"; application: "raw", "http1", "http2", "http3", or "grpc").
 /// 3. TLS profile configuration completeness.
 /// 4. Internal port collisions among configured listeners (preventing overlapping bindings).
 /// 5. Host OS port conflict detection (verifying port availability against host services).
@@ -331,12 +331,12 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
         };
 
         match listener.application.protocol.as_str() {
-            "raw" | "http" => {}
+            "raw" | "http1" | "http2" | "http3" | "grpc" => {}
             other => {
                 return Err(SyncError::Validation {
                     domain: "listeners".into(),
                     reason: format!(
-                        "Listener '{}' has unsupported application protocol '{other}'; must be 'raw' or 'http'",
+                        "Listener '{}' has unsupported application protocol '{other}'; must be 'raw', 'http1', 'http2', 'http3', or 'grpc'",
                         listener.id
                     ),
                 });
@@ -565,7 +565,7 @@ mod tests {
                 "id": "http",
                 "address": " 0.0.0.0:80 ",
                 "transport": { "protocol": "TCP" },
-                "application": { "protocol": "HTTP", "version": "1.1" },
+                "application": { "protocol": "HTTP1", "version": "1.1" },
                 "tls": { "enabled": false }
             }]
         }"#;
@@ -575,7 +575,7 @@ mod tests {
         validate_listeners(&mut listeners).unwrap();
         assert_eq!(listeners[0].address, "0.0.0.0:80");
         assert_eq!(listeners[0].transport.protocol, "tcp");
-        assert_eq!(listeners[0].application.protocol, "http");
+        assert_eq!(listeners[0].application.protocol, "http1");
         assert_eq!(listeners[0].application.version.as_deref(), Some("1.1"));
     }
 
@@ -585,7 +585,7 @@ mod tests {
             "bad-transport",
             "0.0.0.0:80",
             "unsupported_proto",
-            "http",
+            "http1",
         )];
         assert!(matches!(
             validate_listeners(&mut listeners),
@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn test_duplicate_listener_id_fails() {
         let mut listeners = vec![
-            cfg("http", "0.0.0.0:80", "tcp", "http"),
-            cfg("http", "0.0.0.0:8080", "tcp", "http"),
+            cfg("http", "0.0.0.0:80", "tcp", "http1"),
+            cfg("http", "0.0.0.0:8080", "tcp", "http1"),
         ];
         assert!(matches!(
             validate_listeners(&mut listeners),
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn test_internal_port_conflict_fails() {
         let mut listeners = vec![
-            cfg("http-1", "127.0.0.1:18080", "tcp", "http"),
+            cfg("http-1", "127.0.0.1:18080", "tcp", "http1"),
             cfg("tcp-1", "127.0.0.1:18080", "tcp", "raw"), // both use L4 TCP
         ];
         let err = validate_listeners(&mut listeners).unwrap_err();
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn test_internal_port_wildcard_overlap_fails() {
         let mut listeners = vec![
-            cfg("all", "0.0.0.0:18081", "tcp", "http"),
+            cfg("all", "0.0.0.0:18081", "tcp", "http1"),
             cfg("loopback", "127.0.0.1:18081", "tcp", "raw"),
         ];
         let err = validate_listeners(&mut listeners).unwrap_err();
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn test_listener_binary_roundtrip_and_persistence() {
         let tmp = tempdir().unwrap();
-        let listeners = vec![cfg("http", "0.0.0.0:80", "tcp", "http")];
+        let listeners = vec![cfg("http", "0.0.0.0:80", "tcp", "http1")];
         let binary = compile_listeners_to_binary(&listeners, 5, [0x11u8; 32]).unwrap();
 
         let (header, restored) = unpack_listeners_from_binary(&binary).unwrap();

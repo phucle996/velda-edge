@@ -6,8 +6,7 @@
       "mode": "dns",
       "protocol": {
         "transport": "tcp",
-        "application": "http",
-        "version": "1.1"
+        "application": "http1"
       },
       "target": {
         "host": "users.default.svc.cluster.local",
@@ -55,8 +54,7 @@
       "mode": "endpoints",
       "protocol": {
         "transport": "tcp",
-        "application": "http",
-        "version": "1.1"
+        "application": "http1"
       },
       "endpoints": [
         {
@@ -106,8 +104,7 @@
       "mode": "dns",
       "protocol": {
         "transport": "tcp",
-        "application": "http",
-        "version": "2"
+        "application": "grpc"
       },
       "target": {
         "host": "users-grpc.default.svc.cluster.local",
@@ -145,8 +142,7 @@
       "mode": "endpoints",
       "protocol": {
         "transport": "tcp",
-        "application": "http",
-        "version": "1.1"
+        "application": "http1"
       },
       "endpoints": [
         {

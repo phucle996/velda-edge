@@ -48,9 +48,7 @@ pub struct UpstreamsFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamProtocolConfig {
     pub transport: String,   // "tcp", "udp", "quic"
-    pub application: String, // "raw", "http"
-    #[serde(default)]
-    pub version: Option<String>, // "1.0", "1.1", "2", "3"
+    pub application: String, // "raw", "http1", "http2", "http3", "grpc"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,10 +311,6 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
         upstream.protocol.transport.make_ascii_lowercase();
         upstream.protocol.application.make_ascii_lowercase();
 
-        if let Some(ref mut ver) = upstream.protocol.version {
-            trim_in_place(ver);
-        }
-
         let is_valid_transport =
             matches!(upstream.protocol.transport.as_str(), "tcp" | "udp" | "quic");
         if !is_valid_transport {
@@ -329,69 +323,66 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
             });
         }
 
-        let is_valid_app = matches!(upstream.protocol.application.as_str(), "raw" | "http");
+        let is_valid_app = matches!(
+            upstream.protocol.application.as_str(),
+            "raw" | "http1" | "http2" | "http3" | "grpc"
+        );
         if !is_valid_app {
             return Err(SyncError::Validation {
                 domain: "upstreams".into(),
                 reason: format!(
-                    "Upstream '{}': unsupported protocol application '{}'; must be 'raw' or 'http'",
+                    "Upstream '{}': unsupported protocol application '{}'; must be 'raw', 'http1', 'http2', 'http3', or 'grpc'",
                     upstream.id, upstream.protocol.application
                 ),
             });
         }
 
-        if upstream.protocol.application == "http" {
-            let ver = match &upstream.protocol.version {
-                Some(v) if !v.is_empty() => v.as_str(),
-                _ => {
+        match upstream.protocol.application.as_str() {
+            "http1" | "http2" => {
+                if upstream.protocol.transport != "tcp" {
                     return Err(SyncError::Validation {
                         domain: "upstreams".into(),
                         reason: format!(
-                            "Upstream '{}': HTTP protocol requires explicit 'version' ('1.0', '1.1', '2', or '3')",
-                            upstream.id
+                            "Upstream '{}': '{}' requires 'tcp' transport, found '{}'",
+                            upstream.id, upstream.protocol.application, upstream.protocol.transport
                         ),
                     });
                 }
-            };
-
-            let is_valid_ver = matches!(ver, "1.0" | "1.1" | "2" | "3");
-            if !is_valid_ver {
-                return Err(SyncError::Validation {
-                    domain: "upstreams".into(),
-                    reason: format!(
-                        "Upstream '{}': invalid HTTP version '{}'; must be '1.0', '1.1', '2', or '3'",
-                        upstream.id, ver
-                    ),
-                });
             }
-
-            if ver == "3" && upstream.protocol.transport != "quic" {
-                return Err(SyncError::Validation {
-                    domain: "upstreams".into(),
-                    reason: format!(
-                        "Upstream '{}': HTTP/3 requires 'quic' transport, found '{}'",
-                        upstream.id, upstream.protocol.transport
-                    ),
-                });
+            "http3" => {
+                if upstream.protocol.transport != "quic" && upstream.protocol.transport != "udp" {
+                    return Err(SyncError::Validation {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Upstream '{}': HTTP/3 requires 'quic' or 'udp' transport, found '{}'",
+                            upstream.id, upstream.protocol.transport
+                        ),
+                    });
+                }
             }
-
-            if ver != "3" && upstream.protocol.transport != "tcp" {
-                return Err(SyncError::Validation {
-                    domain: "upstreams".into(),
-                    reason: format!(
-                        "Upstream '{}': HTTP/{} requires 'tcp' transport, found '{}'",
-                        upstream.id, ver, upstream.protocol.transport
-                    ),
-                });
+            "grpc" => {
+                if upstream.protocol.transport != "tcp" && upstream.protocol.transport != "quic" {
+                    return Err(SyncError::Validation {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Upstream '{}': gRPC requires 'tcp' or 'quic' transport, found '{}'",
+                            upstream.id, upstream.protocol.transport
+                        ),
+                    });
+                }
             }
-        } else if upstream.protocol.application == "raw" && upstream.protocol.transport == "quic" {
-            return Err(SyncError::Validation {
-                domain: "upstreams".into(),
-                reason: format!(
-                    "Upstream '{}': raw application does not support 'quic' transport",
-                    upstream.id
-                ),
-            });
+            "raw" => {
+                if upstream.protocol.transport != "tcp" && upstream.protocol.transport != "udp" {
+                    return Err(SyncError::Validation {
+                        domain: "upstreams".into(),
+                        reason: format!(
+                            "Upstream '{}': raw application requires 'tcp' or 'udp' transport, found '{}'",
+                            upstream.id, upstream.protocol.transport
+                        ),
+                    });
+                }
+            }
+            _ => unreachable!(),
         }
 
         // Fail fast: strict timeouts validation (zero silent fallbacks)
@@ -897,8 +888,7 @@ mod tests {
             mode: "endpoints".into(),
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
-                application: "http".into(),
-                version: Some("1.1".into()),
+                application: "http1".into(),
             },
             target: None,
             resolver: None,
@@ -926,7 +916,7 @@ mod tests {
             "upstreams": [{
                 "id": " users ",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http", "version": "1.1" },
+                "protocol": { "transport": "tcp", "application": "http1" },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 2 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 }
@@ -999,7 +989,7 @@ mod tests {
             "upstreams": [{
                 "id": "users",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http", "version": "1.1" },
+                "protocol": { "transport": "tcp", "application": "http1" },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1047,7 +1037,7 @@ mod tests {
             "upstreams": [{
                 "id": "u_hc_no_path",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http", "version": "1.1" },
+                "protocol": { "transport": "tcp", "application": "http1" },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1120,7 +1110,7 @@ mod tests {
             "upstreams": [{
                 "id": "secure_upstream",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http", "version": "1.1" },
+                "protocol": { "transport": "tcp", "application": "http1" },
                 "endpoints": [{ "address": "10.0.0.1:8443", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1150,5 +1140,12 @@ mod tests {
             unpacked[0].tls.as_ref().unwrap().sni,
             vec!["backend.internal.svc".to_string()]
         );
+    }
+
+    #[test]
+    fn test_upstream_generic_http_rejected() {
+        let mut u = mock_upstream_config("bad_http");
+        u.protocol.application = "http".into();
+        assert!(validate_upstreams(&mut [u]).is_err());
     }
 }
