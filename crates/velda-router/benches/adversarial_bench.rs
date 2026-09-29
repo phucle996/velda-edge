@@ -18,7 +18,7 @@ use arc_swap::ArcSwap;
 use common::{CountingAllocator, format_duration};
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
 use velda_router::{
-    GrpcRoute, GrpcRouteRequest, GrpcRouter, HttpRoute, HttpRouteRequest, HttpRouter, L4Route,
+    GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router, L4Route,
     L4Router, Router,
 };
 
@@ -29,14 +29,14 @@ fn build_baseline_router(prefix_count: usize) -> Router {
     let mut http_routes = Vec::with_capacity(prefix_count + 5);
 
     // Exact paths
-    http_routes.push(HttpRoute::new_exact(
+    http_routes.push(Http1Route::new_exact(
         RouteId::new(1),
         "https-in",
         "/healthz",
         UpstreamId::new(10),
         "health-backend",
     ));
-    http_routes.push(HttpRoute::new_exact(
+    http_routes.push(Http1Route::new_exact(
         RouteId::new(2),
         "https-in",
         "/metrics",
@@ -45,21 +45,21 @@ fn build_baseline_router(prefix_count: usize) -> Router {
     ));
 
     // Deep nested prefixes
-    http_routes.push(HttpRoute::new(
+    http_routes.push(Http1Route::new(
         RouteId::new(3),
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
         UpstreamId::new(30),
         "deep-analytics-backend",
     ));
-    http_routes.push(HttpRoute::new(
+    http_routes.push(Http1Route::new(
         RouteId::new(4),
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics",
         UpstreamId::new(40),
         "medium-analytics-backend",
     ));
-    http_routes.push(HttpRoute::new(
+    http_routes.push(Http1Route::new(
         RouteId::new(5),
         "https-in",
         "/api/v1/clusters",
@@ -69,7 +69,7 @@ fn build_baseline_router(prefix_count: usize) -> Router {
 
     // Host-restricted route
     http_routes.push(
-        HttpRoute::new(
+        Http1Route::new(
             RouteId::new(6),
             "https-in",
             "/secure/vault",
@@ -81,7 +81,7 @@ fn build_baseline_router(prefix_count: usize) -> Router {
 
     // Dynamic prefixes
     for i in 10..prefix_count + 10 {
-        http_routes.push(HttpRoute::new(
+        http_routes.push(Http1Route::new(
             RouteId::new(i as u32),
             "https-in",
             format!("/services/tenant_{i:04}/resource"),
@@ -89,7 +89,7 @@ fn build_baseline_router(prefix_count: usize) -> Router {
             format!("tenant-{i}-backend"),
         ));
     }
-    let http_router = HttpRouter::new(http_routes).unwrap();
+    let http_router = Http1Router::new(http_routes).unwrap();
 
     let grpc_routes = vec![
         GrpcRoute::new(
@@ -130,7 +130,13 @@ fn build_baseline_router(prefix_count: usize) -> Router {
     ];
     let l4_router = L4Router::new(l4_routes).unwrap();
 
-    Router::new(l4_router, http_router, grpc_router)
+    Router::new(
+        l4_router,
+        http_router,
+        Default::default(),
+        Default::default(),
+        grpc_router,
+    )
 }
 
 // ============================================================================
@@ -158,8 +164,8 @@ fn bench_404_path_flooding_storm() {
     let start = Instant::now();
     for i in 0..iters {
         let path = malicious_paths[i % malicious_paths.len()];
-        let req = HttpRouteRequest::new(path);
-        let route = router.route_http("https-in", &req);
+        let req = Http1RouteRequest::new(path);
+        let route = router.route_http1("https-in", &req);
         assert!(route.is_none()); // Strict None invariant
         let _ = std::hint::black_box(route);
     }
@@ -212,8 +218,8 @@ fn bench_pathological_prefix_backtracking() {
     let start = Instant::now();
     for i in 0..iters {
         let path = near_misses[i % near_misses.len()];
-        let req = HttpRouteRequest::new(path);
-        let route = router.route_http("https-in", &req);
+        let req = Http1RouteRequest::new(path);
+        let route = router.route_http1("https-in", &req);
         let _ = std::hint::black_box(route);
     }
     let elapsed = start.elapsed();
@@ -266,8 +272,8 @@ fn bench_wildcard_host_spoofing_storm() {
     let start = Instant::now();
     for i in 0..iters {
         let host = spoofed_hosts[i % spoofed_hosts.len()];
-        let req = HttpRouteRequest::new("/secure/vault").with_host(host);
-        let route = router.route_http("https-in", &req);
+        let req = Http1RouteRequest::new("/secure/vault").with_host(host);
+        let route = router.route_http1("https-in", &req);
         let _ = std::hint::black_box(route);
     }
     let elapsed = start.elapsed();
@@ -405,8 +411,8 @@ fn bench_concurrent_traffic_under_hot_reload() {
                 match (i + w) % 4 {
                     0..=2 => {
                         let path = paths[i % 4];
-                        let req = HttpRouteRequest::new(path);
-                        let route = current_table.route_http("https-in", &req);
+                        let req = Http1RouteRequest::new(path);
+                        let route = current_table.route_http1("https-in", &req);
                         let _ = std::hint::black_box(route);
                     }
                     _ => {

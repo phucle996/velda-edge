@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
-use velda_router::{GrpcRoute, HttpRoute, L4Route, Router, RouterBuilder};
+use velda_router::{GrpcRoute, Http1Route, L4Route, Router, RouterBuilder};
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, RoutesFile, compile_routes_to_binary, parse_routes,
     unpack_routes_from_binary, validate_routes,
@@ -159,7 +159,6 @@ pub fn generate_realistic_workload(
                     "tcp".into()
                 },
                 application: "raw".into(),
-                version: None,
             },
             target: None,
             resolver: None,
@@ -199,7 +198,7 @@ pub fn generate_realistic_workload(
                     host: Some(format!("api{}.example.com", i % 50)),
                     path_prefix: Some(format!("/api/v1/service_{i:04}")),
                     path: None,
-                    protocol: Some("http".into()),
+                    protocol: None,
                 },
             ),
             // 4..=6: L7 HTTP Exact (30%)
@@ -209,7 +208,7 @@ pub fn generate_realistic_workload(
                     host: Some("api.example.com".into()),
                     path_prefix: None,
                     path: Some(format!("/endpoints/action_{i:04}/exec")),
-                    protocol: Some("http".into()),
+                    protocol: None,
                 },
             ),
             // 7..=8: L7 gRPC (20%)
@@ -340,7 +339,7 @@ pub fn compile_to_runtime_router(
                 builder = builder.add_grpc_route(grpc_route);
             } else {
                 let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    HttpRoute::new_exact(
+                    Http1Route::new_exact(
                         route_id,
                         &route.listener,
                         exact.clone(),
@@ -348,7 +347,7 @@ pub fn compile_to_runtime_router(
                         &route.upstream,
                     )
                 } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    HttpRoute::new(
+                    Http1Route::new(
                         route_id,
                         &route.listener,
                         prefix.clone(),
@@ -356,7 +355,7 @@ pub fn compile_to_runtime_router(
                         &route.upstream,
                     )
                 } else {
-                    HttpRoute::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
+                    Http1Route::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
                 }
                 .with_plugins(route.plugins.clone());
 
@@ -364,7 +363,7 @@ pub fn compile_to_runtime_router(
                     http_route = http_route.with_host(host.clone());
                 }
 
-                builder = builder.add_http_route(http_route);
+                builder = builder.add_http1_route(http_route);
             }
         }
     }

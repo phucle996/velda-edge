@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use common::{format_duration, load_router_from_large_dataset};
 use velda_core::TransportProtocol;
-use velda_router::{GrpcRouteRequest, HttpRouteRequest, Router};
+use velda_router::{GrpcRouteRequest, Http1RouteRequest, Router};
 
 fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
     println!(
@@ -69,8 +69,8 @@ fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
                             } else {
                                 exact_path
                             };
-                            let req = HttpRouteRequest::new(path).with_host(host);
-                            let route = r.route_http("https-in", &req);
+                            let req = Http1RouteRequest::new(path).with_host(host);
+                            let route = r.route_http1("https-in", &req);
                             let _ = std::hint::black_box(route);
                         }
                         _ => {
@@ -136,11 +136,11 @@ fn bench_pure_http_contention(router: Arc<Router>) {
             handles.push(std::thread::spawn(move || {
                 let service_id = (w * 17) % 2000;
                 let path = format!("/api/v1/service_{service_id:04}/orders/items/42");
-                let req = HttpRouteRequest::new(&path);
+                let req = Http1RouteRequest::new(&path);
 
                 b.wait();
                 for _ in 0..ops_per_worker {
-                    let route = r.route_http("https-in", &req);
+                    let route = r.route_http1("https-in", &req);
                     let _ = std::hint::black_box(route);
                 }
             }));

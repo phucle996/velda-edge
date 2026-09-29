@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use common::{CountingAllocator, format_duration, load_router_from_large_dataset};
 use velda_core::TransportProtocol;
-use velda_router::{GrpcRouteRequest, HttpRouteRequest};
+use velda_router::{GrpcRouteRequest, Http1RouteRequest};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -72,11 +72,11 @@ fn bench_protocol_latencies_on_large_dataset() {
 
     // 3. L7 HTTP Exact Match (/endpoints/action_0005/exec)
     let test_exact_path = "/endpoints/action_0005/exec";
-    let req_exact = HttpRouteRequest::new(test_exact_path).with_host("api.example.com");
+    let req_exact = Http1RouteRequest::new(test_exact_path).with_host("api.example.com");
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_exact);
+        let r = router.route_http1("https-in", &req_exact);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -93,11 +93,11 @@ fn bench_protocol_latencies_on_large_dataset() {
 
     // 4. L7 HTTP Longest Prefix Match (/api/v1/service_1000/orders/items/42)
     let test_prefix_path = "/api/v1/service_1000/orders/items/42";
-    let req_prefix = HttpRouteRequest::new(test_prefix_path);
+    let req_prefix = Http1RouteRequest::new(test_prefix_path);
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_prefix);
+        let r = router.route_http1("https-in", &req_prefix);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -114,11 +114,11 @@ fn bench_protocol_latencies_on_large_dataset() {
 
     // 5. L7 HTTP Miss / No-Match
     let test_miss_path = "/unknown/unmatched/path/404";
-    let req_miss = HttpRouteRequest::new(test_miss_path);
+    let req_miss = Http1RouteRequest::new(test_miss_path);
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_miss);
+        let r = router.route_http1("https-in", &req_miss);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -191,12 +191,12 @@ fn bench_prefix_scaling_large_datasets() {
         let router = load_router_from_large_dataset(n, n / 5);
         let mid_idx = (n / 10) * 2;
         let test_path = format!("/api/v1/service_{mid_idx:04}/action/detail");
-        let req = HttpRouteRequest::new(&test_path);
+        let req = Http1RouteRequest::new(&test_path);
 
         ALLOCATOR.reset();
         let start = Instant::now();
         for _ in 0..iters {
-            let r = router.route_http("https-in", &req);
+            let r = router.route_http1("https-in", &req);
             let _ = std::hint::black_box(r);
         }
         let elapsed = start.elapsed();

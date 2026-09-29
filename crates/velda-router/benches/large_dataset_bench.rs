@@ -17,7 +17,7 @@ use std::time::Instant;
 use common::{CountingAllocator, format_duration};
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
 use velda_router::{
-    GrpcRoute, GrpcRouteRequest, HttpRoute, HttpRouteRequest, L4Route, Router, RouterBuilder,
+    GrpcRoute, GrpcRouteRequest, Http1Route, Http1RouteRequest, L4Route, Router, RouterBuilder,
 };
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, RoutesFile, compile_routes_to_binary, parse_routes,
@@ -70,7 +70,6 @@ fn generate_realistic_workload(
                     "tcp".into()
                 },
                 application: "raw".into(),
-                version: None,
             },
             target: None,
             resolver: None,
@@ -110,7 +109,7 @@ fn generate_realistic_workload(
                     host: Some(format!("api{}.example.com", i % 50)),
                     path_prefix: Some(format!("/api/v1/service_{i:04}")),
                     path: None,
-                    protocol: Some("http".into()),
+                    protocol: None,
                 },
             ),
             // 4..=6: L7 HTTP Exact (30%)
@@ -120,7 +119,7 @@ fn generate_realistic_workload(
                     host: Some("api.example.com".into()),
                     path_prefix: None,
                     path: Some(format!("/endpoints/action_{i:04}/exec")),
-                    protocol: Some("http".into()),
+                    protocol: None,
                 },
             ),
             // 7..=8: L7 gRPC (20%)
@@ -250,7 +249,7 @@ fn compile_to_runtime_router(
                 builder = builder.add_grpc_route(grpc_route);
             } else {
                 let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    HttpRoute::new_exact(
+                    Http1Route::new_exact(
                         route_id,
                         &route.listener,
                         exact.clone(),
@@ -258,7 +257,7 @@ fn compile_to_runtime_router(
                         &route.upstream,
                     )
                 } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    HttpRoute::new(
+                    Http1Route::new(
                         route_id,
                         &route.listener,
                         prefix.clone(),
@@ -266,7 +265,7 @@ fn compile_to_runtime_router(
                         &route.upstream,
                     )
                 } else {
-                    HttpRoute::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
+                    Http1Route::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
                 }
                 .with_plugins(route.plugins.clone());
 
@@ -274,7 +273,7 @@ fn compile_to_runtime_router(
                     http_route = http_route.with_host(host.clone());
                 }
 
-                builder = builder.add_http_route(http_route);
+                builder = builder.add_http1_route(http_route);
             }
         }
     }
@@ -380,12 +379,12 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     // A. HTTP Prefix Match (Sample middle route)
     let mid_prefix_idx = (n_routes / 10) * 2; // matches an HTTP prefix route
     let test_prefix_path = format!("/api/v1/service_{mid_prefix_idx:04}/orders/items/42");
-    let req_prefix = HttpRouteRequest::new(&test_prefix_path);
+    let req_prefix = Http1RouteRequest::new(&test_prefix_path);
 
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_prefix);
+        let r = router.route_http1("https-in", &req_prefix);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -403,12 +402,12 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     // B. HTTP Exact Match
     let mid_exact_idx = 5; // matches an exact route (5 % 10 = 5)
     let test_exact_path = format!("/endpoints/action_{mid_exact_idx:04}/exec");
-    let req_exact = HttpRouteRequest::new(&test_exact_path).with_host("api.example.com");
+    let req_exact = Http1RouteRequest::new(&test_exact_path).with_host("api.example.com");
 
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_exact);
+        let r = router.route_http1("https-in", &req_exact);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -425,12 +424,12 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
 
     // C. HTTP Miss (Strict None, No Fallback)
     let test_miss_path = "/unknown/nonexistent/endpoint/404";
-    let req_miss = HttpRouteRequest::new(test_miss_path);
+    let req_miss = Http1RouteRequest::new(test_miss_path);
 
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http("https-in", &req_miss);
+        let r = router.route_http1("https-in", &req_miss);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -506,13 +505,13 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
             for i in 0..ops_per_worker {
                 match (i + w) % 4 {
                     0 => {
-                        let req = HttpRouteRequest::new(&p_path);
-                        let route = r.route_http("https-in", &req);
+                        let req = Http1RouteRequest::new(&p_path);
+                        let route = r.route_http1("https-in", &req);
                         let _ = std::hint::black_box(route);
                     }
                     1 => {
-                        let req = HttpRouteRequest::new(&e_path).with_host("api.example.com");
-                        let route = r.route_http("https-in", &req);
+                        let req = Http1RouteRequest::new(&e_path).with_host("api.example.com");
+                        let route = r.route_http1("https-in", &req);
                         let _ = std::hint::black_box(route);
                     }
                     2 => {

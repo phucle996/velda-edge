@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use common::{CountingAllocator, format_bytes, format_duration, load_router_from_large_dataset};
 use velda_core::TransportProtocol;
-use velda_router::{GrpcRouteRequest, HttpRouteRequest, Router};
+use velda_router::{GrpcRouteRequest, Http1RouteRequest, Router};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -57,8 +57,8 @@ fn bench_steady_state_request_serving_zero_alloc(router: &Router) {
                 }
             }
             2 => {
-                let req = HttpRouteRequest::new(paths[i % paths.len()]).with_host(host);
-                let r = router.route_http("https-in", &req);
+                let req = Http1RouteRequest::new(paths[i % paths.len()]).with_host(host);
+                let r = router.route_http1("https-in", &req);
                 let _ = std::hint::black_box(r);
             }
             3 => {
@@ -202,13 +202,13 @@ fn bench_concurrent_traffic_storm_under_hot_reload() {
         let b = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             let path = "/api/v1/service_0100/orders/items/42";
-            let req = HttpRouteRequest::new(path);
+            let req = Http1RouteRequest::new(path);
 
             b.wait();
             for i in 0..ops_per_worker {
                 let current = r.load();
                 if (i + w) % 2 == 0 {
-                    let route = current.route_http("https-in", &req);
+                    let route = current.route_http1("https-in", &req);
                     let _ = std::hint::black_box(route);
                 } else {
                     let route = current.route_l4("l4-in-0", TransportProtocol::Tcp);
@@ -284,7 +284,7 @@ fn bench_adversarial_uri_parsing_zero_leak() {
         let parsed_grpc = GrpcRouteRequest::from_path(uri, None);
         let _ = std::hint::black_box(parsed_grpc);
 
-        let req_http = HttpRouteRequest::new(uri);
+        let req_http = Http1RouteRequest::new(uri);
         let _ = std::hint::black_box(req_http);
     }
 
