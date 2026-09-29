@@ -150,6 +150,11 @@ impl BackendLease {
     pub fn into_inner(mut self) -> Option<Box<dyn BackendConnection>> {
         self.connection.take()
     }
+
+    /// Consumes this lease and returns the underlying raw [`tokio::net::TcpStream`] if available.
+    pub fn into_tcp_stream(mut self) -> Option<tokio::net::TcpStream> {
+        self.connection.take().and_then(|c| c.into_tcp_stream())
+    }
 }
 
 impl Drop for BackendLease {

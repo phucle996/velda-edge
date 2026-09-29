@@ -13,6 +13,20 @@ use crate::error::{Result, UpstreamError};
 pub trait BackendConnection: PoolableResource + Send + Sync + fmt::Debug + 'static {
     /// Remote socket address of this connection.
     fn peer(&self) -> SocketAddr;
+
+    /// Downcasts reference to `Any` for concrete backend connection extraction.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Downcasts mutable reference to `Any`.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Downcasts boxed connection to `Box<dyn Any>`.
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+
+    /// Consumes the boxed connection and returns the underlying raw [`TcpStream`] if available.
+    fn into_tcp_stream(self: Box<Self>) -> Option<TcpStream> {
+        None
+    }
 }
 
 /// Generic factory capability for establishing new backend connections on pool miss.
@@ -98,6 +112,22 @@ impl BackendConnection for RealTcpConnection {
     fn peer(&self) -> SocketAddr {
         self.peer
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+
+    fn into_tcp_stream(mut self: Box<Self>) -> Option<TcpStream> {
+        self.stream.take()
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -158,6 +188,18 @@ pub mod mock {
     impl BackendConnection for MockConnection {
         fn peer(&self) -> SocketAddr {
             self.peer
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+            self
         }
     }
 
