@@ -96,6 +96,11 @@ impl TlsClientEngine {
             .contains_key(&sni.trim().to_ascii_lowercase())
     }
 
+    /// Returns the compiled TLS connector and client config for a target SNI, if present.
+    pub fn get_connector(&self, sni: &str) -> Option<&(Arc<ClientConfig>, TlsConnector)> {
+        self.connectors.get(&sni.trim().to_ascii_lowercase())
+    }
+
     /// Returns the number of configured upstream SNI endpoints.
     pub fn len(&self) -> usize {
         self.connectors.len()
