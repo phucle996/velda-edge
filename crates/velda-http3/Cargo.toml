@@ -1,16 +1,14 @@
 [package]
-name = "velda-http"
+name = "velda-http3"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
-tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt"] }
+tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt", "net"] }
 bytes = "1.10"
 http = "1.2"
-httparse = "1.10"
-h2 = "0.4"
 thiserror = "2.0"
 tracing = "0.1"
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls"] }

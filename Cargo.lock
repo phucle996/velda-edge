@@ -1868,6 +1868,7 @@ name = "velda-edge"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "bytes",
  "h2",
  "http",
  "rcgen",
@@ -1880,7 +1881,10 @@ dependencies = [
  "tracing-subscriber",
  "velda-composer",
  "velda-core",
- "velda-http",
+ "velda-grpc",
+ "velda-http1",
+ "velda-http2",
+ "velda-http3",
  "velda-router",
  "velda-sync",
  "velda-tls",
@@ -1889,13 +1893,50 @@ dependencies = [
 ]
 
 [[package]]
-name = "velda-http"
+name = "velda-grpc"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "h2",
  "http",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
+name = "velda-http1"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
  "httparse",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
+name = "velda-http2"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "h2",
+ "http",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
+name = "velda-http3"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
  "quinn-proto",
  "rcgen",
  "rustls",

@@ -1,7 +1,8 @@
 //! HTTP/3 (RFC 9114) frame parsing and variable-length integer decoding.
 
-use crate::error::HttpError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+
+use crate::error::Http3Error;
 
 /// HTTP/3 Frame Types defined in RFC 9114.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +102,7 @@ pub fn encode_varint(val: u64, dst: &mut BytesMut) {
 }
 
 /// Decodes the next HTTP/3 frame from the buffer.
-pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, HttpError> {
+pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error> {
     if buf.is_empty() {
         return Ok(None);
     }
