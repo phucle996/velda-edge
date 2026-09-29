@@ -17,9 +17,8 @@ use crate::config::{
 use crate::error::EdgeError;
 use crate::pipeline::{dispatch_l4, dispatch_tcp_l7, dispatch_udp_l4, dispatch_udp_l7};
 use crate::runtime::composer::build_composer;
-use crate::runtime::h3::compile_h3_engine;
 use crate::runtime::router::build_router;
-use crate::runtime::tls::compile_tls_server;
+use crate::runtime::tls::{compile_tls_client, compile_tls_server};
 use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
 use crate::uds::run_ipc_server;
 
@@ -47,9 +46,22 @@ impl EdgeSupervisor {
             let upstreams = load_upstreams(&runtime_dir)?;
             let tls = load_tls(&runtime_dir)?;
             let tls_server = compile_tls_server(&tls)?;
-            let h3_engine = compile_h3_engine(tls_server.as_ref());
+            let tls_client = compile_tls_client(&upstreams)?;
             let composer = build_composer(&listeners)?;
-            let router = build_router(&routes, &upstreams)?;
+            let router = build_router(&routes, &upstreams, &listeners)?;
+            let upstreams_table = crate::runtime::build_upstreams(&upstreams);
+
+            // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
+            if let Some(tls) = tls_server.as_ref() {
+                for listener in &listeners {
+                    if listener.transport.protocol.eq_ignore_ascii_case("udp")
+                        && (listener.application.protocol.eq_ignore_ascii_case("http3")
+                            || listener.application.protocol.eq_ignore_ascii_case("grpc"))
+                    {
+                        let _ = crate::pipeline::l7::http3::init_h3_engine(&listener.id, tls);
+                    }
+                }
+            }
 
             let runtime_config = RuntimeConfig {
                 listeners,
@@ -59,13 +71,18 @@ impl EdgeSupervisor {
                 tls,
             };
 
+            let pipelines =
+                crate::runtime::pipeline::PipelineTable::build(&runtime_config.listeners)?;
+
             Runtime {
                 revision: 1,
                 config: runtime_config,
                 composer,
                 router,
+                pipelines,
+                upstreams: upstreams_table,
                 tls_server,
-                h3_engine,
+                tls_client,
             }
         } else {
             tracing::info!(

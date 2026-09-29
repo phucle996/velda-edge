@@ -94,16 +94,44 @@ pub async fn dispatch_l4(conn: Connection, runtime: &SharedRuntime) {
         return;
     };
 
-    let Some(target_addr) = route.select_target() else {
-        tracing::error!(
-            listener = %listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            peer = %peer,
-            "No backend endpoints available for L4 upstream; dropping connection"
-        );
-        return;
-    };
+    // 1. Acquire backend connection from Upstream L4 TCP (Zero-TLS, pure raw TCP)
+    let (target_addr, backend_stream) =
+        if let Some(upstream) = rt.upstreams.tcp.get(&route.upstream_name) {
+            match upstream.acquire().await {
+                Ok(lease) => {
+                    let target = lease.endpoint();
+                    if let Some(stream) = lease.into_tcp_stream() {
+                        (target, stream)
+                    } else {
+                        tracing::error!(
+                            upstream = %route.upstream_name,
+                            "L4 TCP upstream lease did not contain raw TcpStream"
+                        );
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        listener = %listener_id,
+                        route = %route.id,
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        error = %e,
+                        "Failed to acquire L4 TCP upstream connection; dropping connection"
+                    );
+                    return;
+                }
+            }
+        } else {
+            tracing::error!(
+                listener = %listener_id,
+                route = %route.id,
+                upstream = %route.upstream_name,
+                peer = %peer,
+                "No backend upstream available in TCP upstream table; dropping connection"
+            );
+            return;
+        };
 
     tracing::debug!(
         listener = %listener_id,
@@ -111,30 +139,28 @@ pub async fn dispatch_l4(conn: Connection, runtime: &SharedRuntime) {
         upstream = %route.upstream_name,
         target = %target_addr,
         peer = %peer,
-        "Proxying L4 TCP stream to upstream backend"
+        "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
     );
 
-    tokio::spawn(async move {
-        match velda_transport::tcp::forward::connect_and_forward(conn, target_addr).await {
-            Ok(stats) => {
-                tracing::debug!(
-                    target = %target_addr,
-                    peer = %peer,
-                    client_to_server = stats.client_to_server_bytes,
-                    server_to_client = stats.server_to_client_bytes,
-                    "L4 TCP stream forwarding completed"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    target = %target_addr,
-                    peer = %peer,
-                    "L4 TCP stream forwarding terminated with error"
-                );
-            }
+    match velda_transport::forward_connection(conn, backend_stream).await {
+        Ok(stats) => {
+            tracing::debug!(
+                target = %target_addr,
+                peer = %peer,
+                client_to_server = stats.client_to_server_bytes,
+                server_to_client = stats.server_to_client_bytes,
+                "L4 TCP stream forwarding completed"
+            );
         }
-    });
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                target = %target_addr,
+                peer = %peer,
+                "L4 TCP stream forwarding terminated with error"
+            );
+        }
+    }
 }
 
 /// Dispatches raw UDP L4 datagrams with support for both:
@@ -156,7 +182,13 @@ pub async fn dispatch_udp_l4(
         return;
     };
 
-    let Some(target_addr) = route.select_target() else {
+    let target_addr = if let Some(up) = rt.upstreams.udp.get(&route.upstream_name) {
+        up.select_target().or_else(|| route.select_target())
+    } else {
+        route.select_target()
+    };
+
+    let Some(target_addr) = target_addr else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,

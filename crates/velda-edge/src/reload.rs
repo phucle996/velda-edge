@@ -85,22 +85,56 @@ pub async fn apply_reload(
         current.composer.clone()
     };
 
-    // Recompile Router if routes or upstreams changed
-    let router = if routes_changed || upstreams_changed {
-        build_router(&config.routes, &config.upstreams)?
+    // Recompile Router if routes, upstreams, or listeners changed
+    let router = if routes_changed || upstreams_changed || listeners_changed {
+        build_router(&config.routes, &config.upstreams, &config.listeners)?
     } else {
         current.router.clone()
     };
 
-    let h3_engine = crate::runtime::h3::compile_h3_engine(tls_server.as_ref());
+    // Recompile PipelineTable if listeners changed
+    let pipelines = if listeners_changed {
+        crate::runtime::pipeline::PipelineTable::build(&config.listeners)?
+    } else {
+        current.pipelines.clone()
+    };
+
+    // Recompile UpstreamTable if upstreams changed
+    let upstreams = if upstreams_changed {
+        crate::runtime::build_upstreams(&config.upstreams)
+    } else {
+        current.upstreams.clone()
+    };
+
+    // Recompile TlsClientEngine if upstreams changed
+    let tls_client = if upstreams_changed {
+        crate::runtime::tls::compile_tls_client(&config.upstreams)?
+    } else {
+        current.tls_client.clone()
+    };
+
+    // If listeners or TLS changed, ensure HTTP/3 pipeline engines are registered for any new listeners
+    // (existing engines and their active QUIC connections are preserved without disruption!)
+    if let Some(tls) = tls_server.as_ref() {
+        for listener in &config.listeners {
+            if listener.transport.protocol.eq_ignore_ascii_case("udp")
+                && (listener.application.protocol.eq_ignore_ascii_case("http3")
+                    || listener.application.protocol.eq_ignore_ascii_case("grpc"))
+            {
+                let _ = crate::pipeline::l7::http3::init_h3_engine(&listener.id, tls);
+            }
+        }
+    }
 
     let candidate = Runtime {
         revision: new_revision,
         config,
         composer,
         router,
+        pipelines,
+        upstreams,
         tls_server,
-        h3_engine,
+        tls_client,
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings
@@ -155,8 +189,8 @@ mod tests {
                 protocol: "tcp".into(),
             },
             application: ListenerApplicationConfig {
-                protocol: "http".into(),
-                version: Some("1.1".into()),
+                protocol: "http1".into(),
+                version: None,
             },
             tls: Default::default(),
         }];

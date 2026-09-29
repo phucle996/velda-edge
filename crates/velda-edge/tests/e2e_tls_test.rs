@@ -3,6 +3,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -11,7 +12,14 @@ use velda_sync::post_sync::listener::{
     ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     compile_listeners_to_binary,
 };
+use velda_sync::post_sync::route::{
+    RouteConfig, RouteMatch, RouteTimeouts, compile_routes_to_binary,
+};
 use velda_sync::post_sync::tls::{TlsConfig, compile_tls_to_binary};
+use velda_sync::post_sync::upstream::{
+    EndpointConfig, LoadBalancerConfig, UpstreamConfig, UpstreamProtocolConfig, UpstreamTimeouts,
+    compile_upstreams_to_binary,
+};
 use velda_tls::{ClientTlsConfig, TlsClientEngine};
 
 #[tokio::test]
@@ -21,6 +29,21 @@ async fn test_end_to_end_tls_downstream_termination() {
     let runtime_dir = storage_dir.join("runtime");
     let socket_path = tmp.path().join("edge_tls_e2e.sock");
     fs::create_dir_all(&runtime_dir).unwrap();
+
+    // 0. Start a mock cleartext HTTP backend server
+    let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = backend_listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 28\r\n\r\n{\"gateway\":\"velda-edge-tls\"}";
+                let _ = sock.write_all(resp).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
 
     // 1. Generate self-signed certificate for "localhost"
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -41,7 +64,7 @@ async fn test_end_to_end_tls_downstream_termination() {
             protocol: "tcp".into(),
         },
         application: ListenerApplicationConfig {
-            protocol: "http".into(),
+            protocol: "http1".into(),
             version: Some("1.1".into()),
         },
         tls: ListenerTlsConfig { enabled: true },
@@ -60,6 +83,51 @@ async fn test_end_to_end_tls_downstream_termination() {
     }];
     let tls_bin = compile_tls_to_binary(&tls, 1, [0x22u8; 32]).unwrap();
     fs::write(runtime_dir.join("tls.bin"), tls_bin).unwrap();
+
+    // Upstream definition pointing to mock backend
+    let upstreams = vec![UpstreamConfig {
+        id: "tls-backend".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http1".into(),
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0x33u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    // Route definition for /api/status
+    let routes = vec![RouteConfig {
+        id: "tls-route-1".into(),
+        kind: "l7".into(),
+        listener: "https-in".into(),
+        match_rule: RouteMatch {
+            protocol: None,
+            path: Some("/api/status".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "tls-backend".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0x44u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
 
     // 4. Cold-start bootstrap supervisor
     let config = EdgeConfig::new(&storage_dir, &socket_path);
@@ -106,7 +174,6 @@ async fn test_end_to_end_tls_downstream_termination() {
     );
 
     // Send HTTP/1.1 request over secure TLS tunnel
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tls_client_stream
         .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
@@ -116,7 +183,7 @@ async fn test_end_to_end_tls_downstream_termination() {
     let n = tls_client_stream.read(&mut resp).await.unwrap();
     let resp_str = String::from_utf8(resp[..n].to_vec()).unwrap();
     assert!(resp_str.contains("HTTP/1.1 200 OK"));
-    assert!(resp_str.contains("velda-edge"));
+    assert!(resp_str.contains("velda-edge-tls"));
 
     // 7. Graceful shutdown
     shutdown_tx.send(true).unwrap();
@@ -136,6 +203,36 @@ async fn test_end_to_end_tls_h2_downstream() {
     let socket_path = tmp.path().join("edge_h2_e2e.sock");
     fs::create_dir_all(&runtime_dir).unwrap();
 
+    // 0. Start a mock cleartext HTTP/2 backend server (h2c)
+    let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = backend_listener.accept().await {
+            tokio::spawn(async move {
+                let mut h2_conn = match h2::server::handshake(sock).await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                while let Some(result) = h2_conn.accept().await {
+                    let (_, mut respond) = match result {
+                        Ok(pair) => pair,
+                        Err(_) => break,
+                    };
+                    let body = b"{\"gateway\":\"velda-edge\",\"proto\":\"h2\"}";
+                    let resp = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(())
+                        .unwrap();
+                    let mut send_stream = respond.send_response(resp, false).unwrap();
+                    send_stream
+                        .send_data(bytes::Bytes::from_static(body), true)
+                        .unwrap();
+                }
+            });
+        }
+    });
+
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_pem = cert.cert.pem();
     let key_pem = cert.signing_key.serialize_pem();
@@ -152,7 +249,7 @@ async fn test_end_to_end_tls_h2_downstream() {
             protocol: "tcp".into(),
         },
         application: ListenerApplicationConfig {
-            protocol: "http".into(),
+            protocol: "http2".into(),
             version: None,
         },
         tls: ListenerTlsConfig { enabled: true },
@@ -170,6 +267,51 @@ async fn test_end_to_end_tls_h2_downstream() {
     }];
     let tls_bin = compile_tls_to_binary(&tls, 1, [0x22u8; 32]).unwrap();
     fs::write(runtime_dir.join("tls.bin"), tls_bin).unwrap();
+
+    // Upstream definition pointing to mock backend
+    let upstreams = vec![UpstreamConfig {
+        id: "h2-backend".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http2".into(),
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0x33u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    // Route definition for /api/status
+    let routes = vec![RouteConfig {
+        id: "h2-route-1".into(),
+        kind: "l7".into(),
+        listener: "https-h2-in".into(),
+        match_rule: RouteMatch {
+            protocol: None,
+            path: Some("/api/status".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "h2-backend".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0x44u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
 
     let config = EdgeConfig::new(&storage_dir, &socket_path);
     let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
@@ -214,13 +356,13 @@ async fn test_end_to_end_tls_h2_downstream() {
 
     let (response_fut, _) = client.send_request(req, true).unwrap();
     let response = response_fut.await.unwrap();
-    assert_eq!(response.status(), http::StatusCode::OK);
-
+    let status = response.status();
     let mut body = response.into_body();
     let chunk = body.data().await.unwrap().unwrap();
     let body_str = String::from_utf8(chunk.to_vec()).unwrap();
+    assert_eq!(status, http::StatusCode::OK);
     assert!(body_str.contains("velda-edge"));
-    assert!(body_str.contains("h2"));
+    assert!(body_str.contains("proto"));
 
     shutdown_tx.send(true).unwrap();
     let run_res = edge_task.await.unwrap();

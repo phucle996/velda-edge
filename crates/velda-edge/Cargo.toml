@@ -16,7 +16,10 @@ velda-core = { path = "../velda-core" }
 velda-transport = { path = "../velda-transport" }
 velda-composer = { path = "../velda-composer" }
 velda-tls = { path = "../velda-tls" }
-velda-http = { path = "../velda-http" }
+velda-http1 = { path = "../velda-http1" }
+velda-http2 = { path = "../velda-http2" }
+velda-http3 = { path = "../velda-http3" }
+velda-grpc = { path = "../velda-grpc" }
 velda-router = { path = "../velda-router" }
 velda-upstream = { path = "../velda-upstream" }
 velda-sync = { path = "../velda-sync" }
@@ -28,9 +31,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
 arc-swap = "1.7"
 http = "1.2"
+bytes = "1.10"
+h2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
 rcgen = "0.14.10"
-h2 = "0.4"
 

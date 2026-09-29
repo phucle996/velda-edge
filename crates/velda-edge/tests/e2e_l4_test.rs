@@ -70,7 +70,6 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "raw".into(),
-            version: None,
         },
         target: None,
         resolver: None,
@@ -203,7 +202,6 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
-            version: None,
         },
         target: None,
         resolver: None,
@@ -330,7 +328,6 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
-            version: None,
         },
         target: None,
         resolver: None,

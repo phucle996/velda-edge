@@ -3,7 +3,8 @@
 use std::net::SocketAddr;
 
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
-use velda_router::{GrpcRoute, HttpRoute, L4Route, Router, RouterBuilder};
+use velda_router::{GrpcRoute, Http1Route, Http2Route, Http3Route, L4Route, Router, RouterBuilder};
+use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::route::RouteConfig;
 use velda_sync::post_sync::upstream::UpstreamConfig;
 
@@ -18,14 +19,42 @@ fn hash_id_to_u32(s: &str) -> u32 {
     h
 }
 
-/// Compiles a list of declarative [`RouteConfig`] and [`UpstreamConfig`] declarations into a [`Router`] instance.
+fn resolve_target_endpoints(upstream_id: &str, upstreams: &[UpstreamConfig]) -> Vec<SocketAddr> {
+    let mut target_endpoints = Vec::new();
+    if let Some(up) = upstreams.iter().find(|u| u.id == upstream_id) {
+        for ep in &up.endpoints {
+            if let Ok(addr) = ep.address.parse::<SocketAddr>() {
+                target_endpoints.push(addr);
+            } else {
+                tracing::warn!(
+                    upstream = %up.id,
+                    endpoint = %ep.address,
+                    "Unable to parse endpoint address as SocketAddr"
+                );
+            }
+        }
+
+        if target_endpoints.is_empty()
+            && let Some(ref target) = up.target
+            && let Ok(ip) = target.host.parse::<std::net::IpAddr>()
+        {
+            target_endpoints.push(SocketAddr::new(ip, target.port));
+        }
+    }
+    target_endpoints
+}
+
+/// Compiles declarative route, upstream, and listener configurations into a [`Router`] instance.
 pub(crate) fn build_router(
     routes: &[RouteConfig],
     upstreams: &[UpstreamConfig],
+    listeners: &[ListenerConfig],
 ) -> Result<Router, EdgeError> {
     let mut builder = RouterBuilder::new();
 
     for route in routes {
+        let target_endpoints = resolve_target_endpoints(&route.upstream, upstreams);
+
         if route.kind.eq_ignore_ascii_case("l4") {
             let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("tcp");
 
@@ -44,29 +73,6 @@ pub(crate) fn build_router(
 
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
-
-            let mut target_endpoints = Vec::new();
-            if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
-                for ep in &up.endpoints {
-                    if let Ok(addr) = ep.address.parse::<SocketAddr>() {
-                        target_endpoints.push(addr);
-                    } else {
-                        tracing::warn!(
-                            route = %route.id,
-                            upstream = %up.id,
-                            endpoint = %ep.address,
-                            "Unable to parse endpoint address as SocketAddr in L4 route"
-                        );
-                    }
-                }
-
-                if target_endpoints.is_empty()
-                    && let Some(ref target) = up.target
-                    && let Ok(ip) = target.host.parse::<std::net::IpAddr>()
-                {
-                    target_endpoints.push(SocketAddr::new(ip, target.port));
-                }
-            }
 
             let udp_idle_timeout = if protocol == TransportProtocol::Udp {
                 if route.timeouts.downstream_idle_ms == Some(0)
@@ -100,58 +106,174 @@ pub(crate) fn build_router(
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
 
-            let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("http");
-
-            if protocol_str.eq_ignore_ascii_case("grpc") {
-                let service = route
-                    .match_rule
-                    .path
-                    .as_deref()
-                    .or(route.match_rule.path_prefix.as_deref())
-                    .unwrap_or("*");
-
-                let mut grpc_route = GrpcRoute::new(
-                    route_id,
-                    &route.listener,
-                    service,
-                    upstream_id,
-                    &route.upstream,
-                )
-                .with_plugins(route.plugins.clone());
-
-                if let Some(ref auth) = route.match_rule.host {
-                    grpc_route = grpc_route.with_authority(auth.clone());
+            let protocol_str = match route.match_rule.protocol.as_deref() {
+                Some("grpc") => "grpc",
+                Some("http1") | Some("http/1.1") => "http1",
+                Some("http2") | Some("h2") => "http2",
+                Some("http3") | Some("h3") => "http3",
+                Some("http") | None => {
+                    let listener = listeners
+                        .iter()
+                        .find(|l| l.id == route.listener)
+                        .ok_or_else(|| EdgeError::InvalidConfig {
+                            detail: format!(
+                                "route '{}': refers to unknown listener '{}'",
+                                route.id, route.listener
+                            ),
+                        })?;
+                    match listener.application.protocol.to_ascii_lowercase().as_str() {
+                        "http1" => "http1",
+                        "http2" => "http2",
+                        "http3" => "http3",
+                        "grpc" => "grpc",
+                        other => {
+                            return Err(EdgeError::InvalidConfig {
+                                detail: format!(
+                                    "route '{}': listener '{}' has non-L7 protocol '{}'",
+                                    route.id, route.listener, other
+                                ),
+                            });
+                        }
+                    }
                 }
+                Some(other) => {
+                    return Err(EdgeError::InvalidConfig {
+                        detail: format!("route '{}': unsupported protocol '{}'", route.id, other),
+                    });
+                }
+            };
 
-                builder = builder.add_grpc_route(grpc_route);
-            } else {
-                let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    HttpRoute::new_exact(
+            match protocol_str {
+                "grpc" => {
+                    let service = route
+                        .match_rule
+                        .path
+                        .as_deref()
+                        .or(route.match_rule.path_prefix.as_deref())
+                        .unwrap_or("*");
+
+                    let mut grpc_route = GrpcRoute::new(
                         route_id,
                         &route.listener,
-                        exact.clone(),
+                        service,
                         upstream_id,
                         &route.upstream,
                     )
-                } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    HttpRoute::new(
-                        route_id,
-                        &route.listener,
-                        prefix.clone(),
-                        upstream_id,
-                        &route.upstream,
-                    )
-                } else {
-                    // Host-only route without path restriction matches any path under that host
-                    HttpRoute::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
-                }
-                .with_plugins(route.plugins.clone());
+                    .with_target_endpoints(target_endpoints)
+                    .with_plugins(route.plugins.clone());
 
-                if let Some(ref host) = route.match_rule.host {
-                    http_route = http_route.with_host(host.clone());
-                }
+                    if let Some(ref auth) = route.match_rule.host {
+                        grpc_route = grpc_route.with_authority(auth.clone());
+                    }
 
-                builder = builder.add_http_route(http_route);
+                    builder = builder.add_grpc_route(grpc_route);
+                }
+                "http1" => {
+                    let mut http1_route = if let Some(ref exact) = route.match_rule.path {
+                        Http1Route::new_exact(
+                            route_id,
+                            &route.listener,
+                            exact.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else if let Some(ref prefix) = route.match_rule.path_prefix {
+                        Http1Route::new(
+                            route_id,
+                            &route.listener,
+                            prefix.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else {
+                        Http1Route::new(
+                            route_id,
+                            &route.listener,
+                            "/",
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    }
+                    .with_target_endpoints(target_endpoints)
+                    .with_plugins(route.plugins.clone());
+
+                    if let Some(ref host) = route.match_rule.host {
+                        http1_route = http1_route.with_host(host.clone());
+                    }
+
+                    builder = builder.add_http1_route(http1_route);
+                }
+                "http2" => {
+                    let mut http2_route = if let Some(ref exact) = route.match_rule.path {
+                        Http2Route::new_exact(
+                            route_id,
+                            &route.listener,
+                            exact.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else if let Some(ref prefix) = route.match_rule.path_prefix {
+                        Http2Route::new(
+                            route_id,
+                            &route.listener,
+                            prefix.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else {
+                        Http2Route::new(
+                            route_id,
+                            &route.listener,
+                            "/",
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    }
+                    .with_target_endpoints(target_endpoints)
+                    .with_plugins(route.plugins.clone());
+
+                    if let Some(ref host) = route.match_rule.host {
+                        http2_route = http2_route.with_host(host.clone());
+                    }
+
+                    builder = builder.add_http2_route(http2_route);
+                }
+                "http3" => {
+                    let mut http3_route = if let Some(ref exact) = route.match_rule.path {
+                        Http3Route::new_exact(
+                            route_id,
+                            &route.listener,
+                            exact.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else if let Some(ref prefix) = route.match_rule.path_prefix {
+                        Http3Route::new(
+                            route_id,
+                            &route.listener,
+                            prefix.clone(),
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    } else {
+                        Http3Route::new(
+                            route_id,
+                            &route.listener,
+                            "/",
+                            upstream_id,
+                            &route.upstream,
+                        )
+                    }
+                    .with_target_endpoints(target_endpoints)
+                    .with_plugins(route.plugins.clone());
+
+                    if let Some(ref host) = route.match_rule.host {
+                        http3_route = http3_route.with_host(host.clone());
+                    }
+
+                    builder = builder.add_http3_route(http3_route);
+                }
+                _ => unreachable!(),
             }
         }
     }
@@ -164,6 +286,9 @@ pub(crate) fn build_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_sync::post_sync::listener::{
+        ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+    };
     use velda_sync::post_sync::route::{RouteMatch, RouteTimeouts};
     use velda_sync::post_sync::upstream::{
         EndpointConfig, LoadBalancerConfig, UpstreamProtocolConfig, UpstreamTimeouts,
@@ -171,6 +296,45 @@ mod tests {
 
     #[test]
     fn test_build_router_from_routes() {
+        let listeners = vec![
+            ListenerConfig {
+                id: "postgres-in".into(),
+                address: "127.0.0.1:5432".into(),
+                transport: ListenerTransportConfig {
+                    protocol: "tcp".into(),
+                },
+                application: ListenerApplicationConfig {
+                    protocol: "raw".into(),
+                    version: None,
+                },
+                tls: ListenerTlsConfig { enabled: false },
+            },
+            ListenerConfig {
+                id: "dns-in".into(),
+                address: "127.0.0.1:53".into(),
+                transport: ListenerTransportConfig {
+                    protocol: "udp".into(),
+                },
+                application: ListenerApplicationConfig {
+                    protocol: "raw".into(),
+                    version: None,
+                },
+                tls: ListenerTlsConfig { enabled: false },
+            },
+            ListenerConfig {
+                id: "http-in".into(),
+                address: "127.0.0.1:80".into(),
+                transport: ListenerTransportConfig {
+                    protocol: "tcp".into(),
+                },
+                application: ListenerApplicationConfig {
+                    protocol: "http1".into(),
+                    version: Some("1.1".into()),
+                },
+                tls: ListenerTlsConfig { enabled: false },
+            },
+        ];
+
         let routes = vec![
             RouteConfig {
                 id: "postgres-route".into(),
@@ -196,7 +360,6 @@ mod tests {
                 upstream: "dns-backend".into(),
                 plugins: vec![],
             },
-            // L7 route should be skipped in L4 router builder for now
             RouteConfig {
                 id: "http-route".into(),
                 kind: "l7".into(),
@@ -218,7 +381,6 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "tcp".into(),
                     application: "raw".into(),
-                    version: None,
                 },
                 target: None,
                 resolver: None,
@@ -243,7 +405,6 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "udp".into(),
                     application: "raw".into(),
-                    version: None,
                 },
                 target: None,
                 resolver: None,
@@ -264,7 +425,7 @@ mod tests {
             },
         ];
 
-        let router = build_router(&routes, &upstreams).unwrap();
+        let router = build_router(&routes, &upstreams, &listeners).unwrap();
         let tcp = router
             .route_l4("postgres-in", TransportProtocol::Tcp)
             .unwrap();
@@ -286,10 +447,14 @@ mod tests {
             "127.0.0.1:53".parse::<SocketAddr>().unwrap()
         );
 
-        // Verify L7 HTTP route compilation
-        let http_req = velda_router::HttpRouteRequest::new("/api/v1/users");
-        let http_matched = router.route_http("http-in", &http_req).unwrap();
+        // Verify L7 HTTP/1.1 route compilation
+        let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");
+        let http_matched = router.route_http1("http-in", &http_req).unwrap();
         assert_eq!(http_matched.upstream_name, "http-backend");
+
+        // Verify protocol isolation: HTTP/1 route is NOT in HTTP/2 router
+        let h2_req = velda_router::Http2RouteRequest::new("/api/v1/users");
+        assert!(router.route_http2("http-in", &h2_req).is_none());
 
         assert!(router.route_l4("unknown", TransportProtocol::Tcp).is_none());
     }

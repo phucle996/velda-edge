@@ -29,6 +29,9 @@ pub enum EdgeError {
 
     #[error("Configuration reload failed: {0}")]
     Reload(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 impl From<velda_sync::SyncError> for EdgeError {

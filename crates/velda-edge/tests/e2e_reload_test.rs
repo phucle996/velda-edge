@@ -28,8 +28,8 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             protocol: "tcp".into(),
         },
         application: ListenerApplicationConfig {
-            protocol: "http".into(),
-            version: Some("1.1".into()),
+            protocol: "http1".into(),
+            version: None,
         },
         tls: Default::default(),
     }];
@@ -71,8 +71,8 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
                 protocol: "tcp".into(),
             },
             application: ListenerApplicationConfig {
-                protocol: "http".into(),
-                version: Some("1.1".into()),
+                protocol: "http1".into(),
+                version: None,
             },
             tls: Default::default(),
         },

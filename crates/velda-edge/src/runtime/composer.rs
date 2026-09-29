@@ -25,7 +25,7 @@ pub(crate) fn build_composer(listeners: &[ListenerConfig]) -> Result<Composer, E
         let protocol = ApplicationProtocol::from_str_proto(&listener.application.protocol)
             .ok_or_else(|| EdgeError::InvalidConfig {
                 detail: format!(
-                    "listener '{}': unsupported application protocol '{}'",
+                    "listener '{}': unsupported application protocol '{}'; must be 'http1', 'http2', 'http3', or 'grpc'",
                     listener.id, listener.application.protocol
                 ),
             })?;
@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn test_build_composer_from_listeners() {
         let listeners = vec![
-            // HTTP cleartext → should produce composition
+            // HTTP/1.1 cleartext → should produce composition
             ListenerConfig {
                 id: "http".into(),
                 address: "0.0.0.0:80".into(),
@@ -58,12 +58,12 @@ mod tests {
                     protocol: "tcp".into(),
                 },
                 application: ListenerApplicationConfig {
-                    protocol: "http".into(),
-                    version: Some("1.1".into()),
+                    protocol: "http1".into(),
+                    version: None,
                 },
                 tls: ListenerTlsConfig::default(),
             },
-            // HTTPS with TLS → should produce composition
+            // HTTP/2 with TLS → should produce composition
             ListenerConfig {
                 id: "https".into(),
                 address: "0.0.0.0:443".into(),
@@ -71,8 +71,8 @@ mod tests {
                     protocol: "tcp".into(),
                 },
                 application: ListenerApplicationConfig {
-                    protocol: "http".into(),
-                    version: Some("2".into()),
+                    protocol: "http2".into(),
+                    version: None,
                 },
                 tls: ListenerTlsConfig { enabled: true },
             },
@@ -93,14 +93,14 @@ mod tests {
 
         let composer = build_composer(&listeners).unwrap();
 
-        // HTTP cleartext listener registered
+        // HTTP/1.1 cleartext listener registered
         let http = composer.get_listener("http").unwrap();
-        assert_eq!(http.protocol, ApplicationProtocol::Http);
+        assert_eq!(http.protocol, ApplicationProtocol::Http1);
         assert!(!http.tls_enabled);
 
-        // HTTPS TLS listener registered
+        // HTTP/2 TLS listener registered
         let https = composer.get_listener("https").unwrap();
-        assert_eq!(https.protocol, ApplicationProtocol::Http);
+        assert_eq!(https.protocol, ApplicationProtocol::Http2);
         assert!(https.tls_enabled);
 
         // Raw TCP listener NOT registered (L4 direct)
