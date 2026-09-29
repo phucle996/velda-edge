@@ -98,20 +98,28 @@ impl ComposerContext {
         }
     }
 
-    /// Enriches the context with TLS metadata after successful handshake,
-    /// and resolves generic HTTP into a concrete application protocol (HTTP/2 or HTTP/1.1)
-    /// based on the negotiated ALPN token.
+    /// Enriches the context with TLS metadata after successful handshake.
+    ///
+    /// ALPN is treated as a **validation signal**, not a protocol decision.
+    /// The listener declares its protocol at bootstrap; ALPN only verifies
+    /// that the client supports the declared protocol. Protocol is **never mutated**.
     pub fn with_tls_metadata(mut self, metadata: TlsMetadata) -> Self {
         if let Some(ref alpn) = metadata.alpn {
-            if alpn.eq_ignore_ascii_case("h2") {
-                self.protocol = ApplicationProtocol::Http2;
-            } else if alpn.eq_ignore_ascii_case("http/1.1") || alpn.eq_ignore_ascii_case("http/1.0")
-            {
-                self.protocol = ApplicationProtocol::Http1;
+            let expected = match self.protocol {
+                ApplicationProtocol::Http1 => "http/1.1",
+                ApplicationProtocol::Http2 | ApplicationProtocol::Grpc => "h2",
+                ApplicationProtocol::Http3 => "",
+            };
+            if !expected.is_empty() && !alpn.eq_ignore_ascii_case(expected) {
+                tracing::warn!(
+                    listener = %self.listener_id,
+                    declared = %self.protocol,
+                    alpn = %alpn,
+                    "ALPN mismatch: client negotiated '{}' but listener declares '{}'",
+                    alpn,
+                    self.protocol,
+                );
             }
-        } else if self.protocol == ApplicationProtocol::Http {
-            // Default fallback when client does not send ALPN: HTTP/1.1
-            self.protocol = ApplicationProtocol::Http1;
         }
 
         self.tls = Some(metadata);
@@ -135,53 +143,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_with_tls_metadata_resolves_h2() {
+    fn test_with_tls_metadata_alpn_match_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
-            "https",
+            "https-h2",
             addr,
             addr,
-            ApplicationProtocol::Http,
+            ApplicationProtocol::Http2,
         );
         let metadata = TlsMetadata::new(Some("example.com".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);
 
+        // Protocol stays Http2 — ALPN confirms but does not change it
         assert_eq!(enriched.protocol, ApplicationProtocol::Http2);
         assert_eq!(enriched.tls.unwrap().alpn.as_deref(), Some("h2"));
     }
 
     #[test]
-    fn test_with_tls_metadata_resolves_http1() {
+    fn test_with_tls_metadata_alpn_mismatch_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
-            "https",
+            "https-h1",
             addr,
             addr,
-            ApplicationProtocol::Http,
+            ApplicationProtocol::Http1,
         );
-        let metadata = TlsMetadata::new(Some("example.com".into()), Some("http/1.1".into()));
+        // Client sends h2 ALPN but listener is Http1 — protocol must NOT be mutated
+        let metadata = TlsMetadata::new(Some("example.com".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);
 
         assert_eq!(enriched.protocol, ApplicationProtocol::Http1);
-        assert_eq!(enriched.tls.unwrap().alpn.as_deref(), Some("http/1.1"));
+        assert_eq!(enriched.tls.unwrap().alpn.as_deref(), Some("h2"));
     }
 
     #[test]
-    fn test_with_tls_metadata_fallback_without_alpn() {
+    fn test_with_tls_metadata_no_alpn_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
-            "https",
+            "https-h2",
             addr,
             addr,
-            ApplicationProtocol::Http,
+            ApplicationProtocol::Http2,
         );
         let metadata = TlsMetadata::new(Some("example.com".into()), None);
         let enriched = ctx.with_tls_metadata(metadata);
 
-        assert_eq!(enriched.protocol, ApplicationProtocol::Http1);
+        // No ALPN — protocol stays Http2 as declared
+        assert_eq!(enriched.protocol, ApplicationProtocol::Http2);
         assert!(enriched.tls.unwrap().alpn.is_none());
     }
 }

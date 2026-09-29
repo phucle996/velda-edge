@@ -3,27 +3,29 @@
 use std::fmt;
 
 /// Application layer protocol target configured for an ingress listener.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+///
+/// Every listener must declare its protocol explicitly. There is no generic
+/// "http" variant — use `Http1`, `Http2`, `Http3`, or `Grpc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApplicationProtocol {
-    /// Generic HTTP (can negotiate HTTP/1.1 or HTTP/2 via ALPN or cleartext upgrade).
-    #[default]
-    Http,
-    /// Explicit cleartext or secure HTTP/1.1.
+    /// Explicit HTTP/1.1 (cleartext or over TLS).
     Http1,
     /// Explicit HTTP/2 (H2C or H2 over TLS).
     Http2,
     /// HTTP/3 over QUIC (UDP transport).
     Http3,
+    /// Dedicated gRPC pipeline (transported over HTTP/2 framing).
+    Grpc,
 }
 
 impl ApplicationProtocol {
     /// Parses an application protocol string into a typed protocol variant.
     pub fn from_str_proto(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "http" => Some(Self::Http),
-            "http1" | "http/1.1" | "http/1.0" => Some(Self::Http1),
-            "http2" | "h2" | "h2c" => Some(Self::Http2),
-            "http3" | "h3" | "quic" => Some(Self::Http3),
+            "http1" => Some(Self::Http1),
+            "http2" => Some(Self::Http2),
+            "http3" => Some(Self::Http3),
+            "grpc" => Some(Self::Grpc),
             _ => None,
         }
     }
@@ -31,10 +33,10 @@ impl ApplicationProtocol {
     /// Returns the canonical protocol name.
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Http => "http",
             Self::Http1 => "http1",
             Self::Http2 => "http2",
             Self::Http3 => "http3",
+            Self::Grpc => "grpc",
         }
     }
 }

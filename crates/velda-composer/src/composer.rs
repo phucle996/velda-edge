@@ -206,18 +206,10 @@ impl Composer {
     ) -> Result<ComposedStream, ComposerError> {
         let listener_id = handoff.listener_id();
 
-        // 1. Resolve composition from compiled configuration if present, or derive default HTTP cleartext
-        let (configured_proto, tls_enabled) = match self.listeners.get(listener_id) {
+        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/1.1 cleartext
+        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
             Some(cfg) => (cfg.protocol, cfg.tls_enabled),
-            None => (ApplicationProtocol::Http, false),
-        };
-
-        // For cleartext TCP, generic HTTP has no ALPN negotiation and resolves directly to concrete HTTP/1.1.
-        // For TLS streams, generic HTTP will be resolved into HTTP/2 or HTTP/1.1 upon handshake completion via ALPN.
-        let initial_proto = if !tls_enabled && configured_proto == ApplicationProtocol::Http {
-            ApplicationProtocol::Http1
-        } else {
-            configured_proto
+            None => (ApplicationProtocol::Http1, false),
         };
 
         // 2. Initialize connection context
@@ -226,7 +218,7 @@ impl Composer {
             listener_id,
             handoff.peer(),
             handoff.local_addr(),
-            initial_proto,
+            protocol,
         );
 
         let connection = handoff.into_connection();
@@ -255,7 +247,7 @@ impl Composer {
     ) -> Result<ComposedDatagram, ComposerError> {
         let listener_id = handoff.listener_id();
 
-        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3
+        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3 + TLS
         let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
             Some(cfg) => (cfg.protocol, cfg.tls_enabled),
             None => (ApplicationProtocol::Http3, true),
@@ -331,7 +323,7 @@ mod tests {
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
             "https-secure",
-            ApplicationProtocol::Http,
+            ApplicationProtocol::Http2,
             true,
         ));
 
@@ -341,9 +333,9 @@ mod tests {
         match composed {
             ComposedStream::TlsRequired { context, .. } => {
                 assert_eq!(context.listener_id, "https-secure");
-                assert_eq!(context.protocol, ApplicationProtocol::Http);
+                assert_eq!(context.protocol, ApplicationProtocol::Http2);
 
-                // After TLS handshake, enriched context resolves to concrete HTTP/2
+                // After TLS handshake, ALPN validates but does NOT mutate protocol
                 let enriched = context.with_tls_metadata(TlsMetadata::new(
                     Some("api.example.com".into()),
                     Some("h2".into()),
@@ -390,14 +382,14 @@ mod tests {
         let mut composer = Composer::new();
         composer.register_listener(CompiledListenerComposition::new(
             "udp-custom",
-            ApplicationProtocol::Http,
+            ApplicationProtocol::Http3,
             false,
         ));
 
         let composed = composer.compose_udp_handoff(handoff).unwrap();
 
         assert!(!composed.is_tls_required());
-        assert_eq!(composed.protocol(), ApplicationProtocol::Http);
+        assert_eq!(composed.protocol(), ApplicationProtocol::Http3);
 
         let (dgram, _sock) = composed.into_parts();
         assert_eq!(dgram.data(), b"custom-udp");
