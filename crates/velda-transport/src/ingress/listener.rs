@@ -256,12 +256,12 @@ mod tests {
 
     #[test]
     fn test_ingress_binding_from_user_json_schema() {
-        // Matches listeners.json "http": application "http" -> L7Handoff
+        // Matches listeners.json "http": application "http1" -> L7Handoff
         let http_binding = IngressBinding::from_protocols(
             "http",
             "0.0.0.0:80".parse().unwrap(),
             "tcp",
-            "http",
+            "http1",
             false,
         )
         .unwrap();
@@ -270,12 +270,12 @@ mod tests {
         assert!(http_binding.is_tcp());
         assert!(!http_binding.is_udp());
 
-        // Matches listeners.json "https": application "http", tls true -> L7Handoff
+        // Matches listeners.json "https": application "http2", tls true -> L7Handoff
         let https_binding = IngressBinding::from_protocols(
             "https",
             "0.0.0.0:443".parse().unwrap(),
             "tcp",
-            "http",
+            "http2",
             true,
         )
         .unwrap();
@@ -309,12 +309,12 @@ mod tests {
         assert!(udp_binding.is_udp());
         assert!(!udp_binding.is_tcp());
 
-        // UDP HTTP/3 binding: application "http" -> L7Handoff
+        // UDP HTTP/3 binding: application "http3" -> L7Handoff
         let h3_binding = IngressBinding::from_protocols(
             "h3-ingress",
             "0.0.0.0:8443".parse().unwrap(),
             "udp",
-            "http",
+            "http3",
             true,
         )
         .unwrap();

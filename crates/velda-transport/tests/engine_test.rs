@@ -13,13 +13,13 @@ async fn test_traffic_engine_configured_from_listeners_json_schema() {
 
     // 1. Mirror listeners.json "http" listener:
     let http_binding =
-        IngressBinding::from_protocols("http", dummy_ephemeral, "tcp", "http", false).unwrap();
+        IngressBinding::from_protocols("http", dummy_ephemeral, "tcp", "http1", false).unwrap();
     let http_listener = IngressListener::bind(http_binding).unwrap();
     let http_addr = http_listener.local_addr();
 
     // 2. Mirror listeners.json "https" listener:
     let https_binding =
-        IngressBinding::from_protocols("https", dummy_ephemeral, "tcp", "http", true).unwrap();
+        IngressBinding::from_protocols("https", dummy_ephemeral, "tcp", "http2", true).unwrap();
     let https_listener = IngressListener::bind(https_binding).unwrap();
     let https_addr = https_listener.local_addr();
 
@@ -131,13 +131,13 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
     // 2 HTTP listeners on different ports
     engine
         .add_binding(
-            IngressBinding::from_protocols("http-public", dummy_ephemeral, "tcp", "http", false)
+            IngressBinding::from_protocols("http-public", dummy_ephemeral, "tcp", "http1", false)
                 .unwrap(),
         )
         .unwrap();
     engine
         .add_binding(
-            IngressBinding::from_protocols("http-internal", dummy_ephemeral, "tcp", "http", false)
+            IngressBinding::from_protocols("http-internal", dummy_ephemeral, "tcp", "http1", false)
                 .unwrap(),
         )
         .unwrap();
@@ -327,8 +327,8 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
     };
 
     let tcp_bind = IngressBinding::from_protocols("tcp", free_tcp, "tcp", "raw", false).unwrap();
-    let h1_bind = IngressBinding::from_protocols("h1", free_h1, "tcp", "http", false).unwrap();
-    let h2_bind = IngressBinding::from_protocols("h2", free_h2, "tcp", "http", false).unwrap();
+    let h1_bind = IngressBinding::from_protocols("h1", free_h1, "tcp", "http1", false).unwrap();
+    let h2_bind = IngressBinding::from_protocols("h2", free_h2, "tcp", "http2", false).unwrap();
     let udp_bind = IngressBinding::from_protocols("udp", free_udp, "udp", "raw", false).unwrap();
     let h3_bind = IngressBinding::from_protocols("h3", free_h3, "udp", "http3", true).unwrap();
 
