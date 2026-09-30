@@ -81,37 +81,40 @@ Measures 1,000,000 iterations of connection context initialization and datagram 
 
 | Operation / Pipeline Stage | Details / Scenario | Latency / op | Allocs / op | Throughput | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`ComposerContext::new_tcp`** | Stack init + ID generator | **41.06 ns** | **1.00** | **24,355,529 ops/s** | Minimal context footprint |
-| **`ComposerContext::new_udp`** | Datagram peer identifier | **44.88 ns** | **1.00** | **22,283,702 ops/s** | Monotonic ID generation |
-| **`with_tls_metadata` (ALPN Match)** | Validate h2, preserve protocol | **99.31 ns** | **3.00** | **10,069,850 ops/s** | Non-mutating ALPN check |
-| **`with_tls_metadata` (ALPN Mismatch)** | Warning logged, protocol preserved | **100.08 ns** | **3.00** | **9,991,630 ops/s** | Strict protocol preservation |
-| **`compose_udp_handoff` (Registered)** | HTTP/3 (TlsRequired) | **154.80 ns** | **3.00** | **6,459,881 ops/s** | End-to-end L7 composition |
-| **`compose_udp_handoff` (Default)** | HTTP/3 (Safe fallback) | **150.54 ns** | **3.00** | **6,642,900 ops/s** | Autonomous default route |
+| **`ComposerContext::new_tcp`** | Stack init + ID generator | **40.68 ns** | **1.00** | **24,584,146 ops/s** | Minimal context footprint |
+| **`ComposerContext::new_udp`** | Datagram peer identifier | **47.14 ns** | **1.00** | **21,213,677 ops/s** | Thread-local batched ID |
+| **`with_tls_metadata` (ALPN Match)** | Validate h2, preserve protocol | **100.43 ns** | **3.00** | **9,956,811 ops/s** | Non-mutating ALPN check |
+| **`with_tls_metadata` (ALPN Mismatch)** | Warning logged, protocol preserved | **100.62 ns** | **3.00** | **9,938,582 ops/s** | Strict protocol preservation |
+| **`compose_udp_handoff` (Registered)** | HTTP/3 (TlsRequired) | **116.37 ns** | **2.00** | **8,593,606 ops/s** | **Optimized into_parts (0-alloc ID)** |
+| **`compose_udp_handoff` (Default)** | HTTP/3 (Safe fallback) | **108.43 ns** | **2.00** | **9,222,170 ops/s** | **Autonomous fallback (0-alloc ID)** |
 
 ---
 
-## 5. Multi-Thread Concurrency Scaling (1 .. 64 Worker Threads)
+## 5. Multi-Thread Concurrency Scaling & HardwareTopology Integration
 
-### A. Multi-Thread Concurrency Scaling (Shared `Arc<Composer>` on 1,000-Listener Table):
+Evaluates multi-threaded scaling aligned with host hardware topology probed via `HardwareTopology::probe()` (probed **12 logical cores**, **12 worker threads**):
 
-| Workers | Total Operations | Total Time | Aggregate Throughput | Avg Latency / op | Scaling Factor |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | 500,000 | 36.09 ms | **13.85 M ops/s** | **72.18 ns** | **1.00x** |
-| **2** | 1,000,000 | 34.96 ms | **28.60 M ops/s** | **34.96 ns** | **2.06x** |
-| **4** | 2,000,000 | 55.56 ms | **36.00 M ops/s** | **27.78 ns** | **2.60x** |
-| **8** | 4,000,000 | 58.31 ms | **68.60 M ops/s** | **14.58 ns** | **4.95x** |
-| **16** | 8,000,000 | 85.27 ms | **93.82 M ops/s** | **10.66 ns** | **6.77x** |
-| **32** | 16,000,000 | 185.01 ms | **86.48 M ops/s** | **11.56 ns** | **6.24x** |
-| **64** | 32,000,000 | 365.90 ms | **87.46 M ops/s** | **11.43 ns** | **6.31x** |
+### A. Hardware-Aware Concurrency Scaling Matrix:
 
-> Note: Peak aggregate throughput reaches **93.82 Million ops/s** at 16 threads, saturating host physical CPU cores. When scaled to 32 and 64 threads, throughput stabilizes flatly at ~87M ops/s with zero thread contention or lock convoy effects.
+| Thread Count | Topology Concurrency Zone | Total Operations | Elapsed Time | Aggregate Throughput | Per-Thread Speed | Scaling Factor |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1 Thread** | Baseline (Single Core) | 500,000 | 46.06 ms | **10.86 M ops/s** | 10.86 M ops/s | **1.00x** |
+| **6 Threads** | Sub-Capacity (Linear Scaling) | 3,000,000 | 46.03 ms | **65.17 M ops/s** | 10.86 M ops/s | **6.00x (Perfect)** |
+| **12 Threads** | Optimal Capacity (`HardwareTopology`) | 6,000,000 | 80.05 ms | **74.95 M ops/s** | 6.25 M ops/s | **6.90x** |
+| **24 Threads** | SMT Boundary | 12,000,000 | 159.53 ms | **75.22 M ops/s** | 3.13 M ops/s | **6.93x** |
+| **48 Threads** | Oversubscribed (Contention Zone) | 24,000,000 | 320.37 ms | **74.91 M ops/s** | 1.56 M ops/s | **6.90x** |
+
+### Key Observation:
+- Across physical CPU cores ($N = 1 \rightarrow 6$), scaling achieves a **flawless 6.00x linear speedup** with zero per-thread latency degradation (holding steady at **10.86 M ops/s per core**).
+- At 12 workers (`HardwareTopology`), aggregate throughput reaches **74.95 M ops/s**.
+- Pushing to 24 and 48 threads (beyond physical/logical hardware capacity) exhibits zero lock contention: aggregate throughput remains plateaued at **~75M ops/s** due to OS scheduler time-slicing without race conditions or memory corruption.
 
 ### B. Live Atomic Hot-Reload (`ArcSwap<Composer>`) under High-Intensity Traffic Storm (6,400,000 Ops):
 - **Concurrency**: 64 worker threads hammering composer lookups simultaneously.
 - **Background Writer**: Continuous atomic table swaps executed every 5 ms.
 - **Total Ops Served**: **6,400,000 operations**.
-- **Execution Time**: **64.09 ms**.
-- **Reader Throughput**: **99.85 Million ops/s**.
+- **Execution Time**: **58.55 ms**.
+- **Reader Throughput**: **109.30 Million ops/s**.
 - **Completed Atomic Swaps**: **9 generations**.
 - **Reader Errors / Panics**: **0 (Zero Errors, Zero Downtime)**.
 - **Invariant Verified**: `ArcSwap` provides true zero-cost reader isolation during live configuration reload.

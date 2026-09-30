@@ -200,28 +200,27 @@ impl Composer {
     ///
     /// Validates protocol consistency against the configured listener,
     /// sets up the `ComposerContext`, and decides whether TLS termination is required.
+    /// Composes an incoming TCP L7 handoff from `velda-transport`.
+    ///
+    /// Validates protocol consistency against the configured listener,
+    /// sets up the `ComposerContext`, and decides whether TLS termination is required.
     pub fn compose_tcp_handoff(
         &self,
         handoff: TcpL7Handoff,
     ) -> Result<ComposedStream, ComposerError> {
-        let listener_id = handoff.listener_id();
-
         // 1. Resolve composition from compiled configuration if present, or derive default HTTP/1.1 cleartext
-        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
+        let (protocol, tls_enabled) = match self.listeners.get(handoff.listener_id()) {
             Some(cfg) => (cfg.protocol, cfg.tls_enabled),
             None => (ApplicationProtocol::Http1, false),
         };
 
-        // 2. Initialize connection context
-        let context = ComposerContext::new_tcp(
-            handoff.id(),
-            listener_id,
-            handoff.peer(),
-            handoff.local_addr(),
-            protocol,
-        );
+        // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
+        let conn_id = handoff.id();
+        let peer = handoff.peer();
+        let local_addr = handoff.local_addr();
+        let (connection, listener_id) = handoff.into_parts();
 
-        let connection = handoff.into_connection();
+        let context = ComposerContext::new_tcp(conn_id, listener_id, peer, local_addr, protocol);
 
         // 3. Decide composition outcome
         if tls_enabled {
@@ -245,20 +244,18 @@ impl Composer {
         &self,
         handoff: UdpL7Handoff,
     ) -> Result<ComposedDatagram, ComposerError> {
-        let listener_id = handoff.listener_id();
-
         // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3 + TLS
-        let (protocol, tls_enabled) = match self.listeners.get(listener_id) {
+        let (protocol, tls_enabled) = match self.listeners.get(handoff.listener_id()) {
             Some(cfg) => (cfg.protocol, cfg.tls_enabled),
             None => (ApplicationProtocol::Http3, true),
         };
 
-        // 2. Initialize connection context (UDP uses peer address as connection identifier)
-        let context =
-            ComposerContext::new_udp(listener_id, handoff.peer(), handoff.local_addr(), protocol);
+        // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
+        let peer = handoff.peer();
+        let local_addr = handoff.local_addr();
+        let (datagram, socket, listener_id) = handoff.into_parts();
 
-        let socket = handoff.socket().clone();
-        let datagram = handoff.into_datagram();
+        let context = ComposerContext::new_udp(listener_id, peer, local_addr, protocol);
 
         // 3. Decide composition outcome
         if tls_enabled {

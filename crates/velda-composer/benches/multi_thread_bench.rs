@@ -21,17 +21,53 @@ use velda_core::ConnectionId;
 // ============================================================================
 
 fn bench_multi_thread_scaling() {
+    let topo = velda_core::global_hardware_topology();
+    let cores = topo.available_cores();
+    let workers = topo.worker_threads();
+
     println!("### 1. Multi-Thread Concurrency Scaling (Shared Arc<Composer>)\n");
     println!(
-        "| Thread Count | Total Operations | Elapsed Time | Aggregate Throughput | Per-Thread Speed |"
+        "> Probed Hardware Topology: **{} Cores**, **{} Workers** (HardwareTopology)\n",
+        cores, workers
     );
-    println!("| :--- | :--- | :--- | :--- | :--- |");
+    println!(
+        "| Thread Count | Topology Concurrency Zone | Total Operations | Elapsed Time | Aggregate Throughput | Per-Thread Speed |"
+    );
+    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
-    let thread_counts = [1, 2, 4, 8, 16, 32, 64];
+    // Matrix dynamically configured around HardwareTopology:
+    // 1 (baseline single core), workers / 2, workers (optimal), workers * 2 (SMT), workers * 4 (oversubscribed)
+    let mut thread_counts = vec![1];
+    if workers > 2 && !thread_counts.contains(&(workers / 2)) {
+        thread_counts.push(workers / 2);
+    }
+    if !thread_counts.contains(&workers) {
+        thread_counts.push(workers);
+    }
+    if !thread_counts.contains(&(workers * 2)) {
+        thread_counts.push(workers * 2);
+    }
+    if !thread_counts.contains(&(workers * 4)) {
+        thread_counts.push(workers * 4);
+    }
+    thread_counts.sort_unstable();
+
     let ops_per_thread = 500_000;
     let composer = Arc::new(build_test_composer(1_000));
 
     for &num_threads in &thread_counts {
+        let zone = if num_threads == 1 {
+            "Baseline (Single Core)"
+        } else if num_threads < workers {
+            "Sub-Capacity (Linear Scaling)"
+        } else if num_threads == workers {
+            "Optimal Capacity (HardwareTopology)"
+        } else if num_threads <= workers * 2 {
+            "SMT Boundary"
+        } else {
+            "Oversubscribed (Contention Zone)"
+        };
+
         let barrier = Arc::new(std::sync::Barrier::new(num_threads + 1));
         let mut handles = Vec::with_capacity(num_threads);
 
@@ -43,6 +79,8 @@ fn bench_multi_thread_scaling() {
                 let peer = "127.0.0.1:10000".parse().unwrap();
                 let local = "127.0.0.1:443".parse().unwrap();
                 let target_id = format!("listener_http2_{:04}", (thread_idx * 13) % 1000);
+                let metadata =
+                    TlsMetadata::new(Some("secure.example.com".into()), Some("h2".into()));
 
                 bar.wait();
                 let start = Instant::now();
@@ -60,9 +98,7 @@ fn bench_multi_thread_scaling() {
                         local,
                         proto,
                     );
-                    let metadata =
-                        TlsMetadata::new(Some("secure.example.com".into()), Some("h2".into()));
-                    let enriched = ctx.with_tls_metadata(metadata);
+                    let enriched = ctx.with_tls_metadata(metadata.clone());
                     let _ = std::hint::black_box(enriched);
                 }
 
@@ -82,8 +118,9 @@ fn bench_multi_thread_scaling() {
         let per_thread_ops_sec = aggregate_ops_sec / num_threads as u64;
 
         println!(
-            "| **{:2} Threads** | {:>10} ops | {:>10} | **{:.2} M ops/s** | {:.2} M ops/s |",
+            "| **{:2} Threads** | {:<32} | {:>10} ops | {:>10} | **{:.2} M ops/s** | {:.2} M ops/s |",
             num_threads,
+            zone,
             total_ops,
             format_duration(total_elapsed),
             aggregate_ops_sec as f64 / 1_000_000.0,
