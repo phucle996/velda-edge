@@ -208,15 +208,11 @@ impl Composer {
         &self,
         handoff: TcpL7Handoff,
     ) -> Result<ComposedStream, ComposerError> {
-        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/1.1 cleartext
-        let (protocol, tls_enabled, limits) = match self.listeners.get(handoff.listener_id()) {
-            Some(cfg) => (cfg.protocol, cfg.tls_enabled, cfg.limits),
-            None => (
-                ApplicationProtocol::Http1,
-                false,
-                velda_core::IngressLimits::default(),
-            ),
-        };
+        // 1. Resolve composition from compiled configuration
+        let cfg = self.listeners.get(handoff.listener_id()).ok_or_else(|| {
+            ComposerError::MissingConfiguration(handoff.listener_id().to_string())
+        })?;
+        let (protocol, tls_enabled, limits) = (cfg.protocol, cfg.tls_enabled, cfg.limits);
 
         // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
         let conn_id = handoff.id();
@@ -224,8 +220,8 @@ impl Composer {
         let local_addr = handoff.local_addr();
         let (connection, listener_id) = handoff.into_parts();
 
-        let context = ComposerContext::new_tcp(conn_id, listener_id, peer, local_addr, protocol)
-            .with_limits(limits);
+        let context =
+            ComposerContext::new_tcp(conn_id, listener_id, peer, local_addr, protocol, limits);
 
         // 3. Decide composition outcome
         if tls_enabled {
@@ -249,23 +245,18 @@ impl Composer {
         &self,
         handoff: UdpL7Handoff,
     ) -> Result<ComposedDatagram, ComposerError> {
-        // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3 + TLS
-        let (protocol, tls_enabled, limits) = match self.listeners.get(handoff.listener_id()) {
-            Some(cfg) => (cfg.protocol, cfg.tls_enabled, cfg.limits),
-            None => (
-                ApplicationProtocol::Http3,
-                true,
-                velda_core::IngressLimits::default(),
-            ),
-        };
+        // 1. Resolve composition from compiled configuration
+        let cfg = self.listeners.get(handoff.listener_id()).ok_or_else(|| {
+            ComposerError::MissingConfiguration(handoff.listener_id().to_string())
+        })?;
+        let (protocol, tls_enabled, limits) = (cfg.protocol, cfg.tls_enabled, cfg.limits);
 
         // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
         let peer = handoff.peer();
         let local_addr = handoff.local_addr();
         let (datagram, socket, listener_id) = handoff.into_parts();
 
-        let context =
-            ComposerContext::new_udp(listener_id, peer, local_addr, protocol).with_limits(limits);
+        let context = ComposerContext::new_udp(listener_id, peer, local_addr, protocol, limits);
 
         // 3. Decide composition outcome
         if tls_enabled {
@@ -310,7 +301,13 @@ mod tests {
         let (conn, _addr) = create_dummy_connection().await;
         let handoff = TcpL7Handoff::new(conn, "http-public");
 
-        let composer = Composer::new();
+        let mut composer = Composer::new();
+        composer.register_listener(CompiledListenerComposition::new(
+            "http-public",
+            ApplicationProtocol::Http1,
+            false,
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        ));
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
 
         assert!(!composed.is_tls_required());
@@ -332,7 +329,7 @@ mod tests {
             "https-secure",
             ApplicationProtocol::Http2,
             true,
-            velda_core::IngressLimits::default(),
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         ));
 
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
@@ -355,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compose_udp_h3_handoff_default_tls() {
+    async fn test_compose_udp_h3_handoff_registered() {
         let socket =
             velda_transport::UdpSocket::bind("127.0.0.1:0".parse().unwrap(), Default::default())
                 .unwrap();
@@ -365,8 +362,13 @@ mod tests {
         let datagram = Datagram::new(peer, local_addr, b"quic-initial".to_vec());
         let handoff = UdpL7Handoff::new(datagram, Arc::new(socket), "h3-ingress");
 
-        // No explicit config → defaults to Http3 + TLS required
-        let composer = Composer::new();
+        let mut composer = Composer::new();
+        composer.register_listener(CompiledListenerComposition::new(
+            "h3-ingress",
+            ApplicationProtocol::Http3,
+            true,
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        ));
         let composed = composer.compose_udp_handoff(handoff).unwrap();
 
         assert!(composed.is_tls_required());
@@ -392,7 +394,7 @@ mod tests {
             "udp-custom",
             ApplicationProtocol::Http3,
             false,
-            velda_core::IngressLimits::default(),
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         ));
 
         let composed = composer.compose_udp_handoff(handoff).unwrap();
@@ -402,5 +404,17 @@ mod tests {
 
         let (dgram, _sock) = composed.into_parts();
         assert_eq!(dgram.data(), b"custom-udp");
+    }
+
+    #[tokio::test]
+    async fn test_compose_unregistered_listener_fails() {
+        let (conn, _addr) = create_dummy_connection().await;
+        let handoff = TcpL7Handoff::new(conn, "unregistered-listener");
+        let composer = Composer::new();
+
+        assert!(matches!(
+            composer.compose_tcp_handoff(handoff),
+            Err(ComposerError::MissingConfiguration(id)) if id == "unregistered-listener"
+        ));
     }
 }

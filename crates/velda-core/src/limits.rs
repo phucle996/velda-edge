@@ -7,37 +7,32 @@
 pub struct IngressLimits {
     /// Maximum allowed request body / message payload size in bytes.
     /// Equivalent to NGINX `client_max_body_size` or gRPC `max_receive_message_length`.
-    /// Default: 10 MB (10 * 1024 * 1024 bytes).
     pub max_body_size: usize,
 
     /// Maximum allowed size of the raw header section / HPACK / QPACK block in bytes.
     /// Equivalent to NGINX `large_client_header_buffers` or H2 `SETTINGS_MAX_HEADER_LIST_SIZE`.
-    /// Default: 64 KB (64 * 1024 bytes).
     pub max_header_size: usize,
 
     /// Maximum number of header / metadata fields permitted per request.
-    /// Default: 64 headers.
     pub max_headers: usize,
 
     /// Maximum stream / request read timeout in milliseconds.
-    /// Default: 30,000 ms (30 seconds).
     pub request_timeout_ms: u64,
 }
 
-impl Default for IngressLimits {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IngressLimits {
-    /// Creates a new `IngressLimits` with production default values.
-    pub const fn new() -> Self {
+    /// Creates a new `IngressLimits` with explicitly specified limit thresholds.
+    pub const fn new(
+        max_body_size: usize,
+        max_header_size: usize,
+        max_headers: usize,
+        request_timeout_ms: u64,
+    ) -> Self {
         Self {
-            max_body_size: 10 * 1024 * 1024,
-            max_header_size: 64 * 1024,
-            max_headers: 64,
-            request_timeout_ms: 30_000,
+            max_body_size,
+            max_header_size,
+            max_headers,
+            request_timeout_ms,
         }
     }
 

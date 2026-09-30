@@ -179,7 +179,7 @@ pub fn build_test_composer(listener_count: usize) -> Composer {
             listener_id,
             proto,
             tls,
-            velda_core::IngressLimits::default(),
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         ));
     }
 

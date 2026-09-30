@@ -128,6 +128,7 @@ fn bench_adversarial_alpn_injection_storm() {
                 peer,
                 local,
                 ApplicationProtocol::Http2,
+                velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
             );
 
             let metadata = TlsMetadata::new(Some("attacker.internal".into()), Some(payload.into()));
@@ -262,7 +263,7 @@ fn bench_rapid_listener_flapping_stress() {
             listener_id,
             proto,
             i % 2 == 0,
-            velda_core::IngressLimits::default(),
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         ));
     }
     let elapsed = start.elapsed();

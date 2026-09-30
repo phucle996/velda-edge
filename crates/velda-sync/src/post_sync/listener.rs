@@ -64,25 +64,28 @@ pub struct ListenerLimitsConfig {
     pub request_timeout_ms: u64,
 }
 
-impl Default for ListenerLimitsConfig {
-    fn default() -> Self {
+impl ListenerLimitsConfig {
+    pub const fn new(
+        max_body_size: usize,
+        max_header_size: usize,
+        max_headers: usize,
+        request_timeout_ms: u64,
+    ) -> Self {
         Self {
-            max_body_size: 10 * 1024 * 1024,
-            max_header_size: 64 * 1024,
-            max_headers: 64,
-            request_timeout_ms: 30_000,
+            max_body_size,
+            max_header_size,
+            max_headers,
+            request_timeout_ms,
         }
     }
-}
 
-impl ListenerLimitsConfig {
     pub fn to_ingress_limits(&self) -> velda_core::IngressLimits {
-        velda_core::IngressLimits {
-            max_body_size: self.max_body_size,
-            max_header_size: self.max_header_size,
-            max_headers: self.max_headers,
-            request_timeout_ms: self.request_timeout_ms,
-        }
+        velda_core::IngressLimits::new(
+            self.max_body_size,
+            self.max_header_size,
+            self.max_headers,
+            self.request_timeout_ms,
+        )
     }
 }
 
@@ -612,7 +615,7 @@ mod tests {
                 version: None,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         }
     }
 
@@ -661,6 +664,29 @@ mod tests {
         assert!(
             parse_listeners(json.as_bytes()).is_err(),
             "Missing mandatory limits must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_partial_limits_field_missing_fails_deserialization() {
+        let json = r#"{
+            "schema_version": 1,
+            "listeners": [{
+                "id": "http",
+                "address": "0.0.0.0:80",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "http1" },
+                "tls": { "enabled": false },
+                "limits": {
+                    "max_body_size": 10485760,
+                    "max_header_size": 65536
+                }
+            }]
+        }"#;
+
+        assert!(
+            parse_listeners(json.as_bytes()).is_err(),
+            "Partial limits missing fields must fail deserialization"
         );
     }
 

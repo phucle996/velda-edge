@@ -50,6 +50,9 @@ mod tests {
         ListenerApplicationConfig, ListenerLimitsConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
 
+    const TEST_LIMITS: ListenerLimitsConfig =
+        ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+
     #[test]
     fn test_build_composer_from_listeners() {
         let listeners = vec![
@@ -65,7 +68,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig::default(),
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
             // HTTP/2 with TLS → should produce composition
             ListenerConfig {
@@ -79,7 +82,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: true },
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
             // Raw TCP → should be skipped (L4 direct)
             ListenerConfig {
@@ -93,7 +96,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig::default(),
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
         ];
 
@@ -132,7 +135,7 @@ mod tests {
                 version: None,
             },
             tls: ListenerTlsConfig::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: TEST_LIMITS,
         }];
 
         let result = build_composer(&listeners);

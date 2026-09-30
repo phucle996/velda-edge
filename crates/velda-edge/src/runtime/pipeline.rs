@@ -155,7 +155,7 @@ mod tests {
                 version: version.map(String::from),
             },
             tls: ListenerTlsConfig { enabled: tls },
-            limits: ListenerLimitsConfig::default(),
+            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         }
     }
 

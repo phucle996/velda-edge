@@ -67,6 +67,7 @@ impl ComposerContext {
         peer: SocketAddr,
         local_addr: SocketAddr,
         protocol: ApplicationProtocol,
+        limits: IngressLimits,
     ) -> Self {
         Self {
             connection_id,
@@ -75,7 +76,7 @@ impl ComposerContext {
             local_addr,
             tls: None,
             protocol,
-            limits: IngressLimits::default(),
+            limits,
             created_at: Instant::now(),
         }
     }
@@ -89,6 +90,7 @@ impl ComposerContext {
         peer: SocketAddr,
         local_addr: SocketAddr,
         protocol: ApplicationProtocol,
+        limits: IngressLimits,
     ) -> Self {
         Self {
             connection_id: velda_transport::next_connection_id(),
@@ -97,7 +99,7 @@ impl ComposerContext {
             local_addr,
             tls: None,
             protocol,
-            limits: IngressLimits::default(),
+            limits,
             created_at: Instant::now(),
         }
     }
@@ -155,12 +157,14 @@ mod tests {
     #[test]
     fn test_with_tls_metadata_alpn_match_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
+        let limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
             "https-h2",
             addr,
             addr,
             ApplicationProtocol::Http2,
+            limits,
         );
         let metadata = TlsMetadata::new(Some("example.com".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);
@@ -173,12 +177,14 @@ mod tests {
     #[test]
     fn test_with_tls_metadata_alpn_mismatch_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
+        let limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
             "https-h1",
             addr,
             addr,
             ApplicationProtocol::Http1,
+            limits,
         );
         // Client sends h2 ALPN but listener is Http1 — protocol must NOT be mutated
         let metadata = TlsMetadata::new(Some("example.com".into()), Some("h2".into()));
@@ -191,12 +197,14 @@ mod tests {
     #[test]
     fn test_with_tls_metadata_no_alpn_preserves_protocol() {
         let addr = "127.0.0.1:8080".parse().unwrap();
+        let limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
         let ctx = ComposerContext::new_tcp(
             ConnectionId::new(1),
             "https-h2",
             addr,
             addr,
             ApplicationProtocol::Http2,
+            limits,
         );
         let metadata = TlsMetadata::new(Some("example.com".into()), None);
         let enriched = ctx.with_tls_metadata(metadata);

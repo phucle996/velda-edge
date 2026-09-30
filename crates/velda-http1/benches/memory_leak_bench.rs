@@ -49,7 +49,7 @@ fn bench_request_decoding_steady_state() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     for _ in 0..iters {
         let mut buf = BytesMut::from(&raw[..]);
         let req = decode_request(&mut buf, &limits).unwrap().unwrap();
@@ -182,7 +182,7 @@ fn bench_multithread_storm_reclamation() {
 
         handles.push(thread::spawn(move || {
             bar.wait();
-            let limits = IngressLimits::default();
+            let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
             for _ in 0..ops_per_worker {
                 let mut buf = BytesMut::from(&p[..]);
                 let req = decode_request(&mut buf, &limits).unwrap().unwrap();
@@ -244,7 +244,7 @@ fn bench_adversarial_zero_retention() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     for i in 0..iters {
         let payload = &hostile_payloads[i % hostile_payloads.len()];
         let mut buf = BytesMut::from(&payload[..]);

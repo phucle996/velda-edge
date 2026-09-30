@@ -41,7 +41,7 @@ async fn test_end_to_end_http3_udp_handoff_and_processing() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -120,7 +120,7 @@ async fn test_reload_preserves_active_http3_engine_instance() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();

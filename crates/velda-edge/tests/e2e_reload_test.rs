@@ -33,7 +33,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             version: None,
         },
         tls: Default::default(),
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
 
     let initial_bin = compile_listeners_to_binary(&initial_listeners, 1, [0x11u8; 32]).unwrap();
@@ -77,7 +77,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
                 version: None,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
@@ -90,7 +90,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
                 version: None,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         },
     ];
     let updated_bin = compile_listeners_to_binary(&updated_listeners, 2, [0x22u8; 32]).unwrap();

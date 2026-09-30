@@ -70,7 +70,7 @@ async fn test_end_to_end_l7_http_routing_and_forwarding() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: false },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -208,7 +208,7 @@ async fn test_end_to_end_l7_grpc_routing_and_unimplemented_semantics() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: false },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -313,7 +313,7 @@ async fn test_end_to_end_l7_grpc_routing_and_forwarding() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: false },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -482,7 +482,7 @@ async fn test_end_to_end_l7_grpc_server_streaming() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: false },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -650,7 +650,7 @@ async fn test_end_to_end_l7_grpc_unary_one_way() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: false },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();

@@ -54,9 +54,18 @@ fn bench_steady_state_serving_zero_leak(composer: &Composer) {
             Some(l) => (l.protocol, l.tls_enabled),
             None => (ApplicationProtocol::Http1, false),
         };
+        let limits = listener.map(|l| l.limits).unwrap_or_else(|| {
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000)
+        });
 
-        let ctx =
-            ComposerContext::new_tcp(ConnectionId::new(i as u64), listener_id, peer, local, proto);
+        let ctx = ComposerContext::new_tcp(
+            ConnectionId::new(i as u64),
+            listener_id,
+            peer,
+            local,
+            proto,
+            limits,
+        );
 
         let metadata = TlsMetadata::new(Some("api.velda.internal".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);
@@ -232,6 +241,9 @@ fn bench_concurrent_storm_live_reload_audit() {
                 let proto = listener
                     .map(|l| l.protocol)
                     .unwrap_or(ApplicationProtocol::Http2);
+                let limits = listener.map(|l| l.limits).unwrap_or_else(|| {
+                    velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000)
+                });
 
                 let ctx = ComposerContext::new_tcp(
                     ConnectionId::new((w_idx as u64) << 32 | (i as u64)),
@@ -239,6 +251,7 @@ fn bench_concurrent_storm_live_reload_audit() {
                     peer,
                     local,
                     proto,
+                    limits,
                 );
                 let metadata =
                     TlsMetadata::new(Some("storm.example.com".into()), Some("h2".into()));
@@ -321,6 +334,7 @@ fn bench_adversarial_input_zero_retention(composer: &Composer) {
             peer,
             local,
             ApplicationProtocol::Http1,
+            velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         );
 
         let alpn = &hostile_alpns[i % hostile_alpns.len()];

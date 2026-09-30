@@ -68,7 +68,7 @@ async fn test_end_to_end_tls_downstream_termination() {
             version: Some("1.1".into()),
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -254,7 +254,7 @@ async fn test_end_to_end_tls_h2_downstream() {
             version: None,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::default(),
+        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();

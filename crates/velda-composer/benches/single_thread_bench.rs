@@ -176,6 +176,7 @@ fn bench_context_lifecycle_and_tls_enrichment() {
     let iters = 2_000_000;
     let peer: SocketAddr = "192.168.1.100:54321".parse().unwrap();
     let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
+    let limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
 
     // 1. TCP Context Creation
     ALLOCATOR.reset();
@@ -187,6 +188,7 @@ fn bench_context_lifecycle_and_tls_enrichment() {
             peer,
             local,
             ApplicationProtocol::Http2,
+            limits,
         );
         let _ = std::hint::black_box(ctx);
     }
@@ -205,8 +207,13 @@ fn bench_context_lifecycle_and_tls_enrichment() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let ctx =
-            ComposerContext::new_udp("listener_h3_0001", peer, local, ApplicationProtocol::Http3);
+        let ctx = ComposerContext::new_udp(
+            "listener_h3_0001",
+            peer,
+            local,
+            ApplicationProtocol::Http3,
+            limits,
+        );
         let _ = std::hint::black_box(ctx);
     }
     let elapsed = start.elapsed();
@@ -230,6 +237,7 @@ fn bench_context_lifecycle_and_tls_enrichment() {
             peer,
             local,
             ApplicationProtocol::Http2,
+            limits,
         );
         let metadata = TlsMetadata::new(Some("api.example.com".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);
@@ -256,6 +264,7 @@ fn bench_context_lifecycle_and_tls_enrichment() {
             peer,
             local,
             ApplicationProtocol::Http1,
+            limits,
         );
         let metadata = TlsMetadata::new(Some("api.example.com".into()), Some("h2".into()));
         let enriched = ctx.with_tls_metadata(metadata);

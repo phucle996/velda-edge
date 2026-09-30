@@ -81,7 +81,7 @@ fn bench_smuggling_and_framing() {
         ),
     ];
 
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     for (name, payload, should_succeed) in attack_vectors {
         let start = Instant::now();
 
@@ -158,7 +158,7 @@ fn bench_pathological_header_floods() {
         ),
     ];
 
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     for (name, payload, outcome) in scenarios {
         let start = Instant::now();
 
@@ -201,7 +201,7 @@ fn bench_hostile_method_injections() {
     ];
 
     ALLOCATOR.reset();
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     let start = Instant::now();
 
     for i in 0..iters {
@@ -251,7 +251,7 @@ fn bench_pipeline_boundary_fuzzing() {
     // Case 2: Pipelined stream (2 requests concatenated in one buffer)
     let pipelined_stream = b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
-    let limits = IngressLimits::default();
+    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
     let start = Instant::now();
 
     for _ in 0..iters {

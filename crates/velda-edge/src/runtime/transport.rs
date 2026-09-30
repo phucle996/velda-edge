@@ -51,6 +51,9 @@ mod tests {
     };
     use velda_transport::PathKind;
 
+    const TEST_LIMITS: ListenerLimitsConfig =
+        ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+
     #[test]
     fn test_listener_to_binding_mapping() {
         // Raw TCP -> L4Direct
@@ -65,7 +68,7 @@ mod tests {
                 version: None,
             },
             tls: ListenerTlsConfig::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: TEST_LIMITS,
         };
         let binding = listener_to_binding(&raw_tcp).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -83,7 +86,7 @@ mod tests {
                 version: Some("1.1".into()),
             },
             tls: ListenerTlsConfig::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: TEST_LIMITS,
         };
         let binding = listener_to_binding(&http1).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -101,7 +104,7 @@ mod tests {
                 version: Some("2".into()),
             },
             tls: ListenerTlsConfig::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: TEST_LIMITS,
         };
         let binding = listener_to_binding(&http2).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -119,7 +122,7 @@ mod tests {
                 version: Some("3".into()),
             },
             tls: ListenerTlsConfig { enabled: true },
-            limits: ListenerLimitsConfig::default(),
+            limits: TEST_LIMITS,
         };
         let binding = listener_to_binding(&http3).unwrap();
         assert_eq!(binding.protocol, "udp");

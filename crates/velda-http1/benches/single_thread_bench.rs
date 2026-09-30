@@ -78,7 +78,7 @@ fn bench_request_decoding() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let limits = IngressLimits::default();
+        let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
         for _ in 0..iters {
             let mut buf = BytesMut::from(raw_bytes);
             let req = decode_request(&mut buf, &limits).unwrap().unwrap();
@@ -249,7 +249,7 @@ fn bench_upstream_codec() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let limits = IngressLimits::default();
+        let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
         for _ in 0..iters {
             let mut buf = BytesMut::from(&raw_resp[..]);
             let res = decode_response(&mut buf, &limits).unwrap().unwrap();
@@ -283,7 +283,10 @@ async fn bench_pipelined_connection() {
 
     let iters = 50_000;
     let (mut client_io, server_io) = duplex(256 * 1024);
-    let mut server_conn = Http1ServerConnection::new(server_io, IngressLimits::default());
+    let mut server_conn = Http1ServerConnection::new(
+        server_io,
+        IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+    );
 
     // Client writer task
     let client_task = tokio::spawn(async move {

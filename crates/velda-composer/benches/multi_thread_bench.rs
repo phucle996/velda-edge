@@ -90,6 +90,9 @@ fn bench_multi_thread_scaling() {
                     let proto = listener
                         .map(|l| l.protocol)
                         .unwrap_or(ApplicationProtocol::Http1);
+                    let limits = listener.map(|l| l.limits).unwrap_or_else(|| {
+                        velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000)
+                    });
 
                     let ctx = ComposerContext::new_tcp(
                         ConnectionId::new(((thread_idx as u64) << 32) | i),
@@ -97,6 +100,7 @@ fn bench_multi_thread_scaling() {
                         peer,
                         local,
                         proto,
+                        limits,
                     );
                     let enriched = ctx.with_tls_metadata(metadata.clone());
                     let _ = std::hint::black_box(enriched);
@@ -187,6 +191,9 @@ fn bench_hot_reload_under_traffic_storm() {
                 let proto = listener
                     .map(|l| l.protocol)
                     .unwrap_or(ApplicationProtocol::Http1);
+                let limits = listener.map(|l| l.limits).unwrap_or_else(|| {
+                    velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000)
+                });
 
                 let ctx = ComposerContext::new_tcp(
                     ConnectionId::new(((r_idx as u64) << 32) | i),
@@ -194,6 +201,7 @@ fn bench_hot_reload_under_traffic_storm() {
                     peer,
                     local,
                     proto,
+                    limits,
                 );
                 let _ = std::hint::black_box(ctx);
             }

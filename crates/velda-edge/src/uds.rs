@@ -142,7 +142,7 @@ mod tests {
                 version: None,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::default(),
+            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
         }];
         let bin = compile_listeners_to_binary(&listeners, 77, [0u8; 32]).unwrap();
         fs::write(runtime_dir.join("listeners.bin"), bin).unwrap();

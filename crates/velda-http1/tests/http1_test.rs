@@ -8,10 +8,12 @@ use velda_http1::error::Http1Error;
 use velda_http1::upstream_connector::Http1UpstreamConnector;
 use velda_http1::{decode_request, decode_response, encode_response};
 
+const TEST_LIMITS: IngressLimits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+
 #[tokio::test]
 async fn test_http1_server_connection() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, IngressLimits::default());
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
 
     tokio::spawn(async move {
         client
@@ -48,10 +50,9 @@ async fn test_http1_upstream_connector() {
         Body::Empty,
     );
 
-    let resp =
-        Http1UpstreamConnector::forward_request(&req, backend_addr, &IngressLimits::default())
-            .await
-            .unwrap();
+    let resp = Http1UpstreamConnector::forward_request(&req, backend_addr, &TEST_LIMITS)
+        .await
+        .unwrap();
     assert_eq!(resp.status, StatusCode::OK);
 }
 
@@ -60,7 +61,7 @@ fn test_chunked_request_decoding() {
     let raw = b"POST /upload HTTP/1.1\r\nHost: edge.velda.io\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n6\r\npedia \r\n9\r\nin chunks\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let req = decode_request(&mut buf, &IngressLimits::default())
+    let req = decode_request(&mut buf, &TEST_LIMITS)
         .unwrap()
         .expect("request parsed");
     assert_eq!(req.method, Method::POST);
@@ -78,7 +79,7 @@ fn test_chunked_response_decoding() {
     let raw = b"HTTP/1.1 200 OK\r\nServer: backend-svc\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let resp = decode_response(&mut buf, &IngressLimits::default())
+    let resp = decode_response(&mut buf, &TEST_LIMITS)
         .unwrap()
         .expect("response parsed");
     assert_eq!(resp.status, StatusCode::OK);
@@ -96,7 +97,7 @@ fn test_chunked_incomplete_buffering() {
     let raw = b"POST /stream HTTP/1.1\r\nHost: edge.velda.io\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let res = decode_request(&mut buf, &IngressLimits::default()).unwrap();
+    let res = decode_request(&mut buf, &TEST_LIMITS).unwrap();
     assert!(
         res.is_none(),
         "incomplete chunked stream must return Ok(None)"
@@ -113,7 +114,7 @@ fn test_smuggling_simultaneous_cl_te() {
     let raw = b"POST / HTTP/1.1\r\nHost: victim.com\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &IngressLimits::default()).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
     assert!(
         matches!(err, Http1Error::SmugglingDetected(_)),
         "Must fast-fail reject simultaneous CL and TE"
@@ -125,7 +126,7 @@ fn test_smuggling_multiple_conflicting_cl() {
     let raw = b"POST / HTTP/1.1\r\nHost: victim.com\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n12345";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &IngressLimits::default()).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
     assert!(
         matches!(err, Http1Error::SmugglingDetected(_)),
         "Must reject conflicting multiple Content-Length headers"
@@ -139,7 +140,7 @@ fn test_header_too_large_rejection() {
     raw.resize(70 * 1024, b'a');
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &IngressLimits::default()).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
     assert!(
         matches!(err, Http1Error::HeaderTooLarge(_)),
         "Headers > 64KB must be rejected with HeaderTooLarge"
@@ -152,7 +153,7 @@ fn test_payload_too_large_rejection() {
     let raw = b"POST /data HTTP/1.1\r\nHost: edge.velda.io\r\nContent-Length: 15728640\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &IngressLimits::default()).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
     assert!(
         matches!(err, Http1Error::PayloadTooLarge(_)),
         "Payload > 10MB must be rejected with PayloadTooLarge"
@@ -161,7 +162,7 @@ fn test_payload_too_large_rejection() {
 
 #[test]
 fn test_too_many_headers_rejection() {
-    let limits = IngressLimits::new().with_max_headers(5);
+    let limits = TEST_LIMITS.with_max_headers(5);
     let mut raw = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
     for i in 0..10 {
         raw.extend_from_slice(format!("X-Header-{i}: value\r\n").as_bytes());
@@ -179,7 +180,7 @@ fn test_too_many_headers_rejection() {
 #[tokio::test]
 async fn test_http10_close_by_default() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, IngressLimits::default());
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
 
     tokio::spawn(async move {
         // Plain HTTP/1.0 without keep-alive
@@ -200,7 +201,7 @@ async fn test_http10_close_by_default() {
 #[tokio::test]
 async fn test_http10_keep_alive_negotiated() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, IngressLimits::default());
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
 
     tokio::spawn(async move {
         // HTTP/1.0 with explicit Connection: keep-alive
@@ -239,9 +240,7 @@ fn test_http10_response_encoding() {
 #[tokio::test]
 async fn test_custom_ingress_limits() {
     // Custom limit: max body size only 50 bytes, max header size only 100 bytes
-    let custom_limits = IngressLimits::new()
-        .with_max_body_size(50)
-        .with_max_header_size(100);
+    let custom_limits = TEST_LIMITS.with_max_body_size(50).with_max_header_size(100);
 
     let (mut client, server) = duplex(1024);
     let mut conn = Http1ServerConnection::new(server, custom_limits);

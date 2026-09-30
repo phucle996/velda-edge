@@ -295,6 +295,9 @@ mod tests {
         EndpointConfig, LoadBalancerConfig, UpstreamProtocolConfig, UpstreamTimeouts,
     };
 
+    const TEST_LIMITS: ListenerLimitsConfig =
+        ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+
     #[test]
     fn test_build_router_from_routes() {
         let listeners = vec![
@@ -309,7 +312,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
             ListenerConfig {
                 id: "dns-in".into(),
@@ -322,7 +325,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
             ListenerConfig {
                 id: "http-in".into(),
@@ -335,7 +338,7 @@ mod tests {
                     version: Some("1.1".into()),
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: ListenerLimitsConfig::default(),
+                limits: TEST_LIMITS,
             },
         ];
 
