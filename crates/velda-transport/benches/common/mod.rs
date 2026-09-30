@@ -1,4 +1,4 @@
-//! Common benchmarking utilities and counting allocator for velda-transport.
+//! Common benchmarking utilities, allocator auditing, and PRNG for velda-transport.
 
 #![allow(dead_code)]
 
@@ -6,22 +6,29 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Custom thread-safe `GlobalAlloc` that tracks allocations and deallocations.
 pub struct CountingAllocator {
     alloc_count: AtomicU64,
+    dealloc_count: AtomicU64,
     bytes_allocated: AtomicU64,
+    bytes_deallocated: AtomicU64,
 }
 
 impl CountingAllocator {
     pub const fn new() -> Self {
         Self {
             alloc_count: AtomicU64::new(0),
+            dealloc_count: AtomicU64::new(0),
             bytes_allocated: AtomicU64::new(0),
+            bytes_deallocated: AtomicU64::new(0),
         }
     }
 
     pub fn reset(&self) {
         self.alloc_count.store(0, Ordering::SeqCst);
+        self.dealloc_count.store(0, Ordering::SeqCst);
         self.bytes_allocated.store(0, Ordering::SeqCst);
+        self.bytes_deallocated.store(0, Ordering::SeqCst);
     }
 
     pub fn snapshot(&self) -> (u64, u64) {
@@ -30,9 +37,27 @@ impl CountingAllocator {
             self.bytes_allocated.load(Ordering::SeqCst),
         )
     }
+
+    pub fn dealloc_snapshot(&self) -> (u64, u64) {
+        (
+            self.dealloc_count.load(Ordering::SeqCst),
+            self.bytes_deallocated.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn net_bytes(&self) -> i64 {
+        let allocated = self.bytes_allocated.load(Ordering::SeqCst) as i64;
+        let deallocated = self.bytes_deallocated.load(Ordering::SeqCst) as i64;
+        allocated - deallocated
+    }
+
+    pub fn net_allocs(&self) -> i64 {
+        let allocs = self.alloc_count.load(Ordering::SeqCst) as i64;
+        let deallocs = self.dealloc_count.load(Ordering::SeqCst) as i64;
+        allocs - deallocs
+    }
 }
 
-#[allow(clippy::all)]
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.alloc_count.fetch_add(1, Ordering::Relaxed);
@@ -42,7 +67,47 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.dealloc_count.fetch_add(1, Ordering::Relaxed);
+        self.bytes_deallocated
+            .fetch_add(layout.size() as u64, Ordering::Relaxed);
         unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+/// Minimal fast Xorshift64 PRNG for deterministic, zero-dependency benchmarking.
+pub struct FastRng {
+    state: u64,
+}
+
+impl FastRng {
+    pub const fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { 0xdeadbeefcafe } else { seed },
+        }
+    }
+
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    #[inline]
+    pub fn next_usize(&mut self, max: usize) -> usize {
+        (self.next_u64() % (max as u64)) as usize
+    }
+
+    #[inline]
+    pub fn next_bytes(&mut self, buf: &mut [u8]) {
+        for chunk in buf.chunks_mut(8) {
+            let val = self.next_u64().to_ne_bytes();
+            let len = chunk.len();
+            chunk.copy_from_slice(&val[..len]);
+        }
     }
 }
 
@@ -86,36 +151,4 @@ pub fn format_throughput(bytes: usize, dur: Duration) -> String {
     } else {
         format!("{:.2} GB/s", bps / (1024.0 * 1024.0 * 1024.0))
     }
-}
-
-pub fn calculate_big_o(results: &[(usize, Duration)]) -> (String, f64) {
-    if results.len() < 2 {
-        return ("O(1)".to_string(), 0.0);
-    }
-
-    let (n1, t1) = (results[0].0 as f64, results[0].1.as_nanos() as f64);
-    let (n2, t2) = (
-        results[results.len() - 1].0 as f64,
-        results[results.len() - 1].1.as_nanos() as f64,
-    );
-
-    if n1 <= 0.0 || n2 <= n1 || t1 <= 0.0 || t2 <= 0.0 {
-        return ("O(1)".to_string(), 0.0);
-    }
-
-    let alpha = (t2 / t1).ln() / (n2 / n1).ln();
-
-    let notation = if alpha < 0.25 {
-        "O(1)"
-    } else if alpha < 0.75 {
-        "O(log N)"
-    } else if alpha < 1.25 {
-        "O(N)"
-    } else if alpha < 1.75 {
-        "O(N log N)"
-    } else {
-        "O(N²)"
-    };
-
-    (notation.to_string(), alpha)
 }

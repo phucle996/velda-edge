@@ -8,17 +8,28 @@ use super::config::UdpSocketConfig;
 use super::datagram::Datagram;
 use crate::error::{Result, TransportError};
 
+/// Cache-line aligned 64-bit atomic counter to prevent false sharing under high concurrency.
+#[repr(align(64))]
+#[derive(Debug)]
+struct CacheAlignedAtomicU64(AtomicU64);
+
+impl CacheAlignedAtomicU64 {
+    const fn new(val: u64) -> Self {
+        Self(AtomicU64::new(val))
+    }
+}
+
 /// High-performance UDP socket managing datagram transmission and receipt.
 ///
-/// Tracks total bytes received and sent concurrently via atomic counters,
-/// allowing multiple tasks to share an [`std::sync::Arc<UdpSocket>`] without lock contention.
+/// Tracks total bytes received and sent concurrently via cache-aligned atomic counters,
+/// eliminating false sharing when read and write workers operate on different cores.
 #[derive(Debug)]
 pub struct UdpSocket {
     socket: TokioUdpSocket,
     local_addr: SocketAddr,
     config: UdpSocketConfig,
-    bytes_received: AtomicU64,
-    bytes_sent: AtomicU64,
+    bytes_received: CacheAlignedAtomicU64,
+    bytes_sent: CacheAlignedAtomicU64,
 }
 
 impl UdpSocket {
@@ -60,8 +71,8 @@ impl UdpSocket {
             socket,
             local_addr,
             config,
-            bytes_received: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
+            bytes_received: CacheAlignedAtomicU64::new(0),
+            bytes_sent: CacheAlignedAtomicU64::new(0),
         })
     }
 
@@ -72,8 +83,8 @@ impl UdpSocket {
             socket,
             local_addr,
             config,
-            bytes_received: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
+            bytes_received: CacheAlignedAtomicU64::new(0),
+            bytes_sent: CacheAlignedAtomicU64::new(0),
         })
     }
 
@@ -92,13 +103,13 @@ impl UdpSocket {
     /// Returns the total bytes received by this socket.
     #[inline]
     pub fn bytes_received(&self) -> u64 {
-        self.bytes_received.load(Ordering::Relaxed)
+        self.bytes_received.0.load(Ordering::Relaxed)
     }
 
     /// Returns the total bytes sent by this socket.
     #[inline]
     pub fn bytes_sent(&self) -> u64 {
-        self.bytes_sent.load(Ordering::Relaxed)
+        self.bytes_sent.0.load(Ordering::Relaxed)
     }
 
     /// Receives a datagram into the provided buffer, tracking the received byte count.
@@ -108,7 +119,7 @@ impl UdpSocket {
             .recv_from(buf)
             .await
             .map_err(TransportError::Io)?;
-        self.bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+        self.bytes_received.0.fetch_add(n as u64, Ordering::Relaxed);
         Ok((n, peer))
     }
 
@@ -127,7 +138,7 @@ impl UdpSocket {
             .send_to(buf, target)
             .await
             .map_err(TransportError::Io)?;
-        self.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+        self.bytes_sent.0.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
     }
 
