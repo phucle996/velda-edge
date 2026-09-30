@@ -38,9 +38,13 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
     let path_str = req
         .path
         .ok_or_else(|| Http1Error::Parse("Missing HTTP path/URI".into()))?;
-    let uri = path_str
-        .parse::<Uri>()
-        .map_err(|e| Http1Error::InvalidUri(e.to_string()))?;
+    let uri = if path_str == "/" {
+        Uri::from_static("/")
+    } else {
+        path_str
+            .parse::<Uri>()
+            .map_err(|e| Http1Error::InvalidUri(e.to_string()))?
+    };
 
     let version = match req.version {
         Some(1) => Version::HTTP_11,
@@ -94,6 +98,9 @@ pub fn encode_response(res: &L7Response, dst: &mut BytesMut) {
     let status = res.status;
     let reason = status.canonical_reason().unwrap_or("Unknown");
 
+    // Pre-reserve capacity to avoid micro-reallocations on new buffers
+    dst.reserve(64 + res.headers.len() * 32 + res.body.len());
+
     dst.put_slice(b"HTTP/1.1 ");
     dst.put_slice(status.as_str().as_bytes());
     dst.put_slice(b" ");
@@ -114,7 +121,8 @@ pub fn encode_response(res: &L7Response, dst: &mut BytesMut) {
     if !has_content_length {
         let body_len = res.body.len();
         dst.put_slice(b"content-length: ");
-        dst.put_slice(body_len.to_string().as_bytes());
+        let mut itoa_buf = itoa::Buffer::new();
+        dst.put_slice(itoa_buf.format(body_len).as_bytes());
         dst.put_slice(b"\r\n");
     }
 
@@ -127,6 +135,9 @@ pub fn encode_response(res: &L7Response, dst: &mut BytesMut) {
 
 /// Encodes an HTTP/1.1 request into the destination buffer.
 pub fn encode_request(req: &L7Request, dst: &mut BytesMut) {
+    // Pre-reserve capacity to avoid micro-reallocations on new buffers
+    dst.reserve(64 + req.headers.len() * 32 + req.body.len());
+
     dst.put_slice(req.method.as_str().as_bytes());
     dst.put_slice(b" ");
     let path_and_query = req
@@ -157,7 +168,8 @@ pub fn encode_request(req: &L7Request, dst: &mut BytesMut) {
         dst.put_slice(host.as_bytes());
         if let Some(port) = req.uri.port_u16() {
             dst.put_slice(b":");
-            dst.put_slice(port.to_string().as_bytes());
+            let mut itoa_buf = itoa::Buffer::new();
+            dst.put_slice(itoa_buf.format(port).as_bytes());
         }
         dst.put_slice(b"\r\n");
     }
@@ -165,7 +177,8 @@ pub fn encode_request(req: &L7Request, dst: &mut BytesMut) {
     if !has_content_length && req.has_body() {
         let body_len = req.body.len();
         dst.put_slice(b"content-length: ");
-        dst.put_slice(body_len.to_string().as_bytes());
+        let mut itoa_buf = itoa::Buffer::new();
+        dst.put_slice(itoa_buf.format(body_len).as_bytes());
         dst.put_slice(b"\r\n");
     }
 

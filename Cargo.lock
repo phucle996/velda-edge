@@ -1913,6 +1913,7 @@ dependencies = [
  "bytes",
  "http",
  "httparse",
+ "itoa",
  "thiserror",
  "tokio",
  "tracing",

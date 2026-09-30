@@ -14,25 +14,26 @@ Tests were executed using the custom counting allocator and timing suite in:
 
 | Target / Capability | Metric | Measured Result | Status |
 | :--- | :--- | :--- | :--- |
-| **Small GET Decoding (Root)** | RFC 9112 zero-copy headers | **278.83 ns**, **3.58 M ops/s** | **Passed** (119.7 MB/s wire rate) |
-| **REST API GET (8 Headers)** | Strict header parsing | **686.12 ns**, **1.45 M ops/s** | **Passed** (341.9 MB/s wire rate) |
-| **1KB JSON POST Decoding** | Zero-copy body slice (`split_to`) | **516.97 ns**, **1.93 M ops/s** | **Passed** (2.04 GB/s data rate) |
-| **64KB Binary Stream Decoding** | Large payload streaming | **1.78 µs**, **560.4 K ops/s** | **Passed** (34.26 GB/s data rate) |
-| **200 OK Response Encoding** | Stack/buffer serialization | **50.67 ns**, **19.73 M ops/s** | **Exceeded** (1 allocation) |
-| **1KB JSON Response Encoding** | Buffer reuse serialization | **78.98 ns**, **12.66 M ops/s** | **Passed** (12.94 GB/s data rate) |
-| **Upstream Request Encoding** | Outbound client serialization | **165.72 ns**, **6.03 M ops/s** | **Passed** (2 allocations) |
-| **Upstream Response Decoding** | Inbound server parsing | **470.59 ns**, **2.12 M ops/s** | **Passed** (8 allocations) |
-| **Pipelined Stream Turnaround** | Full client-server duplex cycle | **0.80 µs / op**, **1.24 M ops/s** | **Passed** (50,000 cycles in 40.2 ms) |
-| **Multicore Decoding Scaling** | 12 Workers (`HardwareTopology`) | **14.29 M ops/s** (1.40 GB/s) | **Passed** (4.76x physical speedup) |
-| **Multicore Encoding Scaling** | 24 Workers (Parallel serialize) | **90.83 M ops/s** (10.83 GB/s) | **Exceeded** (Lock-free scaling) |
-| **Keep-Alive Connection Storm** | 16 Tasks, 80,000 duplex ops | **8.26 M ops/s**, **0 deadlocks** | **Passed** (9.68 ms total duration) |
+| **Small GET Decoding (Root)** | Static URI fast-path (`"/"`) | **252.95 ns**, **4.00 allocs** | **Passed** (3.95 M ops/s) |
+| **REST API GET (8 Headers)** | Strict header parsing | **699.35 ns**, **1.43 M ops/s** | **Passed** (335.5 MB/s wire rate) |
+| **1KB JSON POST Decoding** | Zero-copy body slice (`split_to`) | **523.32 ns**, **1.91 M ops/s** | **Passed** (2.01 GB/s data rate) |
+| **64KB Binary Stream Decoding** | Large payload streaming | **1.77 µs**, **563.4 K ops/s** | **Passed** (34.44 GB/s data rate) |
+| **200 OK Response Encoding** | Zero-allocation `itoa` formatting | **42.74 ns**, **0.00 allocs** | **Exceeded** (23.40 M ops/s) |
+| **1KB JSON Response Encoding** | Buffer reuse serialization | **65.67 ns**, **0.00 allocs** | **Exceeded** (15.23 M ops/s, 15.56 GB/s) |
+| **Upstream Request Encoding** | Outbound client serialization | **148.94 ns**, **0.00 allocs** | **Exceeded** (6.71 M ops/s) |
+| **Upstream Response Decoding** | Inbound server parsing | **465.38 ns**, **2.15 M ops/s** | **Passed** (8 allocations) |
+| **Upstream Read Zero-Copy** | Direct `stream.read_buf` | **0.00 intermediate copies** | **Passed** (100% zero-copy) |
+| **Pipelined Stream Turnaround** | Full client-server duplex cycle | **0.78 µs / op**, **1.27 M ops/s** | **Passed** (50,000 cycles in 39.2 ms) |
+| **Multicore Decoding Scaling** | 12 Workers (`HardwareTopology`) | **13.99 M ops/s** (1.37 GB/s) | **Passed** (4.48x physical speedup) |
+| **Multicore Encoding Scaling** | 24 Workers (Parallel serialize) | **109.06 M ops/s** (13.00 GB/s) | **Exceeded** (Lock-free scaling >100M) |
+| **Keep-Alive Connection Storm** | 16 Tasks, 80,000 duplex ops | **7.92 M ops/s**, **0 deadlocks** | **Passed** (10.10 ms total duration) |
 | **Smuggling Rejection (TE/CL)** | Malformed / negative / overflow | **100% Deterministic Rejection** | **Passed** (Zero ambiguity, < 360 ns) |
 | **Header Bomb Resistance** | >64 headers / 4KB values | **Bounded & Rejected** | **Passed** (MAX_HEADERS bound) |
-| **Slowloris Drip Resistance** | Incomplete fragment feeding | **92.34 ns**, `Ok(None)` | **Passed** (Zero buffer advance) |
-| **Hostile Token Injection** | 1,000,000 SQLi/null/mutations | **4.71 M ops/s**, **0 panics** | **Passed** (Deterministic error return) |
-| **Pipeline Boundary Fuzzing** | 500,000 partial & back-to-back | **1.07 M cycles/s**, **0 corrupt**| **Passed** (Strict frame boundary) |
+| **Slowloris Drip Resistance** | Incomplete fragment feeding | **98.74 ns**, `Ok(None)` | **Passed** (Zero buffer advance) |
+| **Hostile Token Injection** | 1,000,000 SQLi/null/mutations | **4.81 M ops/s**, **0 panics** | **Passed** (Deterministic error return) |
+| **Pipeline Boundary Fuzzing** | 500,000 partial & back-to-back | **1.12 M cycles/s**, **0 corrupt**| **Passed** (Strict frame boundary) |
 | **10,000,000 Ops Steady-State** | Net Heap Growth | **0 B (Zero Leak)** | **Passed** (100% RAII reclamation) |
-| **1M Adversarial Stream Stress**| Corrupted payloads | **0 B (Zero Retention)** | **Passed** (Clean error tear-down) |
+| **1M Response Buffer Reuse** | Total allocated across 1M resp | **2.00 KB total (Zero Churn)** | **Exceeded** (Down from 1.91 MB) |
 
 ---
 
@@ -46,28 +47,28 @@ Evaluates parsing raw byte streams into [`velda_core::L7Request`](file:///home/p
 
 | Request Profile | Wire Size | Latency / op | Allocs / op | Throughput | Data Rate | Evaluation |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Small GET (Root)** | 35 B | **278.83 ns** | **5.00** | **3,586,352 ops/s** | 119.71 MB/s | Minimal URI + Host |
-| **REST API GET (8 Headers)** | 246 B | **686.12 ns** | **11.00** | **1,457,461 ops/s** | 341.93 MB/s | Realistic edge API request |
-| **POST (1KB JSON Payload)** | 1.10 KB | **516.97 ns** | **8.00** | **1,934,335 ops/s** | 2.04 GB/s | Zero-copy body slicing via `split_to` |
-| **POST (64KB Binary Stream)** | 64.11 KB | **1784.29 ns** | **8.00** | **560,448 ops/s** | 34.26 GB/s | Large payload zero-copy throughput |
+| **Small GET (Root)** | 35 B | **252.95 ns** | **4.00** | **3,953,416 ops/s** | 131.96 MB/s | Optimized `Uri::from_static("/")` |
+| **REST API GET (8 Headers)** | 246 B | **699.35 ns** | **11.00** | **1,429,896 ops/s** | 335.46 MB/s | Realistic edge API request |
+| **POST (1KB JSON Payload)** | 1.10 KB | **523.32 ns** | **8.00** | **1,910,878 ops/s** | 2.01 GB/s | Zero-copy body slicing via `split_to` |
+| **POST (64KB Binary Stream)** | 64.11 KB | **1774.96 ns** | **8.00** | **563,393 ops/s** | 34.44 GB/s | Large payload zero-copy throughput |
 
 ### B. Response Encoding Latency (`encode_response`)
 
 Serializing [`velda_core::L7Response`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/response.rs) into downstream wire buffers:
 
-| Response Profile | Status | Body Size | Latency / op | Allocs / op | Throughput | Data Rate |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **200 OK (Empty Body)** | 200 | 0 B | **50.67 ns** | **1.00** | **19,734,429 ops/s** | 715.17 MB/s |
-| **200 OK (1KB JSON)** | 200 | 1.00 KB | **78.98 ns** | **1.00** | **12,662,067 ops/s** | 12.94 GB/s |
-| **200 OK (64KB Binary)** | 200 | 64.00 KB | **1283.56 ns** | **1.00** | **779,080 ops/s** | 47.61 GB/s |
-| **404 Not Found** | 404 | 18 B | **73.37 ns** | **1.00** | **13,629,805 ops/s** | 1.14 GB/s |
+| Response Profile | Status | Body Size | Latency / op | Allocs / op | Throughput | Data Rate | Speedup |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **200 OK (Empty Body)** | 200 | 0 B | **42.74 ns** | **0.00** | **23,399,794 ops/s** | 848.00 MB/s | **+18.6%** (Zero alloc) |
+| **200 OK (1KB JSON)** | 200 | 1.00 KB | **65.67 ns** | **0.00** | **15,227,679 ops/s** | 15.56 GB/s | **+20.3%** (Zero alloc) |
+| **200 OK (64KB Binary)** | 200 | 64.00 KB | **1274.48 ns** | **0.00** | **784,631 ops/s** | 47.95 GB/s | Zero alloc |
+| **404 Not Found** | 404 | 18 B | **61.60 ns** | **0.00** | **16,234,364 ops/s** | 1.36 GB/s | **+19.1%** (Zero alloc) |
 
 ### C. Upstream Codec Performance (`encode_request` & `decode_response`)
 
 | Codec Component | Direction | Latency / op | Allocs / op | Throughput | Target |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`encode_request`** | Outbound Client | **165.72 ns** | **2.00** | **6,034,450 ops/s** | < 250 ns |
-| **`decode_response`** | Inbound Server | **470.59 ns** | **8.00** | **2,125,014 ops/s** | < 500 ns |
+| **`encode_request`** | Outbound Client | **148.94 ns** | **0.00** | **6,714,040 ops/s** | < 250 ns (**Zero alloc**) |
+| **`decode_response`** | Inbound Server | **465.38 ns** | **8.00** | **2,148,766 ops/s** | < 500 ns |
 
 ### D. Downstream Ingress Connection Pipelining (`Http1ServerConnection`)
 
@@ -76,9 +77,9 @@ Evaluates 50,000 back-to-back request-response cycles over a single keep-alive d
 | Metric | Measured Result | Target Invariant | Status |
 | :--- | :--- | :--- | :--- |
 | **Pipelined Exchanges** | **50,000 cycles** | 50,000 cycles | **PASS** |
-| **Turnaround Latency** | **0.80 µs / op** | < 20.0 µs | **PASS** |
-| **Pipeline Throughput** | **1,242,929 ops/s** | > 50,000 ops/s | **PASS** |
-| **Elapsed Time** | **40.23 ms** | < 2.0 s | **PASS** |
+| **Turnaround Latency** | **0.78 µs / op** | < 20.0 µs | **PASS** |
+| **Pipeline Throughput** | **1,274,680 ops/s** | > 50,000 ops/s | **PASS** |
+| **Elapsed Time** | **39.23 ms** | < 2.0 s | **PASS** |
 
 ---
 
@@ -90,20 +91,20 @@ Evaluates multi-threaded scaling aligned with host hardware topology probed via 
 
 | Thread Count | Topology Concurrency Zone | Total Operations | Elapsed Time | Aggregate Throughput | Per-Thread Speed | Data Rate |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1 Thread** | Baseline (Single Core) | 500,000 ops | 166.69 ms | **3.00 M ops/s** | 3.00 M ops/s | 300.37 MB/s |
-| **6 Threads** | Sub-Capacity (Linear Scaling) | 3,000,000 ops | 229.78 ms | **13.06 M ops/s** | 2.18 M ops/s | 1.28 GB/s |
-| **12 Threads** | Optimal Capacity (`HardwareTopology`) | 6,000,000 ops | 419.87 ms | **14.29 M ops/s** | 1.19 M ops/s | 1.40 GB/s |
-| **24 Threads** | SMT Boundary | 12,000,000 ops | 842.70 ms | **14.24 M ops/s** | 0.59 M ops/s | 1.39 GB/s |
-| **48 Threads** | Oversubscribed (Contention Zone) | 24,000,000 ops | 1.64 s | **14.63 M ops/s** | 0.30 M ops/s | 1.43 GB/s |
+| **1 Thread** | Baseline (Single Core) | 500,000 ops | 160.24 ms | **3.12 M ops/s** | 3.12 M ops/s | 312.46 MB/s |
+| **6 Threads** | Sub-Capacity (Linear Scaling) | 3,000,000 ops | 222.01 ms | **13.51 M ops/s** | 2.25 M ops/s | 1.32 GB/s |
+| **12 Threads** | Optimal Capacity (`HardwareTopology`) | 6,000,000 ops | 428.93 ms | **13.99 M ops/s** | 1.17 M ops/s | 1.37 GB/s |
+| **24 Threads** | SMT Boundary | 12,000,000 ops | 848.63 ms | **14.14 M ops/s** | 0.59 M ops/s | 1.38 GB/s |
+| **48 Threads** | Oversubscribed (Contention Zone) | 24,000,000 ops | 1.66 s | **14.49 M ops/s** | 0.30 M ops/s | 1.42 GB/s |
 
 ### B. Multicore Response Encoding Scaling Matrix (`encode_response`)
 
 | Thread Count | Total Responses | Elapsed Time | Aggregate Throughput | Per-Thread Speed | Aggregate Data Rate |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1 Thread** | 500,000 ops | 32.17 ms | **15.54 M ops/s** | 15.54 M ops/s | 1.85 GB/s |
-| **6 Threads** | 3,000,000 ops | 47.95 ms | **62.56 M ops/s** | 10.43 M ops/s | 7.46 GB/s |
-| **12 Threads** | 6,000,000 ops | 69.93 ms | **85.81 M ops/s** | 7.15 M ops/s | 10.23 GB/s |
-| **24 Threads** | 12,000,000 ops | 132.11 ms | **90.83 M ops/s** | 3.78 M ops/s | 10.83 GB/s |
+| **1 Thread** | 500,000 ops | 28.85 ms | **17.33 M ops/s** | 17.33 M ops/s | 2.07 GB/s |
+| **6 Threads** | 3,000,000 ops | 41.85 ms | **71.68 M ops/s** | 11.95 M ops/s | 8.55 GB/s |
+| **12 Threads** | 6,000,000 ops | 60.30 ms | **99.50 M ops/s** | 8.29 M ops/s | 11.86 GB/s |
+| **24 Threads** | 12,000,000 ops | 110.03 ms | **109.06 M ops/s** | 4.54 M ops/s | 13.00 GB/s |
 
 ### C. Concurrent Keep-Alive Connection Storm (16 Tasks, 80,000 Ops)
 
@@ -113,8 +114,8 @@ Stresses 16 concurrent pipelined client-server duplex connections simultaneously
 | :--- | :--- | :--- | :--- |
 | **Concurrent Connections** | **16 duplex channels** | 16 connections | **PASS** |
 | **Total Storm Exchanges** | **80,000 ops** | 80,000 ops | **PASS** |
-| **Elapsed Time** | **9.68 ms** | < 2.0 s | **PASS** |
-| **Aggregate Storm Throughput** | **8,263,830 ops/s** | > 50,000 ops/s | **PASS** |
+| **Elapsed Time** | **10.10 ms** | < 2.0 s | **PASS** |
+| **Aggregate Storm Throughput** | **7,923,882 ops/s** | > 50,000 ops/s | **PASS** |
 | **Connection Deadlocks** | **0 (Zero)** | 0 deadlocks | **PASS** |
 
 ---
@@ -127,13 +128,13 @@ Evaluates RFC 9112 conformance, parser resilience against smuggling vectors, hea
 
 | Attack Vector | Payload Snippet | Outcome | Latency / op | Target |
 | :--- | :--- | :--- | :--- | :--- |
-| **Negative Content-Length** | `POST / HTTP/1.1\r\nContent-Length: -1...` | Rejected (Fast-Fail) | **330.67 ns** | **PASS** |
-| **Non-Numeric Content-Length** | `POST / HTTP/1.1\r\nContent-Length: NaN...` | Rejected (Fast-Fail) | **343.81 ns** | **PASS** |
-| **Overflow Content-Length** | `POST / HTTP/1.1\r\nContent-Length: 99999...` | Rejected (Fast-Fail) | **360.10 ns** | **PASS** |
-| **Unsupported HTTP/2 Preface**| `PRI * HTTP/2.0\r\n\r\n` | Rejected (Fast-Fail) | **106.99 ns** | **PASS** |
-| **Unsupported HTTP/0.9** | `GET /index.html\r\n` | Rejected (Fast-Fail) | **101.43 ns** | **PASS** |
-| **Missing HTTP Path** | `GET HTTP/1.1\r\nHost: localhost...` | Rejected (Fast-Fail) | **100.63 ns** | **PASS** |
-| **Valid RFC 9112 Baseline** | `GET /valid HTTP/1.1\r\nHost: localhost...` | Accepted (Valid) | **290.74 ns** | **PASS** |
+| **Negative Content-Length** | `POST / HTTP/1.1\r\nContent-Length: -1...` | Rejected (Fast-Fail) | **326.42 ns** | **PASS** |
+| **Non-Numeric Content-Length** | `POST / HTTP/1.1\r\nContent-Length: NaN...` | Rejected (Fast-Fail) | **306.98 ns** | **PASS** |
+| **Overflow Content-Length** | `POST / HTTP/1.1\r\nContent-Length: 99999...` | Rejected (Fast-Fail) | **355.88 ns** | **PASS** |
+| **Unsupported HTTP/2 Preface**| `PRI * HTTP/2.0\r\n\r\n` | Rejected (Fast-Fail) | **113.40 ns** | **PASS** |
+| **Unsupported HTTP/0.9** | `GET /index.html\r\n` | Rejected (Fast-Fail) | **110.98 ns** | **PASS** |
+| **Missing HTTP Path** | `GET HTTP/1.1\r\nHost: localhost...` | Rejected (Fast-Fail) | **108.31 ns** | **PASS** |
+| **Valid RFC 9112 Baseline** | `GET /valid HTTP/1.1\r\nHost: localhost...` | Accepted (Valid) | **284.99 ns** | **PASS** |
 
 > **Invariant Verified**: Zero smuggling ambiguity; malformed frames fail fast deterministically without buffer corruption or partial state leakage.
 
@@ -141,17 +142,17 @@ Evaluates RFC 9112 conformance, parser resilience against smuggling vectors, hea
 
 | Stress Vector | Payload Description | Outcome | Latency / op | Invariant Enforced |
 | :--- | :--- | :--- | :--- | :--- |
-| **Header Bomb (>64 Headers)** | 1,785 bytes (65 distinct headers) | Rejected / Bounded | **873.49 ns** | Bounded by `MAX_HEADERS = 64` |
-| **4KB Giant Header Value** | 4,141 bytes oversized header value | Parsed / Bounded | **1290.94 ns** | Bounded header capacity |
-| **Slowloris Incomplete Drip** | 45 bytes truncated mid-header | Pending (`Ok(None)`) | **92.34 ns** | Zero buffer advance, preserves stream |
+| **Header Bomb (>64 Headers)** | 1,785 bytes (65 distinct headers) | Rejected / Bounded | **885.41 ns** | Bounded by `MAX_HEADERS = 64` |
+| **4KB Giant Header Value** | 4,141 bytes oversized header value | Parsed / Bounded | **1270.57 ns** | Bounded header capacity |
+| **Slowloris Incomplete Drip** | 45 bytes truncated mid-header | Pending (`Ok(None)`) | **98.74 ns** | Zero buffer advance, preserves stream |
 
 ### C. Hostile HTTP Method Injections & Corrupted Tokens (1,000,000 Ops)
 
 | Metric | Measured | Target Requirement | Status |
 | :--- | :--- | :--- | :--- |
 | **Hostile Invocations** | **1,000,000 ops** | 1,000,000 ops | **PASS** |
-| **Latency / op** | **212.11 ns** | < 1,000 ns | **PASS** |
-| **Throughput** | **4.71 M ops/s** | > 1.0 M ops/s | **PASS** |
+| **Latency / op** | **207.89 ns** | < 1,000 ns | **PASS** |
+| **Throughput** | **4.81 M ops/s** | > 1.0 M ops/s | **PASS** |
 | **Parser Panics** | **0 (Zero)** | 0 panics | **PASS** |
 
 ### D. Incomplete Body Framing & Pipeline Boundary Fuzzing (500,000 Cycles)
@@ -159,8 +160,8 @@ Evaluates RFC 9112 conformance, parser resilience against smuggling vectors, hea
 | Metric | Measured | Target Requirement | Status |
 | :--- | :--- | :--- | :--- |
 | **Boundary Test Cycles** | **500,000 cycles** | 500,000 cycles | **PASS** |
-| **Boundary Cycle Latency** | **938.71 ns** | < 2,500 ns | **PASS** |
-| **Pipelined Parse Rate** | **1.07 M cycles/s** | > 500 K cycles/s | **PASS** |
+| **Boundary Cycle Latency** | **894.02 ns** | < 2,500 ns | **PASS** |
+| **Pipelined Parse Rate** | **1.12 M cycles/s** | > 500 K cycles/s | **PASS** |
 | **Stream Corruption** | **0 (Zero)** | 0 stream errors | **PASS** |
 
 ---
@@ -172,13 +173,13 @@ Validates memory safety, zero-leak steady-state, and buffer reuse invariants und
 | Audit Stage | Workload Scale | Total Allocated | Total Freed | Net Heap Growth | Net Lingering Allocs | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1. Steady-State Serving** | 10,000,000 ops (Decoded requests) | - | - | **0 B** | **0 allocs** | **ZERO LEAK [PASS]** |
-| **2. Response Buffer Reuse** | 1,000,000 serialized responses | 1.91 MB | 1.91 MB | **2048 B** | **1 buffer (reused)**| **BUFFER REUSE [PASS]** |
+| **2. Response Buffer Reuse** | 1,000,000 serialized responses | **2.00 KB** | **0 B** | **2048 B** | **1 buffer (reused)**| **ZERO CHURN [PASS]** |
 | **3. Concurrent Multi-Thread Storm** | 64 workers (6,400,000 ops) | - | - | **56 B** | **1 alloc** | **ZERO LEAK [PASS]** |
 | **4. Adversarial Malformed Stream** | 1,000,000 hostile/malformed frames | - | - | **0 B** | **0 allocs** | **ZERO RETENTION [PASS]** |
 
 ### Key Audit Invariants:
 1. **Zero Heap Growth in Steady-State**: Serving 10,000,000 requests consecutively leaves exactly **0 bytes** of heap residue.
-2. **Buffer Capacity Retention**: Reusing a `BytesMut` output buffer across 1,000,000 response encodings incurs zero reallocations once sized.
+2. **Buffer Capacity Retention**: Reusing a `BytesMut` output buffer across 1,000,000 response encodings consumes only a single initial 2 KB buffer allocation (**0 bytes reallocated**), down from 1.91 MB churn before optimization.
 3. **Multi-Thread Isolation**: 64 concurrent threads hammering the decoder concurrently leave negligible residual heap (56 B) upon task completion.
 4. **Adversarial Resilience**: Corrupted, truncated, and malicious frames are discarded cleanly with **0 B** retained in memory.
 
@@ -188,9 +189,9 @@ Validates memory safety, zero-leak steady-state, and buffer reuse invariants und
 
 1. **RFC 9112 Conformance**: Fast-fail rejection of negative, non-numeric, or overflow `Content-Length` headers, null bytes, and malformed version tokens.
 2. **Zero-Copy Body Splitting**: For payloads with known `Content-Length`, `buf.split_to(body_len).freeze()` creates zero-copy `bytes::Bytes` directly referencing the ingress buffer.
-3. **Bounded Memory Execution**: Header count is strictly bounded by `httparse::MAX_HEADERS = 64`. Header bombs cannot exhaust memory or cause stack overflow.
-4. **Clean Pipeline Framing**: Incomplete frames return `Ok(None)` without advancing the buffer read pointer (`buf.advance`), allowing subsequent socket reads to complete the frame without stream desynchronization.
-5. **Lock-Free Multicore Throughput**: Multicore response encoding achieves **90.83 Million ops/s** (10.83 GB/s) and connection pipelining sustains **8.26 Million ops/s** across 16 concurrent tasks.
+3. **Zero-Alloc Integer Formatting**: `itoa::Buffer` formats integer lengths and ports on the stack, eliminating heap `String` allocations during response and request serialization.
+4. **Zero-Copy Upstream Streaming**: `Http1UpstreamConnector` reads directly from the TCP socket into `read_buf: BytesMut` via `read_buf`, removing stack array intermediates and memcpy overhead.
+5. **Lock-Free Multicore Throughput**: Multicore response encoding reaches **109.06 Million ops/s** (13.00 GB/s) and connection pipelining sustains **7.92+ Million ops/s** across 16 concurrent tasks.
 
 ---
 

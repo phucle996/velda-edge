@@ -27,17 +27,15 @@ impl Http1UpstreamConnector {
         stream.write_all(&write_buf).await?;
 
         let mut read_buf = BytesMut::with_capacity(4096);
-        let mut chunk = [0u8; 4096];
 
         loop {
-            let n = stream.read(&mut chunk).await?;
+            let n = stream.read_buf(&mut read_buf).await?;
             if n == 0 {
                 if let Some(resp) = decode_response(&mut read_buf)? {
                     return Ok(resp);
                 }
                 return Err(Http1Error::ConnectionClosed);
             }
-            read_buf.extend_from_slice(&chunk[..n]);
 
             if let Some(resp) = decode_response(&mut read_buf)? {
                 return Ok(resp);
