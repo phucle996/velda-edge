@@ -41,6 +41,12 @@ impl TcpL7Handoff {
         self.connection
     }
 
+    /// Consumes the handoff envelope, returning the connection and listener ID.
+    #[inline]
+    pub fn into_parts(self) -> (Connection, String) {
+        (self.connection, self.listener_id)
+    }
+
     /// Returns the unique connection identifier.
     #[inline]
     pub fn id(&self) -> ConnectionId {
@@ -100,6 +106,18 @@ impl UdpL7Handoff {
     #[inline]
     pub fn into_datagram(self) -> crate::udp::datagram::Datagram {
         self.datagram
+    }
+
+    /// Consumes the handoff envelope, returning the datagram, shared socket, and listener ID.
+    #[inline]
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::udp::datagram::Datagram,
+        std::sync::Arc<crate::udp::socket::UdpSocket>,
+        String,
+    ) {
+        (self.datagram, self.socket, self.listener_id)
     }
 
     /// Returns a reference to the underlying shared UDP socket.

@@ -29,14 +29,33 @@ pub struct Connection {
     listener_id: Option<String>,
 }
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+const ID_BATCH_SIZE: u64 = 512;
+
+thread_local! {
+    static LOCAL_ID_RANGE: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
 
 /// Generates a globally monotonically increasing [`ConnectionId`].
+///
+/// Uses thread-local batching (512 IDs per batch) to eliminate atomic cache-line
+/// contention (`MESI` invalidation ping-pong) across concurrent worker threads.
 #[inline]
 pub fn next_connection_id() -> ConnectionId {
-    ConnectionId::new(NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed))
+    LOCAL_ID_RANGE.with(|range| {
+        let (curr, max) = range.get();
+        if curr < max {
+            range.set((curr + 1, max));
+            ConnectionId::new(curr)
+        } else {
+            let base = NEXT_CONNECTION_ID.fetch_add(ID_BATCH_SIZE, Ordering::Relaxed);
+            range.set((base + 1, base + ID_BATCH_SIZE));
+            ConnectionId::new(base)
+        }
+    })
 }
 
 impl Connection {
