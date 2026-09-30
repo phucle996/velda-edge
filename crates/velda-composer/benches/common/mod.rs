@@ -175,7 +175,12 @@ pub fn build_test_composer(listener_count: usize) -> Composer {
         };
 
         let listener_id = format!("listener_{proto}_{i:04}");
-        composer.register_listener(CompiledListenerComposition::new(listener_id, proto, tls));
+        composer.register_listener(CompiledListenerComposition::new(
+            listener_id,
+            proto,
+            tls,
+            velda_core::IngressLimits::default(),
+        ));
     }
 
     composer

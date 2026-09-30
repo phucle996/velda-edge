@@ -287,7 +287,8 @@ pub(crate) fn build_router(
 mod tests {
     use super::*;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTlsConfig,
+        ListenerTransportConfig,
     };
     use velda_sync::post_sync::route::{RouteMatch, RouteTimeouts};
     use velda_sync::post_sync::upstream::{
@@ -308,6 +309,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: false },
+                limits: ListenerLimitsConfig::default(),
             },
             ListenerConfig {
                 id: "dns-in".into(),
@@ -320,6 +322,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: false },
+                limits: ListenerLimitsConfig::default(),
             },
             ListenerConfig {
                 id: "http-in".into(),
@@ -332,6 +335,7 @@ mod tests {
                     version: Some("1.1".into()),
                 },
                 tls: ListenerTlsConfig { enabled: false },
+                limits: ListenerLimitsConfig::default(),
             },
         ];
 

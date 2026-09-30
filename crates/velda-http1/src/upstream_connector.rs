@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use velda_core::{L7Request, L7Response};
+use velda_core::{IngressLimits, L7Request, L7Response};
 
 use crate::codec::{decode_response, encode_request};
 use crate::error::Http1Error;
@@ -14,10 +14,11 @@ pub struct Http1UpstreamConnector;
 
 impl Http1UpstreamConnector {
     /// Forwards an HTTP/1.1 L7Request to the target backend endpoint over cleartext TCP,
-    /// returning the parsed L7Response.
+    /// returning the parsed L7Response using configured ingress limits.
     pub async fn forward_request(
         req: &L7Request,
         target: SocketAddr,
+        limits: &IngressLimits,
     ) -> Result<L7Response, Http1Error> {
         let mut stream = TcpStream::connect(target).await?;
 
@@ -31,13 +32,13 @@ impl Http1UpstreamConnector {
         loop {
             let n = stream.read_buf(&mut read_buf).await?;
             if n == 0 {
-                if let Some(resp) = decode_response(&mut read_buf)? {
+                if let Some(resp) = decode_response(&mut read_buf, limits)? {
                     return Ok(resp);
                 }
                 return Err(Http1Error::ConnectionClosed);
             }
 
-            if let Some(resp) = decode_response(&mut read_buf)? {
+            if let Some(resp) = decode_response(&mut read_buf, limits)? {
                 return Ok(resp);
             }
         }

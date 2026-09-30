@@ -332,6 +332,7 @@ mod tests {
             "https-secure",
             ApplicationProtocol::Http2,
             true,
+            velda_core::IngressLimits::default(),
         ));
 
         let composed = composer.compose_tcp_handoff(handoff).unwrap();
@@ -391,6 +392,7 @@ mod tests {
             "udp-custom",
             ApplicationProtocol::Http3,
             false,
+            velda_core::IngressLimits::default(),
         ));
 
         let composed = composer.compose_udp_handoff(handoff).unwrap();

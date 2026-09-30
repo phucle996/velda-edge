@@ -20,8 +20,9 @@ use crate::runtime::SharedRuntime;
 pub async fn forward_http1_request(
     req: &L7Request,
     target: SocketAddr,
+    limits: &velda_core::IngressLimits,
 ) -> Result<L7Response, EdgeError> {
-    Http1UpstreamConnector::forward_request(req, target)
+    Http1UpstreamConnector::forward_request(req, target, limits)
         .await
         .map_err(|e| {
             EdgeError::Internal(format!(
@@ -89,7 +90,7 @@ pub async fn process_http1_request(
         );
     };
 
-    match forward_http1_request(req, target).await {
+    match forward_http1_request(req, target, &context.limits).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(
@@ -115,7 +116,7 @@ pub async fn handle_http1_stream<IO>(stream: IO, context: ComposerContext, runti
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut conn = velda_http1::Http1ServerConnection::with_limits(stream, context.limits);
+    let mut conn = velda_http1::Http1ServerConnection::new(stream, context.limits);
     while let Ok(Some(req)) = conn.next_request().await {
         tracing::debug!(
             method = %req.method,

@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use velda_core::{Body, L7Response};
+use velda_core::{Body, IngressLimits, L7Response};
 use velda_http1::{decode_request, encode_response};
 
 #[global_allocator]
@@ -49,9 +49,10 @@ fn bench_request_decoding_steady_state() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
+    let limits = IngressLimits::default();
     for _ in 0..iters {
         let mut buf = BytesMut::from(&raw[..]);
-        let req = decode_request(&mut buf).unwrap().unwrap();
+        let req = decode_request(&mut buf, &limits).unwrap().unwrap();
         let _ = std::hint::black_box(req);
     }
 
@@ -181,9 +182,10 @@ fn bench_multithread_storm_reclamation() {
 
         handles.push(thread::spawn(move || {
             bar.wait();
+            let limits = IngressLimits::default();
             for _ in 0..ops_per_worker {
                 let mut buf = BytesMut::from(&p[..]);
-                let req = decode_request(&mut buf).unwrap().unwrap();
+                let req = decode_request(&mut buf, &limits).unwrap().unwrap();
                 let _ = std::hint::black_box(req);
             }
         }));
@@ -242,10 +244,11 @@ fn bench_adversarial_zero_retention() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
+    let limits = IngressLimits::default();
     for i in 0..iters {
         let payload = &hostile_payloads[i % hostile_payloads.len()];
         let mut buf = BytesMut::from(&payload[..]);
-        let res = decode_request(&mut buf);
+        let res = decode_request(&mut buf, &limits);
         let _ = std::hint::black_box(res);
     }
 

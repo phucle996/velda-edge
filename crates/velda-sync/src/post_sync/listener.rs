@@ -56,6 +56,42 @@ pub struct ListenerApplicationConfig {
     pub version: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerLimitsConfig {
+    pub max_body_size: usize,
+    pub max_header_size: usize,
+    pub max_headers: usize,
+    pub request_timeout_ms: u64,
+}
+
+impl Default for ListenerLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_body_size: 10 * 1024 * 1024,
+            max_header_size: 64 * 1024,
+            max_headers: 64,
+            request_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl ListenerLimitsConfig {
+    pub fn to_ingress_limits(&self) -> velda_core::IngressLimits {
+        velda_core::IngressLimits {
+            max_body_size: self.max_body_size,
+            max_header_size: self.max_header_size,
+            max_headers: self.max_headers,
+            request_timeout_ms: self.request_timeout_ms,
+        }
+    }
+}
+
+impl From<ListenerLimitsConfig> for velda_core::IngressLimits {
+    fn from(l: ListenerLimitsConfig) -> Self {
+        l.to_ingress_limits()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub id: String,
@@ -63,6 +99,7 @@ pub struct ListenerConfig {
     pub transport: ListenerTransportConfig,
     pub application: ListenerApplicationConfig,
     pub tls: ListenerTlsConfig,
+    pub limits: ListenerLimitsConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -343,6 +380,27 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
             }
         }
 
+        if listener.application.protocol != "raw" {
+            if listener.limits.max_header_size == 0 {
+                return Err(SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Listener '{}' has invalid max_header_size 0; must be > 0",
+                        listener.id
+                    ),
+                });
+            }
+            if listener.limits.max_headers == 0 {
+                return Err(SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Listener '{}' has invalid max_headers 0; must be > 0",
+                        listener.id
+                    ),
+                });
+            }
+        }
+
         // ====================================================================
         // Internal Port Conflict Check
         // ====================================================================
@@ -554,6 +612,7 @@ mod tests {
                 version: None,
             },
             tls: Default::default(),
+            limits: ListenerLimitsConfig::default(),
         }
     }
 
@@ -566,7 +625,13 @@ mod tests {
                 "address": " 0.0.0.0:80 ",
                 "transport": { "protocol": "TCP" },
                 "application": { "protocol": "HTTP1", "version": "1.1" },
-                "tls": { "enabled": false }
+                "tls": { "enabled": false },
+                "limits": {
+                    "max_body_size": 10485760,
+                    "max_header_size": 65536,
+                    "max_headers": 64,
+                    "request_timeout_ms": 30000
+                }
             }]
         }"#;
 
@@ -577,6 +642,26 @@ mod tests {
         assert_eq!(listeners[0].transport.protocol, "tcp");
         assert_eq!(listeners[0].application.protocol, "http1");
         assert_eq!(listeners[0].application.version.as_deref(), Some("1.1"));
+        assert_eq!(listeners[0].limits.max_header_size, 65536);
+    }
+
+    #[test]
+    fn test_missing_limits_fails_deserialization() {
+        let json = r#"{
+            "schema_version": 1,
+            "listeners": [{
+                "id": "http",
+                "address": "0.0.0.0:80",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "http1" },
+                "tls": { "enabled": false }
+            }]
+        }"#;
+
+        assert!(
+            parse_listeners(json.as_bytes()).is_err(),
+            "Missing mandatory limits must fail deserialization"
+        );
     }
 
     #[test]

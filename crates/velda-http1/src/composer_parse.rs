@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use velda_core::{IngressLimits, L7Request, L7Response};
 
-use crate::codec::decode_request_with_limits;
+use crate::codec::decode_request;
 use crate::error::Http1Error;
 
 const INITIAL_BUFFER_CAPACITY: usize = 4096;
@@ -22,13 +22,8 @@ impl<IO> Http1ServerConnection<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Creates a new HTTP/1.1 connection with default generic IngressLimits.
-    pub fn new(stream: IO) -> Self {
-        Self::with_limits(stream, IngressLimits::default())
-    }
-
-    /// Creates a new HTTP/1.1 connection with custom generic IngressLimits configured on the listener.
-    pub fn with_limits(stream: IO, limits: IngressLimits) -> Self {
+    /// Creates a new HTTP/1.1 connection with mandatory generic IngressLimits configured on the listener.
+    pub fn new(stream: IO, limits: IngressLimits) -> Self {
         Self {
             stream,
             read_buf: BytesMut::with_capacity(INITIAL_BUFFER_CAPACITY),
@@ -51,7 +46,7 @@ where
         }
 
         loop {
-            if let Some(req) = decode_request_with_limits(&mut self.read_buf, &self.limits)? {
+            if let Some(req) = decode_request(&mut self.read_buf, &self.limits)? {
                 let is_http10 = req.version == http::Version::HTTP_10;
                 let conn_header = req
                     .headers

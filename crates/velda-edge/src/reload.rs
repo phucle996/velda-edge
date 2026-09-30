@@ -172,7 +172,7 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::tempdir;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
         compile_listeners_to_binary,
     };
 
@@ -193,6 +193,7 @@ mod tests {
                 version: None,
             },
             tls: Default::default(),
+            limits: ListenerLimitsConfig::default(),
         }];
         let bin = compile_listeners_to_binary(&listeners, 10, [0u8; 32]).unwrap();
         std::fs::write(runtime_dir.join("listeners.bin"), bin).unwrap();

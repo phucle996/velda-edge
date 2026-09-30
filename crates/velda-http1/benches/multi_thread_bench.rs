@@ -16,7 +16,7 @@ use common::{format_duration, format_throughput};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::{Body, L7Response};
+use velda_core::{Body, IngressLimits, L7Response};
 use velda_http1::composer_parse::Http1ServerConnection;
 use velda_http1::{decode_request, encode_response};
 
@@ -97,9 +97,10 @@ fn bench_multi_thread_request_decoding_scaling() {
                 bar.wait();
                 let start = Instant::now();
 
+                let limits = IngressLimits::default();
                 for _ in 0..ops_per_thread {
                     let mut buf = BytesMut::from(&payload[..]);
-                    let req = decode_request(&mut buf).unwrap().unwrap();
+                    let req = decode_request(&mut buf, &limits).unwrap().unwrap();
                     let _ = std::hint::black_box(req);
                 }
 
@@ -224,7 +225,7 @@ async fn bench_concurrent_connection_storm() {
 
     for _ in 0..num_connections {
         let (mut client_io, server_io) = duplex(128 * 1024);
-        let mut server_conn = Http1ServerConnection::new(server_io);
+        let mut server_conn = Http1ServerConnection::new(server_io, IngressLimits::default());
         let bar = Arc::clone(&barrier);
 
         // Spawn client writer

@@ -26,6 +26,9 @@ pub enum Http1Error {
     #[error("Header section too large: {0} bytes exceeds limit")]
     HeaderTooLarge(usize),
 
+    #[error("Header count exceeds limit: {0}")]
+    TooManyHeaders(usize),
+
     #[error("HTTP request smuggling detected: {0}")]
     SmugglingDetected(String),
 

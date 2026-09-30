@@ -30,10 +30,13 @@ pub(crate) fn build_composer(listeners: &[ListenerConfig]) -> Result<Composer, E
                 ),
             })?;
 
+        let limits = listener.limits.to_ingress_limits();
+
         compositions.push(CompiledListenerComposition::new(
             &listener.id,
             protocol,
             listener.tls.enabled,
+            limits,
         ));
     }
 
@@ -44,7 +47,7 @@ pub(crate) fn build_composer(listeners: &[ListenerConfig]) -> Result<Composer, E
 mod tests {
     use super::*;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerTlsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerLimitsConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
 
     #[test]
@@ -62,6 +65,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig::default(),
+                limits: ListenerLimitsConfig::default(),
             },
             // HTTP/2 with TLS → should produce composition
             ListenerConfig {
@@ -75,6 +79,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig { enabled: true },
+                limits: ListenerLimitsConfig::default(),
             },
             // Raw TCP → should be skipped (L4 direct)
             ListenerConfig {
@@ -88,6 +93,7 @@ mod tests {
                     version: None,
                 },
                 tls: ListenerTlsConfig::default(),
+                limits: ListenerLimitsConfig::default(),
             },
         ];
 
@@ -126,6 +132,7 @@ mod tests {
                 version: None,
             },
             tls: ListenerTlsConfig::default(),
+            limits: ListenerLimitsConfig::default(),
         }];
 
         let result = build_composer(&listeners);

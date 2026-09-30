@@ -262,6 +262,7 @@ fn bench_rapid_listener_flapping_stress() {
             listener_id,
             proto,
             i % 2 == 0,
+            velda_core::IngressLimits::default(),
         ));
     }
     let elapsed = start.elapsed();

@@ -8,7 +8,8 @@ use tokio::sync::watch;
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::ipc::{SyncNotification, send_notification};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig, compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
+    compile_listeners_to_binary,
 };
 
 #[tokio::test]
@@ -32,6 +33,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             version: None,
         },
         tls: Default::default(),
+        limits: ListenerLimitsConfig::default(),
     }];
 
     let initial_bin = compile_listeners_to_binary(&initial_listeners, 1, [0x11u8; 32]).unwrap();
@@ -75,6 +77,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
                 version: None,
             },
             tls: Default::default(),
+            limits: ListenerLimitsConfig::default(),
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
@@ -87,6 +90,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
                 version: None,
             },
             tls: Default::default(),
+            limits: ListenerLimitsConfig::default(),
         },
     ];
     let updated_bin = compile_listeners_to_binary(&updated_listeners, 2, [0x22u8; 32]).unwrap();

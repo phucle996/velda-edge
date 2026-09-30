@@ -85,18 +85,19 @@ pub struct CompiledListenerComposition {
 }
 
 impl CompiledListenerComposition {
-    /// Creates a new compiled listener composition with default IngressLimits.
+    /// Creates a new compiled listener composition with mandatory IngressLimits declared by the listener.
     pub fn new(
         listener_id: impl Into<String>,
         protocol: ApplicationProtocol,
         tls_enabled: bool,
+        limits: IngressLimits,
     ) -> Self {
         Self {
             listener_id: listener_id.into(),
             protocol,
             tls_enabled,
             handshake_timeout_ms: 5000,
-            limits: IngressLimits::default(),
+            limits,
         }
     }
 

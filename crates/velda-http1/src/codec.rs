@@ -7,15 +7,6 @@ use velda_core::{Body, IngressLimits, L7Request, L7Response};
 
 use crate::error::Http1Error;
 
-/// Maximum number of headers supported per request.
-pub const MAX_HEADERS: usize = 64;
-
-/// Default maximum allowed buffer capacity for HTTP headers (64 KB).
-pub const MAX_HEADER_SIZE: usize = 64 * 1024;
-
-/// Default maximum allowed body payload buffer size (10 MB).
-pub const MAX_BODY_BUFFER_SIZE: usize = 10 * 1024 * 1024;
-
 /// Decodes a chunked HTTP body from a byte slice.
 ///
 /// Returns:
@@ -122,13 +113,8 @@ pub fn decode_chunked_body(
     Ok(Some((offset, Body::Bytes(body_bytes.freeze()))))
 }
 
-/// Decodes an HTTP/1.1 request from the read buffer using default ingress limits.
-pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Error> {
-    decode_request_with_limits(buf, &IngressLimits::default())
-}
-
-/// Decodes an HTTP/1.1 request from the read buffer using specified generic [`IngressLimits`].
-pub fn decode_request_with_limits(
+/// Decodes an HTTP/1.1 request from the read buffer using mandatory generic [`IngressLimits`].
+pub fn decode_request(
     buf: &mut BytesMut,
     limits: &IngressLimits,
 ) -> Result<Option<L7Request>, Http1Error> {
@@ -136,11 +122,22 @@ pub fn decode_request_with_limits(
         return Ok(None);
     }
 
-    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-    let mut req = httparse::Request::new(&mut headers);
+    let max_headers = limits.max_headers.max(1);
+    let mut stack_headers = [httparse::EMPTY_HEADER; 128];
+    let mut heap_headers: Vec<httparse::Header>;
+    let header_slice: &mut [httparse::Header] = if max_headers <= 128 {
+        &mut stack_headers[..max_headers]
+    } else {
+        heap_headers = vec![httparse::EMPTY_HEADER; max_headers];
+        heap_headers.as_mut_slice()
+    };
+    let mut req = httparse::Request::new(header_slice);
 
     let status = match req.parse(buf.as_ref()) {
         Ok(s) => s,
+        Err(httparse::Error::TooManyHeaders) => {
+            return Err(Http1Error::TooManyHeaders(limits.max_headers));
+        }
         Err(e) => return Err(Http1Error::Parse(e.to_string())),
     };
 
@@ -373,13 +370,8 @@ pub fn encode_request(req: &L7Request, dst: &mut BytesMut) {
     }
 }
 
-/// Decodes an HTTP/1.1 response from the read buffer using default ingress limits.
-pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Error> {
-    decode_response_with_limits(buf, &IngressLimits::default())
-}
-
-/// Decodes an HTTP/1.1 response from the read buffer using specified generic [`IngressLimits`].
-pub fn decode_response_with_limits(
+/// Decodes an HTTP/1.1 response from the read buffer using mandatory generic [`IngressLimits`].
+pub fn decode_response(
     buf: &mut BytesMut,
     limits: &IngressLimits,
 ) -> Result<Option<L7Response>, Http1Error> {
@@ -387,11 +379,22 @@ pub fn decode_response_with_limits(
         return Ok(None);
     }
 
-    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-    let mut res = httparse::Response::new(&mut headers);
+    let max_headers = limits.max_headers.max(1);
+    let mut stack_headers = [httparse::EMPTY_HEADER; 128];
+    let mut heap_headers: Vec<httparse::Header>;
+    let header_slice: &mut [httparse::Header] = if max_headers <= 128 {
+        &mut stack_headers[..max_headers]
+    } else {
+        heap_headers = vec![httparse::EMPTY_HEADER; max_headers];
+        heap_headers.as_mut_slice()
+    };
+    let mut res = httparse::Response::new(header_slice);
 
     let status = match res.parse(buf.as_ref()) {
         Ok(s) => s,
+        Err(httparse::Error::TooManyHeaders) => {
+            return Err(Http1Error::TooManyHeaders(limits.max_headers));
+        }
         Err(e) => return Err(Http1Error::Parse(e.to_string())),
     };
 

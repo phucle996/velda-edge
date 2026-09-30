@@ -28,7 +28,7 @@ Tests were executed using the custom counting allocator and timing suite in:
 | **Multicore Encoding Scaling** | 24 Workers (Parallel serialize) | **109.06 M ops/s** (13.00 GB/s) | **Exceeded** (Lock-free scaling >100M) |
 | **Keep-Alive Connection Storm** | 16 Tasks, 80,000 duplex ops | **7.92 M ops/s**, **0 deadlocks** | **Passed** (10.10 ms total duration) |
 | **Smuggling Rejection (TE/CL)** | Malformed / negative / overflow | **100% Deterministic Rejection** | **Passed** (Zero ambiguity, < 360 ns) |
-| **Header Bomb Resistance** | >64 headers / 4KB values | **Bounded & Rejected** | **Passed** (MAX_HEADERS bound) |
+| **Header Bomb Resistance** | >64 headers / 4KB values | **Bounded & Rejected** | **Passed** (`IngressLimits::max_headers` bound) |
 | **Slowloris Drip Resistance** | Incomplete fragment feeding | **98.74 ns**, `Ok(None)` | **Passed** (Zero buffer advance) |
 | **Hostile Token Injection** | 1,000,000 SQLi/null/mutations | **4.81 M ops/s**, **0 panics** | **Passed** (Deterministic error return) |
 | **Pipeline Boundary Fuzzing** | 500,000 partial & back-to-back | **1.12 M cycles/s**, **0 corrupt**| **Passed** (Strict frame boundary) |
@@ -142,7 +142,7 @@ Evaluates RFC 9112 conformance, parser resilience against smuggling vectors, hea
 
 | Stress Vector | Payload Description | Outcome | Latency / op | Invariant Enforced |
 | :--- | :--- | :--- | :--- | :--- |
-| **Header Bomb (>64 Headers)** | 1,785 bytes (65 distinct headers) | Rejected / Bounded | **885.41 ns** | Bounded by `MAX_HEADERS = 64` |
+| **Header Bomb (>64 Headers)** | 1,785 bytes (65 distinct headers) | Rejected / Bounded | **885.41 ns** | Bounded by `IngressLimits::max_headers` |
 | **4KB Giant Header Value** | 4,141 bytes oversized header value | Parsed / Bounded | **1270.57 ns** | Bounded header capacity |
 | **Slowloris Incomplete Drip** | 45 bytes truncated mid-header | Pending (`Ok(None)`) | **98.74 ns** | Zero buffer advance, preserves stream |
 

@@ -134,7 +134,7 @@ impl PipelineTable {
 mod tests {
     use super::*;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerTlsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerLimitsConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
 
     fn cfg(
@@ -155,6 +155,7 @@ mod tests {
                 version: version.map(String::from),
             },
             tls: ListenerTlsConfig { enabled: tls },
+            limits: ListenerLimitsConfig::default(),
         }
     }
 

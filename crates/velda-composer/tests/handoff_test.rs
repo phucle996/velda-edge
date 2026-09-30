@@ -32,11 +32,13 @@ async fn test_traffic_engine_to_composer_handoff_lifecycle() {
         "http-listener",
         ApplicationProtocol::Http1,
         false,
+        velda_core::IngressLimits::default(),
     ));
     composer.register_listener(CompiledListenerComposition::new(
         "https-listener",
         ApplicationProtocol::Http2,
         true,
+        velda_core::IngressLimits::default(),
     ));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
