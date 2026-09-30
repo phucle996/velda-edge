@@ -3,10 +3,10 @@
 This document reports empirical performance benchmarks for `velda-http1` (L7 HTTP/1.1 Protocol Engine, RFC 9112).
 
 Tests were executed using the custom counting allocator and timing suite in:
-- Single-thread suite: [`benches/single_thread_bench.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-http1/benches/single_thread_bench.rs)
-- Multi-thread concurrency suite: [`benches/multi_thread_bench.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-http1/benches/multi_thread_bench.rs)
-- Adversarial & stress suite: [`benches/adversarial_bench.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-http1/benches/adversarial_bench.rs)
-- Memory leak & resource regression suite: [`benches/memory_leak_bench.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-http1/benches/memory_leak_bench.rs)
+- Single-thread suite: [`benches/single_thread_bench.rs`](benches/single_thread_bench.rs)
+- Multi-thread concurrency suite: [`benches/multi_thread_bench.rs`](benches/multi_thread_bench.rs)
+- Adversarial & stress suite: [`benches/adversarial_bench.rs`](benches/adversarial_bench.rs)
+- Memory leak & resource regression suite: [`benches/memory_leak_bench.rs`](benches/memory_leak_bench.rs)
 
 ---
 
@@ -43,7 +43,7 @@ Measures decoding and encoding latency across heterogeneous HTTP/1.1 message pro
 
 ### A. Request Decoding Latency & Allocations (`decode_request`)
 
-Evaluates parsing raw byte streams into [`velda_core::L7Request`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/request.rs):
+Evaluates parsing raw byte streams into [`velda_core::L7Request`](../velda-core/src/request.rs):
 
 | Request Profile | Wire Size | Latency / op | Allocs / op | Throughput | Data Rate | Evaluation |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -54,7 +54,7 @@ Evaluates parsing raw byte streams into [`velda_core::L7Request`](file:///home/p
 
 ### B. Response Encoding Latency (`encode_response`)
 
-Serializing [`velda_core::L7Response`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/response.rs) into downstream wire buffers:
+Serializing [`velda_core::L7Response`](../velda-core/src/response.rs) into downstream wire buffers:
 
 | Response Profile | Status | Body Size | Latency / op | Allocs / op | Throughput | Data Rate | Speedup |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
