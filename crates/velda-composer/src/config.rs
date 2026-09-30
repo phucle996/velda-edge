@@ -65,6 +65,8 @@ impl fmt::Display for ApplicationProtocol {
     }
 }
 
+use velda_core::IngressLimits;
+
 /// Compiled runtime composition rules for a specific listener.
 ///
 /// Pre-validated and stored in RAM during bootstrap/reload without JSON parsing overhead.
@@ -78,10 +80,12 @@ pub struct CompiledListenerComposition {
     pub tls_enabled: bool,
     /// TLS handshake timeout in milliseconds (default 5,000 ms).
     pub handshake_timeout_ms: u64,
+    /// Generic ingress safety limits (body size, header size, max headers, timeout).
+    pub limits: IngressLimits,
 }
 
 impl CompiledListenerComposition {
-    /// Creates a new compiled listener composition.
+    /// Creates a new compiled listener composition with default IngressLimits.
     pub fn new(
         listener_id: impl Into<String>,
         protocol: ApplicationProtocol,
@@ -92,12 +96,19 @@ impl CompiledListenerComposition {
             protocol,
             tls_enabled,
             handshake_timeout_ms: 5000,
+            limits: IngressLimits::default(),
         }
     }
 
     /// Configures an explicit TLS handshake timeout.
     pub fn with_handshake_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.handshake_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Configures explicit ingress safety limits.
+    pub fn with_limits(mut self, limits: IngressLimits) -> Self {
+        self.limits = limits;
         self
     }
 }

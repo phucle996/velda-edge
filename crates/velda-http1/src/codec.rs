@@ -3,17 +3,17 @@
 use bytes::{Buf, BufMut, BytesMut};
 use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Uri, Version};
-use velda_core::{Body, L7Request, L7Response};
+use velda_core::{Body, IngressLimits, L7Request, L7Response};
 
 use crate::error::Http1Error;
 
 /// Maximum number of headers supported per request.
 pub const MAX_HEADERS: usize = 64;
 
-/// Maximum allowed buffer capacity for HTTP headers (64 KB).
+/// Default maximum allowed buffer capacity for HTTP headers (64 KB).
 pub const MAX_HEADER_SIZE: usize = 64 * 1024;
 
-/// Maximum allowed body payload buffer size (10 MB).
+/// Default maximum allowed body payload buffer size (10 MB).
 pub const MAX_BODY_BUFFER_SIZE: usize = 10 * 1024 * 1024;
 
 /// Decodes a chunked HTTP body from a byte slice.
@@ -122,8 +122,16 @@ pub fn decode_chunked_body(
     Ok(Some((offset, Body::Bytes(body_bytes.freeze()))))
 }
 
-/// Decodes an HTTP/1.1 request from the read buffer.
+/// Decodes an HTTP/1.1 request from the read buffer using default ingress limits.
 pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Error> {
+    decode_request_with_limits(buf, &IngressLimits::default())
+}
+
+/// Decodes an HTTP/1.1 request from the read buffer using specified generic [`IngressLimits`].
+pub fn decode_request_with_limits(
+    buf: &mut BytesMut,
+    limits: &IngressLimits,
+) -> Result<Option<L7Request>, Http1Error> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -139,7 +147,7 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
     let header_len = match status {
         httparse::Status::Complete(len) => len,
         httparse::Status::Partial => {
-            if buf.len() > MAX_HEADER_SIZE {
+            if buf.len() > limits.max_header_size {
                 return Err(Http1Error::HeaderTooLarge(buf.len()));
             }
             return Ok(None);
@@ -231,7 +239,7 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
 
     if is_chunked {
         let chunked_slice = &buf[header_len..];
-        match decode_chunked_body(chunked_slice, MAX_BODY_BUFFER_SIZE)? {
+        match decode_chunked_body(chunked_slice, limits.max_body_size)? {
             Some((consumed_wire, body)) => {
                 buf.advance(header_len + consumed_wire);
                 return Ok(Some(L7Request::new(method, uri, version, header_map, body)));
@@ -241,7 +249,7 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
     }
 
     let body_len = content_length.unwrap_or(0);
-    if body_len > MAX_BODY_BUFFER_SIZE {
+    if body_len > limits.max_body_size {
         return Err(Http1Error::PayloadTooLarge(body_len));
     }
 
@@ -365,8 +373,16 @@ pub fn encode_request(req: &L7Request, dst: &mut BytesMut) {
     }
 }
 
-/// Decodes an HTTP/1.1 response from the read buffer.
+/// Decodes an HTTP/1.1 response from the read buffer using default ingress limits.
 pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Error> {
+    decode_response_with_limits(buf, &IngressLimits::default())
+}
+
+/// Decodes an HTTP/1.1 response from the read buffer using specified generic [`IngressLimits`].
+pub fn decode_response_with_limits(
+    buf: &mut BytesMut,
+    limits: &IngressLimits,
+) -> Result<Option<L7Response>, Http1Error> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -382,7 +398,7 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
     let header_len = match status {
         httparse::Status::Complete(len) => len,
         httparse::Status::Partial => {
-            if buf.len() > MAX_HEADER_SIZE {
+            if buf.len() > limits.max_header_size {
                 return Err(Http1Error::HeaderTooLarge(buf.len()));
             }
             return Ok(None);
@@ -458,7 +474,7 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
 
     if is_chunked {
         let chunked_slice = &buf[header_len..];
-        match decode_chunked_body(chunked_slice, MAX_BODY_BUFFER_SIZE)? {
+        match decode_chunked_body(chunked_slice, limits.max_body_size)? {
             Some((consumed_wire, body)) => {
                 buf.advance(header_len + consumed_wire);
                 return Ok(Some(L7Response::new(
@@ -473,7 +489,7 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
     }
 
     let body_len = content_length.unwrap_or(0);
-    if body_len > MAX_BODY_BUFFER_SIZE {
+    if body_len > limits.max_body_size {
         return Err(Http1Error::PayloadTooLarge(body_len));
     }
 

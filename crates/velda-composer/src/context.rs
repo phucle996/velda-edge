@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use velda_core::{ConnectionContext, ConnectionId, L4Request};
+use velda_core::{ConnectionContext, ConnectionId, IngressLimits, L4Request};
 
 use crate::config::ApplicationProtocol;
 
@@ -53,6 +53,8 @@ pub struct ComposerContext {
     pub tls: Option<TlsMetadata>,
     /// Active application protocol resolved for this stream.
     pub protocol: ApplicationProtocol,
+    /// Ingress safety limits applicable to this connection.
+    pub limits: IngressLimits,
     /// Time when the connection entered Composer.
     pub created_at: Instant,
 }
@@ -73,6 +75,7 @@ impl ComposerContext {
             local_addr,
             tls: None,
             protocol,
+            limits: IngressLimits::default(),
             created_at: Instant::now(),
         }
     }
@@ -94,8 +97,15 @@ impl ComposerContext {
             local_addr,
             tls: None,
             protocol,
+            limits: IngressLimits::default(),
             created_at: Instant::now(),
         }
+    }
+
+    /// Configures ingress safety limits for this connection context.
+    pub fn with_limits(mut self, limits: IngressLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Enriches the context with TLS metadata after successful handshake.

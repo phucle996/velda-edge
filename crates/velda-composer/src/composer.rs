@@ -209,9 +209,13 @@ impl Composer {
         handoff: TcpL7Handoff,
     ) -> Result<ComposedStream, ComposerError> {
         // 1. Resolve composition from compiled configuration if present, or derive default HTTP/1.1 cleartext
-        let (protocol, tls_enabled) = match self.listeners.get(handoff.listener_id()) {
-            Some(cfg) => (cfg.protocol, cfg.tls_enabled),
-            None => (ApplicationProtocol::Http1, false),
+        let (protocol, tls_enabled, limits) = match self.listeners.get(handoff.listener_id()) {
+            Some(cfg) => (cfg.protocol, cfg.tls_enabled, cfg.limits),
+            None => (
+                ApplicationProtocol::Http1,
+                false,
+                velda_core::IngressLimits::default(),
+            ),
         };
 
         // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
@@ -220,7 +224,8 @@ impl Composer {
         let local_addr = handoff.local_addr();
         let (connection, listener_id) = handoff.into_parts();
 
-        let context = ComposerContext::new_tcp(conn_id, listener_id, peer, local_addr, protocol);
+        let context = ComposerContext::new_tcp(conn_id, listener_id, peer, local_addr, protocol)
+            .with_limits(limits);
 
         // 3. Decide composition outcome
         if tls_enabled {
@@ -245,9 +250,13 @@ impl Composer {
         handoff: UdpL7Handoff,
     ) -> Result<ComposedDatagram, ComposerError> {
         // 1. Resolve composition from compiled configuration if present, or derive default HTTP/3 + TLS
-        let (protocol, tls_enabled) = match self.listeners.get(handoff.listener_id()) {
-            Some(cfg) => (cfg.protocol, cfg.tls_enabled),
-            None => (ApplicationProtocol::Http3, true),
+        let (protocol, tls_enabled, limits) = match self.listeners.get(handoff.listener_id()) {
+            Some(cfg) => (cfg.protocol, cfg.tls_enabled, cfg.limits),
+            None => (
+                ApplicationProtocol::Http3,
+                true,
+                velda_core::IngressLimits::default(),
+            ),
         };
 
         // 2. Initialize connection context using owned listener_id directly (zero heap allocation)
@@ -255,7 +264,8 @@ impl Composer {
         let local_addr = handoff.local_addr();
         let (datagram, socket, listener_id) = handoff.into_parts();
 
-        let context = ComposerContext::new_udp(listener_id, peer, local_addr, protocol);
+        let context =
+            ComposerContext::new_udp(listener_id, peer, local_addr, protocol).with_limits(limits);
 
         // 3. Decide composition outcome
         if tls_enabled {

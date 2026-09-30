@@ -2,9 +2,9 @@
 
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use velda_core::{L7Request, L7Response};
+use velda_core::{IngressLimits, L7Request, L7Response};
 
-use crate::codec::decode_request;
+use crate::codec::decode_request_with_limits;
 use crate::error::Http1Error;
 
 const INITIAL_BUFFER_CAPACITY: usize = 4096;
@@ -15,30 +15,43 @@ pub struct Http1ServerConnection<IO> {
     read_buf: BytesMut,
     write_buf: BytesMut,
     close_requested: bool,
+    limits: IngressLimits,
 }
 
 impl<IO> Http1ServerConnection<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Creates a new HTTP/1.1 connection wrapping the provided I/O stream.
+    /// Creates a new HTTP/1.1 connection with default generic IngressLimits.
     pub fn new(stream: IO) -> Self {
+        Self::with_limits(stream, IngressLimits::default())
+    }
+
+    /// Creates a new HTTP/1.1 connection with custom generic IngressLimits configured on the listener.
+    pub fn with_limits(stream: IO, limits: IngressLimits) -> Self {
         Self {
             stream,
             read_buf: BytesMut::with_capacity(INITIAL_BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(INITIAL_BUFFER_CAPACITY),
             close_requested: false,
+            limits,
         }
     }
 
-    /// Reads and decodes the next HTTP/1.1 request from the stream.
+    /// Returns a reference to the active ingress limits configured on this connection.
+    #[inline]
+    pub const fn limits(&self) -> &IngressLimits {
+        &self.limits
+    }
+
+    /// Reads and decodes the next HTTP/1.1 request from the stream using the configured limits.
     pub async fn next_request(&mut self) -> Result<Option<L7Request>, Http1Error> {
         if self.close_requested {
             return Ok(None);
         }
 
         loop {
-            if let Some(req) = decode_request(&mut self.read_buf)? {
+            if let Some(req) = decode_request_with_limits(&mut self.read_buf, &self.limits)? {
                 let is_http10 = req.version == http::Version::HTTP_10;
                 let conn_header = req
                     .headers
@@ -87,7 +100,7 @@ where
 
     /// Returns whether this connection was flagged to close.
     #[inline]
-    pub fn is_closed(&self) -> bool {
+    pub const fn is_closed(&self) -> bool {
         self.close_requested
     }
 }

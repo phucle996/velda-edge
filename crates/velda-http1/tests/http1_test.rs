@@ -213,3 +213,32 @@ fn test_http10_response_encoding() {
         "HTTP/1.0 response must serialize with HTTP/1.0 status line"
     );
 }
+
+#[tokio::test]
+async fn test_custom_ingress_limits() {
+    use velda_core::IngressLimits;
+
+    // Custom limit: max body size only 50 bytes, max header size only 100 bytes
+    let custom_limits = IngressLimits::new()
+        .with_max_body_size(50)
+        .with_max_header_size(100);
+
+    let (mut client, server) = duplex(1024);
+    let mut conn = Http1ServerConnection::with_limits(server, custom_limits);
+    assert_eq!(conn.limits().max_body_size, 50);
+    assert_eq!(conn.limits().max_header_size, 100);
+
+    tokio::spawn(async move {
+        // Send a request with Content-Length 100 (> 50 limit)
+        client
+            .write_all(b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let err = conn.next_request().await.unwrap_err();
+    assert!(
+        matches!(err, Http1Error::PayloadTooLarge(100)),
+        "Must enforce custom IngressLimits on connection"
+    );
+}

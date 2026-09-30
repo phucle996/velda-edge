@@ -13,7 +13,11 @@ pub mod edge_response;
 pub mod error;
 pub mod upstream_connector;
 
-pub use codec::{decode_request, decode_response, encode_request, encode_response};
+pub use codec::{
+    MAX_BODY_BUFFER_SIZE, MAX_HEADER_SIZE, MAX_HEADERS, decode_chunked_body, decode_request,
+    decode_request_with_limits, decode_response, decode_response_with_limits, encode_request,
+    encode_response,
+};
 pub use composer_parse::Http1ServerConnection;
 pub use edge_response::send_response as send_http1_response;
 pub use error::Http1Error;
