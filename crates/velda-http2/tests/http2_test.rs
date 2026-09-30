@@ -33,7 +33,10 @@ async fn test_http2_server_and_client_roundtrip() {
         assert_eq!(&chunk[..], b"hello h2 echo");
     });
 
-    let mut server_conn = Http2ServerConnection::handshake(server_io).await.unwrap();
+    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let mut server_conn = Http2ServerConnection::handshake(server_io, test_limits)
+        .await
+        .unwrap();
     let (req, responder) = server_conn.accept_request().await.unwrap().unwrap();
 
     assert_eq!(req.method, Method::POST);
@@ -75,7 +78,8 @@ async fn test_http2_upstream_connector() {
         Body::Empty,
     );
 
-    let resp = Http2UpstreamConnector::forward_request(&req, backend_addr)
+    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let resp = Http2UpstreamConnector::forward_request(&req, backend_addr, &test_limits)
         .await
         .unwrap();
 

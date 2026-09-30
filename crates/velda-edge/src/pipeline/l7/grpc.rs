@@ -35,13 +35,24 @@ where
         }
     };
 
-    while let Ok(Some(server_stream)) = conn.accept().await {
-        let ctx = context.clone();
-        let rt = runtime.clone();
+    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
 
-        tokio::spawn(async move {
-            dispatch_grpc_request_stream(server_stream, &ctx, &rt).await;
-        });
+    while let Ok(accept_result) = tokio::time::timeout(timeout_duration, conn.accept()).await {
+        match accept_result {
+            Ok(Some(server_stream)) => {
+                let ctx = context.clone();
+                let rt = runtime.clone();
+
+                tokio::spawn(async move {
+                    dispatch_grpc_request_stream(server_stream, &ctx, &rt).await;
+                });
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(error = %e, "gRPC stream accept error");
+                break;
+            }
+        }
     }
 }
 
@@ -148,7 +159,7 @@ pub async fn process_grpc_request(
         return GrpcStatus::Unavailable.to_l7_response(Some("no healthy upstream endpoints"));
     };
 
-    match forward_grpc_unary_request(req, target).await {
+    match forward_grpc_unary_request(req, target, &context.limits).await {
         Ok(resp) => resp,
         Err(e) => GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}"))),
     }
@@ -158,8 +169,9 @@ pub async fn process_grpc_request(
 pub async fn forward_grpc_unary_request(
     req: &L7Request,
     target: SocketAddr,
+    limits: &velda_core::IngressLimits,
 ) -> Result<L7Response, EdgeError> {
-    GrpcUpstreamConnector::forward_unary(req, target)
+    GrpcUpstreamConnector::forward_unary(req, target, limits)
         .await
         .map_err(|e| EdgeError::Internal(format!("Failed to forward gRPC unary request: {e}")))
 }

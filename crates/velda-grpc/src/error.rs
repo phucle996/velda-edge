@@ -21,4 +21,7 @@ pub enum GrpcError {
 
     #[error("gRPC status error: code {0:?}, message: {1}")]
     Status(GrpcStatus, String),
+
+    #[error("Payload too large: {0} bytes exceeds max_body_size")]
+    PayloadTooLarge(usize),
 }

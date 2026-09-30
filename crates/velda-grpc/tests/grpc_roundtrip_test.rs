@@ -23,7 +23,7 @@ async fn test_grpc_unary_one_way_roundtrip() {
             assert_eq!(stream.method(), &Method::POST);
 
             // Read the 1 chiều (Unary) incoming message
-            let msg = stream.read_unary_message().await.unwrap();
+            let msg = stream.read_unary_message(10 * 1024 * 1024).await.unwrap();
             assert_eq!(msg, Some(Bytes::from_static(b"hello_unary")));
 
             // Send 1 chiều response with GrpcStatus::Ok
@@ -53,7 +53,8 @@ async fn test_grpc_unary_one_way_roundtrip() {
         Body::Bytes(req_body.freeze()),
     );
 
-    let resp = connector.invoke_unary(&req).await.unwrap();
+    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let resp = connector.invoke_unary(&req, &test_limits).await.unwrap();
 
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(resp.headers.get("grpc-status").unwrap(), "0");
@@ -101,7 +102,8 @@ async fn test_grpc_composer_trailers_only_response() {
         Body::Empty,
     );
 
-    let resp = connector.invoke_unary(&req).await.unwrap();
+    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let resp = connector.invoke_unary(&req, &test_limits).await.unwrap();
 
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(resp.headers.get("grpc-status").unwrap(), "5"); // NOT_FOUND = 5

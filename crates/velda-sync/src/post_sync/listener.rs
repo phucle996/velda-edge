@@ -402,6 +402,15 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
                     ),
                 });
             }
+            if listener.limits.request_timeout_ms == 0 {
+                return Err(SyncError::Validation {
+                    domain: "listeners".into(),
+                    reason: format!(
+                        "Listener '{}' has invalid request_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
+                        listener.id
+                    ),
+                });
+            }
         }
 
         // ====================================================================

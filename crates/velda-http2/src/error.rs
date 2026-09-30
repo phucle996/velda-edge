@@ -13,4 +13,7 @@ pub enum Http2Error {
 
     #[error("HTTP parsing error: {0}")]
     Parse(String),
+
+    #[error("Payload too large: {0} bytes exceeds max_body_size")]
+    PayloadTooLarge(usize),
 }

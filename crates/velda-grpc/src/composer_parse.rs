@@ -93,8 +93,12 @@ impl GrpcServerStream {
     /// Reads exactly one Length-Prefixed Message from the downstream stream (Unary / 1 chiều).
     ///
     /// Buffers incoming data chunks until the full 5-byte header and payload are received.
+    /// Enforces `max_body_size` — rejects with [`GrpcError::PayloadTooLarge`] if exceeded.
     /// Returns `Ok(Some(payload))` or `Ok(None)` if stream was empty.
-    pub async fn read_unary_message(&mut self) -> Result<Option<Bytes>, GrpcError> {
+    pub async fn read_unary_message(
+        &mut self,
+        max_body_size: usize,
+    ) -> Result<Option<Bytes>, GrpcError> {
         let mut buf = BytesMut::new();
 
         while let Some(chunk_res) = self.recv_stream.data().await {
@@ -102,6 +106,10 @@ impl GrpcServerStream {
             let len = chunk.len();
             buf.extend_from_slice(&chunk);
             let _ = self.recv_stream.flow_control().release_capacity(len);
+
+            if buf.len() > max_body_size {
+                return Err(GrpcError::PayloadTooLarge(buf.len()));
+            }
 
             if let Some((_compressed, payload)) = decode_grpc_frame(&mut buf)? {
                 return Ok(Some(payload));

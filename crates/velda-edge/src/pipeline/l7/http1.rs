@@ -116,8 +116,25 @@ pub async fn handle_http1_stream<IO>(stream: IO, context: ComposerContext, runti
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
     let mut conn = velda_http1::Http1ServerConnection::new(stream, context.limits);
-    while let Ok(Some(req)) = conn.next_request().await {
+    loop {
+        let req = match tokio::time::timeout(timeout_duration, conn.next_request()).await {
+            Ok(Ok(Some(req))) => req,
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "HTTP/1.1 request decode error");
+                break;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    listener = %context.listener_id,
+                    timeout_ms = context.limits.request_timeout_ms,
+                    "HTTP/1.1 request read timed out"
+                );
+                break;
+            }
+        };
         tracing::debug!(
             method = %req.method,
             path = %req.path(),

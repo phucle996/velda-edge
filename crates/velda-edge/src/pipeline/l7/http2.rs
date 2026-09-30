@@ -20,8 +20,9 @@ use crate::runtime::SharedRuntime;
 pub async fn forward_http2_request(
     req: &L7Request,
     target: SocketAddr,
+    limits: &velda_core::IngressLimits,
 ) -> Result<L7Response, EdgeError> {
-    Http2UpstreamConnector::forward_request(req, target)
+    Http2UpstreamConnector::forward_request(req, target, limits)
         .await
         .map_err(|e| {
             EdgeError::Internal(format!("Failed to forward HTTP/2 request to {target}: {e}"))
@@ -87,7 +88,7 @@ pub async fn process_http2_request(
         );
     };
 
-    match forward_http2_request(req, target).await {
+    match forward_http2_request(req, target, &context.limits).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(
@@ -113,25 +114,42 @@ pub async fn handle_http2_stream<IO>(stream: IO, context: ComposerContext, runti
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    match velda_http2::Http2ServerConnection::handshake(stream).await {
-        Ok(mut conn) => {
-            while let Ok(Some((req, responder))) = conn.accept_request().await {
-                tracing::debug!(
-                    method = %req.method,
-                    path = %req.path(),
-                    listener = %context.listener_id,
-                    "Decoded HTTP/2 request"
-                );
-                let ctx_clone = context.clone();
-                let rt_clone = runtime.clone();
-                tokio::spawn(async move {
-                    let response = process_http2_request(&req, &ctx_clone, &rt_clone).await;
-                    if let Err(e) = responder.send_response(&response) {
-                        tracing::warn!(error = %e, "Failed to send HTTP/2 response to client");
-                    }
-                });
+    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
+    match velda_http2::Http2ServerConnection::handshake(stream, context.limits).await {
+        Ok(mut conn) => loop {
+            let accept_result = tokio::time::timeout(timeout_duration, conn.accept_request()).await;
+            match accept_result {
+                Ok(Ok(Some((req, responder)))) => {
+                    tracing::debug!(
+                        method = %req.method,
+                        path = %req.path(),
+                        listener = %context.listener_id,
+                        "Decoded HTTP/2 request"
+                    );
+                    let ctx_clone = context.clone();
+                    let rt_clone = runtime.clone();
+                    tokio::spawn(async move {
+                        let response = process_http2_request(&req, &ctx_clone, &rt_clone).await;
+                        if let Err(e) = responder.send_response(&response) {
+                            tracing::warn!(error = %e, "Failed to send HTTP/2 response to client");
+                        }
+                    });
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "HTTP/2 stream accept error");
+                    break;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        listener = %context.listener_id,
+                        timeout_ms = context.limits.request_timeout_ms,
+                        "HTTP/2 stream accept timed out"
+                    );
+                    break;
+                }
             }
-        }
+        },
         Err(e) => {
             tracing::warn!(error = %e, "Failed to complete HTTP/2 server handshake");
         }
