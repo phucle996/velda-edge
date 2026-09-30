@@ -39,14 +39,21 @@ where
 
         loop {
             if let Some(req) = decode_request(&mut self.read_buf)? {
-                if req
+                let is_http10 = req.version == http::Version::HTTP_10;
+                let conn_header = req
                     .headers
                     .get(http::header::CONNECTION)
-                    .and_then(|h| h.to_str().ok())
-                    .is_some_and(|s| s.eq_ignore_ascii_case("close"))
-                {
+                    .and_then(|h| h.to_str().ok());
+
+                if is_http10 {
+                    // RFC 9112 Section 9.3: HTTP/1.0 defaults to close unless keep-alive is negotiated
+                    if !conn_header.is_some_and(|s| s.eq_ignore_ascii_case("keep-alive")) {
+                        self.close_requested = true;
+                    }
+                } else if conn_header.is_some_and(|s| s.eq_ignore_ascii_case("close")) {
                     self.close_requested = true;
                 }
+
                 return Ok(Some(req));
             }
 

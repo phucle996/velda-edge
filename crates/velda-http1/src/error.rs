@@ -23,6 +23,15 @@ pub enum Http1Error {
     #[error("Payload too large: content length {0} exceeds limit")]
     PayloadTooLarge(usize),
 
+    #[error("Header section too large: {0} bytes exceeds limit")]
+    HeaderTooLarge(usize),
+
+    #[error("HTTP request smuggling detected: {0}")]
+    SmugglingDetected(String),
+
+    #[error("Invalid chunked transfer encoding: {0}")]
+    InvalidChunkedEncoding(String),
+
     #[error("Connection closed by peer")]
     ConnectionClosed,
 }

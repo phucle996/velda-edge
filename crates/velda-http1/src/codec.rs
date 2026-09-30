@@ -8,7 +8,119 @@ use velda_core::{Body, L7Request, L7Response};
 use crate::error::Http1Error;
 
 /// Maximum number of headers supported per request.
-const MAX_HEADERS: usize = 64;
+pub const MAX_HEADERS: usize = 64;
+
+/// Maximum allowed buffer capacity for HTTP headers (64 KB).
+pub const MAX_HEADER_SIZE: usize = 64 * 1024;
+
+/// Maximum allowed body payload buffer size (10 MB).
+pub const MAX_BODY_BUFFER_SIZE: usize = 10 * 1024 * 1024;
+
+/// Decodes a chunked HTTP body from a byte slice.
+///
+/// Returns:
+/// - `Ok(Some((consumed_wire_bytes, body)))` if a complete chunked payload was decoded.
+/// - `Ok(None)` if the chunked payload is incomplete (requires more bytes from the stream).
+/// - `Err(Http1Error)` if chunk framing is corrupted, malformed, or exceeds `max_body_size`.
+pub fn decode_chunked_body(
+    data: &[u8],
+    max_body_size: usize,
+) -> Result<Option<(usize, Body)>, Http1Error> {
+    let mut offset = 0;
+    let mut total_body_len = 0;
+
+    // First pass: validate framing, compute sizes, verify completeness (zero heap allocations)
+    loop {
+        let remaining = &data[offset..];
+        let Some(crlf_pos) = remaining.windows(2).position(|w| w == b"\r\n") else {
+            return Ok(None);
+        };
+        let line = &remaining[..crlf_pos];
+        let size_part = match line.iter().position(|&b| b == b';') {
+            Some(semi) => &line[..semi],
+            None => line,
+        };
+        let size_str = match std::str::from_utf8(size_part) {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                return Err(Http1Error::InvalidChunkedEncoding(
+                    "Non-UTF8 chunk size".into(),
+                ));
+            }
+        };
+        if size_str.is_empty() {
+            return Err(Http1Error::InvalidChunkedEncoding(
+                "Empty chunk size line".into(),
+            ));
+        }
+        let chunk_size = usize::from_str_radix(size_str, 16).map_err(|e| {
+            Http1Error::InvalidChunkedEncoding(format!("Invalid hex chunk size: {e}"))
+        })?;
+
+        offset += crlf_pos + 2;
+
+        if chunk_size == 0 {
+            // Terminal chunk. Check for trailer section ending with CRLF
+            let trailer_data = &data[offset..];
+            if trailer_data.starts_with(b"\r\n") {
+                offset += 2;
+                break;
+            }
+            if let Some(trailer_end) = trailer_data.windows(4).position(|w| w == b"\r\n\r\n") {
+                offset += trailer_end + 4;
+                break;
+            }
+            return Ok(None);
+        }
+
+        total_body_len += chunk_size;
+        if total_body_len > max_body_size {
+            return Err(Http1Error::PayloadTooLarge(total_body_len));
+        }
+
+        if data[offset..].len() < chunk_size + 2 {
+            return Ok(None);
+        }
+
+        if &data[offset + chunk_size..offset + chunk_size + 2] != b"\r\n" {
+            return Err(Http1Error::InvalidChunkedEncoding(
+                "Missing CRLF after chunk data".into(),
+            ));
+        }
+
+        offset += chunk_size + 2;
+    }
+
+    if total_body_len == 0 {
+        return Ok(Some((offset, Body::Empty)));
+    }
+
+    // Second pass: extract body bytes
+    let mut body_bytes = BytesMut::with_capacity(total_body_len);
+    let mut read_offset = 0;
+    loop {
+        let remaining = &data[read_offset..];
+        let crlf_pos = remaining.windows(2).position(|w| w == b"\r\n").unwrap();
+        let line = &remaining[..crlf_pos];
+        let size_part = match line.iter().position(|&b| b == b';') {
+            Some(semi) => &line[..semi],
+            None => line,
+        };
+        let size_str = std::str::from_utf8(size_part).unwrap().trim();
+        let chunk_size = usize::from_str_radix(size_str, 16).unwrap();
+
+        read_offset += crlf_pos + 2;
+
+        if chunk_size == 0 {
+            break;
+        }
+
+        body_bytes.put_slice(&data[read_offset..read_offset + chunk_size]);
+        read_offset += chunk_size + 2;
+    }
+
+    Ok(Some((offset, Body::Bytes(body_bytes.freeze()))))
+}
 
 /// Decodes an HTTP/1.1 request from the read buffer.
 pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Error> {
@@ -26,7 +138,12 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
 
     let header_len = match status {
         httparse::Status::Complete(len) => len,
-        httparse::Status::Partial => return Ok(None),
+        httparse::Status::Partial => {
+            if buf.len() > MAX_HEADER_SIZE {
+                return Err(Http1Error::HeaderTooLarge(buf.len()));
+            }
+            return Ok(None);
+        }
     };
 
     let method_str = req
@@ -54,7 +171,10 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
     };
 
     let mut header_map = HeaderMap::with_capacity(req.headers.len());
+    let mut content_length_count = 0;
     let mut content_length: Option<usize> = None;
+    let mut is_chunked = false;
+    let mut has_transfer_encoding = false;
 
     for h in req.headers.iter() {
         if h.name.is_empty() {
@@ -66,17 +186,66 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<Option<L7Request>, Http1Erro
             .map_err(|e| Http1Error::InvalidHeader(e.to_string()))?;
 
         if name == CONTENT_LENGTH {
-            content_length = std::str::from_utf8(h.value)
-                .ok()
-                .and_then(|s| s.trim().parse::<usize>().ok());
+            content_length_count += 1;
+            let val_str = std::str::from_utf8(h.value)
+                .map_err(|_| Http1Error::Parse("Invalid non-UTF8 Content-Length".into()))?;
+            let parsed_cl = val_str
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| Http1Error::Parse("Invalid numeric Content-Length".into()))?;
+
+            if let Some(prev) = content_length
+                && prev != parsed_cl
+            {
+                return Err(Http1Error::SmugglingDetected(
+                    "Multiple conflicting Content-Length headers".into(),
+                ));
+            }
+            content_length = Some(parsed_cl);
+        } else if name == http::header::TRANSFER_ENCODING {
+            has_transfer_encoding = true;
+            let val_str = std::str::from_utf8(h.value)
+                .map_err(|_| Http1Error::Parse("Invalid non-UTF8 Transfer-Encoding".into()))?;
+            let codings: Vec<&str> = val_str.split(',').map(|s| s.trim()).collect();
+            if codings
+                .last()
+                .is_some_and(|&c| c.eq_ignore_ascii_case("chunked"))
+            {
+                is_chunked = true;
+            } else {
+                return Err(Http1Error::Parse(format!(
+                    "Unsupported Transfer-Encoding coding: {val_str}"
+                )));
+            }
         }
 
         header_map.append(name, value);
     }
 
-    let body_len = content_length.unwrap_or(0);
-    let total_len = header_len + body_len;
+    // RFC 9112 Section 6.1: Simultaneous CL and TE is a smuggling vector -> fast fail reject
+    if content_length_count > 0 && has_transfer_encoding {
+        return Err(Http1Error::SmugglingDetected(
+            "Simultaneous Content-Length and Transfer-Encoding headers".into(),
+        ));
+    }
 
+    if is_chunked {
+        let chunked_slice = &buf[header_len..];
+        match decode_chunked_body(chunked_slice, MAX_BODY_BUFFER_SIZE)? {
+            Some((consumed_wire, body)) => {
+                buf.advance(header_len + consumed_wire);
+                return Ok(Some(L7Request::new(method, uri, version, header_map, body)));
+            }
+            None => return Ok(None),
+        }
+    }
+
+    let body_len = content_length.unwrap_or(0);
+    if body_len > MAX_BODY_BUFFER_SIZE {
+        return Err(Http1Error::PayloadTooLarge(body_len));
+    }
+
+    let total_len = header_len + body_len;
     if buf.len() < total_len {
         return Ok(None);
     }
@@ -101,16 +270,23 @@ pub fn encode_response(res: &L7Response, dst: &mut BytesMut) {
     // Pre-reserve capacity to avoid micro-reallocations on new buffers
     dst.reserve(64 + res.headers.len() * 32 + res.body.len());
 
-    dst.put_slice(b"HTTP/1.1 ");
+    match res.version {
+        Version::HTTP_10 => dst.put_slice(b"HTTP/1.0 "),
+        _ => dst.put_slice(b"HTTP/1.1 "),
+    }
     dst.put_slice(status.as_str().as_bytes());
     dst.put_slice(b" ");
     dst.put_slice(reason.as_bytes());
     dst.put_slice(b"\r\n");
 
     let mut has_content_length = false;
+    let mut has_transfer_encoding = false;
     for (name, val) in &res.headers {
         if name == CONTENT_LENGTH {
             has_content_length = true;
+        }
+        if name == http::header::TRANSFER_ENCODING {
+            has_transfer_encoding = true;
         }
         dst.put_slice(name.as_str().as_bytes());
         dst.put_slice(b": ");
@@ -118,7 +294,7 @@ pub fn encode_response(res: &L7Response, dst: &mut BytesMut) {
         dst.put_slice(b"\r\n");
     }
 
-    if !has_content_length {
+    if !has_content_length && !has_transfer_encoding {
         let body_len = res.body.len();
         dst.put_slice(b"content-length: ");
         let mut itoa_buf = itoa::Buffer::new();
@@ -205,7 +381,12 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
 
     let header_len = match status {
         httparse::Status::Complete(len) => len,
-        httparse::Status::Partial => return Ok(None),
+        httparse::Status::Partial => {
+            if buf.len() > MAX_HEADER_SIZE {
+                return Err(Http1Error::HeaderTooLarge(buf.len()));
+            }
+            return Ok(None);
+        }
     };
 
     let code = res
@@ -222,7 +403,10 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
     };
 
     let mut header_map = HeaderMap::with_capacity(res.headers.len());
+    let mut content_length_count = 0;
     let mut content_length: Option<usize> = None;
+    let mut is_chunked = false;
+    let mut has_transfer_encoding = false;
 
     for h in res.headers.iter() {
         if h.name.is_empty() {
@@ -234,17 +418,66 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<Option<L7Response>, Http1Er
             .map_err(|e| Http1Error::InvalidHeader(e.to_string()))?;
 
         if name == CONTENT_LENGTH {
-            content_length = std::str::from_utf8(h.value)
-                .ok()
-                .and_then(|s| s.trim().parse::<usize>().ok());
+            content_length_count += 1;
+            let val_str = std::str::from_utf8(h.value)
+                .map_err(|_| Http1Error::Parse("Invalid non-UTF8 Content-Length".into()))?;
+            let parsed_cl = val_str
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| Http1Error::Parse("Invalid numeric Content-Length".into()))?;
+
+            if let Some(prev) = content_length
+                && prev != parsed_cl
+            {
+                return Err(Http1Error::SmugglingDetected(
+                    "Multiple conflicting Content-Length headers".into(),
+                ));
+            }
+            content_length = Some(parsed_cl);
+        } else if name == http::header::TRANSFER_ENCODING {
+            has_transfer_encoding = true;
+            let val_str = std::str::from_utf8(h.value)
+                .map_err(|_| Http1Error::Parse("Invalid non-UTF8 Transfer-Encoding".into()))?;
+            let codings: Vec<&str> = val_str.split(',').map(|s| s.trim()).collect();
+            if codings
+                .last()
+                .is_some_and(|&c| c.eq_ignore_ascii_case("chunked"))
+            {
+                is_chunked = true;
+            }
         }
 
         header_map.append(name, value);
     }
 
-    let body_len = content_length.unwrap_or(0);
-    let total_len = header_len + body_len;
+    if content_length_count > 0 && has_transfer_encoding {
+        return Err(Http1Error::SmugglingDetected(
+            "Simultaneous Content-Length and Transfer-Encoding in response".into(),
+        ));
+    }
 
+    if is_chunked {
+        let chunked_slice = &buf[header_len..];
+        match decode_chunked_body(chunked_slice, MAX_BODY_BUFFER_SIZE)? {
+            Some((consumed_wire, body)) => {
+                buf.advance(header_len + consumed_wire);
+                return Ok(Some(L7Response::new(
+                    status_code,
+                    version,
+                    header_map,
+                    body,
+                )));
+            }
+            None => return Ok(None),
+        }
+    }
+
+    let body_len = content_length.unwrap_or(0);
+    if body_len > MAX_BODY_BUFFER_SIZE {
+        return Err(Http1Error::PayloadTooLarge(body_len));
+    }
+
+    let total_len = header_len + body_len;
     if buf.len() < total_len {
         return Ok(None);
     }
