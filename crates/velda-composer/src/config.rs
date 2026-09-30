@@ -20,12 +20,30 @@ pub enum ApplicationProtocol {
 
 impl ApplicationProtocol {
     /// Parses an application protocol string into a typed protocol variant.
+    ///
+    /// Evaluates case-insensitively with zero heap allocations on the hot path.
     pub fn from_str_proto(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "http1" => Some(Self::Http1),
-            "http2" => Some(Self::Http2),
-            "http3" => Some(Self::Http3),
-            "grpc" => Some(Self::Grpc),
+        let bytes = s.as_bytes();
+        match bytes.len() {
+            4 => {
+                if bytes.eq_ignore_ascii_case(b"grpc") {
+                    Some(Self::Grpc)
+                } else {
+                    None
+                }
+            }
+            5 => {
+                if bytes[..4].eq_ignore_ascii_case(b"http") {
+                    match bytes[4] {
+                        b'1' => Some(Self::Http1),
+                        b'2' => Some(Self::Http2),
+                        b'3' => Some(Self::Http3),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -81,5 +99,52 @@ impl CompiledListenerComposition {
     pub fn with_handshake_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.handshake_timeout_ms = timeout_ms;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_str_proto_valid() {
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("http1"),
+            Some(ApplicationProtocol::Http1)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("HTTP1"),
+            Some(ApplicationProtocol::Http1)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("Http2"),
+            Some(ApplicationProtocol::Http2)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("HTTP3"),
+            Some(ApplicationProtocol::Http3)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("hTtP3"),
+            Some(ApplicationProtocol::Http3)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("grpc"),
+            Some(ApplicationProtocol::Grpc)
+        );
+        assert_eq!(
+            ApplicationProtocol::from_str_proto("GRPC"),
+            Some(ApplicationProtocol::Grpc)
+        );
+    }
+
+    #[test]
+    fn test_from_str_proto_invalid() {
+        assert_eq!(ApplicationProtocol::from_str_proto("http"), None);
+        assert_eq!(ApplicationProtocol::from_str_proto("http4"), None);
+        assert_eq!(ApplicationProtocol::from_str_proto("grp"), None);
+        assert_eq!(ApplicationProtocol::from_str_proto("grpc1"), None);
+        assert_eq!(ApplicationProtocol::from_str_proto(""), None);
+        assert_eq!(ApplicationProtocol::from_str_proto("random_garbage"), None);
     }
 }
