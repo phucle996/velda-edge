@@ -40,9 +40,11 @@ where
     C: AsyncRead + AsyncWrite + Unpin + ?Sized,
     S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    let (client_to_server, server_to_client) = tokio::io::copy_bidirectional(client, server)
-        .await
-        .map_err(TransportError::Forward)?;
+    // 64 KB buffers for high-bandwidth L4 stream forwarding, cutting syscalls by up to 8x
+    let (client_to_server, server_to_client) =
+        tokio::io::copy_bidirectional_with_sizes(client, server, 65536, 65536)
+            .await
+            .map_err(TransportError::Forward)?;
 
     Ok(TransferStats {
         client_to_server_bytes: client_to_server,

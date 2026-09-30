@@ -34,8 +34,10 @@ pub fn reconcile_active_listeners<L4H, L7H, UdpL4H, UdpL7H, FutL4, FutL7, FutUdp
     UdpL7H: Fn(UdpL7Handoff) -> FutUdpL7 + Send + Sync + Clone + 'static,
     FutUdpL7: std::future::Future<Output = ()> + Send + 'static,
 {
-    let desired_map: HashMap<String, IngressBinding> =
-        desired.into_iter().map(|b| (b.id.clone(), b)).collect();
+    let mut desired_map: HashMap<String, IngressBinding> = HashMap::with_capacity(desired.len());
+    for b in desired {
+        desired_map.insert(b.id.clone(), b);
+    }
 
     // 1. Detect removed or modified listeners
     let to_remove: Vec<String> = active

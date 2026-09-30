@@ -55,7 +55,7 @@ pub async fn forward_udp_flow(
 
     let mut stats = TransferStats::new(sent as u64, 0);
 
-    let mut buf = [0u8; 65535]; // Maximum UDP datagram size
+    let mut buf = vec![0u8; 65535]; // Heap buffer to prevent inflating Future frame size
 
     loop {
         tokio::select! {

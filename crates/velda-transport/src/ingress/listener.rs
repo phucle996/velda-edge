@@ -34,27 +34,29 @@ impl IngressBinding {
     pub fn new(
         id: impl Into<String>,
         addr: SocketAddr,
-        transport_protocol: impl Into<String>,
+        transport_protocol: impl AsRef<str>,
         path: PathKind,
         tls_enabled: bool,
     ) -> Result<Self> {
-        let id = id.into();
-        let protocol = transport_protocol.into();
-        let proto_lower = protocol.to_ascii_lowercase();
-
-        if proto_lower != "tcp" && proto_lower != "udp" {
+        let tp = transport_protocol.as_ref();
+        let protocol = if tp.eq_ignore_ascii_case("tcp") {
+            "tcp".to_string()
+        } else if tp.eq_ignore_ascii_case("udp") {
+            "udp".to_string()
+        } else {
+            let id_str = id.into();
             return Err(TransportError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "unsupported transport protocol '{protocol}' for listener '{id}' (must be 'tcp' or 'udp')"
+                    "unsupported transport protocol '{tp}' for listener '{id_str}' (must be 'tcp' or 'udp')"
                 ),
             )));
-        }
+        };
 
         Ok(Self {
-            id,
+            id: id.into(),
             addr,
-            protocol: proto_lower,
+            protocol,
             tls_enabled,
             path,
             tcp_config: TcpListenerConfig::default(),
@@ -67,12 +69,11 @@ impl IngressBinding {
     pub fn from_protocols(
         id: impl Into<String>,
         addr: SocketAddr,
-        transport_protocol: impl Into<String>,
-        application_protocol: impl Into<String>,
+        transport_protocol: impl AsRef<str>,
+        application_protocol: impl AsRef<str>,
         tls_enabled: bool,
     ) -> Result<Self> {
-        let app_proto = application_protocol.into();
-        let path = if app_proto.eq_ignore_ascii_case("raw") {
+        let path = if application_protocol.as_ref().eq_ignore_ascii_case("raw") {
             PathKind::L4Direct
         } else {
             PathKind::L7Handoff
@@ -186,6 +187,7 @@ impl IngressListener {
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         let local_addr = ingress.local_addr();
+        let listener_id = ingress.binding().id.clone();
         tokio::spawn(async move {
             tracing::info!(
                 listener_id = %ingress.id(),
@@ -222,13 +224,13 @@ impl IngressListener {
                                 );
                                 match path {
                                     PathKind::L4Direct => {
-                                        let conn = conn.with_listener_id(ingress.id());
+                                        let conn = conn.with_listener_id(listener_id.clone());
                                         tokio::spawn(l4_fn(conn));
                                     }
                                     PathKind::L7Handoff => {
                                         let handoff = crate::forwarding::l7::TcpL7Handoff::new(
                                             conn,
-                                            ingress.binding().id.clone(),
+                                            listener_id.clone(),
                                         );
                                         tokio::spawn(l7_fn(handoff));
                                     }

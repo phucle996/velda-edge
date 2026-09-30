@@ -182,7 +182,9 @@ impl UdpSocket {
                 "UDP ingress loop running"
             );
 
-            let mut buf = [0u8; 65535];
+            let listener_id = binding.id.clone();
+            let path = binding.path;
+            let mut buf = vec![0u8; 65535];
 
             loop {
                 if *shutdown.borrow() {
@@ -193,7 +195,7 @@ impl UdpSocket {
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() {
                             tracing::info!(
-                                listener_id = %binding.id,
+                                listener_id = %listener_id,
                                 listen_addr = %local_addr,
                                 "UDP ingress loop shutting down"
                             );
@@ -204,19 +206,18 @@ impl UdpSocket {
                         match res {
                             Ok((n, peer)) => {
                                 let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
-                                match binding.path {
+                                match path {
                                     crate::ingress::classifier::PathKind::L7Handoff => {
                                         let handoff = crate::forwarding::l7::UdpL7Handoff::new(
                                             dgram,
                                             std::sync::Arc::clone(&socket),
-                                            binding.id.clone(),
+                                            listener_id.clone(),
                                         );
                                         tokio::spawn(udp_l7_fn(handoff));
                                     }
                                     crate::ingress::classifier::PathKind::L4Direct => {
                                         let sock_clone = std::sync::Arc::clone(&socket);
-                                        let id_clone = binding.id.clone();
-                                        tokio::spawn(udp_l4_fn(id_clone, sock_clone, dgram));
+                                        tokio::spawn(udp_l4_fn(listener_id.clone(), sock_clone, dgram));
                                     }
                                 }
                             }
