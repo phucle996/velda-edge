@@ -16,3 +16,20 @@ thiserror = "2.0"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
+arc-swap = "1.7"
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false
