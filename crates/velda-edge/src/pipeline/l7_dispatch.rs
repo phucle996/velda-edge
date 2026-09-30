@@ -22,9 +22,9 @@ use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 /// validated but never mutates the declared protocol.
 pub async fn dispatch_tcp_l7(handoff: TcpL7Handoff, runtime: &SharedRuntime) {
     let rt = runtime.load();
-    let listener_id = handoff.listener_id().to_owned();
+    let listener_id = handoff.listener_id();
 
-    let Some(pipeline) = rt.pipelines.tcp_pipeline(&listener_id) else {
+    let Some(pipeline) = rt.pipelines.tcp_pipeline(listener_id) else {
         tracing::error!(
             listener = %listener_id,
             "No compiled TCP pipeline for listener; dropping connection"
@@ -175,8 +175,8 @@ pub async fn dispatch_udp_l7(handoff: UdpL7Handoff, runtime: &SharedRuntime) {
         }
     };
 
-    let listener_id = composed.context().listener_id.clone();
-    let Some(udp_pipeline) = rt.pipelines.udp_pipeline(&listener_id) else {
+    let listener_id = &composed.context().listener_id;
+    let Some(udp_pipeline) = rt.pipelines.udp_pipeline(listener_id) else {
         tracing::error!(
             listener = %listener_id,
             peer = %composed.context().peer,
