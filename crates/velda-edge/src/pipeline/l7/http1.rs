@@ -9,20 +9,27 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_composer::ComposerContext;
-use velda_core::{L7Request, L7Response};
-use velda_http1::Http1UpstreamConnector;
+use velda_http1::{Http1Request, Http1Response, Http1ServerConnection, Http1UpstreamConnector};
 use velda_router::Http1RouteRequest;
 
 use crate::error::EdgeError;
 use crate::runtime::SharedRuntime;
 
 /// Forwards an HTTP/1.1 request over cleartext TCP to the upstream target endpoint.
+///
+/// Opens a fresh TCP connection per call. When `velda-connection-pool` is integrated,
+/// replace `TcpStream::connect` with a pooled connection lease.
 pub async fn forward_http1_request(
-    req: &L7Request,
+    req: &Http1Request,
     target: SocketAddr,
     limits: &velda_core::IngressLimits,
-) -> Result<L7Response, EdgeError> {
-    Http1UpstreamConnector::forward_request(req, target, limits)
+) -> Result<Http1Response, EdgeError> {
+    let mut stream = tokio::net::TcpStream::connect(target).await.map_err(|e| {
+        EdgeError::Internal(format!(
+            "Failed to connect to HTTP/1.1 upstream {target}: {e}"
+        ))
+    })?;
+    Http1UpstreamConnector::forward_on_stream(req, &mut stream, limits)
         .await
         .map_err(|e| {
             EdgeError::Internal(format!(
@@ -33,10 +40,10 @@ pub async fn forward_http1_request(
 
 /// Dispatches an HTTP/1.1 request through `Http1Router` and forwards to upstream backend.
 pub async fn process_http1_request(
-    req: &L7Request,
+    req: &Http1Request,
     context: &ComposerContext,
     runtime: &SharedRuntime,
-) -> L7Response {
+) -> Http1Response {
     let host = req
         .host()
         .and_then(|h| h.to_str().ok())
@@ -57,7 +64,7 @@ pub async fn process_http1_request(
             method = %req.method,
             "No HTTP/1.1 route matched"
         );
-        return L7Response::from_bytes(
+        return Http1Response::from_bytes(
             StatusCode::NOT_FOUND,
             b"404 Not Found: no matching route\n".to_vec(),
         )
@@ -80,7 +87,7 @@ pub async fn process_http1_request(
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for HTTP/1.1 upstream"
         );
-        return L7Response::from_bytes(
+        return Http1Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
             b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
         )
@@ -99,7 +106,7 @@ pub async fn process_http1_request(
                 upstream = %route.upstream_name,
                 "HTTP/1.1 upstream forwarding failed"
             );
-            L7Response::from_bytes(
+            Http1Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -116,25 +123,46 @@ pub async fn handle_http1_stream<IO>(stream: IO, context: ComposerContext, runti
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
-    let mut conn = velda_http1::Http1ServerConnection::new(stream, context.limits);
+    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
+    let mut conn = Http1ServerConnection::new(stream, context.limits);
     loop {
-        let req = match tokio::time::timeout(timeout_duration, conn.next_request()).await {
-            Ok(Ok(Some(req))) => req,
-            Ok(Ok(None)) => break,
+        // Phase 1: decode request head (fail-fast, header inspection, plugin hook point)
+        let (head, framing) =
+            match tokio::time::timeout(timeout_duration, conn.next_request_head()).await {
+                Ok(Ok(Some(parts))) => parts,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "HTTP/1.1 request head decode error");
+                    break;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        listener = %context.listener_id,
+                        timeout_ms = context.limits.idle_timeout_ms,
+                        "HTTP/1.1 request read timed out"
+                    );
+                    break;
+                }
+            };
+
+        // Phase 2: decode request body
+        let body = match tokio::time::timeout(timeout_duration, conn.read_body(framing)).await {
+            Ok(Ok(body)) => body,
             Ok(Err(e)) => {
-                tracing::debug!(error = %e, "HTTP/1.1 request decode error");
+                tracing::debug!(error = %e, "HTTP/1.1 request body decode error");
                 break;
             }
             Err(_) => {
                 tracing::debug!(
                     listener = %context.listener_id,
-                    timeout_ms = context.limits.request_timeout_ms,
-                    "HTTP/1.1 request read timed out"
+                    timeout_ms = context.limits.idle_timeout_ms,
+                    "HTTP/1.1 request body read timed out"
                 );
                 break;
             }
         };
+
+        let req = Http1Request::from_parts(head, body);
         tracing::debug!(
             method = %req.method,
             path = %req.path(),

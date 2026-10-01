@@ -51,6 +51,9 @@ pub async fn apply_reload(
     let mut routes_changed = false;
     let mut upstreams_changed = false;
 
+    let hw = velda_core::hardware::global_hardware_topology();
+    let profile = crate::runtime_profile::resolve_runtime_profile(runtime_dir, hw);
+
     for domain in &notif.changed_domains {
         match domain.as_str() {
             "listeners" => {
@@ -70,7 +73,7 @@ pub async fn apply_reload(
             }
             "tls" => {
                 config.tls = load_tls(runtime_dir)?;
-                tls_server = compile_tls_server(&config.tls)?;
+                tls_server = compile_tls_server(&config.tls, &profile.to_tls_server_params())?;
             }
             other => {
                 tracing::warn!(domain = %other, "Unknown domain in reload notification; skipping");
@@ -138,7 +141,9 @@ pub async fn apply_reload(
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings
-    let bindings = candidate.active_bindings()?;
+    let tcp_cfg = profile.to_tcp_listener_config();
+    let udp_cfg = profile.to_udp_socket_config();
+    let bindings = candidate.active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
 
     // If listeners changed, notify TrafficEngine to reconcile ports dynamically
     if let (true, Some(engine)) = (listeners_changed, engine_handle) {
@@ -191,6 +196,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http1".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: Default::default(),
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),

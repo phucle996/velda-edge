@@ -39,6 +39,7 @@ async fn test_end_to_end_http3_udp_handoff_and_processing() {
         application: ListenerApplicationConfig {
             protocol: "http3".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: true },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -118,6 +119,7 @@ async fn test_reload_preserves_active_http3_engine_instance() {
         application: ListenerApplicationConfig {
             protocol: "http3".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: true },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),

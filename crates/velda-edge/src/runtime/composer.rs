@@ -13,7 +13,7 @@ use crate::error::EdgeError;
 ///
 /// Only L7 listeners (application.protocol != "raw") produce composition entries.
 /// L4 direct listeners are handled entirely by `velda-transport` and never reach Composer.
-pub(crate) fn build_composer(listeners: &[ListenerConfig]) -> Result<Composer, EdgeError> {
+pub fn build_composer(listeners: &[ListenerConfig]) -> Result<Composer, EdgeError> {
     let mut compositions = Vec::new();
 
     for listener in listeners {
@@ -66,6 +66,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "http1".into(),
                     version: None,
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig::default(),
                 limits: TEST_LIMITS,
@@ -80,6 +81,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "http2".into(),
                     version: None,
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig { enabled: true },
                 limits: TEST_LIMITS,
@@ -94,6 +96,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "raw".into(),
                     version: None,
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig::default(),
                 limits: TEST_LIMITS,
@@ -133,6 +136,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "grpc-unknown".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig::default(),
             limits: TEST_LIMITS,

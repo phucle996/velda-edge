@@ -49,6 +49,8 @@ pub struct UpstreamsFile {
 pub struct UpstreamProtocolConfig {
     pub transport: String,   // "tcp", "udp", "quic"
     pub application: String, // "raw", "http1", "http2", "http3", "grpc"
+    #[serde(default)]
+    pub streaming: velda_core::StreamingMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +335,20 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                 reason: format!(
                     "Upstream '{}': unsupported protocol application '{}'; must be 'raw', 'http1', 'http2', 'http3', or 'grpc'",
                     upstream.id, upstream.protocol.application
+                ),
+            });
+        }
+
+        // Streaming mode protocol invariant: L4 'raw' upstreams cannot enable L7 streaming
+        if upstream.protocol.application == "raw"
+            && upstream.protocol.streaming.is_streaming_enabled()
+        {
+            return Err(SyncError::Validation {
+                domain: "upstreams".into(),
+                reason: format!(
+                    "Upstream '{}' has streaming mode '{}' enabled, but protocol 'raw' does not support L7 streaming; must be 'false' or 'disabled'",
+                    upstream.id,
+                    upstream.protocol.streaming.as_str()
                 ),
             });
         }
@@ -727,8 +743,11 @@ pub fn compile_upstreams_to_binary(
         }
     }
 
-    // Single contiguous buffer: reserve header slot then serialize payload directly
-    let mut binary_output = vec![0; DOMAIN_HEADER_SIZE];
+    // OPTIMIZATION: Pre-allocate contiguous buffer with estimated capacity (header + 192B per upstream)
+    // to avoid multiple vector reallocations during streaming bincode serialization.
+    let estimated_cap = DOMAIN_HEADER_SIZE + upstreams.len().saturating_mul(192);
+    let mut binary_output = Vec::with_capacity(estimated_cap);
+    binary_output.resize(DOMAIN_HEADER_SIZE, 0);
 
     bincode::serialize_into(&mut binary_output, upstreams).map_err(|e| SyncError::Compile {
         domain: "upstreams".into(),
@@ -889,6 +908,7 @@ mod tests {
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
                 application: "http1".into(),
+                streaming: velda_core::StreamingMode::Disabled,
             },
             target: None,
             resolver: None,
@@ -1147,5 +1167,19 @@ mod tests {
         let mut u = mock_upstream_config("bad_http");
         u.protocol.application = "http".into();
         assert!(validate_upstreams(&mut [u]).is_err());
+    }
+
+    #[test]
+    fn test_upstream_streaming_validation() {
+        let mut invalid_raw = mock_upstream_config("raw-stream");
+        invalid_raw.protocol.application = "raw".into();
+        invalid_raw.protocol.streaming = velda_core::StreamingMode::Server;
+        let err = validate_upstreams(&mut [invalid_raw]).unwrap_err();
+        assert!(err.to_string().contains("does not support L7 streaming"));
+
+        let mut valid_h2 = mock_upstream_config("h2-stream");
+        valid_h2.protocol.application = "http2".into();
+        valid_h2.protocol.streaming = velda_core::StreamingMode::Server;
+        assert!(validate_upstreams(&mut [valid_h2]).is_ok());
     }
 }

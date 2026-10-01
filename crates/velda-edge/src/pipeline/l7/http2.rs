@@ -114,7 +114,7 @@ pub async fn handle_http2_stream<IO>(stream: IO, context: ComposerContext, runti
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
+    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
     match velda_http2::Http2ServerConnection::handshake(stream, context.limits).await {
         Ok(mut conn) => loop {
             let accept_result = tokio::time::timeout(timeout_duration, conn.accept_request()).await;
@@ -143,7 +143,7 @@ where
                 Err(_) => {
                     tracing::debug!(
                         listener = %context.listener_id,
-                        timeout_ms = context.limits.request_timeout_ms,
+                        timeout_ms = context.limits.idle_timeout_ms,
                         "HTTP/2 stream accept timed out"
                     );
                     break;

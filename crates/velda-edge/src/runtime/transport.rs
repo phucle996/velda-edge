@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use velda_sync::post_sync::listener::ListenerConfig;
-use velda_transport::IngressBinding;
+use velda_transport::{IngressBinding, TcpListenerConfig, UdpSocketConfig};
 
 use crate::error::EdgeError;
 
@@ -14,9 +14,26 @@ use crate::error::EdgeError;
 pub(super) fn active_bindings(
     listeners: &[ListenerConfig],
 ) -> Result<Vec<IngressBinding>, EdgeError> {
+    active_bindings_with_configs(listeners, None, None)
+}
+
+/// Converts a list of listener configurations into transport-ready [`IngressBinding`]s
+/// applying host/tier-tuned TCP and UDP socket configurations.
+pub(super) fn active_bindings_with_configs(
+    listeners: &[ListenerConfig],
+    tcp_config: Option<&TcpListenerConfig>,
+    udp_config: Option<&UdpSocketConfig>,
+) -> Result<Vec<IngressBinding>, EdgeError> {
     let mut bindings = Vec::with_capacity(listeners.len());
     for cfg in listeners {
-        bindings.push(listener_to_binding(cfg)?);
+        let mut binding = listener_to_binding(cfg)?;
+        if let Some(tcp) = tcp_config {
+            binding = binding.with_tcp_config(tcp.clone());
+        }
+        if let Some(udp) = udp_config {
+            binding = binding.with_udp_config(udp.clone());
+        }
+        bindings.push(binding);
     }
     Ok(bindings)
 }
@@ -66,6 +83,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig::default(),
             limits: TEST_LIMITS,
@@ -84,6 +102,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("1.1".into()),
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig::default(),
             limits: TEST_LIMITS,
@@ -102,6 +121,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("2".into()),
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig::default(),
             limits: TEST_LIMITS,
@@ -120,6 +140,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("3".into()),
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig { enabled: true },
             limits: TEST_LIMITS,

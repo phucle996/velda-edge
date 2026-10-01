@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -54,6 +54,8 @@ pub struct ListenerApplicationConfig {
     pub protocol: String, // "raw", "http1", "http2", "http3", "grpc"
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default)]
+    pub streaming: velda_core::StreamingMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +63,7 @@ pub struct ListenerLimitsConfig {
     pub max_body_size: usize,
     pub max_header_size: usize,
     pub max_headers: usize,
-    pub request_timeout_ms: u64,
+    pub idle_timeout_ms: u64,
 }
 
 impl ListenerLimitsConfig {
@@ -69,13 +71,13 @@ impl ListenerLimitsConfig {
         max_body_size: usize,
         max_header_size: usize,
         max_headers: usize,
-        request_timeout_ms: u64,
+        idle_timeout_ms: u64,
     ) -> Self {
         Self {
             max_body_size,
             max_header_size,
             max_headers,
-            request_timeout_ms,
+            idle_timeout_ms,
         }
     }
 
@@ -84,7 +86,7 @@ impl ListenerLimitsConfig {
             self.max_body_size,
             self.max_header_size,
             self.max_headers,
-            self.request_timeout_ms,
+            self.idle_timeout_ms,
         )
     }
 }
@@ -402,15 +404,29 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
                     ),
                 });
             }
-            if listener.limits.request_timeout_ms == 0 {
+            if listener.limits.idle_timeout_ms == 0 {
                 return Err(SyncError::Validation {
                     domain: "listeners".into(),
                     reason: format!(
-                        "Listener '{}' has invalid request_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
+                        "Listener '{}' has invalid idle_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
                         listener.id
                     ),
                 });
             }
+        }
+
+        // Streaming mode protocol invariant: L4 'raw' listeners cannot enable L7 streaming
+        if listener.application.protocol == "raw"
+            && listener.application.streaming.is_streaming_enabled()
+        {
+            return Err(SyncError::Validation {
+                domain: "listeners".into(),
+                reason: format!(
+                    "Listener '{}' has streaming mode '{}' enabled, but protocol 'raw' does not support L7 streaming; must be 'false' or 'disabled'",
+                    listener.id,
+                    listener.application.streaming.as_str()
+                ),
+            });
         }
 
         // ====================================================================
@@ -440,23 +456,30 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
     let host_sockets = collect_host_listening_sockets();
     let has_proc_data = !host_sockets.is_empty();
 
+    // OPTIMIZATION: Index host sockets by port into a HashMap to turn an O(N * M) nested scan
+    // into an O(1) lookup per listener port.
+    let mut host_sockets_by_port: HashMap<u16, Vec<HostListeningSocket>> =
+        HashMap::with_capacity(host_sockets.len());
+    for s in host_sockets {
+        host_sockets_by_port.entry(s.port).or_default().push(s);
+    }
+
     for &(id, proto, socket_addr) in &parsed_bindings {
         let mut in_use = false;
 
         if has_proc_data {
-            for host in &host_sockets {
-                if host.proto == proto
-                    && host.port == socket_addr.port()
-                    && ip_addresses_overlap(host.ip, socket_addr.ip())
-                {
-                    in_use = true;
-                    break;
+            if let Some(matching) = host_sockets_by_port.get(&socket_addr.port()) {
+                for host in matching {
+                    if host.proto == proto && ip_addresses_overlap(host.ip, socket_addr.ip()) {
+                        in_use = true;
+                        break;
+                    }
                 }
             }
-        }
-
-        // Fallback / active probe check
-        if !in_use && probe_socket_conflict(socket_addr, proto) {
+        } else if probe_socket_conflict(socket_addr, proto) {
+            // OPTIMIZATION: Only fall back to active socket bind probe if /proc/net is unavailable
+            // (e.g. non-Linux or restricted environment), avoiding hundreds of costly syscalls
+            // for every free port on every validation cycle.
             in_use = true;
         }
 
@@ -484,7 +507,11 @@ pub fn compile_listeners_to_binary(
     revision: u64,
     source_checksum: [u8; 32],
 ) -> Result<Vec<u8>, SyncError> {
-    let mut binary_output = vec![0; DOMAIN_HEADER_SIZE];
+    // OPTIMIZATION: Pre-allocate contiguous buffer with estimated capacity (header + 128B per listener)
+    // to avoid multiple vector reallocations during streaming bincode serialization.
+    let estimated_cap = DOMAIN_HEADER_SIZE + listeners.len().saturating_mul(128);
+    let mut binary_output = Vec::with_capacity(estimated_cap);
+    binary_output.resize(DOMAIN_HEADER_SIZE, 0);
 
     bincode::serialize_into(&mut binary_output, listeners).map_err(|e| SyncError::Compile {
         domain: "listeners".into(),
@@ -622,6 +649,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: app_proto.into(),
                 version: None,
+                streaming: velda_core::StreamingMode::Disabled,
             },
             tls: Default::default(),
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -642,7 +670,7 @@ mod tests {
                     "max_body_size": 10485760,
                     "max_header_size": 65536,
                     "max_headers": 64,
-                    "request_timeout_ms": 30000
+                    "idle_timeout_ms": 30000
                 }
             }]
         }"#;
@@ -791,5 +819,17 @@ mod tests {
         persist_listeners(tmp.path(), b"{\"listeners\": []}", &binary).unwrap();
         assert!(tmp.path().join("config/listeners.json").exists());
         assert!(tmp.path().join("runtime/listeners.bin").exists());
+    }
+
+    #[test]
+    fn test_listener_streaming_validation() {
+        let mut invalid_raw = vec![cfg("raw-stream", "127.0.0.1:18090", "tcp", "raw")];
+        invalid_raw[0].application.streaming = velda_core::StreamingMode::Server;
+        let err = validate_listeners(&mut invalid_raw).unwrap_err();
+        assert!(err.to_string().contains("does not support L7 streaming"));
+
+        let mut valid_h2 = vec![cfg("h2-stream", "127.0.0.1:18091", "tcp", "http2")];
+        valid_h2[0].application.streaming = velda_core::StreamingMode::Server;
+        assert!(validate_listeners(&mut valid_h2).is_ok());
     }
 }

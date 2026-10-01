@@ -54,7 +54,8 @@
       "mode": "endpoints",
       "protocol": {
         "transport": "tcp",
-        "application": "http1"
+        "application": "http2",
+        "streaming": "server"
       },
       "endpoints": [
         {

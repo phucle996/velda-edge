@@ -26,13 +26,15 @@ pub mod l4;
 pub mod l7;
 pub mod lifecycle;
 pub mod limits;
+pub mod streaming;
 pub mod types;
 
 // -----------------------------------------------------------------------------
-// Ingress Limits
+// Ingress Limits & Streaming
 // -----------------------------------------------------------------------------
 
 pub use limits::IngressLimits;
+pub use streaming::StreamingMode;
 
 // -----------------------------------------------------------------------------
 // L4 / L7 Models
@@ -67,5 +69,8 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 // -----------------------------------------------------------------------------
 
 pub use endpoint::{Endpoint, EndpointId};
-pub use hardware::{HardwareTopology, global_hardware_topology, init_hardware_topology};
+pub use hardware::{
+    CpuProfile, CpuTier, HardwareTopology, MemoryProfile, MemoryTier, ResourceTier,
+    global_hardware_topology, init_hardware_topology, probe_cpu, probe_memory,
+};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

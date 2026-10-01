@@ -22,6 +22,7 @@ velda-http3 = { path = "../velda-http3" }
 velda-grpc = { path = "../velda-grpc" }
 velda-router = { path = "../velda-router" }
 velda-upstream = { path = "../velda-upstream" }
+velda-discovery = { path = "../velda-discovery" }
 velda-sync = { path = "../velda-sync" }
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -37,4 +38,20 @@ h2 = "0.4"
 [dev-dependencies]
 tempfile = "3"
 rcgen = "0.14.10"
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false
 

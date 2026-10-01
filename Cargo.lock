@@ -1849,6 +1849,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "http",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1882,6 +1884,7 @@ dependencies = [
  "tracing-subscriber",
  "velda-composer",
  "velda-core",
+ "velda-discovery",
  "velda-grpc",
  "velda-http1",
  "velda-http2",
@@ -1914,6 +1917,7 @@ dependencies = [
  "http",
  "httparse",
  "itoa",
+ "memchr",
  "thiserror",
  "tokio",
  "tracing",
@@ -2024,7 +2028,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tracing",
  "velda-core",
 ]
 

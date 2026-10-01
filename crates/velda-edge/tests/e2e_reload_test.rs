@@ -31,6 +31,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
         application: ListenerApplicationConfig {
             protocol: "http1".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: Default::default(),
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -75,6 +76,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             application: ListenerApplicationConfig {
                 protocol: "http1".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: Default::default(),
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -88,6 +90,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: Default::default(),
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),

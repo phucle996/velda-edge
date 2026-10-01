@@ -45,7 +45,7 @@ fn resolve_target_endpoints(upstream_id: &str, upstreams: &[UpstreamConfig]) -> 
 }
 
 /// Compiles declarative route, upstream, and listener configurations into a [`Router`] instance.
-pub(crate) fn build_router(
+pub fn build_router(
     routes: &[RouteConfig],
     upstreams: &[UpstreamConfig],
     listeners: &[ListenerConfig],
@@ -310,6 +310,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "raw".into(),
                     version: None,
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig { enabled: false },
                 limits: TEST_LIMITS,
@@ -323,6 +324,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "raw".into(),
                     version: None,
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig { enabled: false },
                 limits: TEST_LIMITS,
@@ -336,6 +338,7 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "http1".into(),
                     version: Some("1.1".into()),
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 tls: ListenerTlsConfig { enabled: false },
                 limits: TEST_LIMITS,
@@ -388,6 +391,7 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "tcp".into(),
                     application: "raw".into(),
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 target: None,
                 resolver: None,
@@ -412,6 +416,7 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "udp".into(),
                     application: "raw".into(),
+                    streaming: velda_sync::StreamingMode::Disabled,
                 },
                 target: None,
                 resolver: None,

@@ -4,7 +4,9 @@
 //! ready for O(1) downstream TLS termination on the request serving hot path.
 
 use velda_sync::post_sync::tls::TlsConfig;
-use velda_tls::{ClientTlsConfig, ServerTlsConfig, TlsClientEngine, TlsServerEngine};
+use velda_tls::{
+    ClientTlsConfig, ServerTlsConfig, TlsClientEngine, TlsServerEngine, TlsServerParams,
+};
 
 use crate::error::EdgeError;
 
@@ -24,6 +26,7 @@ use crate::error::EdgeError;
 /// Returns `Ok(None)` if no TLS configurations are provided.
 pub(crate) fn compile_tls_server(
     tls_configs: &[TlsConfig],
+    params: &TlsServerParams,
 ) -> Result<Option<TlsServerEngine>, EdgeError> {
     if tls_configs.is_empty() {
         return Ok(None);
@@ -41,7 +44,8 @@ pub(crate) fn compile_tls_server(
         })
         .collect();
 
-    let engine = TlsServerEngine::new(&server_configs).map_err(EdgeError::Tls)?;
+    let engine =
+        TlsServerEngine::new_with_params(&server_configs, params).map_err(EdgeError::Tls)?;
     Ok(Some(engine))
 }
 
@@ -81,7 +85,8 @@ mod tests {
 
     #[test]
     fn test_compile_tls_server_empty() {
-        let engine = compile_tls_server(&[]).unwrap();
+        let params = TlsServerParams::from_hardware();
+        let engine = compile_tls_server(&[], &params).unwrap();
         assert!(engine.is_none());
     }
 
@@ -100,7 +105,8 @@ mod tests {
             alpn: vec!["h2".into(), "http/1.1".into()],
         }];
 
-        let engine = compile_tls_server(&configs).unwrap();
+        let params = TlsServerParams::from_hardware();
+        let engine = compile_tls_server(&configs, &params).unwrap();
         assert!(engine.is_some());
     }
 
@@ -126,6 +132,7 @@ mod tests {
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
                 application: "http2".into(),
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             target: None,
             resolver: None,

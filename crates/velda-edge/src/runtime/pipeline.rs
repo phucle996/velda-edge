@@ -153,6 +153,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: app.into(),
                 version: version.map(String::from),
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: ListenerTlsConfig { enabled: tls },
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),

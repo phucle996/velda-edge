@@ -8,7 +8,8 @@
         "protocol": "tcp"
       },
       "application": {
-        "protocol": "http2"
+        "protocol": "http2",
+        "streaming": "server"
       },
       "tls": {
         "enabled": true
@@ -17,7 +18,7 @@
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
-        "request_timeout_ms": 30000
+        "idle_timeout_ms": 30000
       }
     },
     {
@@ -27,7 +28,8 @@
         "protocol": "tcp"
       },
       "application": {
-        "protocol": "grpc"
+        "protocol": "grpc",
+        "streaming": "duplex"
       },
       "tls": {
         "enabled": true
@@ -36,7 +38,7 @@
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
-        "request_timeout_ms": 30000
+        "idle_timeout_ms": 30000
       }
     },
     {
@@ -46,7 +48,8 @@
         "protocol": "tcp"
       },
       "application": {
-        "protocol": "raw"
+        "protocol": "raw",
+        "streaming": false
       },
       "tls": {
         "enabled": false
@@ -55,7 +58,7 @@
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
-        "request_timeout_ms": 30000
+        "idle_timeout_ms": 30000
       }
     }
   ]

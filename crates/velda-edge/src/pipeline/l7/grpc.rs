@@ -35,7 +35,7 @@ where
         }
     };
 
-    let timeout_duration = std::time::Duration::from_millis(context.limits.request_timeout_ms);
+    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
 
     while let Ok(accept_result) = tokio::time::timeout(timeout_duration, conn.accept()).await {
         match accept_result {

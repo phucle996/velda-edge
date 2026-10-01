@@ -58,6 +58,7 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: Default::default(),
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -72,6 +73,7 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "raw".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,
@@ -192,6 +194,7 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: Default::default(),
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -205,6 +208,7 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,
@@ -319,6 +323,7 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: Default::default(),
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -332,6 +337,7 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,

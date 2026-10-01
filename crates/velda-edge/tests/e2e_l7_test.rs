@@ -68,6 +68,7 @@ async fn test_end_to_end_l7_http_routing_and_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "http1".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: false },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -82,6 +83,7 @@ async fn test_end_to_end_l7_http_routing_and_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "http1".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,
@@ -206,6 +208,7 @@ async fn test_end_to_end_l7_grpc_routing_and_unimplemented_semantics() {
         application: ListenerApplicationConfig {
             protocol: "grpc".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: false },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -311,6 +314,7 @@ async fn test_end_to_end_l7_grpc_routing_and_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "grpc".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: false },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -324,6 +328,7 @@ async fn test_end_to_end_l7_grpc_routing_and_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "grpc".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,
@@ -480,6 +485,7 @@ async fn test_end_to_end_l7_grpc_server_streaming() {
         application: ListenerApplicationConfig {
             protocol: "grpc".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: false },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -493,6 +499,7 @@ async fn test_end_to_end_l7_grpc_server_streaming() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "grpc".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,
@@ -648,6 +655,7 @@ async fn test_end_to_end_l7_grpc_unary_one_way() {
         application: ListenerApplicationConfig {
             protocol: "grpc".into(),
             version: None,
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         tls: ListenerTlsConfig { enabled: false },
         limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
@@ -661,6 +669,7 @@ async fn test_end_to_end_l7_grpc_unary_one_way() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "grpc".into(),
+            streaming: velda_sync::StreamingMode::Disabled,
         },
         target: None,
         resolver: None,

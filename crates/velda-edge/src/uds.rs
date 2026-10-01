@@ -140,6 +140,7 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
+                streaming: velda_sync::StreamingMode::Disabled,
             },
             tls: Default::default(),
             limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
