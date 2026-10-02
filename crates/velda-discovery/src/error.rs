@@ -29,10 +29,6 @@ pub enum DiscoveryError {
     #[error("Hosts file error at '{path}': {reason}")]
     HostsParsingFailed { path: String, reason: String },
 
-    /// No endpoints were discovered for the target.
-    #[error("No endpoints discovered for target '{target}'")]
-    NoEndpointsDiscovered { target: String },
-
     /// No DNS servers configured for resolution.
     #[error("No DNS nameservers available for resolution")]
     EmptyServerList,

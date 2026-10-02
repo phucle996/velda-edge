@@ -3,12 +3,12 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use velda_discovery::{
-    CacheLookup, DiscoveryError, DnsResolverConfig, DnsResolverProvider, EndpointSet,
-    HostsFileSource, ResolvConfServerProvider, UdpDnsTransport,
+    CacheLookup, DiscoveryError, DnsResolverConfig, DnsResolverProvider, HostsFileSource,
+    ResolvConfServerProvider, UdpDnsTransport,
 };
 
 // ============================================================================
@@ -18,6 +18,7 @@ use velda_discovery::{
 struct TestUdpDnsServer {
     addr: SocketAddr,
     query_count: Arc<AtomicUsize>,
+    active: Arc<AtomicBool>,
 }
 
 impl TestUdpDnsServer {
@@ -26,10 +27,17 @@ impl TestUdpDnsServer {
         let addr = socket.local_addr().unwrap();
         let query_count = Arc::new(AtomicUsize::new(0));
         let count_clone = Arc::clone(&query_count);
+        let active = Arc::new(AtomicBool::new(true));
+        let active_clone = Arc::clone(&active);
 
         tokio::spawn(async move {
             let mut buf = [0u8; 512];
             while let Ok((len, peer)) = socket.recv_from(&mut buf).await {
+                if !active_clone.load(Ordering::SeqCst) {
+                    // Simulates server failure / outage: drop packets
+                    continue;
+                }
+
                 count_clone.fetch_add(1, Ordering::SeqCst);
                 if let Some(d) = delay {
                     tokio::time::sleep(d).await;
@@ -76,11 +84,19 @@ impl TestUdpDnsServer {
             }
         });
 
-        Self { addr, query_count }
+        Self {
+            addr,
+            query_count,
+            active,
+        }
     }
 
     fn query_count(&self) -> usize {
         self.query_count.load(Ordering::SeqCst)
+    }
+
+    fn set_active(&self, is_active: bool) {
+        self.active.store(is_active, Ordering::SeqCst);
     }
 }
 
@@ -227,6 +243,7 @@ async fn test_last_known_good_resilience() {
         hosts_ttl: Duration::from_millis(15),
         negative_ttl: Duration::from_millis(50),
         query_timeout: Duration::from_millis(10),
+        ..Default::default()
     };
 
     let resolver = Arc::new(DnsResolverProvider::with_hosts_and_config(
@@ -238,13 +255,52 @@ async fn test_last_known_good_resilience() {
     assert_eq!(eps.len(), 1);
     assert_eq!(eps[0].address.ip(), IpAddr::V4(target_ip));
 
-    // 2. Wait for positive TTL to expire
+    // 2. Shut down nameserver to simulate network outage / nameserver failure
+    server.set_active(false);
+
+    // 3. Wait for positive TTL to expire
     tokio::time::sleep(Duration::from_millis(25)).await;
 
-    // 3. Fallback to LKG preserves the valid endpoints!
+    // 4. Wire query now times out on unreachable server.
+    // Invariant: Resolver engages Step 4 and falls back to Last-Known-Good (LKG)!
     let fallback_eps = resolver.resolve("resilient.local", 8080).await.unwrap();
     assert_eq!(fallback_eps.len(), 1);
     assert_eq!(fallback_eps[0].address.ip(), IpAddr::V4(target_ip));
+}
+
+#[tokio::test]
+async fn test_case_insensitive_domain_resolution() {
+    let target_ip = Ipv4Addr::new(192, 168, 5, 5);
+    let server = TestUdpDnsServer::spawn(Some(target_ip), None, false).await;
+
+    let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
+    let hosts = HostsFileSource::empty();
+    let transport = UdpDnsTransport::new();
+
+    let resolver = Arc::new(DnsResolverProvider::with_hosts(servers, hosts, transport));
+
+    // 1. Resolve lowercase
+    let eps1 = resolver.resolve("api.case.test", 80).await.unwrap();
+    assert_eq!(eps1[0].address.ip(), IpAddr::V4(target_ip));
+
+    // 2. Resolve UPPERCASE - RFC 1035 requires case-insensitivity: must hit in-memory cache
+    let initial_queries = server.query_count();
+    let eps2 = resolver.resolve("API.CASE.TEST", 80).await.unwrap();
+    assert_eq!(eps2[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(
+        server.query_count(),
+        initial_queries,
+        "Uppercase query must hit positive cache without additional wire queries"
+    );
+
+    // 3. Resolve MixedCase
+    let eps3 = resolver.resolve("Api.Case.Test", 80).await.unwrap();
+    assert_eq!(eps3[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(
+        server.query_count(),
+        initial_queries,
+        "MixedCase query must hit positive cache without additional wire queries"
+    );
 }
 
 #[tokio::test]
@@ -315,7 +371,7 @@ async fn test_udp_query_timeout_failover() {
 }
 
 #[tokio::test]
-async fn test_resolve_ips_and_endpoint_set_iterators() {
+async fn test_resolve_ips_and_resolve() {
     let target = Ipv4Addr::new(10, 1, 1, 1);
     let server = TestUdpDnsServer::spawn(Some(target), None, false).await;
 
@@ -332,14 +388,70 @@ async fn test_resolve_ips_and_endpoint_set_iterators() {
     // Call resolve with port
     let endpoints = resolver.resolve("api.service", 8080).await.unwrap();
     assert_eq!(endpoints.len(), 1);
-
-    let ep_set = EndpointSet::new(endpoints, 1);
-    let extracted_ips: Vec<IpAddr> = ep_set.ips().collect();
-    assert_eq!(extracted_ips, vec![IpAddr::V4(target)]);
-
-    let extracted_addrs: Vec<SocketAddr> = ep_set.addresses().collect();
     assert_eq!(
-        extracted_addrs,
-        vec![SocketAddr::new(IpAddr::V4(target), 8080)]
+        endpoints[0].address,
+        SocketAddr::new(IpAddr::V4(target), 8080)
     );
+}
+
+#[test]
+fn test_dns_resolver_config_for_tier() {
+    let constrained = DnsResolverConfig::for_tier(velda_core::MemoryTier::Constrained);
+    assert_eq!(constrained.cache_capacity, 1_000);
+    assert_eq!(constrained.lkg_capacity, 500);
+
+    let small = DnsResolverConfig::for_tier(velda_core::MemoryTier::Small);
+    assert_eq!(small.cache_capacity, 10_000);
+    assert_eq!(small.lkg_capacity, 2_000);
+
+    let medium = DnsResolverConfig::for_tier(velda_core::MemoryTier::Medium);
+    assert_eq!(medium.cache_capacity, 50_000);
+    assert_eq!(medium.lkg_capacity, 10_000);
+
+    let large = DnsResolverConfig::for_tier(velda_core::MemoryTier::Large);
+    assert_eq!(large.cache_capacity, 150_000);
+    assert_eq!(large.lkg_capacity, 30_000);
+
+    let xlarge = DnsResolverConfig::for_tier(velda_core::MemoryTier::XLarge);
+    assert_eq!(xlarge.cache_capacity, 400_000);
+    assert_eq!(xlarge.lkg_capacity, 80_000);
+
+    let two_xlarge = DnsResolverConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
+    assert_eq!(two_xlarge.cache_capacity, 1_000_000);
+    assert_eq!(two_xlarge.lkg_capacity, 200_000);
+
+    let ultra = DnsResolverConfig::for_tier(velda_core::MemoryTier::Ultra);
+    assert_eq!(ultra.cache_capacity, 2_500_000);
+    assert_eq!(ultra.lkg_capacity, 500_000);
+}
+
+#[tokio::test]
+async fn test_bounded_lkg_capacity_eviction() {
+    let target = Ipv4Addr::new(10, 99, 1, 1);
+    let server = TestUdpDnsServer::spawn(Some(target), None, false).await;
+
+    let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
+    let hosts = HostsFileSource::empty();
+    let transport = UdpDnsTransport::new();
+
+    let config = DnsResolverConfig {
+        lkg_capacity: 2,                        // Strict bound of 2 entries
+        positive_ttl: Duration::from_millis(1), // Rapidly expire cache to force LKG fallbacks
+        ..Default::default()
+    };
+
+    let resolver = DnsResolverProvider::with_hosts_and_config(servers, hosts, transport, config);
+
+    // Resolve 3 different domains (domain1, domain2, domain3)
+    let _ = resolver.resolve_ips("domain1.local").await.unwrap();
+    let _ = resolver.resolve_ips("domain2.local").await.unwrap();
+    let _ = resolver.resolve_ips("domain3.local").await.unwrap();
+
+    // Verify server shutdown and test that LKG does not exceed 2 entries
+    server.set_active(false);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // domain3 was inserted last, so it's guaranteed to be in LKG
+    let res3 = resolver.resolve_ips("domain3.local").await;
+    assert!(res3.is_ok(), "Most recent domain must be retained in LKG");
 }

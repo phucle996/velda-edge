@@ -2,25 +2,52 @@
 //! Uses real `UdpDnsTransport` over actual loopback UDP sockets.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use velda_discovery::{
-    Discovery, DiscoveryMode, DnsResolverProvider, Endpoint, EndpointSet, HostsFileSource,
-    ResolvConfServerProvider, UdpDnsTransport,
+    Discovery, DiscoveryError, DiscoveryMode, DnsResolverProvider, Endpoint, EndpointSet,
+    HostsFileSource, ResolvConfServerProvider, UdpDnsTransport,
 };
 
 // ============================================================================
-// Helper: Loopback UDP DNS Server
+// Helper: Loopback UDP DNS Server with Dynamic IP and Outage Simulation
 // ============================================================================
 
-async fn spawn_test_udp_server(ip: Ipv4Addr) -> SocketAddr {
+struct TestDnsHandle {
+    addr: SocketAddr,
+    ip: Arc<RwLock<Ipv4Addr>>,
+    active: Arc<AtomicBool>,
+}
+
+impl TestDnsHandle {
+    fn set_ip(&self, new_ip: Ipv4Addr) {
+        *self.ip.write().unwrap() = new_ip;
+    }
+
+    fn set_active(&self, is_active: bool) {
+        self.active.store(is_active, Ordering::SeqCst);
+    }
+}
+
+async fn spawn_test_udp_server(ip: Ipv4Addr) -> TestDnsHandle {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = socket.local_addr().unwrap();
+    let ip_holder = Arc::new(RwLock::new(ip));
+    let ip_clone = Arc::clone(&ip_holder);
+    let active = Arc::new(AtomicBool::new(true));
+    let active_clone = Arc::clone(&active);
 
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         while let Ok((len, peer)) = socket.recv_from(&mut buf).await {
+            if !active_clone.load(Ordering::SeqCst) {
+                // Drop packet to simulate network outage / nameserver crash
+                continue;
+            }
+
+            let current_ip = *ip_clone.read().unwrap();
             let req_id = u16::from_be_bytes([buf[0], buf[1]]);
             let qtype = u16::from_be_bytes([buf[len - 4], buf[len - 3]]);
             let mut resp = Vec::with_capacity(64);
@@ -40,7 +67,7 @@ async fn spawn_test_udp_server(ip: Ipv4Addr) -> SocketAddr {
                 resp.extend_from_slice(&1u16.to_be_bytes());
                 resp.extend_from_slice(&60u32.to_be_bytes());
                 resp.extend_from_slice(&4u16.to_be_bytes());
-                resp.extend_from_slice(&ip.octets());
+                resp.extend_from_slice(&current_ip.octets());
             } else {
                 resp.extend_from_slice(&0x8180u16.to_be_bytes());
                 resp.extend_from_slice(&1u16.to_be_bytes());
@@ -54,7 +81,11 @@ async fn spawn_test_udp_server(ip: Ipv4Addr) -> SocketAddr {
         }
     });
 
-    addr
+    TestDnsHandle {
+        addr,
+        ip: ip_holder,
+        active,
+    }
 }
 
 // ============================================================================
@@ -100,12 +131,30 @@ fn test_discovery_from_mode_explicit() {
     assert!(snapshot.contains_addr(&ep));
 }
 
+#[test]
+fn test_discovery_from_mode_dns_missing_resolver_error() {
+    let res = Discovery::from_mode::<ResolvConfServerProvider, UdpDnsTransport>(
+        DiscoveryMode::Dns {
+            host: "unconfigured.service".into(),
+            port: 80,
+            refresh_interval: Duration::from_millis(50),
+        },
+        None,
+    );
+
+    assert!(matches!(
+        res,
+        Err(DiscoveryError::DnsResolutionFailed { ref host, ref reason })
+            if host == "unconfigured.service" && reason.contains("DNS resolver required")
+    ));
+}
+
 #[tokio::test]
 async fn test_discovery_from_mode_dns() {
     let target_ip = Ipv4Addr::new(10, 0, 2, 1);
-    let srv_addr = spawn_test_udp_server(target_ip).await;
+    let server = spawn_test_udp_server(target_ip).await;
 
-    let servers = ResolvConfServerProvider::with_servers(vec![srv_addr]);
+    let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
     let hosts = HostsFileSource::empty();
     let transport = UdpDnsTransport::new();
 
@@ -127,6 +176,82 @@ async fn test_discovery_from_mode_dns() {
     let snapshot = disc.current_endpoints();
     assert_eq!(snapshot.len(), 1);
     assert!(snapshot.contains_addr(&SocketAddr::new(IpAddr::V4(target_ip), 9000)));
+
+    disc.shutdown();
+}
+
+#[tokio::test]
+async fn test_discovery_dynamic_topology_evolution_and_lkg_outage() {
+    let initial_ip = Ipv4Addr::new(10, 0, 3, 1);
+    let server = spawn_test_udp_server(initial_ip).await;
+
+    let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
+    let hosts = HostsFileSource::empty();
+    let transport = UdpDnsTransport::new();
+
+    let config = velda_discovery::DnsResolverConfig {
+        positive_ttl: Duration::from_millis(15),
+        hosts_ttl: Duration::from_millis(15),
+        negative_ttl: Duration::from_millis(50),
+        query_timeout: Duration::from_millis(10),
+        ..Default::default()
+    };
+
+    let resolver = Arc::new(velda_discovery::DnsResolverProvider::with_hosts_and_config(
+        servers, hosts, transport, config,
+    ));
+
+    let disc = Discovery::new_dns(
+        "evolving.service".into(),
+        8080,
+        Duration::from_millis(25),
+        resolver,
+    );
+
+    // 1. Initial resolution (Generation >= 1)
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let snap1 = disc.current_endpoints();
+    let initial_gen = snap1.generation();
+    assert!(
+        initial_gen >= 1,
+        "Must complete at least initial resolution"
+    );
+    assert!(snap1.contains_addr(&SocketAddr::new(IpAddr::V4(initial_ip), 8080)));
+
+    // 2. Rolling update: backend changes IP from 10.0.3.1 to 10.0.3.99
+    let updated_ip = Ipv4Addr::new(10, 0, 3, 99);
+    server.set_ip(updated_ip);
+
+    // Wait for background ticker to refresh with new IP
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let snap2 = disc.current_endpoints();
+    let updated_gen = snap2.generation();
+    assert!(
+        updated_gen > initial_gen,
+        "Generation counter must increment on topology evolution"
+    );
+    assert!(
+        snap2.contains_addr(&SocketAddr::new(IpAddr::V4(updated_ip), 8080)),
+        "Endpoints must update to new backend IP"
+    );
+
+    // 3. Upstream Outage: DNS server crashes / goes down
+    server.set_active(false);
+
+    // Wait through multiple refresh cycles during outage
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    let snap3 = disc.current_endpoints();
+
+    // Invariant: Background discovery MUST retain the Last-Known-Good endpoints!
+    assert_eq!(
+        snap3.len(),
+        1,
+        "Endpoint set must NOT become empty during upstream DNS outages"
+    );
+    assert!(
+        snap3.contains_addr(&SocketAddr::new(IpAddr::V4(updated_ip), 8080)),
+        "Endpoints must preserve Last-Known-Good address during outage"
+    );
 
     disc.shutdown();
 }

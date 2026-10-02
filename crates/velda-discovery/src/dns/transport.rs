@@ -15,6 +15,9 @@ use crate::error::{DiscoveryError, Result};
 // 1. RFC 1035 UDP Wire Transport
 // ============================================================================
 
+/// Default UDP DNS response packet buffer size (RFC 1035 wire framing).
+pub const DEFAULT_DNS_PACKET_BUFFER_SIZE: usize = 1024;
+
 /// Asynchronous RFC 1035 wire-format DNS transport operating directly over UDP sockets.
 ///
 /// Features:
@@ -86,7 +89,7 @@ impl UdpDnsTransport {
                 reason: format!("failed to send DNS query packet: {e}"),
             })?;
 
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; DEFAULT_DNS_PACKET_BUFFER_SIZE];
         let len = socket
             .recv(&mut buf)
             .await
@@ -180,7 +183,7 @@ impl DnsTransport for SystemDnsTransport {
 // ============================================================================
 
 /// Builds a 12-byte header + question section for a standard DNS query.
-pub(crate) fn build_query_packet(id: u16, host: &str, qtype: u16) -> Option<Vec<u8>> {
+pub fn build_query_packet(id: u16, host: &str, qtype: u16) -> Option<Vec<u8>> {
     let host = host.trim_end_matches('.');
     if host.is_empty() || host.len() > 253 {
         return None;
@@ -215,7 +218,7 @@ pub(crate) fn build_query_packet(id: u16, host: &str, qtype: u16) -> Option<Vec<
 
 /// Skips a DNS name in wire representation, safely advancing across label sequences
 /// and RFC 1035 compression pointers (`0xC0`).
-pub(crate) fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
+pub fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
     loop {
         if pos >= buf.len() {
             return None;
@@ -241,7 +244,7 @@ pub(crate) fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
 }
 
 /// Parses an RFC 1035 DNS response buffer and extracts IP addresses.
-pub(crate) fn parse_response_packet(query_id: u16, host: &str, buf: &[u8]) -> Result<Vec<IpAddr>> {
+pub fn parse_response_packet(query_id: u16, host: &str, buf: &[u8]) -> Result<Vec<IpAddr>> {
     if buf.len() < 12 {
         return Err(DiscoveryError::DnsResolutionFailed {
             host: host.to_string(),
@@ -432,55 +435,5 @@ mod tests {
             }
             _ => panic!("Expected DnsResolutionFailed with NXDOMAIN"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_udp_dns_transport_local_mock_server() {
-        let mock_server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = mock_server.local_addr().unwrap();
-
-        let transport = UdpDnsTransport::new();
-
-        // Spawn mock DNS server task that handles incoming queries
-        tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            for _ in 0..2 {
-                if let Ok((len, peer)) = mock_server.recv_from(&mut buf).await {
-                    let req_id = u16::from_be_bytes([buf[0], buf[1]]);
-                    let qtype = u16::from_be_bytes([buf[len - 4], buf[len - 3]]);
-
-                    let mut resp = Vec::new();
-                    resp.extend_from_slice(&req_id.to_be_bytes());
-                    resp.extend_from_slice(&0x8180u16.to_be_bytes()); // QR=1, RD=1, RA=1
-                    resp.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT=1
-                    if qtype == 1 {
-                        // Answer with A record
-                        resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT=1
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        // Echo question
-                        resp.extend_from_slice(&buf[12..len]);
-                        // Answer
-                        resp.extend_from_slice(&[0xC0, 0x0C]); // Pointer
-                        resp.extend_from_slice(&1u16.to_be_bytes()); // A
-                        resp.extend_from_slice(&1u16.to_be_bytes()); // IN
-                        resp.extend_from_slice(&60u32.to_be_bytes()); // TTL
-                        resp.extend_from_slice(&4u16.to_be_bytes());
-                        resp.extend_from_slice(&[10, 0, 0, 99]);
-                    } else {
-                        // Return empty answer for AAAA
-                        resp.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT=0
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        resp.extend_from_slice(&buf[12..len]);
-                    }
-
-                    let _ = mock_server.send_to(&resp, peer).await;
-                }
-            }
-        });
-
-        let ips = transport.query(server_addr, "mock.local").await.unwrap();
-        assert_eq!(ips, vec!["10.0.0.99".parse::<IpAddr>().unwrap()]);
     }
 }

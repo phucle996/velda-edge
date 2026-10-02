@@ -48,7 +48,7 @@ impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
 // 2. Resolver Configuration
 // ============================================================================
 
-/// TTL configurations for DNS resolution and caching.
+/// TTL and capacity configurations for DNS resolution, caching, and LKG resilience.
 #[derive(Debug, Clone, Copy)]
 pub struct DnsResolverConfig {
     /// Positive cache TTL for nameserver responses (default: 30s).
@@ -57,8 +57,14 @@ pub struct DnsResolverConfig {
     pub hosts_ttl: Duration,
     /// Negative cache TTL for non-existent domains (default: 5s).
     pub negative_ttl: Duration,
-    /// FIX (Blocker 4 - UDP Hang / Timeout): Strict timeout per nameserver query attempt (default: 2s).
+    /// Strict timeout per nameserver query attempt (default: 2s).
     pub query_timeout: Duration,
+    /// Maximum capacity of entries per cache table (positive and negative).
+    pub cache_capacity: usize,
+    /// Maximum capacity of entries in the Last-Known-Good (LKG) resilience map.
+    pub lkg_capacity: usize,
+    /// Maximum UDP packet buffer size for wire responses (default: 1024).
+    pub max_packet_size: usize,
 }
 
 impl Default for DnsResolverConfig {
@@ -68,6 +74,80 @@ impl Default for DnsResolverConfig {
             hosts_ttl: Duration::from_secs(300),
             negative_ttl: Duration::from_secs(5),
             query_timeout: Duration::from_secs(2),
+            cache_capacity: 50_000,
+            lkg_capacity: 10_000,
+            max_packet_size: 1024,
+        }
+    }
+}
+
+impl DnsResolverConfig {
+    /// Constructs a resolver configuration tailored to the host's [`velda_core::MemoryTier`].
+    pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
+        match tier {
+            velda_core::MemoryTier::Constrained => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(15),
+                query_timeout: Duration::from_secs(3),
+                cache_capacity: 1_000,
+                lkg_capacity: 500,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::Small => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(10),
+                query_timeout: Duration::from_secs(2),
+                cache_capacity: 10_000,
+                lkg_capacity: 2_000,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::Medium => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(5),
+                query_timeout: Duration::from_secs(2),
+                cache_capacity: 50_000,
+                lkg_capacity: 10_000,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::Large => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(5),
+                query_timeout: Duration::from_millis(1500),
+                cache_capacity: 150_000,
+                lkg_capacity: 30_000,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::XLarge => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(5),
+                query_timeout: Duration::from_secs(1),
+                cache_capacity: 400_000,
+                lkg_capacity: 80_000,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::TwoXLarge => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(5),
+                query_timeout: Duration::from_secs(1),
+                cache_capacity: 1_000_000,
+                lkg_capacity: 200_000,
+                max_packet_size: 1024,
+            },
+            velda_core::MemoryTier::Ultra => Self {
+                positive_ttl: Duration::from_secs(30),
+                hosts_ttl: Duration::from_secs(300),
+                negative_ttl: Duration::from_secs(5),
+                query_timeout: Duration::from_secs(1),
+                cache_capacity: 2_500_000,
+                lkg_capacity: 500_000,
+                max_packet_size: 1024,
+            },
         }
     }
 }
@@ -109,11 +189,12 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         transport: T,
         config: DnsResolverConfig,
     ) -> Self {
+        let cache = DnsCache::with_capacity(config.cache_capacity);
         Self {
             servers,
             hosts,
             transport,
-            cache: DnsCache::new(),
+            cache,
             config,
             lkg: RwLock::new(HashMap::new()),
             inflight: tokio::sync::Mutex::new(HashMap::new()),
@@ -227,11 +308,17 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
                     self.cache
                         .insert_positive(key, ips.to_vec(), self.config.positive_ttl);
 
-                    // Update LKG (Last-Known-Good)
-                    self.lkg
-                        .write()
-                        .unwrap()
-                        .insert(key.to_string(), Arc::clone(&ips));
+                    // Update LKG (Last-Known-Good) with bounded capacity
+                    {
+                        let mut lkg = self.lkg.write().unwrap();
+                        if !lkg.contains_key(key)
+                            && lkg.len() >= self.config.lkg_capacity
+                            && let Some(first_key) = lkg.keys().next().cloned()
+                        {
+                            lkg.remove(&first_key);
+                        }
+                        lkg.insert(key.to_string(), Arc::clone(&ips));
+                    }
 
                     return Ok(ips);
                 }

@@ -18,9 +18,10 @@ pub mod error;
 pub mod service;
 
 pub use dns::{
-    CacheLookup, DnsCache, DnsResolverConfig, DnsResolverProvider, DnsServer, DnsServerProvider,
-    DnsServerTarget, DnsTransport, HostsFileSource, ResolvConfServerProvider, StaticServerProvider,
-    SystemDnsTransport, UdpDnsTransport,
+    CacheLookup, DEFAULT_DNS_PACKET_BUFFER_SIZE, DnsCache, DnsResolverConfig, DnsResolverProvider,
+    DnsServer, DnsServerProvider, DnsServerTarget, DnsTransport, HostsFileSource,
+    ResolvConfServerProvider, StaticServerProvider, SystemDnsTransport, UdpDnsTransport,
+    build_query_packet, parse_response_packet, skip_name,
 };
 
 pub use endpoint::{Endpoint, EndpointId, EndpointSet};

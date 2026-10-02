@@ -28,3 +28,11 @@ harness = false
 name = "adversarial_bench"
 harness = false
 
+[[bench]]
+name = "memory_leak_bench"
+harness = false
+
+[[bench]]
+name = "wire_bench"
+harness = false
+

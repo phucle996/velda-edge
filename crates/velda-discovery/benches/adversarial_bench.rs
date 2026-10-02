@@ -42,6 +42,7 @@ fn bench_nxdomain_flooding_storm() {
             hosts_ttl: Duration::from_secs(300),
             negative_ttl: Duration::from_secs(60),
             query_timeout: Duration::from_millis(50),
+            ..Default::default()
         };
 
         let resolver = DnsResolverProvider::with_hosts_and_config(
@@ -124,6 +125,7 @@ fn bench_nameserver_failover() {
             hosts_ttl: Duration::from_secs(300),
             negative_ttl: Duration::from_millis(1),
             query_timeout: Duration::from_millis(5),
+            ..Default::default()
         };
 
         let resolver = DnsResolverProvider::with_hosts_and_config(
@@ -185,6 +187,7 @@ fn bench_total_outage_lkg_preservation() {
             hosts_ttl: Duration::from_secs(300),
             negative_ttl: Duration::from_millis(10),
             query_timeout: Duration::from_millis(2),
+            ..Default::default()
         };
 
         let resolver = DnsResolverProvider::with_hosts_and_config(

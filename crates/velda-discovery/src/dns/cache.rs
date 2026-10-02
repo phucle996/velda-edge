@@ -247,4 +247,28 @@ mod tests {
         );
         assert_eq!(cache.positive_len(), 3);
     }
+
+    #[test]
+    fn test_case_insensitive_cache_lookup() {
+        let cache = DnsCache::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Insert lowercase, lookup uppercase and mixed case
+        cache.insert_positive("api.velda.io", vec![ip], Duration::from_secs(10));
+        assert_eq!(cache.get("API.VELDA.IO"), CacheLookup::Hit(Arc::from([ip])));
+        assert_eq!(cache.get("Api.Velda.Io"), CacheLookup::Hit(Arc::from([ip])));
+        assert_eq!(cache.get("api.velda.io"), CacheLookup::Hit(Arc::from([ip])));
+
+        // Insert uppercase, lookup lowercase
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        cache.insert_positive("UPPER.SERVICE.LOCAL", vec![ip2], Duration::from_secs(10));
+        assert_eq!(
+            cache.get("upper.service.local"),
+            CacheLookup::Hit(Arc::from([ip2]))
+        );
+        assert_eq!(
+            cache.get("Upper.Service.Local"),
+            CacheLookup::Hit(Arc::from([ip2]))
+        );
+    }
 }
