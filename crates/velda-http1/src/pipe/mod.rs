@@ -36,6 +36,20 @@ pub enum Http1PipeStrategy {
 }
 
 impl Http1PipeStrategy {
+    /// Derives the execution strategy directly from upstream's declared streaming mode.
+    ///
+    /// Validated against listener capabilities at configuration compilation time,
+    /// so this derivation on the serving hot path is an infallible, zero-cost mapping.
+    #[inline]
+    pub fn from_streaming(streaming: StreamingMode) -> Self {
+        match (streaming.client, streaming.server) {
+            (true, true) => Self::Duplex,
+            (false, true) => Self::ServerStream,
+            (true, false) => Self::ClientStream,
+            (false, false) => Self::Buffered,
+        }
+    }
+
     /// Resolves the concrete strategy from listener capabilities and upstream requirements.
     ///
     /// # Errors
@@ -59,12 +73,7 @@ impl Http1PipeStrategy {
             ));
         }
 
-        match (upstream_streaming.client, upstream_streaming.server) {
-            (true, true) => Ok(Self::Duplex),
-            (false, true) => Ok(Self::ServerStream),
-            (true, false) => Ok(Self::ClientStream),
-            (false, false) => Ok(Self::Buffered),
-        }
+        Ok(Self::from_streaming(upstream_streaming))
     }
 }
 

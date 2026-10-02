@@ -122,6 +122,22 @@ pub enum ErrorKind {
 
 ---
 
+### 2.7 Hardware Topology: Phân tách Probe CPU & Memory (`src/hardware/`)
+Cung cấp khả năng nhận diện tài nguyên hệ thống thực tế (CPU cores, RAM) một lần duy nhất lúc cold start từ kernel/cgroups và lưu vào RAM (`OnceLock`), không đọc từ biến môi trường:
+- `src/hardware/cpu.rs`:
+  - `probe_cpu()`: Đọc cgroups v2 (`/sys/fs/cgroup/cpu.max`), cgroups v1 (`cpu.cfs_quota_us`), hoặc `available_parallelism` từ hệ thống.
+  - **`CpuTier`**: `Constrained` (1-2 cores), `Small` (3-4 cores), `Medium` (5-8 cores), `Large` (9-16 cores), `XLarge` (17-32 cores), `TwoXLarge` (33-64 cores), `Ultra` (> 64 cores).
+  - Dùng để tự động tính toán concurrency scaling và channel capacities theo năng lực phần cứng thực tế.
+- `src/hardware/memory.rs`:
+  - `probe_memory()`: Đọc cgroups v2 (`memory.max`), cgroups v1 (`memory.limit_in_bytes`), hoặc `/proc/meminfo` MemTotal.
+  - **`MemoryTier`**: `Constrained` (< 512 MB), `Small` (512 MB – 2 GB), `Medium` (2 GB – 8 GB), `Large` (8 GB – 32 GB), `XLarge` (32 GB – 64 GB), `TwoXLarge` (64 GB – 128 GB), `Ultra` (> 128 GB).
+  - Dùng để scale socket buffers (TCP/UDP), socket backlog, và DNS/LKG cache capacities.
+- `src/hardware/mod.rs`:
+  - `HardwareTopology`: Tổng hợp `CpuProfile` và `MemoryProfile`.
+  - Hỗ trợ đầy đủ backward-compatibility (`available_cores`, `worker_threads`, `memory_bytes`, `resource_tier()`, alias `ResourceTier = MemoryTier`).
+
+---
+
 ## 3. Ranh giới: Những việc `velda-core` TUYỆT ĐỐI KHÔNG làm
 
 Để giữ cho `velda-core` siêu nhẹ, ổn định và không chứa business logic, crate này **KHÔNG BAO GIỜ**:
