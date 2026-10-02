@@ -15,7 +15,6 @@ members = [
     "crates/velda-upstream",
     "crates/velda-lb",
     "crates/velda-connection-pool",
-    "crates/velda-composer",
     "crates/velda-observability",
     "crates/velda-edge",
 ]

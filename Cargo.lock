@@ -1821,20 +1821,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "velda-composer"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tracing",
- "velda-core",
- "velda-tls",
- "velda-transport",
-]
-
-[[package]]
 name = "velda-connection-pool"
 version = "0.1.0"
 dependencies = [
@@ -1882,7 +1868,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "velda-composer",
  "velda-core",
  "velda-discovery",
  "velda-grpc",
