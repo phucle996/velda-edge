@@ -40,7 +40,7 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
          ▼                           ▼                           ▼
   2. L4 Fast-Path Direct     3. TCP L7 Handoff           4. UDP L7 Handoff
   (path == L4Direct)         (path == L7Handoff)         (path == L7Handoff)
-  forward_tcp_direct/stream  TcpL7Handoff                UdpL7Handoff
+  forward_connection         TcpL7Handoff                UdpL7Handoff
   copy_bidirectional         (conn, listener_id)         (dgram, sock, listener_id)
          │                           │                           │
          ▼                           ▼                           ▼
@@ -58,7 +58,7 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
 | **2** | **L4 Connection Tracking** | Wraps raw sockets in [`Connection`](src/connection.rs); generates monotonic `ConnectionId`; tracks bytes read/written with lock-free atomics. | Vocabulary types defined in [`velda-core`](../velda-core). |
 | **3** | **2D Ingress Path Resolution** | Evaluates Dimension 1 (`transport.protocol`: `tcp` \| `udp`) and Dimension 2 (`application.protocol`: `raw` $\to$ `L4Direct`, $\ne$ `raw` $\to$ `L7Handoff`) at binding creation. Zero payload sniffing. | Protocol composition and backend mapping delegated to [`velda-composer`](../velda-composer). |
 | **4** | **L4 Direct Forwarding** | High-throughput raw byte proxying via `copy_bidirectional` for TCP and stateless datagram/flow sessions for UDP. | Upstream backend discovery and connection leasing owned by [`velda-upstream`](../velda-upstream). |
-| **5** | **Symmetrical L7 Handoff** | Envelopes classified streams into [`TcpL7Handoff`](src/forwarding/l7.rs) and [`UdpL7Handoff`](src/forwarding/l7.rs) carrying only connection/datagram carrier and `listener_id`. | Protocol composition, TLS termination, and ALPN coordination owned by [`velda-composer`](../velda-composer). |
+| **5** | **Symmetrical L7 Handoff** | Envelopes classified streams into [`TcpL7Handoff`](src/handoff/l7.rs) and [`UdpL7Handoff`](src/handoff/l7.rs) carrying only connection/datagram carrier and `listener_id`. | Protocol composition, TLS termination, and ALPN coordination owned by [`velda-composer`](../velda-composer). |
 
 ---
 
@@ -68,8 +68,8 @@ Stage 0 — Edge Traffic Ingress, L4 Connection Lifecycle, Forwarding & L7 Hando
    Serving path never parses JSON, never reads disk, and never makes Control Plane RPCs. Ingress bindings, socket options, and forwarding paths execute entirely from pre-compiled RAM structures.
 2. **Strict Symmetrical Handoff Contract**:
    Transport provides clean, symmetrical handoff structures for both transport protocols:
-   - [`TcpL7Handoff`](src/forwarding/l7.rs): Hands off `(Connection, listener_id)`.
-   - [`UdpL7Handoff`](src/forwarding/l7.rs): Hands off `(Datagram, Arc<UdpSocket>, listener_id)`.
+   - [`TcpL7Handoff`](src/handoff/l7.rs): Hands off `(Connection, listener_id)`.
+   - [`UdpL7Handoff`](src/handoff/l7.rs): Hands off `(Datagram, Arc<UdpSocket>, listener_id)`.
    Transport never makes application-layer assumptions; Composer resolves the target engine (HTTP/1, HTTP/2, HTTP/3, TLS) solely via `listener_id`.
 3. **Zero Payload Sniffing**:
    Ingress routing path is decided statically from the declarative listener configuration (`application.protocol == "raw"` $\to$ `PathKind::L4Direct`, $\ne$ `"raw"` $\to$ `PathKind::L7Handoff`). Zero byte sniffing or speculative prefetching on ingress.

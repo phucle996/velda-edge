@@ -9,7 +9,7 @@ use super::handle::EngineHandle;
 use super::reconcile::reconcile_active_listeners;
 use crate::connection::Connection;
 use crate::error::Result;
-use crate::forwarding::l7::{TcpL7Handoff, UdpL7Handoff};
+use crate::handoff::{TcpL7Handoff, UdpL7Handoff};
 use crate::ingress::classifier::PathKind;
 use crate::ingress::listener::{IngressBinding, IngressListener};
 use crate::udp::datagram::Datagram;
@@ -68,6 +68,7 @@ impl TrafficEngine {
             tls_enabled: false,
             path: PathKind::L4Direct,
             tcp_config: Default::default(),
+            udp_config: socket.config().clone(),
         };
         self.initial_udp.push((id_str, Arc::new(socket), binding));
         self

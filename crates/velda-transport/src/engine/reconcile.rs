@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::connection::Connection;
-use crate::forwarding::l7::{TcpL7Handoff, UdpL7Handoff};
+use crate::handoff::{TcpL7Handoff, UdpL7Handoff};
 use crate::ingress::listener::{IngressBinding, IngressListener};
 use crate::udp::datagram::Datagram;
 use crate::udp::socket::UdpSocket;
@@ -64,8 +64,7 @@ pub fn reconcile_active_listeners<L4H, L7H, UdpL4H, UdpL7H, FutL4, FutL7, FutUdp
     for (id, binding) in desired_map {
         if let Entry::Vacant(e) = active.entry(id.clone()) {
             if binding.is_udp() {
-                match UdpSocket::bind(binding.addr, crate::udp::config::UdpSocketConfig::default())
-                {
+                match UdpSocket::bind(binding.addr, binding.udp_config.clone()) {
                     Ok(socket) => {
                         tracing::info!(
                             listener_id = %id,

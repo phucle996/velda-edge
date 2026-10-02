@@ -33,16 +33,19 @@ impl TransferStats {
     }
 }
 
-/// Forwards bytes bidirectionally between two asynchronous streams using
-/// [`tokio::io::copy_bidirectional`] with automatic half-close (TCP FIN) handling.
-pub async fn forward_bidirectional<C, S>(client: &mut C, server: &mut S) -> Result<TransferStats>
+/// Forwards bytes bidirectionally between two asynchronous streams using custom buffer sizes.
+pub async fn forward_bidirectional_with_sizes<C, S>(
+    client: &mut C,
+    server: &mut S,
+    client_buf_size: usize,
+    server_buf_size: usize,
+) -> Result<TransferStats>
 where
     C: AsyncRead + AsyncWrite + Unpin + ?Sized,
     S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    // 64 KB buffers for high-bandwidth L4 stream forwarding, cutting syscalls by up to 8x
     let (client_to_server, server_to_client) =
-        tokio::io::copy_bidirectional_with_sizes(client, server, 65536, 65536)
+        tokio::io::copy_bidirectional_with_sizes(client, server, client_buf_size, server_buf_size)
             .await
             .map_err(TransportError::Forward)?;
 
@@ -52,17 +55,34 @@ where
     })
 }
 
+/// Forwards bytes bidirectionally between two asynchronous streams using
+/// [`tokio::io::copy_bidirectional`] with automatic half-close (TCP FIN) handling.
+///
+/// Uses standard 64 KB buffers for high-bandwidth L4 stream forwarding.
+pub async fn forward_bidirectional<C, S>(client: &mut C, server: &mut S) -> Result<TransferStats>
+where
+    C: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    forward_bidirectional_with_sizes(client, server, 65536, 65536).await
+}
+
+/// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`]
+/// using the specified buffer size (e.g. from [`super::config::TcpListenerConfig::copy_buffer_size`]).
+pub async fn forward_connection_with_size(
+    mut client: Connection,
+    mut server: TcpStream,
+    buffer_size: usize,
+) -> Result<TransferStats> {
+    forward_bidirectional_with_sizes(client.stream_mut(), &mut server, buffer_size, buffer_size)
+        .await
+}
+
 /// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`].
 ///
 /// Updates the internal byte counters of the client [`Connection`].
-pub async fn forward_connection(
-    mut client: Connection,
-    mut server: TcpStream,
-) -> Result<TransferStats> {
-    let stats = forward_bidirectional(client.stream_mut(), &mut server).await?;
-    // Connection will be dropped here or can be kept; its internal counters
-    // can reflect the transfer if requested.
-    Ok(stats)
+pub async fn forward_connection(client: Connection, server: TcpStream) -> Result<TransferStats> {
+    forward_connection_with_size(client, server, 65536).await
 }
 
 /// Connects to a target upstream address and pumps bytes bidirectionally with the client connection.

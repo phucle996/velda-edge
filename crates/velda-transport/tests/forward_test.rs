@@ -134,3 +134,49 @@ async fn test_connect_and_forward_helper() {
     assert_eq!(stats.client_to_server_bytes, 4);
     assert_eq!(stats.server_to_client_bytes, 4);
 }
+
+#[tokio::test]
+async fn test_forward_connection_with_custom_buffer_size() {
+    use velda_transport::forward_connection_with_size;
+
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let upstream_task = tokio::spawn(async move {
+        let (mut socket, _) = upstream_listener.accept().await.unwrap();
+        let mut buf = [0u8; 11];
+        socket.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"custom-size");
+        socket.write_all(b"custom-resp").await.unwrap();
+        socket.shutdown().await.unwrap();
+    });
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let proxy_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        let conn = Connection::from_stream(stream).unwrap();
+        let upstream = TcpStream::connect(upstream_addr).await.unwrap();
+        forward_connection_with_size(conn, upstream, 8 * 1024)
+            .await
+            .unwrap()
+    });
+
+    let client_task = tokio::spawn(async move {
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client.write_all(b"custom-size").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut buf = Vec::new();
+        client.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"custom-resp");
+    });
+
+    client_task.await.unwrap();
+    let stats = proxy_task.await.unwrap();
+    upstream_task.await.unwrap();
+
+    assert_eq!(stats.client_to_server_bytes, 11);
+    assert_eq!(stats.server_to_client_bytes, 11);
+}

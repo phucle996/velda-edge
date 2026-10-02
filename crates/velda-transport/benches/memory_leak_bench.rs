@@ -14,10 +14,9 @@ use std::thread;
 use std::time::Instant;
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
-use velda_transport::forwarding::l7::UdpL7Handoff;
 use velda_transport::ingress::listener::IngressBinding;
 use velda_transport::udp::datagram::Datagram;
-use velda_transport::{UdpSocket, UdpSocketConfig, next_connection_id};
+use velda_transport::{UdpL7Handoff, UdpSocket, UdpSocketConfig, next_connection_id};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();

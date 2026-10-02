@@ -7,6 +7,7 @@ use crate::connection::Connection;
 use crate::error::{Result, TransportError};
 use crate::tcp::config::TcpListenerConfig;
 use crate::tcp::listener::TcpListener;
+use crate::udp::config::UdpSocketConfig;
 
 /// Ingress binding configuration matching the user's declared listener definition in listeners.json.
 ///
@@ -27,6 +28,8 @@ pub struct IngressBinding {
     pub path: PathKind,
     /// TCP socket listener options (e.g. nodelay, backlog, buffer sizes).
     pub tcp_config: TcpListenerConfig,
+    /// UDP socket options (e.g. receive/send buffer sizes).
+    pub udp_config: UdpSocketConfig,
 }
 
 impl IngressBinding {
@@ -60,6 +63,7 @@ impl IngressBinding {
             tls_enabled,
             path,
             tcp_config: TcpListenerConfig::default(),
+            udp_config: UdpSocketConfig::default(),
         })
     }
 
@@ -108,6 +112,12 @@ impl IngressBinding {
     /// Configures the TCP listener socket parameters.
     pub fn with_tcp_config(mut self, config: TcpListenerConfig) -> Self {
         self.tcp_config = config;
+        self
+    }
+
+    /// Configures the UDP socket parameters.
+    pub fn with_udp_config(mut self, config: UdpSocketConfig) -> Self {
+        self.udp_config = config;
         self
     }
 }
@@ -166,7 +176,7 @@ impl IngressListener {
     ) where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(crate::forwarding::l7::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(crate::handoff::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         tasks.spawn(async move {
@@ -183,7 +193,7 @@ impl IngressListener {
     ) where
         L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(crate::forwarding::l7::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        L7H: Fn(crate::handoff::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         let local_addr = ingress.local_addr();
@@ -228,7 +238,7 @@ impl IngressListener {
                                         tokio::spawn(l4_fn(conn));
                                     }
                                     PathKind::L7Handoff => {
-                                        let handoff = crate::forwarding::l7::TcpL7Handoff::new(
+                                        let handoff = crate::handoff::TcpL7Handoff::new(
                                             conn,
                                             listener_id.clone(),
                                         );

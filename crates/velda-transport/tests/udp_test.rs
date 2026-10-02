@@ -159,9 +159,13 @@ async fn test_forward_udp_flow() {
 async fn test_udp_l7_handoff_for_http3_quic() {
     use velda_transport::{IngressBinding, PathKind, TrafficEngine, UdpL7Handoff};
 
-    let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let free_addr: SocketAddr = {
+        let l = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
     let binding =
-        IngressBinding::from_protocols("h3-ingress", server_addr, "udp", "quic", true).unwrap();
+        IngressBinding::from_protocols("h3-ingress", free_addr, "udp", "quic", true).unwrap();
     assert_eq!(binding.path, PathKind::L7Handoff);
     assert!(binding.is_udp());
 
@@ -169,7 +173,7 @@ async fn test_udp_l7_handoff_for_http3_quic() {
     engine.add_binding(binding).unwrap();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (l7_received_tx, _l7_received_rx) = tokio::sync::mpsc::channel(1);
+    let (l7_received_tx, mut l7_received_rx) = tokio::sync::mpsc::channel(1);
 
     let engine_task = tokio::spawn(async move {
         engine
@@ -192,44 +196,23 @@ async fn test_udp_l7_handoff_for_http3_quic() {
             .await
     });
 
-    // Determine bound port by querying client connection
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send packet using client UDP socket
     let client =
         UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
 
-    // To know the exact port bound by TrafficEngine, let's determine it from an ephemeral listener test:
-    // We can also test UdpL7Handoff directly on a known bound socket
-    let free_addr: SocketAddr = {
-        let l = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
-
-    let h3_binding =
-        IngressBinding::from_protocols("h3-direct", free_addr, "udp", "quic", true).unwrap();
-    let dgram = Datagram::new(
-        client.local_addr(),
-        free_addr,
-        b"QUIC-Client-Hello".to_vec(),
-    );
-    let socket = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
-
-    let handoff = UdpL7Handoff::new(dgram, Arc::clone(&socket), h3_binding.id.clone());
-
-    assert_eq!(handoff.listener_id(), "h3-direct");
-    assert_eq!(handoff.peer(), client.local_addr());
-    assert_eq!(handoff.data(), b"QUIC-Client-Hello");
-
-    // Test send_response
-    handoff.send_response(b"QUIC-Server-Ack").await.unwrap();
+    client
+        .send_to(b"QUIC-Client-Hello", free_addr)
+        .await
+        .unwrap();
 
     let mut buf = [0u8; 64];
     let (n, from) = client.recv_from(&mut buf).await.unwrap();
-    assert_eq!(&buf[..n], b"QUIC-Server-Ack");
-    assert_eq!(from, socket.local_addr());
+    assert_eq!(&buf[..n], b"QUIC-Server-Hello");
+    assert_eq!(from, free_addr);
+
+    l7_received_rx.recv().await.unwrap();
 
     shutdown_tx.send(true).unwrap();
     let _ = engine_task.await;

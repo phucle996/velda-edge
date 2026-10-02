@@ -169,7 +169,7 @@ impl UdpSocket {
     ) where
         UdpL4H: Fn(String, std::sync::Arc<Self>, Datagram) -> FutL4 + Send + Sync + Clone + 'static,
         FutL4: std::future::Future<Output = ()> + Send + 'static,
-        UdpL7H: Fn(crate::forwarding::l7::UdpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        UdpL7H: Fn(crate::handoff::UdpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
         tasks.spawn(async move {
@@ -208,7 +208,7 @@ impl UdpSocket {
                                 let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
                                 match path {
                                     crate::ingress::classifier::PathKind::L7Handoff => {
-                                        let handoff = crate::forwarding::l7::UdpL7Handoff::new(
+                                        let handoff = crate::handoff::UdpL7Handoff::new(
                                             dgram,
                                             std::sync::Arc::clone(&socket),
                                             listener_id.clone(),
