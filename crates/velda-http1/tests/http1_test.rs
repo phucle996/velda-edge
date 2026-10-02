@@ -2,20 +2,21 @@ use bytes::BytesMut;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::net::TcpListener;
-use velda_core::{Body, IngressLimits};
+use velda_core::Body;
+use velda_core::hardware::MemoryTier;
 use velda_http1::error::Http1Error;
 use velda_http1::{
-    Http1BodyFraming, Http1BufferConfig, Http1Request, Http1Response, Http1ResponseHead,
+    Http1BodyFraming, Http1Config, Http1Request, Http1Response, Http1ResponseHead,
     Http1ServerConnection, decode_body, decode_request, decode_request_head, decode_response,
     decode_response_head, encode_response, forward_request,
 };
 
-const TEST_LIMITS: IngressLimits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+const TEST_CONFIG: Http1Config = Http1Config::for_tier(MemoryTier::Medium);
 
 #[tokio::test]
 async fn test_http1_server_connection() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         client
@@ -53,7 +54,7 @@ async fn test_http1_upstream_connector() {
     );
 
     let mut stream = tokio::net::TcpStream::connect(backend_addr).await.unwrap();
-    let resp = forward_request(&req, &mut stream, &TEST_LIMITS, &Http1BufferConfig::auto())
+    let resp = forward_request(&req, &mut stream, &TEST_CONFIG)
         .await
         .unwrap();
     assert_eq!(resp.status, StatusCode::OK);
@@ -64,7 +65,7 @@ fn test_chunked_request_decoding() {
     let raw = b"POST /upload HTTP/1.1\r\nHost: edge.velda.io\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n6\r\npedia \r\n9\r\nin chunks\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let req = decode_request(&mut buf, &TEST_LIMITS)
+    let req = decode_request(&mut buf, &TEST_CONFIG)
         .unwrap()
         .expect("request parsed");
     assert_eq!(req.method, Method::POST);
@@ -82,7 +83,7 @@ fn test_chunked_response_decoding() {
     let raw = b"HTTP/1.1 200 OK\r\nServer: backend-svc\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let resp = decode_response(&mut buf, &TEST_LIMITS)
+    let resp = decode_response(&mut buf, &TEST_CONFIG)
         .unwrap()
         .expect("response parsed");
     assert_eq!(resp.status, StatusCode::OK);
@@ -100,7 +101,7 @@ fn test_chunked_incomplete_buffering() {
     let raw = b"POST /stream HTTP/1.1\r\nHost: edge.velda.io\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let res = decode_request(&mut buf, &TEST_LIMITS).unwrap();
+    let res = decode_request(&mut buf, &TEST_CONFIG).unwrap();
     assert!(
         res.is_none(),
         "incomplete chunked stream must return Ok(None)"
@@ -117,7 +118,7 @@ fn test_smuggling_simultaneous_cl_te() {
     let raw = b"POST / HTTP/1.1\r\nHost: victim.com\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
         matches!(err, Http1Error::SmugglingDetected(_)),
         "Must fast-fail reject simultaneous CL and TE"
@@ -129,7 +130,7 @@ fn test_smuggling_multiple_conflicting_cl() {
     let raw = b"POST / HTTP/1.1\r\nHost: victim.com\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n12345";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
         matches!(err, Http1Error::SmugglingDetected(_)),
         "Must reject conflicting multiple Content-Length headers"
@@ -143,7 +144,7 @@ fn test_header_too_large_rejection() {
     raw.resize(70 * 1024, b'a');
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
         matches!(err, Http1Error::HeaderTooLarge(_)),
         "Headers > 64KB must be rejected with HeaderTooLarge"
@@ -156,7 +157,7 @@ fn test_payload_too_large_rejection() {
     let raw = b"POST /data HTTP/1.1\r\nHost: edge.velda.io\r\nContent-Length: 15728640\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &TEST_LIMITS).unwrap_err();
+    let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
         matches!(err, Http1Error::PayloadTooLarge(_)),
         "Payload > 10MB must be rejected with PayloadTooLarge"
@@ -165,7 +166,7 @@ fn test_payload_too_large_rejection() {
 
 #[test]
 fn test_too_many_headers_rejection() {
-    let limits = TEST_LIMITS.with_max_headers(5);
+    let limits = TEST_CONFIG.with_max_headers(5);
     let mut raw = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
     for i in 0..10 {
         raw.extend_from_slice(format!("X-Header-{i}: value\r\n").as_bytes());
@@ -183,7 +184,7 @@ fn test_too_many_headers_rejection() {
 #[tokio::test]
 async fn test_http10_close_by_default() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         // Plain HTTP/1.0 without keep-alive
@@ -204,7 +205,7 @@ async fn test_http10_close_by_default() {
 #[tokio::test]
 async fn test_http10_keep_alive_negotiated() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         // HTTP/1.0 with explicit Connection: keep-alive
@@ -243,12 +244,12 @@ fn test_http10_response_encoding() {
 #[tokio::test]
 async fn test_custom_ingress_limits() {
     // Custom limit: max body size only 50 bytes, max header size only 100 bytes
-    let custom_limits = TEST_LIMITS.with_max_body_size(50).with_max_header_size(100);
+    let custom_cfg = TEST_CONFIG.with_max_body_size(50).with_max_header_size(100);
 
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, custom_limits);
-    assert_eq!(conn.limits().max_body_size, 50);
-    assert_eq!(conn.limits().max_header_size, 100);
+    let mut conn = Http1ServerConnection::new(server, custom_cfg);
+    assert_eq!(conn.config().max_body_size, 50);
+    assert_eq!(conn.config().max_header_size, 100);
 
     tokio::spawn(async move {
         // Send a request with Content-Length 100 (> 50 limit)
@@ -261,14 +262,14 @@ async fn test_custom_ingress_limits() {
     let err = conn.next_request().await.unwrap_err();
     assert!(
         matches!(err, Http1Error::PayloadTooLarge(100)),
-        "Must enforce custom IngressLimits on connection"
+        "Must enforce custom limits on connection"
     );
 }
 
 #[tokio::test]
 async fn test_phased_server_connection_head_and_body() {
     let (mut client, server) = duplex(1024);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         client
@@ -309,7 +310,7 @@ fn test_phased_decode_request_head_and_body() {
         &b"GET /search?q=rust HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\nTEST"[..],
     );
 
-    let (head, framing) = decode_request_head(&mut buf, &TEST_LIMITS)
+    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG)
         .unwrap()
         .unwrap();
     assert_eq!(head.method, Method::GET);
@@ -319,7 +320,7 @@ fn test_phased_decode_request_head_and_body() {
     // Buffer now contains only body
     assert_eq!(&buf[..], b"TEST");
 
-    let body = decode_body(&mut buf, framing, &TEST_LIMITS)
+    let body = decode_body(&mut buf, framing, &TEST_CONFIG)
         .unwrap()
         .unwrap();
     if let Body::Bytes(b) = body {
@@ -333,7 +334,7 @@ fn test_phased_decode_request_head_and_body() {
 #[tokio::test]
 async fn test_progressive_chunked_server_streaming() {
     let (mut client, server) = duplex(4096);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         let (head, _framing) = conn.next_request_head().await.unwrap().unwrap();
@@ -354,7 +355,7 @@ async fn test_progressive_chunked_server_streaming() {
 
     let mut read_buf = BytesMut::with_capacity(4096);
     let (head, framing) = loop {
-        if let Some(parts) = decode_response_head(&mut read_buf, &TEST_LIMITS).unwrap() {
+        if let Some(parts) = decode_response_head(&mut read_buf, &TEST_CONFIG).unwrap() {
             break parts;
         }
         let n = client.read_buf(&mut read_buf).await.unwrap();
@@ -414,7 +415,7 @@ async fn test_progressive_chunked_server_streaming() {
 #[tokio::test]
 async fn test_progressive_chunked_client_upload() {
     let (mut client, server) = duplex(4096);
-    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
         client

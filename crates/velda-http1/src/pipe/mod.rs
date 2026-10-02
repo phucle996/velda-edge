@@ -90,9 +90,23 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
+const HOP_BY_HOP_NAMES: [HeaderName; 9] = [
+    http::header::CONNECTION,
+    HeaderName::from_static("keep-alive"),
+    http::header::PROXY_AUTHENTICATE,
+    http::header::PROXY_AUTHORIZATION,
+    http::header::TE,
+    http::header::TRAILER,
+    HeaderName::from_static("trailers"),
+    http::header::TRANSFER_ENCODING,
+    http::header::UPGRADE,
+];
+
 /// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let mut to_remove = Vec::new();
+    let mut to_remove = [const { HeaderName::from_static("connection") }; 8];
+    let mut count = 0;
+
     if let Some(conn) = headers.get(http::header::CONNECTION)
         && let Ok(conn_str) = conn.to_str()
     {
@@ -100,19 +114,19 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap) {
             let trimmed = part.trim();
             if !trimmed.is_empty()
                 && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
+                && count < 8
             {
-                to_remove.push(name);
+                to_remove[count] = name;
+                count += 1;
             }
         }
     }
 
-    for &h in HOP_BY_HOP_HEADERS {
-        if let Ok(name) = HeaderName::from_bytes(h.as_bytes()) {
-            headers.remove(name);
-        }
+    for name in &HOP_BY_HOP_NAMES {
+        headers.remove(name);
     }
 
-    for name in to_remove {
+    for name in &to_remove[..count] {
         headers.remove(name);
     }
 }

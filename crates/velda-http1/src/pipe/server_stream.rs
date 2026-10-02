@@ -7,13 +7,12 @@
 
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::IngressLimits;
 
 use super::sanitize_hop_by_hop_headers;
 use crate::client::connector::{
     read_chunk_sized, read_next_chunk, read_response_head, send_request,
 };
-use crate::config::Http1BufferConfig;
+use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
@@ -27,8 +26,7 @@ pub async fn pipe_server_stream<DownIO, UpIO>(
     mut head: Http1RequestHead,
     framing: Http1BodyFraming,
     upstream: &mut UpIO,
-    limits: &IngressLimits,
-    buf_config: &Http1BufferConfig,
+    config: &Http1Config,
 ) -> Result<(), Http1Error>
 where
     DownIO: AsyncRead + AsyncWrite + Unpin,
@@ -41,11 +39,11 @@ where
     let req = Http1Request::from_parts(head, body);
 
     // 2. Send complete request to upstream backend
-    send_request(&req, upstream, buf_config).await?;
+    send_request(&req, upstream, config).await?;
 
     // 3. Read upstream response head
-    let mut read_buf = BytesMut::with_capacity(buf_config.upstream_read_capacity);
-    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, limits).await?;
+    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
+    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
     sanitize_hop_by_hop_headers(&mut resp_head.headers);
 
     // 4. Send chunked response head downstream

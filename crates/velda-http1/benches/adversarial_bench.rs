@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::CountingAllocator;
-use velda_core::IngressLimits;
-use velda_http1::decode_request;
+use velda_core::MemoryTier;
+use velda_http1::{Http1Config, decode_request};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -81,13 +81,13 @@ fn bench_smuggling_and_framing() {
         ),
     ];
 
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     for (name, payload, should_succeed) in attack_vectors {
         let start = Instant::now();
 
         for _ in 0..iters {
             let mut buf = BytesMut::from(payload);
-            let res = decode_request(&mut buf, &limits);
+            let res = decode_request(&mut buf, &config);
             let _ = std::hint::black_box(res);
         }
 
@@ -158,13 +158,13 @@ fn bench_pathological_header_floods() {
         ),
     ];
 
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     for (name, payload, outcome) in scenarios {
         let start = Instant::now();
 
         for _ in 0..iters {
             let mut buf = BytesMut::from(payload);
-            let res = decode_request(&mut buf, &limits);
+            let res = decode_request(&mut buf, &config);
             let _ = std::hint::black_box(res);
         }
 
@@ -201,13 +201,13 @@ fn bench_hostile_method_injections() {
     ];
 
     ALLOCATOR.reset();
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     let start = Instant::now();
 
     for i in 0..iters {
         let raw = methods[i % methods.len()];
         let mut buf = BytesMut::from(raw);
-        let res = decode_request(&mut buf, &limits);
+        let res = decode_request(&mut buf, &config);
         let _ = std::hint::black_box(res);
     }
 
@@ -251,21 +251,21 @@ fn bench_pipeline_boundary_fuzzing() {
     // Case 2: Pipelined stream (2 requests concatenated in one buffer)
     let pipelined_stream = b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     let start = Instant::now();
 
     for _ in 0..iters {
         // Partial body must return Ok(None) without advancing buffer
         let mut buf = BytesMut::from(&partial_body[..]);
-        let res = decode_request(&mut buf, &limits).unwrap();
+        let res = decode_request(&mut buf, &config).unwrap();
         debug_assert!(res.is_none());
         debug_assert_eq!(buf.len(), partial_body.len());
 
         // Pipelined buffer must decode first request, leaving second in buffer
         let mut pipe_buf = BytesMut::from(&pipelined_stream[..]);
-        let first = decode_request(&mut pipe_buf, &limits).unwrap().unwrap();
+        let first = decode_request(&mut pipe_buf, &config).unwrap().unwrap();
         debug_assert_eq!(first.path(), "/first");
-        let second = decode_request(&mut pipe_buf, &limits).unwrap().unwrap();
+        let second = decode_request(&mut pipe_buf, &config).unwrap().unwrap();
         debug_assert_eq!(second.path(), "/second");
     }
 

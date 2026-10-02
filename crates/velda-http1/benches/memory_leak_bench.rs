@@ -16,8 +16,8 @@ use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use velda_core::{Body, IngressLimits};
-use velda_http1::{Http1Response, decode_request, encode_response};
+use velda_core::{Body, MemoryTier};
+use velda_http1::{Http1Config, Http1Response, decode_request, encode_response};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -49,10 +49,10 @@ fn bench_request_decoding_steady_state() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     for _ in 0..iters {
         let mut buf = BytesMut::from(&raw[..]);
-        let req = decode_request(&mut buf, &limits).unwrap().unwrap();
+        let req = decode_request(&mut buf, &config).unwrap().unwrap();
         let _ = std::hint::black_box(req);
     }
 
@@ -182,10 +182,10 @@ fn bench_multithread_storm_reclamation() {
 
         handles.push(thread::spawn(move || {
             bar.wait();
-            let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+            let config = Http1Config::for_tier(MemoryTier::Medium);
             for _ in 0..ops_per_worker {
                 let mut buf = BytesMut::from(&p[..]);
-                let req = decode_request(&mut buf, &limits).unwrap().unwrap();
+                let req = decode_request(&mut buf, &config).unwrap().unwrap();
                 let _ = std::hint::black_box(req);
             }
         }));
@@ -244,11 +244,11 @@ fn bench_adversarial_zero_retention() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+    let config = Http1Config::for_tier(MemoryTier::Medium);
     for i in 0..iters {
         let payload = &hostile_payloads[i % hostile_payloads.len()];
         let mut buf = BytesMut::from(&payload[..]);
-        let res = decode_request(&mut buf, &limits);
+        let res = decode_request(&mut buf, &config);
         let _ = std::hint::black_box(res);
     }
 

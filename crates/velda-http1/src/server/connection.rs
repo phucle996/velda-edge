@@ -6,7 +6,7 @@
 
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use velda_core::{Body, IngressLimits};
+use velda_core::Body;
 
 use super::decode::{decode_body, decode_request, decode_request_head};
 use super::encode::{
@@ -14,7 +14,7 @@ use super::encode::{
 };
 use super::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
 use crate::client::response::{Http1Response, Http1ResponseHead};
-use crate::config::Http1BufferConfig;
+use crate::config::Http1Config;
 use crate::error::Http1Error;
 
 /// An active HTTP/1.1 connection over an asynchronous downstream stream.
@@ -23,53 +23,39 @@ pub struct Http1ServerConnection<IO> {
     read_buf: BytesMut,
     write_buf: BytesMut,
     close_requested: bool,
-    limits: IngressLimits,
-    buf_config: Http1BufferConfig,
+    config: Http1Config,
 }
 
 impl<IO> Http1ServerConnection<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Creates a new HTTP/1.1 connection with mandatory generic IngressLimits configured on the listener.
-    pub fn new(stream: IO, limits: IngressLimits) -> Self {
-        Self::with_config(stream, limits, Http1BufferConfig::auto())
-    }
-
-    /// Creates a new HTTP/1.1 connection with explicit buffer configuration.
-    pub fn with_config(stream: IO, limits: IngressLimits, buf_config: Http1BufferConfig) -> Self {
+    /// Creates a new HTTP/1.1 connection with the given [`Http1Config`].
+    pub fn new(stream: IO, config: Http1Config) -> Self {
         Self {
             stream,
-            read_buf: BytesMut::with_capacity(buf_config.initial_buffer_capacity),
-            write_buf: BytesMut::with_capacity(buf_config.initial_buffer_capacity),
+            read_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
+            write_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
             close_requested: false,
-            limits,
-            buf_config,
+            config,
         }
     }
 
-    /// Returns a reference to the active ingress limits configured on this connection.
+    /// Returns a reference to the active configuration used by this connection.
     #[inline]
-    pub const fn limits(&self) -> &IngressLimits {
-        &self.limits
-    }
-
-    /// Returns a reference to the buffer configuration used by this connection.
-    #[inline]
-    pub const fn buf_config(&self) -> &Http1BufferConfig {
-        &self.buf_config
+    pub const fn config(&self) -> &Http1Config {
+        &self.config
     }
 
     /// Compacts read/write buffers if they have grown beyond the shrink threshold
     /// and are currently empty.
     #[inline]
     pub fn compact_buffers(&mut self) {
-        if self.read_buf.is_empty() && self.read_buf.capacity() > self.buf_config.shrink_threshold {
-            self.read_buf = BytesMut::with_capacity(self.buf_config.initial_buffer_capacity);
+        if self.read_buf.is_empty() && self.read_buf.capacity() > self.config.shrink_threshold {
+            self.read_buf = BytesMut::with_capacity(self.config.initial_buffer_capacity);
         }
-        if self.write_buf.is_empty() && self.write_buf.capacity() > self.buf_config.shrink_threshold
-        {
-            self.write_buf = BytesMut::with_capacity(self.buf_config.initial_buffer_capacity);
+        if self.write_buf.is_empty() && self.write_buf.capacity() > self.config.shrink_threshold {
+            self.write_buf = BytesMut::with_capacity(self.config.initial_buffer_capacity);
         }
     }
 
@@ -87,7 +73,7 @@ where
         self.compact_buffers();
 
         loop {
-            if let Some((head, framing)) = decode_request_head(&mut self.read_buf, &self.limits)? {
+            if let Some((head, framing)) = decode_request_head(&mut self.read_buf, &self.config)? {
                 let is_http10 = head.version == http::Version::HTTP_10;
                 let conn_header = head
                     .headers
@@ -126,7 +112,7 @@ where
         }
 
         loop {
-            if let Some(body) = decode_body(&mut self.read_buf, framing, &self.limits)? {
+            if let Some(body) = decode_body(&mut self.read_buf, framing, &self.config)? {
                 return Ok(body);
             }
 
@@ -148,7 +134,7 @@ where
         self.compact_buffers();
 
         loop {
-            if let Some(req) = decode_request(&mut self.read_buf, &self.limits)? {
+            if let Some(req) = decode_request(&mut self.read_buf, &self.config)? {
                 let is_http10 = req.version == http::Version::HTTP_10;
                 let conn_header = req
                     .headers
@@ -245,7 +231,7 @@ where
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
-        use super::parse::parse_single_chunk;
+        use super::decode::parse_single_chunk;
         use bytes::Buf;
 
         loop {

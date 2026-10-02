@@ -6,42 +6,41 @@
 
 use bytes::{Buf, BufMut, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_core::{Body, IngressLimits};
+use velda_core::Body;
 
 use super::decode::{decode_response, decode_response_head};
 use super::response::{Http1Response, Http1ResponseHead};
-use crate::client::parse::parse_single_chunk;
-use crate::config::Http1BufferConfig;
+use crate::client::decode::parse_single_chunk;
+use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
 
 /// Forwards an HTTP/1.1 request over an already-connected stream.
 ///
 /// Encodes the request onto the pre-established stream (TCP, TLS, or pooled connection)
-/// and decodes the incoming response using the provided buffer config.
+/// and decodes the incoming response using the provided [`Http1Config`].
 pub async fn forward_request<IO>(
     req: &Http1Request,
     stream: &mut IO,
-    limits: &IngressLimits,
-    buf_config: &Http1BufferConfig,
+    config: &Http1Config,
 ) -> Result<Http1Response, Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    send_request(req, stream, buf_config).await?;
+    send_request(req, stream, config).await?;
 
-    let mut read_buf = BytesMut::with_capacity(buf_config.upstream_read_capacity);
+    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
 
     loop {
         let n = stream.read_buf(&mut read_buf).await?;
         if n == 0 {
-            if let Some(resp) = decode_response(&mut read_buf, limits)? {
+            if let Some(resp) = decode_response(&mut read_buf, config)? {
                 return Ok(resp);
             }
             return Err(Http1Error::ConnectionClosed);
         }
 
-        if let Some(resp) = decode_response(&mut read_buf, limits)? {
+        if let Some(resp) = decode_response(&mut read_buf, config)? {
             return Ok(resp);
         }
     }
@@ -51,12 +50,12 @@ where
 pub async fn send_request<IO>(
     req: &Http1Request,
     stream: &mut IO,
-    buf_config: &Http1BufferConfig,
+    config: &Http1Config,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut write_buf = BytesMut::with_capacity(buf_config.upstream_write_base);
+    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
     super::encode::encode_request_head(
         &req.method,
         &req.uri,
@@ -77,12 +76,12 @@ where
 pub async fn send_request_head_chunked<IO>(
     head: &Http1RequestHead,
     stream: &mut IO,
-    buf_config: &Http1BufferConfig,
+    config: &Http1Config,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut write_buf = BytesMut::with_capacity(buf_config.upstream_write_base);
+    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
     super::encode::encode_request_line(&head.method, &head.uri, &mut write_buf);
 
     let mut has_te = false;
@@ -112,19 +111,19 @@ where
 pub async fn read_response_head<IO>(
     stream: &mut IO,
     read_buf: &mut BytesMut,
-    limits: &IngressLimits,
+    config: &Http1Config,
 ) -> Result<(Http1ResponseHead, Http1BodyFraming), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
-        if let Some(parts) = decode_response_head(read_buf, limits)? {
+        if let Some(parts) = decode_response_head(read_buf, config)? {
             return Ok(parts);
         }
 
         let n = stream.read_buf(read_buf).await?;
         if n == 0 {
-            if let Some(parts) = decode_response_head(read_buf, limits)? {
+            if let Some(parts) = decode_response_head(read_buf, config)? {
                 return Ok(parts);
             }
             return Err(Http1Error::ConnectionClosed);

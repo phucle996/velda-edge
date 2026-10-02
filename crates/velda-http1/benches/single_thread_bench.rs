@@ -15,10 +15,10 @@ use common::{CountingAllocator, format_bytes, format_duration, format_throughput
 use http::header::{CONTENT_TYPE, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::{Body, IngressLimits};
+use velda_core::{Body, MemoryTier};
 use velda_http1::{
-    Http1Request, Http1Response, Http1ServerConnection, decode_request, decode_response,
-    encode_request, encode_response,
+    Http1Config, Http1Request, Http1Response, Http1ServerConnection, decode_request,
+    decode_response, encode_request, encode_response,
 };
 
 #[global_allocator]
@@ -80,10 +80,10 @@ fn bench_request_decoding() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+        let config = Http1Config::for_tier(MemoryTier::Medium);
         for _ in 0..iters {
             let mut buf = BytesMut::from(raw_bytes);
-            let req = decode_request(&mut buf, &limits).unwrap().unwrap();
+            let req = decode_request(&mut buf, &config).unwrap().unwrap();
             let _ = std::hint::black_box(req);
         }
 
@@ -251,10 +251,10 @@ fn bench_upstream_codec() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
+        let config = Http1Config::for_tier(MemoryTier::Medium);
         for _ in 0..iters {
             let mut buf = BytesMut::from(&raw_resp[..]);
-            let res = decode_response(&mut buf, &limits).unwrap().unwrap();
+            let res = decode_response(&mut buf, &config).unwrap().unwrap();
             let _ = std::hint::black_box(res);
         }
 
@@ -285,10 +285,8 @@ async fn bench_pipelined_connection() {
 
     let iters = 50_000;
     let (mut client_io, server_io) = duplex(256 * 1024);
-    let mut server_conn = Http1ServerConnection::new(
-        server_io,
-        IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
-    );
+    let mut server_conn =
+        Http1ServerConnection::new(server_io, Http1Config::for_tier(MemoryTier::Medium));
 
     // Client writer task
     let client_task = tokio::spawn(async move {

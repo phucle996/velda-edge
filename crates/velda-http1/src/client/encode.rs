@@ -23,25 +23,7 @@ pub fn encode_request_line(method: &Method, uri: &Uri, dst: &mut BytesMut) {
     dst.put_slice(b" HTTP/1.1\r\n");
 }
 
-/// Encodes HTTP headers into the destination buffer with a single capacity reservation.
-#[inline]
-pub fn encode_headers(headers: &HeaderMap, dst: &mut BytesMut) {
-    if headers.is_empty() {
-        return;
-    }
-    let mut total_len = 0;
-    for (name, val) in headers {
-        total_len += name.as_str().len() + val.as_bytes().len() + 4;
-    }
-    dst.reserve(total_len);
-
-    for (name, val) in headers {
-        dst.put_slice(name.as_str().as_bytes());
-        dst.put_slice(b": ");
-        dst.put_slice(val.as_bytes());
-        dst.put_slice(b"\r\n");
-    }
-}
+pub use crate::wire::encode_headers;
 
 /// Serializes HTTP/1.1 request head metadata into the destination buffer.
 #[inline]
@@ -52,8 +34,22 @@ pub fn encode_request_head(
     body_len: Option<usize>,
     dst: &mut BytesMut,
 ) {
+    let mut needed = method.as_str().len() + uri.path().len() + 36;
+    for (name, val) in headers {
+        needed += name.as_str().len() + val.as_bytes().len() + 4;
+    }
+    if body_len.is_some() {
+        needed += 36;
+    }
+    dst.reserve(needed);
+
     encode_request_line(method, uri, dst);
-    encode_headers(headers, dst);
+    for (name, val) in headers {
+        dst.put_slice(name.as_str().as_bytes());
+        dst.put_slice(b": ");
+        dst.put_slice(val.as_bytes());
+        dst.put_slice(b"\r\n");
+    }
 
     if let Some(len) = body_len
         && !headers.contains_key(CONTENT_LENGTH)

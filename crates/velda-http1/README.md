@@ -27,9 +27,6 @@ Client TCP bytes
 velda-transport          accept loop, path classification
   │
   ▼
-velda-composer           protocol handoff (HTTP/1.1, H2, H3, gRPC)
-  │
-  ▼
 velda-edge pipeline      spawns per-connection task (pipeline/l7/http1.rs)
   │
   │   ┌────────────────────────────────────────────────────────┐
@@ -43,7 +40,7 @@ velda-edge pipeline      spawns per-connection task (pipeline/l7/http1.rs)
   │   │    → reads body (Content-Length / Chunked)             │
   │   │    → hook point for WAF body / payload inspection      │
   │   │                                                        │
-  │   │  Phase 3: Http1UpstreamConnector::forward_on_stream()  │
+  │   │  Phase 3: pipe::forward_request()                      │
   │   │    → serializes RequestHead and streams Body           │
   │   │    → reads ResponseHead and Body from backend          │
   │   │                                                        │
@@ -57,7 +54,7 @@ velda-router             route matching (separate crate, called by pipeline)
 velda-upstream           backend topology & health (separate crate, no dependency on velda-http1)
 ```
 
-**Important:** `velda-composer` and `velda-upstream` do NOT call this crate. All connection and request processing is orchestrated by `velda-edge::pipeline::l7::http1`, which creates `Http1ServerConnection` and passes upstream streams into `Http1UpstreamConnector::forward_on_stream()`.
+**Important:** All connection and request processing is orchestrated by `velda-edge::pipeline::l7::http1`, which creates `Http1ServerConnection` and passes upstream streams into `forward_request()`.
 
 ---
 
@@ -78,7 +75,7 @@ Decodes the payload based on the detected `BodyFraming`:
 - `Content-Length`: Sliced zero-copy from read buffer via `buf.split_to(len).freeze()`.
 - `Chunked`: Optimized 2-pass decoder with **memoized stack offsets** (`[(usize, usize); 16]`). Pass 1 verifies framing and records chunk boundaries; Pass 2 copies bytes directly without reparsing hex numbers or scanning CRLF twice. Uses SIMD `memchr` for CRLF scan.
 
-### 3. Zero-Copy Egress Encoding (`send_response_vectored`)
+### 3. Zero-Copy Egress Encoding (`send_response`)
 - Headers are serialized into `write_buf` (always small, ~150–300 bytes).
 - Response body (if `Body::Bytes`) is streamed directly from its `Bytes` slice to the socket.
 - **Result**: Zero memory copies of the body on egress, and `write_buf` never balloons in size.
@@ -91,7 +88,7 @@ Decodes the payload based on the detected `BodyFraming`:
 Wraps a downstream stream and drives the request-response cycle:
 
 ```rust
-let mut conn = Http1ServerConnection::new(stream, limits);
+let mut conn = Http1ServerConnection::new(stream, config);
 
 // Phased approach (enables plugin hooks):
 while let Some((head, framing)) = conn.next_request_head().await? {
@@ -99,7 +96,7 @@ while let Some((head, framing)) = conn.next_request_head().await? {
     let body = conn.read_body(framing).await?;
     // [Hook Point: on_request_body] WAF Payload Scan
 
-    let req = L7Request::from_parts(head, body);
+    let req = Http1Request::from_parts(head, body);
     let resp = process(&req).await;
 
     conn.send_response(&resp).await?;
@@ -123,28 +120,34 @@ On each request cycle, if read/write buffers have expanded beyond the configured
 
 ```
 src/
-├── lib.rs                  Crate root, public re-exports & ergonomic aliases
-├── config.rs               Http1BufferConfig scaled by hardware memory tier
+├── lib.rs                  Crate root, canonical public re-exports (flat entities)
+├── config.rs               Http1Config scaled by hardware memory tier
 ├── error.rs                Http1Error enum
+├── wire.rs                 RFC 9112 wire framing & chunked codec utilities
 │
 ├── server/                 Downstream Ingress (Gateway <-> Client)
 │   ├── mod.rs              Server subsystem exports
 │   ├── request.rs          Http1Request, Http1RequestHead, Http1BodyFraming (Ingress entity)
-│   ├── parse.rs            parse_request_head, parse_chunked_body, SIMD search (&[u8])
-│   ├── decode.rs           decode_request_head, decode_body, decode_request (&mut BytesMut)
-│   ├── encode.rs           encode_status_line, encode_response, send_response_vectored
+│   ├── decode.rs           Wire parsing (RFC 9112) and stream decoding (&mut BytesMut)
+│   ├── encode.rs           encode_status_line, encode_response, send_response_parts
 │   └── connection.rs       Http1ServerConnection (downstream loop, keep-alive RFC 9112)
 │
-└── client/                 Upstream Ingress (Gateway <-> Backend Microservice)
-    ├── mod.rs              Client subsystem exports
-    ├── response.rs         Http1Response, Http1ResponseHead (Ingress entity)
-    ├── encode.rs           encode_request_line, encode_request_head, encode_request
-    ├── parse.rs            parse_response_head, parse_chunked_body, SIMD search (&[u8])
-    ├── decode.rs           decode_response_head, decode_response (&mut BytesMut)
-    └── connector.rs        Http1UpstreamConnector (forward request, decode response)
+├── client/                 Upstream Ingress (Gateway <-> Backend Microservice)
+│   ├── mod.rs              Client subsystem exports
+│   ├── response.rs         Http1Response, Http1ResponseHead (Ingress entity)
+│   ├── encode.rs           encode_request_line, encode_request_head, encode_request
+│   ├── decode.rs           Wire parsing (RFC 9112) and stream decoding (&mut BytesMut)
+│   └── connector.rs        forward_request, read_response_head, read_next_chunk
+│
+└── pipe/                   Bidirectional stream pipes & hop-by-hop sanitization
+    ├── mod.rs              Pipe strategy resolution & header filter
+    ├── buffered.rs         Buffered request/response pipe
+    ├── client_stream.rs    Chunked upload streaming pipe
+    ├── server_stream.rs    Progressive chunked download streaming pipe
+    └── duplex.rs           Full-duplex bidirectional streaming pipe
 
 tests/
-└── http1_test.rs           16 integration tests (phased decode, streaming, limits, keep-alive)
+└── http1_test.rs           18 integration tests (phased decode, streaming, limits, keep-alive)
 
 benches/
 ├── single_thread_bench.rs  Decode/encode throughput on a single core
