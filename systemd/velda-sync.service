@@ -1,0 +1,40 @@
+[Unit]
+Description=Velda Sync Configuration Daemon
+Documentation=https://github.com/phucle996/velda-edge
+After=network-online.target velda-edge.service
+Wants=network-online.target velda-edge.service
+
+[Service]
+Type=simple
+User=velda
+Group=velda
+
+EnvironmentFile=-/etc/velda/sync.env
+ExecStart=/usr/local/bin/velda-sync
+
+Restart=always
+RestartSec=3s
+KillMode=mixed
+TimeoutStopSec=15s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+StateDirectory=velda
+RuntimeDirectory=velda
+WorkingDirectory=/var/lib/velda
+ReadWritePaths=/var/lib/velda /run/velda /etc/velda
+
+LimitNOFILE=65536
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

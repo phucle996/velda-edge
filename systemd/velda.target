@@ -1,0 +1,7 @@
+[Unit]
+Description=Velda Edge All Services Target
+Documentation=https://github.com/phucle996/velda-edge
+Wants=velda-edge.service velda-sync.service velda-control-plane.service
+
+[Install]
+WantedBy=multi-user.target
