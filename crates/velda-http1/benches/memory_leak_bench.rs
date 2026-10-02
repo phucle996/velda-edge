@@ -16,8 +16,8 @@ use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use velda_core::{Body, IngressLimits, L7Response};
-use velda_http1::{decode_request, encode_response};
+use velda_core::{Body, IngressLimits};
+use velda_http1::{Http1Response, decode_request, encode_response};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -100,7 +100,7 @@ fn bench_response_encoding_lifecycle() {
     let iters = 1_000_000;
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let res = L7Response::new(
+    let res = Http1Response::new(
         StatusCode::OK,
         http::Version::HTTP_11,
         headers,

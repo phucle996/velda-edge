@@ -37,4 +37,7 @@ pub enum Http1Error {
 
     #[error("Connection closed by peer")]
     ConnectionClosed,
+
+    #[error("Streaming policy violation: {0}")]
+    StreamingViolation(String),
 }

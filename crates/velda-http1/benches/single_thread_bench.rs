@@ -15,9 +15,11 @@ use common::{CountingAllocator, format_bytes, format_duration, format_throughput
 use http::header::{CONTENT_TYPE, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::{Body, IngressLimits, L7Request, L7Response};
-use velda_http1::composer_parse::Http1ServerConnection;
-use velda_http1::{decode_request, decode_response, encode_request, encode_response};
+use velda_core::{Body, IngressLimits};
+use velda_http1::{
+    Http1Request, Http1Response, Http1ServerConnection, decode_request, decode_response,
+    encode_request, encode_response,
+};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -161,7 +163,7 @@ fn bench_response_encoding() {
     let mut buf = BytesMut::with_capacity(128 * 1024);
 
     for (name, status, headers, body) in scenarios {
-        let res = L7Response::new(status, Version::HTTP_11, headers, body);
+        let res = Http1Response::new(status, Version::HTTP_11, headers, body);
         let body_len = res.body.len();
 
         ALLOCATOR.reset();
@@ -212,7 +214,7 @@ fn bench_upstream_codec() {
             HeaderValue::from_static("velda-edge-upstream/1.0"),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let req = L7Request::new(
+        let req = Http1Request::new(
             Method::POST,
             Uri::from_static("http://backend-svc:8080/v1/orders"),
             Version::HTTP_11,
@@ -299,7 +301,7 @@ async fn bench_pipelined_connection() {
         }
     });
 
-    let resp = L7Response::new(
+    let resp = Http1Response::new(
         StatusCode::OK,
         Version::HTTP_11,
         HeaderMap::new(),

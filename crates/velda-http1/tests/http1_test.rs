@@ -2,11 +2,13 @@ use bytes::BytesMut;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::net::TcpListener;
-use velda_core::{Body, IngressLimits, L7Request, L7Response};
-use velda_http1::composer_parse::Http1ServerConnection;
+use velda_core::{Body, IngressLimits};
 use velda_http1::error::Http1Error;
-use velda_http1::upstream_connector::Http1UpstreamConnector;
-use velda_http1::{decode_request, decode_response, encode_response};
+use velda_http1::{
+    Http1BodyFraming, Http1BufferConfig, Http1Request, Http1Response, Http1ResponseHead,
+    Http1ServerConnection, decode_body, decode_request, decode_request_head, decode_response,
+    decode_response_head, encode_response, forward_request,
+};
 
 const TEST_LIMITS: IngressLimits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
 
@@ -42,7 +44,7 @@ async fn test_http1_upstream_connector() {
             .unwrap();
     });
 
-    let req = L7Request::new(
+    let req = Http1Request::new(
         Method::GET,
         Uri::from_static("http://localhost/health"),
         Version::HTTP_11,
@@ -50,7 +52,8 @@ async fn test_http1_upstream_connector() {
         Body::Empty,
     );
 
-    let resp = Http1UpstreamConnector::forward_request(&req, backend_addr, &TEST_LIMITS)
+    let mut stream = tokio::net::TcpStream::connect(backend_addr).await.unwrap();
+    let resp = forward_request(&req, &mut stream, &TEST_LIMITS, &Http1BufferConfig::auto())
         .await
         .unwrap();
     assert_eq!(resp.status, StatusCode::OK);
@@ -221,7 +224,7 @@ async fn test_http10_keep_alive_negotiated() {
 
 #[test]
 fn test_http10_response_encoding() {
-    let resp = L7Response::new(
+    let resp = Http1Response::new(
         StatusCode::OK,
         Version::HTTP_10,
         HeaderMap::new(),
@@ -260,4 +263,184 @@ async fn test_custom_ingress_limits() {
         matches!(err, Http1Error::PayloadTooLarge(100)),
         "Must enforce custom IngressLimits on connection"
     );
+}
+
+#[tokio::test]
+async fn test_phased_server_connection_head_and_body() {
+    let (mut client, server) = duplex(1024);
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+
+    tokio::spawn(async move {
+        client
+            .write_all(
+                b"POST /api/v1/data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nHELLO",
+            )
+            .await
+            .unwrap();
+
+        let mut resp_buf = [0u8; 1024];
+        let n = client.read(&mut resp_buf).await.unwrap();
+        let resp_str = String::from_utf8_lossy(&resp_buf[..n]);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(resp_str.contains("WORLD"));
+    });
+
+    // Phase 1: next_request_head
+    let (head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    assert_eq!(head.method, Method::POST);
+    assert_eq!(head.path(), "/api/v1/data");
+    assert_eq!(framing, Http1BodyFraming::ContentLength(5));
+
+    // Phase 2: read_body
+    let body = conn.read_body(framing).await.unwrap();
+    assert_eq!(body.len(), 5);
+
+    // Egress: send response parts
+    let resp_head = Http1ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
+    let resp_body = Body::Bytes(bytes::Bytes::from_static(b"WORLD"));
+    conn.send_response_parts(&resp_head, &resp_body)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn test_phased_decode_request_head_and_body() {
+    let mut buf = BytesMut::from(
+        &b"GET /search?q=rust HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\nTEST"[..],
+    );
+
+    let (head, framing) = decode_request_head(&mut buf, &TEST_LIMITS)
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.method, Method::GET);
+    assert_eq!(head.path(), "/search");
+    assert_eq!(framing, Http1BodyFraming::ContentLength(4));
+
+    // Buffer now contains only body
+    assert_eq!(&buf[..], b"TEST");
+
+    let body = decode_body(&mut buf, framing, &TEST_LIMITS)
+        .unwrap()
+        .unwrap();
+    if let Body::Bytes(b) = body {
+        assert_eq!(&b[..], b"TEST");
+    } else {
+        panic!("Expected Body::Bytes");
+    }
+    assert!(buf.is_empty());
+}
+
+#[tokio::test]
+async fn test_progressive_chunked_server_streaming() {
+    let (mut client, server) = duplex(4096);
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+
+    tokio::spawn(async move {
+        let (head, _framing) = conn.next_request_head().await.unwrap().unwrap();
+        assert_eq!(head.method, Method::GET);
+
+        let resp_head = Http1ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
+        conn.send_response_head_chunked(&resp_head).await.unwrap();
+
+        conn.send_chunk(b"data: first token\n\n").await.unwrap();
+        conn.send_chunk(b"data: second token\n\n").await.unwrap();
+        conn.send_chunked_end().await.unwrap();
+    });
+
+    client
+        .write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut read_buf = BytesMut::with_capacity(4096);
+    let (head, framing) = loop {
+        if let Some(parts) = decode_response_head(&mut read_buf, &TEST_LIMITS).unwrap() {
+            break parts;
+        }
+        let n = client.read_buf(&mut read_buf).await.unwrap();
+        assert!(n > 0);
+    };
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(framing, Http1BodyFraming::Chunked);
+
+    // Read first chunk
+    let chunk1 = loop {
+        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+            let (wire_len, payload, is_term) = chunk;
+            assert!(!is_term);
+            let data = bytes::Bytes::copy_from_slice(payload);
+            use bytes::Buf;
+            read_buf.advance(wire_len);
+            break data;
+        }
+        let n = client.read_buf(&mut read_buf).await.unwrap();
+        assert!(n > 0);
+    };
+    assert_eq!(&chunk1[..], b"data: first token\n\n");
+
+    // Read second chunk
+    let chunk2 = loop {
+        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+            let (wire_len, payload, is_term) = chunk;
+            assert!(!is_term);
+            let data = bytes::Bytes::copy_from_slice(payload);
+            use bytes::Buf;
+            read_buf.advance(wire_len);
+            break data;
+        }
+        let n = client.read_buf(&mut read_buf).await.unwrap();
+        assert!(n > 0);
+    };
+    assert_eq!(&chunk2[..], b"data: second token\n\n");
+
+    // Read terminal chunk
+    let is_done = loop {
+        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+            let (wire_len, _, is_term) = chunk;
+            assert!(is_term);
+            use bytes::Buf;
+            read_buf.advance(wire_len);
+            break true;
+        }
+        let n = client.read_buf(&mut read_buf).await.unwrap();
+        if n == 0 {
+            break false;
+        }
+    };
+    assert!(is_done);
+}
+
+#[tokio::test]
+async fn test_progressive_chunked_client_upload() {
+    let (mut client, server) = duplex(4096);
+    let mut conn = Http1ServerConnection::new(server, TEST_LIMITS);
+
+    tokio::spawn(async move {
+        client
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        client.write_all(b"5\r\nhello\r\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        client.write_all(b"6\r\nworld!\r\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        client.write_all(b"0\r\n\r\n").await.unwrap();
+    });
+
+    let (head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    assert_eq!(head.method, Method::POST);
+    assert_eq!(framing, Http1BodyFraming::Chunked);
+
+    let chunk1 = conn.read_next_chunk().await.unwrap().unwrap();
+    assert_eq!(&chunk1[..], b"hello");
+
+    let chunk2 = conn.read_next_chunk().await.unwrap().unwrap();
+    assert_eq!(&chunk2[..], b"world!");
+
+    let chunk_term = conn.read_next_chunk().await.unwrap();
+    assert!(chunk_term.is_none());
 }
