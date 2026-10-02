@@ -13,15 +13,18 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod headers;
+pub mod pipe;
 pub mod server;
 
 // Top-level public re-exports
-pub use client::{
-    Http2Response, Http2ResponseHead, Http2UpstreamConnector, decode_l7_response, decode_response,
-    decode_streaming_response, send_h2_request, send_l7_request, start_streaming_request,
-};
+pub use client::{Http2Response, Http2ResponseHead, connect, connect_stream};
 pub use config::Http2Config;
 pub use error::Http2Error;
+pub use headers::{filter_h2_headers, sanitize_h2_headers};
+pub use pipe::{
+    Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+};
 pub use server::{
     Http2Request, Http2RequestHead, Http2Responder, Http2ServerConnection, Http2StreamReceiver,
     Http2StreamSender, decode_request,

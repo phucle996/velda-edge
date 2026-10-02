@@ -6,10 +6,17 @@
 use bytes::{Bytes, BytesMut};
 use h2::RecvStream;
 use http::Request;
-use velda_core::{Body, IngressLimits};
+use velda_core::Body;
 
 use super::request::{Http2Request, Http2RequestHead};
+use crate::config::Http2Config;
 use crate::error::Http2Error;
+
+#[cold]
+#[inline(never)]
+pub fn cold_payload_error(size: usize) -> Http2Error {
+    Http2Error::PayloadTooLarge(size)
+}
 
 /// Progressive stream receiver for an incoming HTTP/2 request or response body.
 ///
@@ -52,7 +59,7 @@ impl Http2StreamReceiver {
         self.bytes_received += len;
         if self.bytes_received > self.max_body_size {
             let _ = self.body_stream.flow_control().release_capacity(len);
-            return Err(Http2Error::PayloadTooLarge(self.bytes_received));
+            return Err(cold_payload_error(self.bytes_received));
         }
 
         // Release flow control capacity back to the sender
@@ -72,6 +79,35 @@ impl Http2StreamReceiver {
         self.body_stream.is_end_stream()
     }
 
+    /// Accumulates all remaining chunks into a [`Body`] while enforcing `max_body_size`.
+    ///
+    /// Hot-path zero-copy optimizations:
+    /// - If the stream is already at EOF (`is_end_stream`), returns [`Body::Empty`] immediately with 0 allocations.
+    /// - If the stream contains exactly one DATA chunk with `is_end_stream`, returns [`Body::Bytes`] zero-copy without allocating a [`BytesMut`] or copying memory.
+    /// - Multi-chunk payloads are progressively accumulated into [`BytesMut`].
+    pub async fn consume_all(&mut self) -> Result<Body, Http2Error> {
+        if self.is_end_stream() {
+            return Ok(Body::Empty);
+        }
+
+        let Some(first_chunk) = self.recv_chunk().await? else {
+            return Ok(Body::Empty);
+        };
+
+        if self.is_end_stream() {
+            return Ok(Body::Bytes(first_chunk));
+        }
+
+        let mut body_buf = BytesMut::with_capacity(first_chunk.len() * 2);
+        body_buf.extend_from_slice(&first_chunk);
+
+        while let Some(chunk) = self.recv_chunk().await? {
+            body_buf.extend_from_slice(&chunk);
+        }
+
+        Ok(Body::Bytes(body_buf.freeze()))
+    }
+
     /// Unwraps the underlying [`RecvStream`].
     #[inline]
     pub fn into_inner(self) -> RecvStream {
@@ -83,31 +119,22 @@ impl Http2StreamReceiver {
 ///
 /// Ensures HTTP/2 flow control permits uninterrupted streaming by notifying the peer's
 /// send window via `release_capacity`.
+#[inline]
 pub async fn decode_request_body(
     body_stream: RecvStream,
     max_body_size: usize,
 ) -> Result<Body, Http2Error> {
     let mut receiver = Http2StreamReceiver::new(body_stream, max_body_size);
-    let mut body_buf = BytesMut::new();
-
-    while let Some(chunk) = receiver.recv_chunk().await? {
-        body_buf.extend_from_slice(&chunk);
-    }
-
-    if body_buf.is_empty() {
-        Ok(Body::Empty)
-    } else {
-        Ok(Body::Bytes(body_buf.freeze()))
-    }
+    receiver.consume_all().await
 }
 
 /// Decodes an incoming H2 stream request into an [`Http2Request`].
 pub async fn decode_request(
     request: Request<RecvStream>,
-    limits: &IngressLimits,
+    config: &Http2Config,
 ) -> Result<Http2Request, Http2Error> {
     let (parts, body_stream) = request.into_parts();
-    let body = decode_request_body(body_stream, limits.max_body_size).await?;
+    let body = decode_request_body(body_stream, config.max_body_size).await?;
     let head = Http2RequestHead::new(parts.method, parts.uri, parts.headers, None);
     Ok(Http2Request::new(head, body))
 }

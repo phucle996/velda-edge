@@ -3,59 +3,277 @@
 //! Operates strictly for listeners explicitly configured with `protocol = "http2"`.
 //! Routes matched via `velda-router::Http2Router`, forwarded via `velda-http2`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
+use bytes::Bytes;
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_composer::ComposerContext;
-use velda_core::{L7Request, L7Response};
-use velda_http2::Http2UpstreamConnector;
+use tokio::sync::RwLock;
+use velda_core::{L7Response, StreamingMode};
+use velda_http2::client;
+use velda_http2::config::Http2Config;
+use velda_http2::error::Http2Error;
+use velda_http2::pipe::{
+    Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+};
+use velda_http2::server::{
+    Http2RequestHead, Http2Responder, Http2ServerConnection, Http2StreamReceiver,
+};
 use velda_router::Http2RouteRequest;
+use velda_tls::TlsServerEngine;
+use velda_transport::Connection;
 
-use crate::error::EdgeError;
+use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
 
-/// Forwards an HTTP/2 request over cleartext TCP to the upstream target endpoint.
-pub async fn forward_http2_request(
-    req: &L7Request,
-    target: SocketAddr,
-    limits: &velda_core::IngressLimits,
-) -> Result<L7Response, EdgeError> {
-    Http2UpstreamConnector::forward_request(req, target, limits)
-        .await
-        .map_err(|e| {
-            EdgeError::Internal(format!("Failed to forward HTTP/2 request to {target}: {e}"))
-        })
+/// In-memory upstream connection pool multiplexing multiple H2 streams over active connections.
+pub struct H2UpstreamPool {
+    clients: RwLock<HashMap<SocketAddr, h2::client::SendRequest<Bytes>>>,
 }
 
-/// Dispatches an HTTP/2 request through `Http2Router` and forwards to upstream backend.
-pub async fn process_http2_request(
-    req: &L7Request,
-    context: &ComposerContext,
-    runtime: &SharedRuntime,
-) -> L7Response {
-    let host = req
-        .host()
-        .and_then(|h| h.to_str().ok())
-        .or_else(|| req.uri.host());
+impl Default for H2UpstreamPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    let mut http_req = Http2RouteRequest::new(req.path());
-    if let Some(h) = host {
+impl H2UpstreamPool {
+    /// Creates a new empty [`H2UpstreamPool`].
+    pub fn new() -> Self {
+        Self {
+            clients: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Acquires an active multiplexed client for `target`, or connects and stores a new one.
+    pub async fn get_or_connect(
+        &self,
+        target: SocketAddr,
+        config: &Http2Config,
+    ) -> Result<h2::client::SendRequest<Bytes>, Http2Error> {
+        // 1. Fast path: check if existing connection is still active and ready
+        {
+            let guard = self.clients.read().await;
+            if let Some(client) = guard.get(&target)
+                && let Ok(ready_client) = client.clone().ready().await
+            {
+                return Ok(ready_client);
+            }
+        }
+
+        // 2. Slow path: connect new H2 client and store in pool
+        let mut guard = self.clients.write().await;
+        if let Some(client) = guard.get(&target)
+            && let Ok(ready_client) = client.clone().ready().await
+        {
+            return Ok(ready_client);
+        }
+
+        let new_client = client::connect(target, config).await?;
+        guard.insert(target, new_client.clone());
+        Ok(new_client)
+    }
+}
+
+static H2_UPSTREAM_POOL: OnceLock<H2UpstreamPool> = OnceLock::new();
+
+/// Returns a reference to the global HTTP/2 upstream connection multiplexing pool.
+pub fn get_h2_upstream_pool() -> &'static H2UpstreamPool {
+    H2_UPSTREAM_POOL.get_or_init(H2UpstreamPool::new)
+}
+
+/// Enriches downstream request headers with standard proxy forwarding metadata.
+fn enrich_forwarded_headers(
+    headers: &mut http::HeaderMap,
+    context: &IngressContext,
+    host: Option<&str>,
+) {
+    let client_ip_str = context.peer.ip().to_string();
+    let is_tls = context.tls_enabled || context.tls.is_some();
+    let proto = if is_tls { "https" } else { "http" };
+
+    // 1. X-Forwarded-For
+    let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
+    if let Some(existing) = headers.get(&x_forwarded_for) {
+        if let Ok(existing_str) = existing.to_str() {
+            let combined = format!("{existing_str}, {client_ip_str}");
+            if let Ok(val) = HeaderValue::from_str(&combined) {
+                headers.insert(x_forwarded_for, val);
+            }
+        }
+    } else if let Ok(val) = HeaderValue::from_str(&client_ip_str) {
+        headers.insert(x_forwarded_for, val);
+    }
+
+    // 2. X-Forwarded-Proto
+    headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(proto),
+    );
+
+    // 3. X-Forwarded-Port
+    let port_str = context.local_addr.port().to_string();
+    if let Ok(val) = HeaderValue::from_str(&port_str) {
+        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
+    }
+
+    // 4. X-Forwarded-Host
+    let x_forwarded_host = HeaderName::from_static("x-forwarded-host");
+    if !headers.contains_key(&x_forwarded_host)
+        && let Some(h) = host
+        && let Ok(val) = HeaderValue::from_str(h)
+    {
+        headers.insert(x_forwarded_host, val);
+    }
+
+    // 5. X-Real-IP
+    let x_real_ip = HeaderName::from_static("x-real-ip");
+    if !headers.contains_key(&x_real_ip)
+        && let Ok(val) = HeaderValue::from_str(&client_ip_str)
+    {
+        headers.insert(x_real_ip, val);
+    }
+}
+
+/// Asynchronous stream worker dispatching incoming HTTP/2 connections.
+///
+/// Inspects listener configuration to determine whether downstream TLS termination
+/// is active. If TLS is required, negotiates handshake, validates ALPN against "http2",
+/// and passes the encrypted stream to the HTTP/2 loop.
+pub async fn handle_http2_stream(
+    connection: Connection,
+    context: IngressContext,
+    config: Http2Config,
+    runtime: SharedRuntime,
+) {
+    let rt = runtime.load();
+
+    if context.tls_enabled {
+        let Some(tls_server) = rt.tls_server.as_ref() else {
+            tracing::error!(
+                listener = %context.listener_id,
+                peer = %context.peer,
+                "TLS required for listener, but no TLS server engine is compiled; dropping connection"
+            );
+            return;
+        };
+
+        match tls_server.accept_with_timeout(connection).await {
+            Ok(tls_stream) => {
+                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
+                tracing::debug!(
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    sni = ?handshake_info.sni,
+                    alpn = ?handshake_info.alpn,
+                    "Downstream TLS handshake succeeded"
+                );
+                let enriched_context =
+                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
+
+                if let Err(err) = enriched_context.validate_alpn("http2") {
+                    tracing::warn!(
+                        error = %err,
+                        listener = %enriched_context.listener_id,
+                        peer = %enriched_context.peer,
+                        "Dropping connection due to protocol ALPN mismatch"
+                    );
+                    return;
+                }
+
+                run_http2_loop(tls_stream, enriched_context, config, runtime).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    "Downstream TLS handshake failed"
+                );
+            }
+        }
+    } else {
+        run_http2_loop(connection, context, config, runtime).await;
+    }
+}
+
+/// Core HTTP/2 downstream request-response loop decoupled from transport layer.
+pub async fn run_http2_loop<IO>(
+    stream: IO,
+    context: IngressContext,
+    config: Http2Config,
+    runtime: SharedRuntime,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let timeout_duration = std::time::Duration::from_millis(config.idle_timeout_ms);
+    match Http2ServerConnection::handshake(stream, config.clone()).await {
+        Ok(mut conn) => loop {
+            let accept_result =
+                tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
+            match accept_result {
+                Ok(Ok(Some((head, receiver, responder)))) => {
+                    let ctx_clone = context.clone();
+                    let rt_clone = runtime.clone();
+                    let cfg_clone = config.clone();
+                    tokio::spawn(async move {
+                        serve_http2_stream(
+                            head, receiver, responder, ctx_clone, cfg_clone, rt_clone,
+                        )
+                        .await;
+                    });
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "HTTP/2 stream accept error");
+                    break;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        listener = %context.listener_id,
+                        timeout_ms = config.idle_timeout_ms,
+                        "HTTP/2 stream accept timed out"
+                    );
+                    break;
+                }
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to complete HTTP/2 server handshake");
+        }
+    }
+}
+
+/// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
+async fn serve_http2_stream(
+    head: Http2RequestHead,
+    receiver: Http2StreamReceiver,
+    responder: Http2Responder,
+    context: IngressContext,
+    config: Http2Config,
+    runtime: SharedRuntime,
+) {
+    let host_str = head.host().map(|s| s.to_string());
+
+    let mut http_req = Http2RouteRequest::new(head.path());
+    if let Some(ref h) = host_str {
         http_req = http_req.with_host(h);
     }
-    http_req = http_req.with_method(req.method.as_str());
+    http_req = http_req.with_method(head.method.as_str());
 
     let rt = runtime.load();
     let Some(route) = rt.router.route_http2(&context.listener_id, &http_req) else {
         tracing::debug!(
             listener = %context.listener_id,
-            path = %req.path(),
-            host = ?host,
-            method = %req.method,
+            path = %head.path(),
+            host = ?host_str,
+            method = %head.method,
             "No HTTP/2 route matched"
         );
-        return L7Response::from_bytes(
+        let not_found = L7Response::from_bytes(
             StatusCode::NOT_FOUND,
             b"404 Not Found: no matching route\n".to_vec(),
         )
@@ -63,10 +281,13 @@ pub async fn process_http2_request(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
+        let _ = responder.send_response(&not_found);
+        return;
     };
 
-    let target = if let Some(up) = rt.upstreams.http2.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
+    let up = rt.upstreams.http2.get(&route.upstream_name);
+    let target = if let Some(u) = up {
+        u.select_target().or_else(|| route.select_target())
     } else {
         route.select_target()
     };
@@ -78,7 +299,7 @@ pub async fn process_http2_request(
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for HTTP/2 upstream"
         );
-        return L7Response::from_bytes(
+        let no_backend = L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
             b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
         )
@@ -86,72 +307,58 @@ pub async fn process_http2_request(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
+        let _ = responder.send_response(&no_backend);
+        return;
     };
 
-    match forward_http2_request(req, target, &context.limits).await {
-        Ok(resp) => resp,
+    let up_streaming = up
+        .as_ref()
+        .map(|u| u.streaming)
+        .unwrap_or(StreamingMode::DISABLED);
+
+    let mut head = head;
+    enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
+
+    let pool = get_h2_upstream_pool();
+    let mut client = match pool.get_or_connect(target, &config).await {
+        Ok(c) => c,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 target = %target,
                 upstream = %route.upstream_name,
-                "HTTP/2 upstream forwarding failed"
+                "Failed to acquire HTTP/2 upstream connection"
             );
-            L7Response::from_bytes(
+            let err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
         }
-    }
-}
+    };
 
-/// Asynchronous stream worker dispatching incoming HTTP/2 connections.
-pub async fn handle_http2_stream<IO>(stream: IO, context: ComposerContext, runtime: SharedRuntime)
-where
-    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
-    match velda_http2::Http2ServerConnection::handshake(stream, context.limits).await {
-        Ok(mut conn) => loop {
-            let accept_result = tokio::time::timeout(timeout_duration, conn.accept_request()).await;
-            match accept_result {
-                Ok(Ok(Some((req, responder)))) => {
-                    tracing::debug!(
-                        method = %req.method,
-                        path = %req.path(),
-                        listener = %context.listener_id,
-                        "Decoded HTTP/2 request"
-                    );
-                    let ctx_clone = context.clone();
-                    let rt_clone = runtime.clone();
-                    tokio::spawn(async move {
-                        let response = process_http2_request(&req, &ctx_clone, &rt_clone).await;
-                        if let Err(e) = responder.send_response(&response) {
-                            tracing::warn!(error = %e, "Failed to send HTTP/2 response to client");
-                        }
-                    });
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "HTTP/2 stream accept error");
-                    break;
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        listener = %context.listener_id,
-                        timeout_ms = context.limits.idle_timeout_ms,
-                        "HTTP/2 stream accept timed out"
-                    );
-                    break;
-                }
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to complete HTTP/2 server handshake");
+    let strategy = Http2PipeStrategy::from_streaming(up_streaming);
+    let pipe_res = match strategy {
+        Http2PipeStrategy::Buffered => {
+            pipe_buffered(head, receiver, responder, &mut client, &config).await
         }
+        Http2PipeStrategy::ServerStream => {
+            pipe_server_stream(head, receiver, responder, &mut client, &config).await
+        }
+        Http2PipeStrategy::ClientStream => {
+            pipe_client_stream(head, receiver, responder, &mut client, &config).await
+        }
+        Http2PipeStrategy::Duplex => {
+            pipe_duplex(head, receiver, responder, &mut client, &config).await
+        }
+    };
+
+    if let Err(e) = pipe_res {
+        tracing::warn!(error = %e, target = %target, "HTTP/2 pipe failed");
     }
 }

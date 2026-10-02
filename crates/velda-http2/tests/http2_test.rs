@@ -1,12 +1,14 @@
 use bytes::Bytes;
-use http::{Method, StatusCode, Uri};
+use http::{Method, StatusCode};
 use tokio::io::duplex;
 use tokio::net::TcpListener;
-use velda_core::{Body, IngressLimits, L7Request};
-use velda_http2::client::{Http2Response, Http2UpstreamConnector};
+use velda_core::{Body, MemoryTier};
+use velda_http2::client::{self, Http2Response};
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
 use velda_http2::server::Http2ServerConnection;
+
+const TEST_CONFIG: Http2Config = Http2Config::for_tier(MemoryTier::Medium);
 
 #[tokio::test]
 async fn test_http2_server_and_client_roundtrip() {
@@ -35,8 +37,7 @@ async fn test_http2_server_and_client_roundtrip() {
         assert_eq!(&chunk[..], b"hello h2 echo");
     });
 
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let mut server_conn = Http2ServerConnection::handshake(server_io, test_limits)
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
     let (req, responder) = server_conn.accept_request().await.unwrap().unwrap();
@@ -88,8 +89,7 @@ async fn test_http2_multiplexing_concurrent_streams() {
         }
     });
 
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let mut server_conn = Http2ServerConnection::handshake(server_io, test_limits)
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
 
@@ -135,8 +135,8 @@ async fn test_http2_payload_limit_enforcement() {
     });
 
     // Limit maximum body size to 50 bytes
-    let tight_limits = IngressLimits::new(50, 64 * 1024, 64, 30_000);
-    let mut server_conn = Http2ServerConnection::handshake(server_io, tight_limits)
+    let tight_config = Http2Config::for_tier(MemoryTier::Medium).with_max_body_size(50);
+    let mut server_conn = Http2ServerConnection::handshake(server_io, tight_config)
         .await
         .unwrap();
 
@@ -168,32 +168,20 @@ async fn test_http2_upstream_connector() {
         }
     });
 
-    let req = L7Request::new(
-        Method::GET,
-        Uri::from_static("http://localhost/health"),
-        http::Version::HTTP_2,
-        http::HeaderMap::new(),
-        Body::Empty,
-    );
+    let config = TEST_CONFIG.with_max_concurrent_streams(512);
 
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let config = Http2Config::default().with_max_concurrent_streams(512);
+    let mut client = client::connect(backend_addr, &config).await.unwrap();
+    let http_req = http::Request::builder()
+        .method("GET")
+        .uri("http://localhost/health")
+        .body(())
+        .unwrap();
+    let (resp_fut, _) = client.send_request(http_req, true).unwrap();
+    let (parts, mut body) = resp_fut.await.unwrap().into_parts();
 
-    let resp = Http2UpstreamConnector::forward_request_with_config(
-        &req,
-        backend_addr,
-        &test_limits,
-        &config,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resp.status, StatusCode::OK);
-    if let Body::Bytes(ref b) = resp.body {
-        assert_eq!(&b[..], b"h2 alive");
-    } else {
-        panic!("expected body bytes");
-    }
+    assert_eq!(parts.status, StatusCode::OK);
+    let chunk = body.data().await.unwrap().unwrap();
+    assert_eq!(&chunk[..], b"h2 alive");
 }
 
 #[tokio::test]
@@ -238,8 +226,7 @@ async fn test_http2_server_streaming_sse() {
         assert_eq!(received_events[2], "data: token-3\n\n");
     });
 
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let mut server_conn = Http2ServerConnection::handshake(server_io, test_limits)
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
 
@@ -288,28 +275,28 @@ async fn test_http2_client_streaming_upload() {
             let _ = h2_conn.await;
         });
 
-        let mut req_headers = http::HeaderMap::new();
-        req_headers.insert("content-type", "application/octet-stream".parse().unwrap());
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("https://example.com/upload")
+            .header("content-type", "application/octet-stream")
+            .body(())
+            .unwrap();
 
-        let (resp_fut, mut sender) = velda_http2::client::start_streaming_request(
-            &mut client,
-            Method::POST,
-            Uri::from_static("https://example.com/upload"),
-            &req_headers,
-        )
-        .unwrap();
+        let (resp_fut, mut send_stream) = client.send_request(req, false).unwrap();
 
-        sender.send_chunk(Bytes::from("part-1;")).await.unwrap();
-        sender.send_chunk(Bytes::from("part-2;")).await.unwrap();
-        sender.send_chunk(Bytes::from("part-3;")).await.unwrap();
-        sender.finish().unwrap();
+        send_stream
+            .send_data(Bytes::from("part-1;"), false)
+            .unwrap();
+        send_stream
+            .send_data(Bytes::from("part-2;"), false)
+            .unwrap();
+        send_stream.send_data(Bytes::from("part-3;"), true).unwrap();
 
         let (parts, _) = resp_fut.await.unwrap().into_parts();
         assert_eq!(parts.status, StatusCode::CREATED);
     });
 
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let mut server_conn = Http2ServerConnection::handshake(server_io, test_limits)
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
 
@@ -345,54 +332,55 @@ async fn test_http2_client_streaming_upload() {
     server_task.abort();
 }
 
+#[test]
+fn test_http2_pipe_strategy_mapping() {
+    use velda_core::StreamingMode;
+    use velda_http2::pipe::Http2PipeStrategy;
+
+    assert_eq!(
+        Http2PipeStrategy::from_streaming(StreamingMode::DISABLED),
+        Http2PipeStrategy::Buffered
+    );
+    assert_eq!(
+        Http2PipeStrategy::from_streaming(StreamingMode::SERVER),
+        Http2PipeStrategy::ServerStream
+    );
+    assert_eq!(
+        Http2PipeStrategy::from_streaming(StreamingMode::CLIENT),
+        Http2PipeStrategy::ClientStream
+    );
+    assert_eq!(
+        Http2PipeStrategy::from_streaming(StreamingMode::DUPLEX),
+        Http2PipeStrategy::Duplex
+    );
+}
+
 #[tokio::test]
-async fn test_http2_upstream_streaming_pass_through() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let backend_addr = listener.local_addr().unwrap();
+async fn test_empty_body_response() {
+    let (client_io, server_io) = duplex(64 * 1024);
 
     tokio::spawn(async move {
-        let (sock, _) = listener.accept().await.unwrap();
-        let mut server = h2::server::handshake(sock).await.unwrap();
-        while let Some(res) = server.accept().await {
-            let (_req, mut respond) = res.unwrap();
-            let resp = http::Response::builder()
-                .status(200)
-                .header("content-type", "text/event-stream")
-                .body(())
-                .unwrap();
-            let mut send = respond.send_response(resp, false).unwrap();
-            send.send_data(Bytes::from_static(b"event: msg1\n\n"), false)
-                .unwrap();
-            send.send_data(Bytes::from_static(b"event: msg2\n\n"), true)
-                .unwrap();
-        }
-    });
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
 
-    let req = L7Request::new(
-        Method::GET,
-        Uri::from_static("http://localhost/events"),
-        http::Version::HTTP_2,
-        http::HeaderMap::new(),
-        Body::Empty,
-    );
-
-    let test_limits = IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let (head, mut receiver) =
-        Http2UpstreamConnector::forward_streaming_request(&req, backend_addr, &test_limits)
-            .await
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/empty")
+            .body(())
             .unwrap();
 
-    assert_eq!(head.status, StatusCode::OK);
-    assert_eq!(
-        head.headers.get("content-type").unwrap(),
-        "text/event-stream"
-    );
+        let (resp_fut, _) = client.send_request(req, true).unwrap();
+        let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        assert!(body.data().await.is_none());
+    });
 
-    let chunk1 = receiver.recv_chunk().await.unwrap().unwrap();
-    assert_eq!(&chunk1[..], b"event: msg1\n\n");
-
-    let chunk2 = receiver.recv_chunk().await.unwrap().unwrap();
-    assert_eq!(&chunk2[..], b"event: msg2\n\n");
-
-    assert!(receiver.recv_chunk().await.unwrap().is_none());
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
+        .await
+        .unwrap();
+    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let resp = velda_core::L7Response::from_bytes(StatusCode::OK, vec![]);
+    responder.send_response(&resp).unwrap();
 }

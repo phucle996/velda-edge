@@ -25,4 +25,7 @@ pub enum Http2Error {
 
     #[error("Connection closed unexpectedly")]
     ConnectionClosed,
+
+    #[error("Streaming policy violation: {0}")]
+    StreamingViolation(String),
 }

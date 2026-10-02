@@ -2,7 +2,7 @@
 //!
 //! Represents incoming requests initiated by downstream clients across multiplexed streams.
 
-use http::{HeaderMap, HeaderValue, Method, Uri, Version};
+use http::{HeaderMap, Method, Uri, Version};
 use velda_core::{Body, L7Request};
 
 /// Header metadata and stream identity for an incoming HTTP/2 request.
@@ -43,12 +43,16 @@ impl Http2RequestHead {
         self.uri.path()
     }
 
-    /// Returns the target host from the `:authority` pseudo-header or `Host` header.
+    /// Returns the target host from the `Host` header or URI authority component.
+    ///
+    /// In HTTP/2, the `:authority` pseudo-header is extracted by `h2` into `Uri::authority()`
+    /// and is not present in `HeaderMap`. This method checks both sources.
     #[inline]
-    pub fn host(&self) -> Option<&HeaderValue> {
+    pub fn host(&self) -> Option<&str> {
         self.headers
             .get(http::header::HOST)
-            .or_else(|| self.headers.get(":authority"))
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| self.uri.authority().map(|a| a.as_str()))
     }
 }
 
@@ -86,9 +90,9 @@ impl Http2Request {
         self.head.path()
     }
 
-    /// Returns the request host header, if present.
+    /// Returns the request host, if present.
     #[inline]
-    pub fn host(&self) -> Option<&HeaderValue> {
+    pub fn host(&self) -> Option<&str> {
         self.head.host()
     }
 

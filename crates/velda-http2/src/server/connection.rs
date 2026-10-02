@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use h2::server::{Builder, Connection};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{IngressLimits, L7Request};
+use velda_core::L7Request;
 
 use super::decode::{Http2StreamReceiver, decode_request};
 use super::encode::Http2Responder;
@@ -20,7 +20,6 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     connection: Connection<IO, Bytes>,
-    limits: IngressLimits,
     config: Http2Config,
 }
 
@@ -29,37 +28,21 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     /// Performs the HTTP/2 server handshake over the underlying I/O stream
-    /// with default configuration and mandatory ingress safety limits.
-    pub async fn handshake(stream: IO, limits: IngressLimits) -> Result<Self, Http2Error> {
-        Self::handshake_with_config(stream, limits, Http2Config::default()).await
-    }
-
-    /// Performs the HTTP/2 server handshake with explicit [`Http2Config`] settings.
-    pub async fn handshake_with_config(
-        stream: IO,
-        limits: IngressLimits,
-        config: Http2Config,
-    ) -> Result<Self, Http2Error> {
+    /// configured with [`Http2Config`].
+    pub async fn handshake(stream: IO, config: Http2Config) -> Result<Self, Http2Error> {
         let mut builder = Builder::default();
         builder
             .initial_connection_window_size(config.initial_connection_window_size)
             .initial_window_size(config.initial_stream_window_size)
             .max_concurrent_streams(config.max_concurrent_streams)
             .max_frame_size(config.max_frame_size)
-            .max_header_list_size(config.max_header_list_size);
+            .max_header_list_size(config.max_header_list_size)
+            .max_send_buffer_size(config.max_send_buffer_size)
+            .max_concurrent_reset_streams(config.max_consecutive_resets as usize)
+            .max_pending_accept_reset_streams(config.max_consecutive_resets as usize);
 
         let connection = builder.handshake(stream).await?;
-        Ok(Self {
-            connection,
-            limits,
-            config,
-        })
-    }
-
-    /// Returns a reference to the active ingress limits configured on this connection.
-    #[inline]
-    pub const fn limits(&self) -> &IngressLimits {
-        &self.limits
+        Ok(Self { connection, config })
     }
 
     /// Returns a reference to the HTTP/2 configuration of this connection.
@@ -81,7 +64,7 @@ where
 
         let (request, respond) = res?;
         let stream_id = respond.stream_id();
-        let mut req = decode_request(request, &self.limits).await?;
+        let mut req = decode_request(request, &self.config).await?;
         req.head.stream_id = Some(stream_id);
 
         Ok(Some((req, Http2Responder::new(respond))))
@@ -112,7 +95,7 @@ where
         let stream_id = respond.stream_id();
         let (parts, body_stream) = request.into_parts();
         let head = Http2RequestHead::new(parts.method, parts.uri, parts.headers, Some(stream_id));
-        let receiver = Http2StreamReceiver::new(body_stream, self.limits.max_body_size);
+        let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size);
         let responder = Http2Responder::new(respond);
 
         Ok(Some((head, receiver, responder)))

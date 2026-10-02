@@ -14,6 +14,26 @@ use velda_core::{Body, L7Response};
 use crate::client::response::Http2Response;
 use crate::error::Http2Error;
 
+#[cold]
+#[inline(never)]
+fn cold_parse_error(e: impl std::fmt::Display) -> Http2Error {
+    Http2Error::Parse(e.to_string())
+}
+
+/// Constructs an HTTP/2 response head frame builder with sanitized RFC 9113 headers.
+#[inline]
+pub fn build_h2_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> Result<Response<()>, Http2Error> {
+    let mut builder = Response::builder().status(status).version(Version::HTTP_2);
+    let clean_headers = crate::headers::filter_h2_headers(headers);
+    for (name, val) in &clean_headers {
+        builder = builder.header(name, val);
+    }
+    builder.body(()).map_err(cold_parse_error)
+}
+
 /// Responder handle for an active HTTP/2 multiplexed stream.
 ///
 /// Each stream in HTTP/2 possesses an independent responder handle, allowing
@@ -56,16 +76,7 @@ impl Http2Responder {
         status: StatusCode,
         headers: &HeaderMap,
     ) -> Result<Http2StreamSender, Http2Error> {
-        let mut builder = Response::builder().status(status).version(Version::HTTP_2);
-
-        for (name, val) in headers {
-            builder = builder.header(name, val);
-        }
-
-        let http_response = builder
-            .body(())
-            .map_err(|e| Http2Error::Parse(e.to_string()))?;
-
+        let http_response = build_h2_response(status, headers)?;
         let send_stream = self.respond.send_response(http_response, false)?;
         Ok(Http2StreamSender::new(send_stream))
     }
@@ -77,21 +88,9 @@ impl Http2Responder {
         headers: &HeaderMap,
         body: &Body,
     ) -> Result<(), Http2Error> {
-        let mut builder = Response::builder().status(status).version(Version::HTTP_2);
-
-        for (name, val) in headers {
-            builder = builder.header(name, val);
-        }
-
         let has_body = !body.is_empty();
-        let is_end_of_stream = !has_body;
-        let http_response = builder
-            .body(())
-            .map_err(|e| Http2Error::Parse(e.to_string()))?;
-
-        let mut send_stream = self
-            .respond
-            .send_response(http_response, is_end_of_stream)?;
+        let http_response = build_h2_response(status, headers)?;
+        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
         if let Body::Bytes(b) = body
             && !b.is_empty()
@@ -143,11 +142,17 @@ impl Http2StreamSender {
     }
 
     /// Attempts to send a DATA chunk immediately if flow-control window capacity permits.
+    ///
+    /// Unlike [`send_chunk`], this does not await additional window capacity.
+    /// Returns [`Http2Error::ConnectionClosed`] if insufficient capacity is available.
     pub fn try_send_chunk(&mut self, data: Bytes) -> Result<(), Http2Error> {
         if data.is_empty() {
             return Ok(());
         }
         self.send_stream.reserve_capacity(data.len());
+        if self.send_stream.capacity() < data.len() {
+            return Err(Http2Error::ConnectionClosed);
+        }
         self.send_stream.send_data(data, false)?;
         Ok(())
     }
