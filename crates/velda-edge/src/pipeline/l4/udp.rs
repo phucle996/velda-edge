@@ -1,9 +1,8 @@
-//! Layer 4 (L4) traffic dispatching for raw TCP and UDP connections.
+//! Layer 4 (L4) raw UDP datagram proxying.
 //!
 //! Supports:
-//! - **TCP stream proxying**: Zero-copy bidirectional byte pumping via `connect_and_forward`.
-//! - **UDP unidirectional proxying (1 chiều)**: Direct fire-and-forget datagram forwarding.
-//! - **UDP bidirectional proxying (2 chiều)**: Stateful flow/session tracking via [`UdpSessionTable`]
+//! - **Unidirectional proxying (1 chiều)**: Direct fire-and-forget datagram forwarding.
+//! - **Bidirectional proxying (2 chiều)**: Stateful flow/session tracking via [`UdpSessionTable`]
 //!   with ephemeral upstream sockets, automatic response routing back to client, and idle eviction.
 
 use std::collections::HashMap;
@@ -12,7 +11,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use velda_core::TransportProtocol;
-use velda_transport::{Connection, Datagram, UdpSocket};
+use velda_transport::{Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
 
@@ -76,97 +75,8 @@ pub fn get_udp_session_table() -> &'static UdpSessionTable {
     GLOBAL_UDP_SESSIONS.get_or_init(UdpSessionTable::new)
 }
 
-/// Dispatches raw L4 TCP connection to routing and direct upstream byte-level proxying.
-pub async fn dispatch_l4(conn: Connection, runtime: &SharedRuntime) {
-    let peer = conn.peer();
-    let Some(listener_id) = conn.listener_id().map(|s| s.to_string()) else {
-        tracing::warn!(peer = %peer, "Received L4 connection without listener_id; dropping");
-        return;
-    };
-
-    let rt = runtime.load();
-    let Some(route) = rt.router.route_l4(&listener_id, TransportProtocol::Tcp) else {
-        tracing::warn!(
-            listener = %listener_id,
-            peer = %peer,
-            "No L4 TCP route configured for listener; dropping connection"
-        );
-        return;
-    };
-
-    // 1. Acquire backend connection from Upstream L4 TCP (Zero-TLS, pure raw TCP)
-    let (target_addr, backend_stream) =
-        if let Some(upstream) = rt.upstreams.tcp.get(&route.upstream_name) {
-            match upstream.acquire().await {
-                Ok(lease) => {
-                    let target = lease.endpoint();
-                    if let Some(stream) = lease.into_tcp_stream() {
-                        (target, stream)
-                    } else {
-                        tracing::error!(
-                            upstream = %route.upstream_name,
-                            "L4 TCP upstream lease did not contain raw TcpStream"
-                        );
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        listener = %listener_id,
-                        route = %route.id,
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        error = %e,
-                        "Failed to acquire L4 TCP upstream connection; dropping connection"
-                    );
-                    return;
-                }
-            }
-        } else {
-            tracing::error!(
-                listener = %listener_id,
-                route = %route.id,
-                upstream = %route.upstream_name,
-                peer = %peer,
-                "No backend upstream available in TCP upstream table; dropping connection"
-            );
-            return;
-        };
-
-    tracing::debug!(
-        listener = %listener_id,
-        route = %route.id,
-        upstream = %route.upstream_name,
-        target = %target_addr,
-        peer = %peer,
-        "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
-    );
-
-    match velda_transport::forward_connection(conn, backend_stream).await {
-        Ok(stats) => {
-            tracing::debug!(
-                target = %target_addr,
-                peer = %peer,
-                client_to_server = stats.client_to_server_bytes,
-                server_to_client = stats.server_to_client_bytes,
-                "L4 TCP stream forwarding completed"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                target = %target_addr,
-                peer = %peer,
-                "L4 TCP stream forwarding terminated with error"
-            );
-        }
-    }
-}
-
-/// Dispatches raw UDP L4 datagrams with support for both:
-/// - Unidirectional forwarding (1 chiều): fire-and-forget.
-/// - Bidirectional forwarding (2 chiều): stateful flow session proxying with reply routing.
-pub async fn dispatch_udp_l4(
+/// Handles raw UDP L4 datagrams with support for both unidirectional and bidirectional flows.
+pub async fn handle_l4_udp(
     listener_id: String,
     socket: Arc<UdpSocket>,
     datagram: Datagram,

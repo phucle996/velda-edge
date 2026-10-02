@@ -40,6 +40,9 @@ impl Default for SniResolver {
     }
 }
 
+/// Canonical RFC 6125 wildcard domain prefix.
+pub const WILDCARD_PREFIX: &str = "*.";
+
 impl SniResolver {
     /// Creates a new empty `SniResolver`.
     pub fn new() -> Self {
@@ -67,9 +70,9 @@ impl SniResolver {
                 continue;
             }
 
-            if s.starts_with("*.") {
+            if s.starts_with(WILDCARD_PREFIX) {
                 // Suffix after '*.' e.g. '*.example.com' -> 'example.com'
-                let suffix = s.trim_start_matches("*.").to_string();
+                let suffix = s.trim_start_matches(WILDCARD_PREFIX).to_string();
                 self.wildcard_matches.insert(suffix, certified_key.clone());
             } else {
                 self.exact_matches.insert(s, certified_key.clone());
@@ -88,7 +91,8 @@ impl SniResolver {
             return Some(key.clone());
         }
 
-        // 2. Wildcard match (e.g. "sub.example.com" matches "*.example.com")
+        // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only, e.g. "sub.example.com" matches "*.example.com",
+        // but multi-level "a.b.example.com" intentionally does not match to prevent subdomain hijack/spoofing).
         if let Some(idx) = sni.find('.') {
             let parent_domain = &sni[idx + 1..];
             if let Some(key) = self.wildcard_matches.get(parent_domain) {

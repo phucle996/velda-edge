@@ -5,17 +5,15 @@
 //! Wrapped in [`ArcSwap`] to enable zero-overhead, lock-free $O(1)$ reads on the
 //! request serving hot path, and atomic swaps upon configuration reloads.
 
-pub(crate) mod composer;
-pub(crate) mod pipeline;
-pub(crate) mod router;
+pub mod pipeline;
+pub mod router;
 pub(crate) mod tls;
 mod transport;
-pub(crate) mod upstream;
+pub mod upstream;
 
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use velda_composer::Composer;
 use velda_router::Router;
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -26,7 +24,10 @@ use velda_tls::{TlsClientEngine, TlsServerEngine};
 use velda_transport::IngressBinding;
 
 use crate::error::EdgeError;
-use crate::runtime::pipeline::PipelineTable;
+pub use crate::runtime::pipeline::{
+    PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol,
+};
+pub use crate::runtime::router::build_router;
 pub use crate::runtime::upstream::{L4Upstream, UpstreamTable, build_upstreams};
 
 /// Read-only snapshot of declarative domain configurations loaded into RAM.
@@ -48,6 +49,16 @@ impl RuntimeConfig {
     /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s.
     pub fn active_bindings(&self) -> Result<Vec<IngressBinding>, EdgeError> {
         transport::active_bindings(&self.listeners)
+    }
+
+    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s
+    /// with explicit TCP/UDP configurations.
+    pub fn active_bindings_with_configs(
+        &self,
+        tcp_config: Option<&velda_transport::TcpListenerConfig>,
+        udp_config: Option<&velda_transport::UdpSocketConfig>,
+    ) -> Result<Vec<IngressBinding>, EdgeError> {
+        transport::active_bindings_with_configs(&self.listeners, tcp_config, udp_config)
     }
 
     /// Returns the number of configured listeners.
@@ -77,8 +88,6 @@ pub struct Runtime {
     pub revision: u64,
     /// Declarative configuration domains loaded from binary artifacts (*.bin).
     pub config: RuntimeConfig,
-    /// Pre-compiled Composer with typed listener composition entries for O(1) hot-path lookup.
-    pub composer: Composer,
     /// Pre-compiled Router with O(1) L4 and linear L7 route lookup tables.
     pub router: Router,
     /// Pre-compiled pipeline table mapping listener_id → TcpPipeline/UdpPipeline for zero-branch dispatch.
@@ -103,6 +112,17 @@ impl Runtime {
     /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s.
     pub fn active_bindings(&self) -> Result<Vec<IngressBinding>, EdgeError> {
         self.config.active_bindings()
+    }
+
+    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s
+    /// with explicit TCP/UDP configurations.
+    pub fn active_bindings_with_configs(
+        &self,
+        tcp_config: Option<&velda_transport::TcpListenerConfig>,
+        udp_config: Option<&velda_transport::UdpSocketConfig>,
+    ) -> Result<Vec<IngressBinding>, EdgeError> {
+        self.config
+            .active_bindings_with_configs(tcp_config, udp_config)
     }
 
     /// Returns the number of configured listeners.

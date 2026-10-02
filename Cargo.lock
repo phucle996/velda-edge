@@ -1907,6 +1907,7 @@ dependencies = [
  "tokio",
  "tracing",
  "velda-core",
+ "velda-tls",
 ]
 
 [[package]]
@@ -1931,10 +1932,12 @@ dependencies = [
  "quinn-proto",
  "rcgen",
  "rustls",
+ "rustls-pki-types",
  "thiserror",
  "tokio",
  "tracing",
  "velda-core",
+ "velda-tls",
 ]
 
 [[package]]

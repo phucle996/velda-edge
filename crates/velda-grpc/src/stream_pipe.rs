@@ -1,4 +1,4 @@
-//! Full-duplex gRPC stream pumping between `composer_parse` and `upstream_connector`.
+//! Bidirectional gRPC stream pumping between `composer_parse` and `upstream_connector`.
 //!
 //! Provides true streaming proxying without buffering message bodies in RAM.
 //! Seamlessly handles Unary (1 chiều), Server Streaming, Client Streaming, and Bi-directional Streaming.
@@ -13,7 +13,7 @@ use crate::status::GrpcStatus;
 use crate::upstream_connector::GrpcUpstreamConnector;
 
 /// Pipes an active downstream gRPC stream directly to an upstream backend endpoint
-/// in full-duplex streaming mode.
+/// in bidirectional streaming mode.
 pub async fn pipe_grpc_stream(
     server_stream: GrpcServerStream,
     target: SocketAddr,

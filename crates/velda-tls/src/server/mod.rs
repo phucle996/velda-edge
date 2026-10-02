@@ -8,11 +8,10 @@ mod handshake;
 pub mod quic;
 mod resolver;
 
-pub use config::{
-    MAX_SESSION_CACHE_CAPACITY, MIN_SESSION_CACHE_CAPACITY, ServerTlsConfig,
-    optimal_session_cache_capacity, probed_session_cache_capacity,
-};
+pub use config::{ServerTlsConfig, TlsServerParams};
 pub use engine::{TlsServerEngine, accept};
-pub use handshake::TlsHandshakeInfo;
+pub use handshake::{
+    TlsHandshakeInfo, is_alpn_compatible, is_protocol_alpn_compatible, normalize_alpn_bytes,
+};
 pub use quic::build_quic_server_config;
-pub use resolver::SniResolver;
+pub use resolver::{SniResolver, WILDCARD_PREFIX};

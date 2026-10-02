@@ -8,12 +8,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_edge::runtime::{
-    PipelineTable, Runtime, RuntimeConfig, build_composer, build_router, build_upstreams,
-};
+use velda_edge::runtime::{PipelineTable, Runtime, RuntimeConfig, build_router, build_upstreams};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTlsConfig,
-    ListenerTransportConfig, compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+    compile_listeners_to_binary,
 };
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, compile_routes_to_binary,
@@ -193,12 +191,16 @@ pub fn build_mock_listeners(count: usize) -> Vec<ListenerConfig> {
             application: ListenerApplicationConfig {
                 protocol: proto.into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: ListenerTlsConfig {
                 enabled: i % 2 == 1,
             },
-            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         });
     }
 
@@ -219,7 +221,7 @@ pub fn build_mock_upstreams(count: usize) -> Vec<UpstreamConfig> {
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
                 application: "http1".into(),
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             target: None,
             resolver: None,
@@ -287,7 +289,6 @@ pub fn build_mock_runtime(
     let upstreams = build_mock_upstreams(upstream_count);
     let routes = build_mock_routes(route_count, &listeners, &upstreams);
 
-    let composer = build_composer(&listeners).unwrap();
     let router = build_router(&routes, &upstreams, &listeners).unwrap();
     let pipelines = PipelineTable::build(&listeners).unwrap();
     let upstreams_table = build_upstreams(&upstreams);
@@ -303,7 +304,6 @@ pub fn build_mock_runtime(
     Runtime {
         revision,
         config,
-        composer,
         router,
         pipelines,
         upstreams: upstreams_table,

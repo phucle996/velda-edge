@@ -3,19 +3,11 @@
 //! Operates strictly for listeners explicitly configured with `protocol = "http2"`.
 //! Routes matched via `velda-router::Http2Router`, forwarded via `velda-http2`.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::OnceLock;
-
-use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::RwLock;
 use velda_core::{L7Response, StreamingMode};
-use velda_http2::client;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
 use velda_http2::pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
@@ -28,62 +20,6 @@ use velda_transport::Connection;
 
 use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
-
-/// In-memory upstream connection pool multiplexing multiple H2 streams over active connections.
-pub struct H2UpstreamPool {
-    clients: RwLock<HashMap<SocketAddr, h2::client::SendRequest<Bytes>>>,
-}
-
-impl Default for H2UpstreamPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl H2UpstreamPool {
-    /// Creates a new empty [`H2UpstreamPool`].
-    pub fn new() -> Self {
-        Self {
-            clients: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Acquires an active multiplexed client for `target`, or connects and stores a new one.
-    pub async fn get_or_connect(
-        &self,
-        target: SocketAddr,
-        config: &Http2Config,
-    ) -> Result<h2::client::SendRequest<Bytes>, Http2Error> {
-        // 1. Fast path: check if existing connection is still active and ready
-        {
-            let guard = self.clients.read().await;
-            if let Some(client) = guard.get(&target)
-                && let Ok(ready_client) = client.clone().ready().await
-            {
-                return Ok(ready_client);
-            }
-        }
-
-        // 2. Slow path: connect new H2 client and store in pool
-        let mut guard = self.clients.write().await;
-        if let Some(client) = guard.get(&target)
-            && let Ok(ready_client) = client.clone().ready().await
-        {
-            return Ok(ready_client);
-        }
-
-        let new_client = client::connect(target, config).await?;
-        guard.insert(target, new_client.clone());
-        Ok(new_client)
-    }
-}
-
-static H2_UPSTREAM_POOL: OnceLock<H2UpstreamPool> = OnceLock::new();
-
-/// Returns a reference to the global HTTP/2 upstream connection multiplexing pool.
-pub fn get_h2_upstream_pool() -> &'static H2UpstreamPool {
-    H2_UPSTREAM_POOL.get_or_init(H2UpstreamPool::new)
-}
 
 /// Enriches downstream request headers with standard proxy forwarding metadata.
 fn enrich_forwarded_headers(
@@ -319,8 +255,26 @@ async fn serve_http2_stream(
     let mut head = head;
     enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
 
-    let pool = get_h2_upstream_pool();
-    let mut client = match pool.get_or_connect(target, &config).await {
+    // HTTP/2 Multiplexing Invariant (RFC 9113):
+    // Unlike HTTP/1.1 which requires an exclusive 1-to-1 stream lease per request, HTTP/2 establishes
+    // a single persistent multiplexed connection per backend IP. Hundreds of concurrent requests share
+    // this single connection simultaneously via interleaved binary frames and unique Stream IDs.
+    // We invoke `up.execute` to ensure healthy endpoint selection, automatic failover, and client acquisition.
+    let client_res = match up {
+        Some(u) => {
+            let cfg = config.clone();
+            u.execute(|endpoint| {
+                let cfg = cfg.clone();
+                async move { velda_http2::client::connect(endpoint, &cfg).await }
+            })
+            .await
+        }
+        None => velda_http2::client::connect(target, &config)
+            .await
+            .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string())),
+    };
+
+    let mut client = match client_res {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(

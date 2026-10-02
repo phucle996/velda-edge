@@ -45,6 +45,7 @@ pub use client::connector::{
 pub use client::decode::{decode_response, decode_response_head, parse_response_head};
 pub use client::encode::{encode_request, encode_request_head, encode_request_line};
 pub use client::response::{Http1Response, Http1ResponseHead};
+pub use client::stream::{UpstreamHttp1Stream, connect_stream};
 
 // Streaming Pipe re-exports
 pub use pipe::{

@@ -4,6 +4,10 @@
 
 mod config;
 mod engine;
+pub mod quic;
+pub mod verifier;
 
 pub use config::ClientTlsConfig;
 pub use engine::{TlsClientEngine, connect};
+pub use quic::build_quic_client_config;
+pub use verifier::{InsecureCertVerifier, build_insecure_client_config};

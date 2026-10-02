@@ -74,6 +74,20 @@ pub fn build_router(
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
 
+            // Validate cross-protocol compatibility between L4 route and targeted upstream
+            if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
+                let up_app = up.protocol.application.to_ascii_lowercase();
+                let up_trans = up.protocol.transport.to_ascii_lowercase();
+                if up_app != "raw" || up_trans != protocol_str {
+                    return Err(EdgeError::InvalidConfig {
+                        detail: format!(
+                            "Cross-protocol violation: L4 {} route '{}' targets upstream '{}' with incompatible protocol '{}/{}'",
+                            protocol_str, route.id, up.id, up_app, up_trans
+                        ),
+                    });
+                }
+            }
+
             let udp_idle_timeout = if protocol == TransportProtocol::Udp {
                 if route.timeouts.downstream_idle_ms == Some(0)
                     || route.plugins.iter().any(|p| {
@@ -142,6 +156,19 @@ pub fn build_router(
                     });
                 }
             };
+
+            // Validate cross-protocol compatibility between L7 route and targeted upstream
+            if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
+                let up_app = up.protocol.application.to_ascii_lowercase();
+                if up_app != protocol_str {
+                    return Err(EdgeError::InvalidConfig {
+                        detail: format!(
+                            "Cross-protocol violation: L7 {} route '{}' targets upstream '{}' with incompatible protocol '{}'",
+                            protocol_str, route.id, up.id, up_app
+                        ),
+                    });
+                }
+            }
 
             match protocol_str {
                 "grpc" => {
@@ -287,16 +314,12 @@ pub fn build_router(
 mod tests {
     use super::*;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTlsConfig,
-        ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
     use velda_sync::post_sync::route::{RouteMatch, RouteTimeouts};
     use velda_sync::post_sync::upstream::{
         EndpointConfig, LoadBalancerConfig, UpstreamProtocolConfig, UpstreamTimeouts,
     };
-
-    const TEST_LIMITS: ListenerLimitsConfig =
-        ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
 
     #[test]
     fn test_build_router_from_routes() {
@@ -310,10 +333,14 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "raw".into(),
                     version: None,
-                    streaming: velda_sync::StreamingMode::Disabled,
+                    streaming: velda_sync::StreamingMode::DISABLED,
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: TEST_LIMITS,
+                http1: None,
+                http2: None,
+                grpc: None,
+                http3: None,
+                raw: None,
             },
             ListenerConfig {
                 id: "dns-in".into(),
@@ -324,10 +351,14 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "raw".into(),
                     version: None,
-                    streaming: velda_sync::StreamingMode::Disabled,
+                    streaming: velda_sync::StreamingMode::DISABLED,
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: TEST_LIMITS,
+                http1: None,
+                http2: None,
+                grpc: None,
+                http3: None,
+                raw: None,
             },
             ListenerConfig {
                 id: "http-in".into(),
@@ -338,10 +369,14 @@ mod tests {
                 application: ListenerApplicationConfig {
                     protocol: "http1".into(),
                     version: Some("1.1".into()),
-                    streaming: velda_sync::StreamingMode::Disabled,
+                    streaming: velda_sync::StreamingMode::DISABLED,
                 },
                 tls: ListenerTlsConfig { enabled: false },
-                limits: TEST_LIMITS,
+                http1: None,
+                http2: None,
+                grpc: None,
+                http3: None,
+                raw: None,
             },
         ];
 
@@ -391,7 +426,7 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "tcp".into(),
                     application: "raw".into(),
-                    streaming: velda_sync::StreamingMode::Disabled,
+                    streaming: velda_sync::StreamingMode::DISABLED,
                 },
                 target: None,
                 resolver: None,
@@ -416,7 +451,7 @@ mod tests {
                 protocol: UpstreamProtocolConfig {
                     transport: "udp".into(),
                     application: "raw".into(),
-                    streaming: velda_sync::StreamingMode::Disabled,
+                    streaming: velda_sync::StreamingMode::DISABLED,
                 },
                 target: None,
                 resolver: None,

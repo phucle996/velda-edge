@@ -81,8 +81,7 @@ fn bench_multi_thread_scaling() {
                 for _ in 0..ops_per_thread {
                     let rt = s.load();
                     let pipe = rt.pipelines.tcp_pipeline(&target_listener);
-                    let comp = rt.composer.get_listener(&target_listener);
-                    let _ = std::hint::black_box((pipe, comp));
+                    let _ = std::hint::black_box(pipe);
                 }
 
                 start.elapsed()

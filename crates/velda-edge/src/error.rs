@@ -21,6 +21,9 @@ pub enum EdgeError {
     #[error("Transport error: {0}")]
     Transport(#[from] velda_transport::TransportError),
 
+    #[error("Upstream error: {0}")]
+    Upstream(#[from] velda_upstream::UpstreamError),
+
     #[error("TLS error: {0}")]
     Tls(#[from] velda_tls::TlsError),
 
@@ -32,6 +35,15 @@ pub enum EdgeError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error(
+        "ALPN protocol mismatch on listener '{listener_id}': expected '{expected}', actual '{actual}'"
+    )]
+    AlpnMismatch {
+        listener_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl From<velda_sync::SyncError> for EdgeError {

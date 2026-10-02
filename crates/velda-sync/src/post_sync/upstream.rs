@@ -49,7 +49,6 @@ pub struct UpstreamsFile {
 pub struct UpstreamProtocolConfig {
     pub transport: String,   // "tcp", "udp", "quic"
     pub application: String, // "raw", "http1", "http2", "http3", "grpc"
-    #[serde(default)]
     pub streaming: velda_core::StreamingMode,
 }
 
@@ -346,7 +345,7 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
             return Err(SyncError::Validation {
                 domain: "upstreams".into(),
                 reason: format!(
-                    "Upstream '{}' has streaming mode '{}' enabled, but protocol 'raw' does not support L7 streaming; must be 'false' or 'disabled'",
+                    "Upstream '{}' has streaming mode '{}' enabled, but protocol 'raw' does not support L7 streaming; must be 'disable'",
                     upstream.id,
                     upstream.protocol.streaming.as_str()
                 ),
@@ -908,7 +907,7 @@ mod tests {
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
                 application: "http1".into(),
-                streaming: velda_core::StreamingMode::Disabled,
+                streaming: velda_core::StreamingMode::DISABLED,
             },
             target: None,
             resolver: None,
@@ -936,7 +935,7 @@ mod tests {
             "upstreams": [{
                 "id": " users ",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http1" },
+                "protocol": { "transport": "tcp", "application": "http1", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 2 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 }
@@ -1009,7 +1008,7 @@ mod tests {
             "upstreams": [{
                 "id": "users",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http1" },
+                "protocol": { "transport": "tcp", "application": "http1", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1042,7 +1041,7 @@ mod tests {
             "upstreams": [{
                 "id": "u_hc_fail",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "raw" },
+                "protocol": { "transport": "tcp", "application": "raw", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1057,7 +1056,7 @@ mod tests {
             "upstreams": [{
                 "id": "u_hc_no_path",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http1" },
+                "protocol": { "transport": "tcp", "application": "http1", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1083,7 +1082,7 @@ mod tests {
             "upstreams": [{
                 "id": "u_no_timeouts",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "raw" },
+                "protocol": { "transport": "tcp", "application": "raw", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" }
             }]
@@ -1096,7 +1095,7 @@ mod tests {
             "upstreams": [{
                 "id": "u_no_connect",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "raw" },
+                "protocol": { "transport": "tcp", "application": "raw", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "idle_ms": 30000 }
@@ -1110,13 +1109,27 @@ mod tests {
             "upstreams": [{
                 "id": "u_no_idle",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "raw" },
+                "protocol": { "transport": "tcp", "application": "raw", "streaming": [] },
                 "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500 }
             }]
         }"#;
         assert!(parse_upstreams(json_no_idle.as_bytes()).is_err());
+
+        // Missing streaming field -> deserialization failure
+        let json_no_streaming = r#"{
+            "schema_version": 1,
+            "upstreams": [{
+                "id": "u_no_streaming",
+                "mode": "endpoints",
+                "protocol": { "transport": "tcp", "application": "raw" },
+                "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
+                "load_balancer": { "algorithm": "round_robin" },
+                "timeouts": { "connect_ms": 500, "idle_ms": 30000 }
+            }]
+        }"#;
+        assert!(parse_upstreams(json_no_streaming.as_bytes()).is_err());
     }
 
     #[test]
@@ -1130,7 +1143,7 @@ mod tests {
             "upstreams": [{
                 "id": "secure_upstream",
                 "mode": "endpoints",
-                "protocol": { "transport": "tcp", "application": "http1" },
+                "protocol": { "transport": "tcp", "application": "http1", "streaming": [] },
                 "endpoints": [{ "address": "10.0.0.1:8443", "weight": 1 }],
                 "load_balancer": { "algorithm": "round_robin" },
                 "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
@@ -1173,13 +1186,13 @@ mod tests {
     fn test_upstream_streaming_validation() {
         let mut invalid_raw = mock_upstream_config("raw-stream");
         invalid_raw.protocol.application = "raw".into();
-        invalid_raw.protocol.streaming = velda_core::StreamingMode::Server;
+        invalid_raw.protocol.streaming = velda_core::StreamingMode::SERVER;
         let err = validate_upstreams(&mut [invalid_raw]).unwrap_err();
         assert!(err.to_string().contains("does not support L7 streaming"));
 
         let mut valid_h2 = mock_upstream_config("h2-stream");
         valid_h2.protocol.application = "http2".into();
-        valid_h2.protocol.streaming = velda_core::StreamingMode::Server;
+        valid_h2.protocol.streaming = velda_core::StreamingMode::SERVER;
         assert!(validate_upstreams(&mut [valid_h2]).is_ok());
     }
 }

@@ -53,8 +53,8 @@ async fn test_grpc_unary_one_way_roundtrip() {
         Body::Bytes(req_body.freeze()),
     );
 
-    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let resp = connector.invoke_unary(&req, &test_limits).await.unwrap();
+    let test_config = velda_grpc::GrpcConfig::for_tier(velda_core::MemoryTier::Medium);
+    let resp = connector.invoke_unary(&req, &test_config).await.unwrap();
 
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(resp.headers.get("grpc-status").unwrap(), "0");
@@ -102,8 +102,8 @@ async fn test_grpc_composer_trailers_only_response() {
         Body::Empty,
     );
 
-    let test_limits = velda_core::IngressLimits::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
-    let resp = connector.invoke_unary(&req, &test_limits).await.unwrap();
+    let test_config = velda_grpc::GrpcConfig::for_tier(velda_core::MemoryTier::Medium);
+    let resp = connector.invoke_unary(&req, &test_config).await.unwrap();
 
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(resp.headers.get("grpc-status").unwrap(), "5"); // NOT_FOUND = 5

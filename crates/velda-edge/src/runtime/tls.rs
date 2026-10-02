@@ -132,7 +132,7 @@ mod tests {
             protocol: UpstreamProtocolConfig {
                 transport: "tcp".into(),
                 application: "http2".into(),
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             target: None,
             resolver: None,

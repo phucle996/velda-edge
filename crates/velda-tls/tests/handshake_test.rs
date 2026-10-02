@@ -1,19 +1,11 @@
-use std::sync::Arc;
+//! Integration tests for TLS handshake, ALPN negotiation, and timeout defense.
 
-use rcgen::generate_simple_self_signed;
-use rustls::ClientConfig;
+mod common;
+
+use common::{make_client_connector, make_test_cert};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use tokio_rustls::TlsConnector;
-use velda_tls::pem::parse_ca_bundle_pem;
 use velda_tls::{ServerTlsConfig, TlsServerEngine};
-
-fn make_test_cert(sans: Vec<String>) -> (String, String) {
-    let certified_key = generate_simple_self_signed(sans).unwrap();
-    let cert_pem = certified_key.cert.pem();
-    let key_pem = certified_key.signing_key.serialize_pem();
-    (cert_pem, key_pem)
-}
 
 #[tokio::test]
 async fn test_tls_handshake_and_alpn_negotiation() {
@@ -30,18 +22,7 @@ async fn test_tls_handshake_and_alpn_negotiation() {
     };
 
     let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
-
-    // Setup client connector that trusts the self-signed cert as CA
-    let root_store = parse_ca_bundle_pem(&cert_pem).unwrap();
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec()];
-
-    let connector = TlsConnector::from(Arc::new(client_config));
+    let connector = make_client_connector(&cert_pem, Some(vec!["h2"]));
 
     // 1. Successful handshake with exact SNI
     let (client_io, server_io) = duplex(65536);
@@ -90,16 +71,7 @@ async fn test_strict_no_sni_or_unknown_sni_rejects_handshake() {
     };
 
     let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
-
-    let root_store = parse_ca_bundle_pem(&cert_pem).unwrap();
-    let client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-    let connector = TlsConnector::from(Arc::new(client_config));
+    let connector = make_client_connector(&cert_pem, Some(vec!["h2"]));
 
     // Connect with unrecognized SNI "unknown.domain.com"
     let (client_io, server_io) = duplex(65536);
@@ -121,4 +93,137 @@ async fn test_strict_no_sni_or_unknown_sni_rejects_handshake() {
     );
 
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_downstream_tls_handshake_timeout_and_completion() {
+    let (cert_pem, key_pem) = make_test_cert(vec!["timeout.test".into()]);
+
+    let server_config = ServerTlsConfig {
+        sni: vec!["timeout.test".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: cert_pem.clone(),
+        key_pem,
+        client_ca_pem: None,
+    };
+
+    let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
+
+    // 1. Client connects via duplex but never sends ClientHello (stalled / Slowloris attack)
+    {
+        let (_client_io, server_io) = duplex(1024);
+
+        let res = server_engine
+            .accept_with_explicit_timeout(server_io, std::time::Duration::from_millis(50))
+            .await;
+
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "Error should indicate timeout: {err}"
+        );
+    }
+
+    // 2. Client completes handshake promptly within timeout
+    {
+        let (client_io, server_io) = duplex(65536);
+        let s_engine = server_engine.clone();
+
+        let srv_task = tokio::spawn(async move {
+            let res = s_engine
+                .accept_with_explicit_timeout(server_io, std::time::Duration::from_millis(500))
+                .await;
+            assert!(res.is_ok(), "Handshake within timeout must succeed");
+        });
+
+        let connector = make_client_connector(&cert_pem, Some(vec!["h2"]));
+        let s_name = ServerName::try_from("timeout.test".to_string()).unwrap();
+        let client_res = connector.connect(s_name, client_io).await;
+        assert!(client_res.is_ok());
+
+        srv_task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_tls_version_enforcement_downstream_and_upstream() {
+    let (cert_pem, key_pem) = make_test_cert(vec!["version.test".into()]);
+
+    // 1. Server configured exclusively for TLS 1.3
+    let server_config_tls13 = ServerTlsConfig {
+        sni: vec!["version.test".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: cert_pem.clone(),
+        key_pem: key_pem.clone(),
+        client_ca_pem: None,
+    };
+    let server_engine_tls13 = TlsServerEngine::new(&[server_config_tls13]).unwrap();
+
+    // Client requesting TLS 1.3 -> Success
+    let client_cfg_13 = velda_tls::ClientTlsConfig {
+        sni: vec!["version.test".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        ca_pem: Some(cert_pem.clone()),
+        client_cert_pem: None,
+        client_key_pem: None,
+    };
+    let client_engine_13 = velda_tls::TlsClientEngine::new(&[client_cfg_13]).unwrap();
+
+    let (client_io, server_io) = duplex(65536);
+    let s_engine = server_engine_tls13.clone();
+    let srv_task = tokio::spawn(async move { s_engine.accept(server_io).await });
+    let client_res = client_engine_13.connect("version.test", client_io).await;
+    assert!(
+        client_res.is_ok(),
+        "TLS 1.3 client connecting to TLS 1.3 server must succeed"
+    );
+    let srv_res = srv_task.await.unwrap();
+    assert!(srv_res.is_ok(), "Server accept for TLS 1.3 must succeed");
+
+    // Client requesting ONLY TLS 1.2 -> Must FAIL against TLS 1.3 server!
+    let client_cfg_12 = velda_tls::ClientTlsConfig {
+        sni: vec!["version.test".into()],
+        versions: vec!["tls1.2".into()],
+        alpn: vec!["h2".into()],
+        ca_pem: Some(cert_pem.clone()),
+        client_cert_pem: None,
+        client_key_pem: None,
+    };
+    let client_engine_12 = velda_tls::TlsClientEngine::new(&[client_cfg_12]).unwrap();
+
+    let (client_io2, server_io2) = duplex(65536);
+    let s_engine2 = server_engine_tls13.clone();
+    let srv_task2 = tokio::spawn(async move { s_engine2.accept(server_io2).await });
+    let client_res2 = client_engine_12.connect("version.test", client_io2).await;
+    assert!(
+        client_res2.is_err(),
+        "TLS 1.2 client connecting to TLS 1.3-only server must fail"
+    );
+    let _ = srv_task2.await;
+
+    // 2. Server configured exclusively for TLS 1.2
+    let server_config_tls12 = ServerTlsConfig {
+        sni: vec!["version.test".into()],
+        versions: vec!["tls1.2".into()],
+        alpn: vec!["http/1.1".into()],
+        cert_pem: cert_pem.clone(),
+        key_pem,
+        client_ca_pem: None,
+    };
+    let server_engine_tls12 = TlsServerEngine::new(&[server_config_tls12]).unwrap();
+
+    // Client with TLS 1.3 only -> Must FAIL against TLS 1.2 server!
+    let (client_io3, server_io3) = duplex(65536);
+    let s_engine3 = server_engine_tls12.clone();
+    let srv_task3 = tokio::spawn(async move { s_engine3.accept(server_io3).await });
+    let client_res3 = client_engine_13.connect("version.test", client_io3).await;
+    assert!(
+        client_res3.is_err(),
+        "TLS 1.3 client connecting to TLS 1.2-only server must fail"
+    );
+    let _ = srv_task3.await;
 }

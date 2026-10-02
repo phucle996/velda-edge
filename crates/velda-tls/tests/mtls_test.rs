@@ -1,24 +1,16 @@
-use std::sync::Arc;
+//! Comprehensive tests for Mutual TLS (mTLS) in both Downstream and Upstream directions.
 
-use rcgen::generate_simple_self_signed;
-use rustls::ClientConfig;
+mod common;
+
+use common::{make_client_connector, make_mtls_client_connector, make_test_cert};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use tokio_rustls::TlsConnector;
-use velda_tls::pem::{parse_ca_bundle_pem, parse_certs_pem, parse_private_key_pem};
+use velda_tls::client::{ClientTlsConfig, TlsClientEngine};
 use velda_tls::{ServerTlsConfig, TlsServerEngine};
 
-fn make_test_cert(sans: Vec<String>) -> (String, String) {
-    let certified_key = generate_simple_self_signed(sans).unwrap();
-    let cert_pem = certified_key.cert.pem();
-    let key_pem = certified_key.signing_key.serialize_pem();
-    (cert_pem, key_pem)
-}
-
 #[tokio::test]
-async fn test_downstream_mtls_authentication() {
+async fn test_downstream_mtls_authentication_flows() {
     let (server_cert, server_key) = make_test_cert(vec!["mtls.example.com".into()]);
-    let (ca_cert, _) = make_test_cert(vec!["ca.internal".into()]);
     let (client_cert, client_key) = make_test_cert(vec!["client.internal".into()]);
     let (untrusted_cert, untrusted_key) = make_test_cert(vec!["attacker.net".into()]);
 
@@ -28,22 +20,14 @@ async fn test_downstream_mtls_authentication() {
         alpn: vec!["h2".into()],
         cert_pem: server_cert.clone(),
         key_pem: server_key,
-        client_ca_pem: Some(ca_cert.clone()),
+        client_ca_pem: Some(client_cert.clone()),
     };
 
     let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
-    let server_root_store = parse_ca_bundle_pem(&server_cert).unwrap();
 
     // 1. Client without certificate must be rejected by mTLS server
     {
-        let client_config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(server_root_store.clone())
-                .with_no_client_auth();
-
-        let connector = TlsConnector::from(Arc::new(client_config));
+        let connector = make_client_connector(&server_cert, Some(vec!["h2"]));
         let (client_io, server_io) = duplex(65536);
 
         let s_engine = server_engine.clone();
@@ -63,27 +47,20 @@ async fn test_downstream_mtls_authentication() {
             "Expected no cert error, got: {err_msg}"
         );
 
-        // If client's connect initially completed flight, any read must immediately fail or EOF
         if let Ok(mut c_stream) = client_res {
             let mut buf = [0u8; 1];
-            assert!(c_stream.read(&mut buf).await.unwrap_or(0) == 0);
+            assert_eq!(c_stream.read(&mut buf).await.unwrap_or(0), 0);
         }
     }
 
     // 2. Client with untrusted certificate must be rejected by mTLS server
     {
-        let bad_certs = parse_certs_pem(&untrusted_cert).unwrap();
-        let bad_key = parse_private_key_pem(&untrusted_key).unwrap();
-
-        let client_config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(server_root_store.clone())
-                .with_client_auth_cert(bad_certs, bad_key)
-                .unwrap();
-
-        let connector = TlsConnector::from(Arc::new(client_config));
+        let connector = make_mtls_client_connector(
+            &server_cert,
+            &untrusted_cert,
+            &untrusted_key,
+            Some(vec!["h2"]),
+        );
         let (client_io, server_io) = duplex(65536);
 
         let s_engine = server_engine.clone();
@@ -100,40 +77,19 @@ async fn test_downstream_mtls_authentication() {
 
         if let Ok(mut c_stream) = client_res {
             let mut buf = [0u8; 1];
-            assert!(c_stream.read(&mut buf).await.unwrap_or(0) == 0);
+            assert_eq!(c_stream.read(&mut buf).await.unwrap_or(0), 0);
         }
     }
 
     // 3. Client with valid certificate accepted by trusted CA succeeds
     {
-        let (s_cert, s_key) = make_test_cert(vec!["mtls.example.com".into()]);
-        let server_config_trusted = ServerTlsConfig {
-            sni: vec!["mtls.example.com".into()],
-            versions: vec!["tls1.3".into()],
-            alpn: vec!["h2".into()],
-            cert_pem: s_cert.clone(),
-            key_pem: s_key,
-            client_ca_pem: Some(client_cert.clone()),
-        };
-        let trusted_server_engine = TlsServerEngine::new(&[server_config_trusted]).unwrap();
-
-        let valid_certs = parse_certs_pem(&client_cert).unwrap();
-        let valid_key = parse_private_key_pem(&client_key).unwrap();
-        let s_store = parse_ca_bundle_pem(&s_cert).unwrap();
-
-        let client_config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(s_store)
-                .with_client_auth_cert(valid_certs, valid_key)
-                .unwrap();
-
-        let connector = TlsConnector::from(Arc::new(client_config));
+        let connector =
+            make_mtls_client_connector(&server_cert, &client_cert, &client_key, Some(vec!["h2"]));
         let (client_io, server_io) = duplex(65536);
 
+        let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let mut stream = trusted_server_engine.accept(server_io).await.unwrap();
+            let mut stream = s_engine.accept(server_io).await.unwrap();
             let info = TlsServerEngine::extract_handshake_info(&stream);
             assert!(info.peer_certs.is_some(), "mTLS peer certs must be present");
             assert!(!info.peer_certs.unwrap().is_empty());
@@ -153,5 +109,97 @@ async fn test_downstream_mtls_authentication() {
         assert_eq!(&reply, b"pass");
 
         server_task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_upstream_mtls_with_tls_client_engine() {
+    let (backend_cert, backend_key) = make_test_cert(vec!["backend.internal".into()]);
+    let (gateway_client_cert, gateway_client_key) =
+        make_test_cert(vec!["edge-gateway.internal".into()]);
+
+    // Backend server requiring mTLS client cert
+    let backend_server_cfg = ServerTlsConfig {
+        sni: vec!["backend.internal".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: backend_cert.clone(),
+        key_pem: backend_key,
+        client_ca_pem: Some(gateway_client_cert.clone()),
+    };
+    let backend_server_engine = TlsServerEngine::new(&[backend_server_cfg]).unwrap();
+
+    // 1. TlsClientEngine with client certificate succeeds connecting to backend
+    {
+        let client_tls_config = ClientTlsConfig {
+            sni: vec!["backend.internal".into()],
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            ca_pem: Some(backend_cert.clone()),
+            client_cert_pem: Some(gateway_client_cert.clone()),
+            client_key_pem: Some(gateway_client_key.clone()),
+        };
+
+        let client_engine = TlsClientEngine::new(&[client_tls_config]).unwrap();
+        let (edge_io, backend_io) = duplex(65536);
+
+        let b_engine = backend_server_engine.clone();
+        let backend_task = tokio::spawn(async move {
+            let mut stream = b_engine.accept(backend_io).await.unwrap();
+            let info = TlsServerEngine::extract_handshake_info(&stream);
+            assert!(
+                info.peer_certs.is_some(),
+                "Backend server must receive Gateway's client cert"
+            );
+            let mut buf = [0u8; 5];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+            stream.write_all(b"world").await.unwrap();
+        });
+
+        let mut edge_stream = client_engine
+            .connect("backend.internal", edge_io)
+            .await
+            .expect("Upstream mTLS connect should succeed");
+
+        edge_stream.write_all(b"hello").await.unwrap();
+        let mut resp = [0u8; 5];
+        edge_stream.read_exact(&mut resp).await.unwrap();
+        assert_eq!(&resp, b"world");
+
+        backend_task.await.unwrap();
+    }
+
+    // 2. TlsClientEngine without client certificate fails connecting to mTLS-requiring backend
+    {
+        let client_tls_config_no_auth = ClientTlsConfig {
+            sni: vec!["backend.internal".into()],
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            ca_pem: Some(backend_cert),
+            client_cert_pem: None,
+            client_key_pem: None,
+        };
+
+        let client_engine = TlsClientEngine::new(&[client_tls_config_no_auth]).unwrap();
+        let (edge_io, backend_io) = duplex(65536);
+
+        let b_engine = backend_server_engine.clone();
+        let backend_task = tokio::spawn(async move {
+            let res = b_engine.accept(backend_io).await;
+            assert!(
+                res.is_err(),
+                "Backend must reject gateway without client cert"
+            );
+        });
+
+        let client_res = client_engine.connect("backend.internal", edge_io).await;
+        // Either connect handshake errors or post-handshake read errors
+        if let Ok(mut stream) = client_res {
+            let mut buf = [0u8; 1];
+            assert_eq!(stream.read(&mut buf).await.unwrap_or(0), 0);
+        }
+
+        backend_task.await.unwrap();
     }
 }

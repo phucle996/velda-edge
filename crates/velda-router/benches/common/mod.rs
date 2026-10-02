@@ -159,7 +159,7 @@ pub fn generate_realistic_workload(
                     "tcp".into()
                 },
                 application: "raw".into(),
-                streaming: velda_core::StreamingMode::Disabled,
+                streaming: velda_core::StreamingMode::DISABLED,
             },
             target: None,
             resolver: None,

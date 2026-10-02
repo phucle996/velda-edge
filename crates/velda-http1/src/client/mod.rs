@@ -11,6 +11,7 @@ pub mod connector;
 pub mod decode;
 pub mod encode;
 pub mod response;
+pub mod stream;
 
 pub use connector::{
     forward_request, read_chunk_sized, read_next_chunk, read_response_head, send_request,
@@ -22,3 +23,4 @@ pub use decode::{
 };
 pub use encode::{encode_headers, encode_request, encode_request_head, encode_request_line};
 pub use response::{Http1Response, Http1ResponseHead};
+pub use stream::{UpstreamHttp1Stream, connect_stream};

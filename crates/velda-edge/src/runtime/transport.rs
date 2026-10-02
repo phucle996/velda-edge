@@ -64,12 +64,9 @@ fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, EdgeEr
 mod tests {
     use super::*;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerLimitsConfig, ListenerTlsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
     use velda_transport::PathKind;
-
-    const TEST_LIMITS: ListenerLimitsConfig =
-        ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000);
 
     #[test]
     fn test_listener_to_binding_mapping() {
@@ -83,10 +80,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: ListenerTlsConfig::default(),
-            limits: TEST_LIMITS,
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         };
         let binding = listener_to_binding(&raw_tcp).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -102,10 +103,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("1.1".into()),
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: ListenerTlsConfig::default(),
-            limits: TEST_LIMITS,
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         };
         let binding = listener_to_binding(&http1).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -121,10 +126,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("2".into()),
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: ListenerTlsConfig::default(),
-            limits: TEST_LIMITS,
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         };
         let binding = listener_to_binding(&http2).unwrap();
         assert_eq!(binding.protocol, "tcp");
@@ -140,10 +149,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http".into(),
                 version: Some("3".into()),
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: ListenerTlsConfig { enabled: true },
-            limits: TEST_LIMITS,
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         };
         let binding = listener_to_binding(&http3).unwrap();
         assert_eq!(binding.protocol, "udp");

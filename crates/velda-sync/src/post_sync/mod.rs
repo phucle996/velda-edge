@@ -19,6 +19,9 @@
 
 pub mod listener;
 pub mod plugin;
+pub mod policy;
 pub mod route;
 pub mod tls;
 pub mod upstream;
+
+pub use policy::validate_streaming_policy;

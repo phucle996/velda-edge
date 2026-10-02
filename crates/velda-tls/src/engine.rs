@@ -6,7 +6,7 @@ use tokio_rustls::server::TlsStream as ServerTlsStream;
 
 use crate::client::{ClientTlsConfig, TlsClientEngine};
 use crate::error::TlsError;
-use crate::server::{ServerTlsConfig, TlsHandshakeInfo, TlsServerEngine};
+use crate::server::{ServerTlsConfig, TlsHandshakeInfo, TlsServerEngine, TlsServerParams};
 
 /// Self-contained in-memory TLS engine ready for hot-path zero-IO execution.
 #[derive(Debug, Clone)]
@@ -16,13 +16,23 @@ pub struct TlsEngine {
 }
 
 impl TlsEngine {
-    /// Builds a new `TlsEngine` from server configurations and upstream client configurations.
+    /// Builds a new `TlsEngine` from server configurations and upstream client configurations using hardware probe.
     pub fn new(
         servers: &[ServerTlsConfig],
         upstreams: &[ClientTlsConfig],
     ) -> Result<Self, TlsError> {
+        let params = TlsServerParams::from_hardware();
+        Self::new_with_params(servers, upstreams, &params)
+    }
+
+    /// Builds a new `TlsEngine` from server configurations, upstream client configurations, and explicit server parameters.
+    pub fn new_with_params(
+        servers: &[ServerTlsConfig],
+        upstreams: &[ClientTlsConfig],
+        params: &TlsServerParams,
+    ) -> Result<Self, TlsError> {
         let server = if !servers.is_empty() {
-            Some(TlsServerEngine::new(servers)?)
+            Some(TlsServerEngine::new_with_params(servers, params)?)
         } else {
             None
         };
@@ -32,7 +42,8 @@ impl TlsEngine {
         Ok(Self { server, client })
     }
 
-    /// Performs downstream TLS termination on an incoming connection.
+    /// Performs downstream TLS termination on an incoming connection bounded by the hardware-tuned handshake timeout
+    /// (mitigating Slowloris connection exhaustion attacks).
     pub async fn accept<IO>(&self, stream: IO) -> Result<ServerTlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
@@ -40,7 +51,7 @@ impl TlsEngine {
         let server = self.server.as_ref().ok_or_else(|| {
             TlsError::HandshakeFailed("No downstream TLS servers configured".into())
         })?;
-        server.accept(stream).await
+        server.accept_with_timeout(stream).await
     }
 
     /// Performs upstream TLS connection to a target SNI backend.

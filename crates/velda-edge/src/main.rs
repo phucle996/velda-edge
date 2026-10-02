@@ -12,19 +12,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // 1. Probe host hardware topology once during cold-start (respects cgroups and VELDA_WORKER_THREADS)
+    // 1. Probe host hardware topology once during cold-start (respects container cgroups)
     let hardware = HardwareTopology::probe();
     let _ = init_hardware_topology(hardware);
 
     tracing::info!(
         available_cores = hardware.available_cores,
-        worker_threads = hardware.worker_threads,
+        cpu_tier = hardware.cpu_tier().as_str(),
+        memory_tier = hardware.memory_tier().as_str(),
         "Configured Velda Edge runtime from HardwareTopology"
     );
 
-    // 2. Build multi-threaded Tokio runtime explicitly matched to HardwareTopology
+    // 2. Build multi-threaded Tokio runtime explicitly matched to HardwareTopology available cores
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(hardware.worker_threads)
+        .worker_threads(hardware.available_cores)
         .enable_all()
         .build()?;
 

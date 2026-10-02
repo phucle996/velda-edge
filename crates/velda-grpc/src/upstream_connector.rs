@@ -9,8 +9,9 @@ use h2::client::{Connection, ResponseFuture, SendRequest, handshake};
 use http::Version;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
-use velda_core::{Body, IngressLimits, L7Request, L7Response};
+use velda_core::{Body, L7Request, L7Response};
 
+use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 
 /// Active gRPC client connector to an upstream backend endpoint.
@@ -49,12 +50,12 @@ impl GrpcUpstreamConnector {
     /// Invokes a 1 chiều (Unary) gRPC request and returns the upstream `L7Response`.
     ///
     /// Seamlessly forwards request payload, waits for response headers, reads response LPM frame,
-    /// and collects trailers (`grpc-status`). Enforces `max_body_size` from [`IngressLimits`]
+    /// and collects trailers (`grpc-status`). Enforces `max_message_size` from [`GrpcConfig`]
     /// on the upstream response body.
     pub async fn invoke_unary(
         &mut self,
         req: &L7Request,
-        limits: &IngressLimits,
+        config: &GrpcConfig,
     ) -> Result<L7Response, GrpcError> {
         let mut request_builder = http::Request::builder()
             .method(req.method.clone())
@@ -78,7 +79,7 @@ impl GrpcUpstreamConnector {
 
         let response = response_future.await.map_err(GrpcError::H2)?;
         let (parts, mut body_stream) = response.into_parts();
-        let max_body = limits.max_body_size;
+        let max_body = config.max_message_size;
         let mut resp_body = BytesMut::new();
 
         while let Some(chunk_res) = body_stream.data().await {
@@ -117,9 +118,9 @@ impl GrpcUpstreamConnector {
     pub async fn forward_unary(
         req: &L7Request,
         target: SocketAddr,
-        limits: &IngressLimits,
+        config: &GrpcConfig,
     ) -> Result<L7Response, GrpcError> {
         let mut connector = Self::connect(target).await?;
-        connector.invoke_unary(req, limits).await
+        connector.invoke_unary(req, config).await
     }
 }

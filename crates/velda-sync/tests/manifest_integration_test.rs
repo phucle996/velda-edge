@@ -74,7 +74,7 @@ async fn test_end_to_end_manifest_sync_composition() {
     let listeners_bytes = fs::read(&listeners_bin).unwrap();
     let (l_header, l_list) = listener::unpack_listeners_from_binary(&listeners_bytes).unwrap();
     assert_eq!(l_header.revision, 42);
-    assert_eq!(l_list.len(), 3);
+    assert_eq!(l_list.len(), 5);
 
     // Plugins
     let plugins_bin = storage_dir.path().join("runtime/plugins.bin");

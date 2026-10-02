@@ -1,7 +1,7 @@
-//! Downstream Ingress parsing and stream extraction for `velda-composer`.
+//! Downstream Ingress parsing and stream extraction for edge ingress pipeline.
 //!
 //! Provides the primary boundary where raw/TLS client connections from Composer are
-//! upgraded to HTTP/2, yielding parsed gRPC requests and full-duplex streams.
+//! upgraded to HTTP/2, yielding parsed gRPC requests and bidirectional streams.
 
 use bytes::{Bytes, BytesMut};
 use h2::server::{Connection, handshake};

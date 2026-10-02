@@ -25,6 +25,12 @@ pub struct ClientTlsConfig {
 }
 
 impl ClientTlsConfig {
+    /// Compiles this `ClientTlsConfig` definition into an `Arc<ClientConfig>`.
+    #[inline]
+    pub fn build(&self) -> Result<Arc<ClientConfig>, TlsError> {
+        self.build_client_config()
+    }
+
     /// Compiles a single `ClientTlsConfig` definition into an `Arc<ClientConfig>`.
     pub fn build_client_config(&self) -> Result<Arc<ClientConfig>, TlsError> {
         let mut root_store = rustls::RootCertStore::empty();
@@ -32,9 +38,11 @@ impl ClientTlsConfig {
             root_store = parse_ca_bundle_pem(ca_pem)?;
         }
 
+        let protocol_versions = crate::version::resolve_protocol_versions(&self.versions)?;
+
         let builder =
             ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
+                .with_protocol_versions(&protocol_versions)
                 .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?
                 .with_root_certificates(root_store);
 
@@ -46,14 +54,22 @@ impl ClientTlsConfig {
                     .with_client_auth_cert(certs, key)
                     .map_err(|e| TlsError::InvalidPrivateKey(e.to_string()))?
             }
-            _ => builder.with_no_client_auth(),
+            (None, None) => builder.with_no_client_auth(),
+            (Some(_), None) => {
+                return Err(TlsError::InvalidPrivateKey(
+                    "client_cert_pem was provided but client_key_pem is missing".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(TlsError::InvalidCertificate(
+                    "client_key_pem was provided but client_cert_pem is missing".into(),
+                ));
+            }
         };
 
         if !self.alpn.is_empty() {
             client_config.alpn_protocols =
                 self.alpn.iter().map(|s| s.as_bytes().to_vec()).collect();
-        } else {
-            client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         }
 
         Ok(Arc::new(client_config))

@@ -1,8 +1,9 @@
 //! Traffic pipeline modules handling stream dispatch and protocol workflows.
 
-pub mod l4_dispatch;
+pub mod context;
+pub mod l4;
 pub mod l7;
-pub mod l7_dispatch;
 
-pub use l4_dispatch::{dispatch_l4, dispatch_udp_l4};
-pub use l7_dispatch::{dispatch_tcp_l7, dispatch_udp_l7};
+pub use context::{IngressContext, TlsMetadata};
+pub use l4::{handle_l4_tcp, handle_l4_udp};
+pub use l7::{handle_tcp_l7, handle_udp_l7};

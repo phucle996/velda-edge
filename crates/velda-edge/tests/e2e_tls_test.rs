@@ -9,8 +9,8 @@ use tokio::sync::watch;
 
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTlsConfig,
-    ListenerTransportConfig, compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+    compile_listeners_to_binary,
 };
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, compile_routes_to_binary,
@@ -66,10 +66,14 @@ async fn test_end_to_end_tls_downstream_termination() {
         application: ListenerApplicationConfig {
             protocol: "http1".into(),
             version: Some("1.1".into()),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -93,7 +97,7 @@ async fn test_end_to_end_tls_downstream_termination() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "http1".into(),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         target: None,
         resolver: None,
@@ -254,10 +258,14 @@ async fn test_end_to_end_tls_h2_downstream() {
         application: ListenerApplicationConfig {
             protocol: "http2".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -280,7 +288,7 @@ async fn test_end_to_end_tls_h2_downstream() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "http2".into(),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         target: None,
         resolver: None,
@@ -373,4 +381,149 @@ async fn test_end_to_end_tls_h2_downstream() {
     shutdown_tx.send(true).unwrap();
     let run_res = edge_task.await.unwrap();
     assert!(run_res.is_ok());
+}
+
+#[tokio::test]
+async fn test_end_to_end_tls_http1_upstream_forwarding() {
+    let backend_cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let backend_cert_pem = backend_cert.cert.pem();
+    let backend_key_pem = backend_cert.signing_key.serialize_pem();
+
+    let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let server_tls_config = velda_tls::ServerTlsConfig {
+        sni: vec!["localhost".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["http/1.1".into()],
+        cert_pem: backend_cert_pem.clone(),
+        key_pem: backend_key_pem,
+        client_ca_pem: None,
+    };
+    let backend_tls_engine = velda_tls::TlsServerEngine::new_with_params(
+        &[server_tls_config],
+        &velda_tls::TlsServerParams::from_hardware(),
+    )
+    .unwrap();
+
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = backend_listener.accept().await {
+            let engine = backend_tls_engine.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls_stream) = engine.accept(sock).await {
+                    let mut buf = [0u8; 1024];
+                    let n = tls_stream.read(&mut buf).await.unwrap_or(0);
+                    if n > 0 {
+                        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nhello from tls!";
+                        let _ = tls_stream.write_all(resp).await;
+                        let _ = tls_stream.flush().await;
+                    }
+                }
+            });
+        }
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_h1_upstream_tls.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "h1-plain-in".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http1".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "h1-tls-up".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http1".into(),
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: Some(velda_sync::post_sync::upstream::UpstreamTlsConfig {
+            ca_pem: Some(backend_cert_pem),
+            client_cert_pem: None,
+            client_key_pem: None,
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["http/1.1".into()],
+            sni: vec!["localhost".into()],
+        }),
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "h1-tls-route".into(),
+        kind: "l7".into(),
+        listener: "h1-plain-in".into(),
+        match_rule: RouteMatch {
+            path_prefix: Some("/secure".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "h1-tls-up".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
+
+    let config = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+    client
+        .write_all(b"GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 1024];
+    let n = client.read(&mut buf).await.unwrap();
+    let resp = String::from_utf8(buf[..n].to_vec()).unwrap();
+
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp.contains("hello from tls!"));
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
 }

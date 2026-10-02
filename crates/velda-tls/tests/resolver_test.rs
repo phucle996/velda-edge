@@ -1,13 +1,11 @@
-use rcgen::generate_simple_self_signed;
+//! Unit and integration tests for SniResolver and RFC 6125 wildcard matching.
+
+mod common;
+
+use common::make_test_cert;
+use rustls::pki_types::PrivateKeyDer;
 use velda_tls::SniResolver;
 use velda_tls::pem::{parse_certs_pem, parse_private_key_pem};
-
-fn make_test_cert(sans: Vec<String>) -> (String, String) {
-    let certified_key = generate_simple_self_signed(sans).unwrap();
-    let cert_pem = certified_key.cert.pem();
-    let key_pem = certified_key.signing_key.serialize_pem();
-    (cert_pem, key_pem)
-}
 
 #[test]
 fn test_exact_and_wildcard_sni_resolution() {
@@ -32,16 +30,56 @@ fn test_exact_and_wildcard_sni_resolution() {
     assert_eq!(resolver.exact_len(), 1);
     assert_eq!(resolver.wildcard_len(), 1);
 
-    // Exact match
+    // Exact match & case-insensitivity
     assert!(resolver.lookup("api.example.com").is_some());
     assert!(resolver.lookup("API.EXAMPLE.COM").is_some());
+    assert!(resolver.lookup("aPi.ExAmPlE.cOm").is_some());
 
-    // Wildcard match
+    // Wildcard match (single label)
     assert!(resolver.lookup("svc1.internal.net").is_some());
     assert!(resolver.lookup("auth.internal.net").is_some());
+    assert!(resolver.lookup("AUTH.INTERNAL.NET").is_some());
+
+    // RFC 6125: Wildcard does NOT match multi-level / nested subdomains
+    assert!(
+        resolver.lookup("deep.sub.internal.net").is_none(),
+        "Wildcard *.internal.net must not match multi-level deep.sub.internal.net"
+    );
 
     // Unknown SNI (Strict rejection)
     assert!(resolver.lookup("unknown.com").is_none());
     assert!(resolver.lookup("other.example.com").is_none());
     assert!(resolver.lookup("").is_none());
+    assert!(resolver.lookup("   ").is_none());
+}
+
+#[test]
+fn test_sni_resolver_whitespace_trimming() {
+    let mut resolver = SniResolver::new();
+    let (cert, key) = make_test_cert(vec!["trimmed.org".into()]);
+    let certs = parse_certs_pem(&cert).unwrap();
+    let key = parse_private_key_pem(&key).unwrap();
+
+    resolver
+        .add_certificate(&["  trimmed.org  ".into()], certs, key)
+        .unwrap();
+
+    assert!(resolver.lookup("trimmed.org").is_some());
+    assert!(resolver.lookup("  trimmed.org  ").is_some());
+}
+
+#[test]
+fn test_sni_resolver_invalid_key_fails() {
+    let mut resolver = SniResolver::new();
+    let (cert, _) = make_test_cert(vec!["test.org".into()]);
+    let certs = parse_certs_pem(&cert).unwrap();
+
+    // Invalid/corrupted DER bytes for private key
+    let corrupted_key = PrivateKeyDer::Pkcs8(vec![0x00, 0x01, 0x02].into());
+    let err = resolver.add_certificate(&["test.org".into()], certs, corrupted_key);
+
+    assert!(
+        err.is_err(),
+        "Adding invalid private key must return an error"
+    );
 }

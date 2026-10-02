@@ -1,20 +1,17 @@
+//! Integration tests for TLS session resumption and ticket recycling.
+
+mod common;
+
 use std::sync::Arc;
 
-use rcgen::generate_simple_self_signed;
+use common::make_test_cert;
 use rustls::ClientConfig;
 use rustls::client::ClientSessionMemoryCache;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio_rustls::TlsConnector;
 use velda_tls::pem::parse_ca_bundle_pem;
-use velda_tls::{ServerTlsConfig, TlsServerEngine};
-
-fn make_test_cert(sans: Vec<String>) -> (String, String) {
-    let certified_key = generate_simple_self_signed(sans).unwrap();
-    let cert_pem = certified_key.cert.pem();
-    let key_pem = certified_key.signing_key.serialize_pem();
-    (cert_pem, key_pem)
-}
+use velda_tls::{ServerTlsConfig, TlsServerEngine, TlsServerParams};
 
 #[tokio::test]
 async fn test_tls_session_resumption_and_tickets() {
@@ -29,9 +26,15 @@ async fn test_tls_session_resumption_and_tickets() {
         client_ca_pem: None,
     };
 
-    let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
+    // Use explicit parameters to prevent fragility across heterogeneous CI/CD hardware tiers
+    let params = TlsServerParams::from_hardware()
+        .with_session_cache_capacity(4096)
+        .with_max_early_data_size(8192)
+        .with_send_tls13_tickets(4);
 
-    // Verify ServerConfig has session cache & 0-RTT enabled
+    let server_engine = TlsServerEngine::new_with_params(&[server_config], &params).unwrap();
+
+    // Verify ServerConfig has session cache & 0-RTT properly applied
     assert_eq!(server_engine.config().max_early_data_size, 8192);
     assert_eq!(server_engine.config().send_tls13_tickets, 4);
 
@@ -97,27 +100,4 @@ async fn test_tls_session_resumption_and_tickets() {
         assert_eq!(&buf, b"res2");
         srv_task.await.unwrap();
     }
-}
-
-#[test]
-fn test_quic_server_config_compilation_from_tls_engine() {
-    let (cert_pem, key_pem) = make_test_cert(vec!["quic.example.com".into()]);
-
-    let server_config = ServerTlsConfig {
-        sni: vec!["quic.example.com".into()],
-        versions: vec!["tls1.3".into()],
-        alpn: vec!["h3".into()],
-        cert_pem,
-        key_pem,
-        client_ca_pem: None,
-    };
-
-    let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
-    let quic_config = server_engine.build_quic_config().unwrap();
-
-    let endpoint_config = Arc::new(quinn_proto::EndpointConfig::default());
-    let endpoint =
-        quinn_proto::Endpoint::new(endpoint_config, Some(Arc::new(quic_config)), false, None);
-    // Endpoint initialized successfully with QUIC crypto & 0-RTT config from TLS engine
-    let _ = endpoint;
 }

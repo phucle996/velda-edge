@@ -8,8 +8,8 @@ use tokio::sync::watch;
 
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTlsConfig,
-    ListenerTransportConfig, compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
+    compile_listeners_to_binary,
 };
 use velda_sync::post_sync::tls::{TlsConfig, compile_tls_to_binary};
 
@@ -39,10 +39,14 @@ async fn test_end_to_end_http3_udp_handoff_and_processing() {
         application: ListenerApplicationConfig {
             protocol: "http3".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -119,10 +123,14 @@ async fn test_reload_preserves_active_http3_engine_instance() {
         application: ListenerApplicationConfig {
             protocol: "http3".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: ListenerTlsConfig { enabled: true },
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0x11u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();

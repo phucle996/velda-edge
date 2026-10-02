@@ -119,7 +119,7 @@ mod tests {
     use tempfile::tempdir;
     use velda_sync::ipc::send_notification;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
         compile_listeners_to_binary,
     };
 
@@ -140,10 +140,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         }];
         let bin = compile_listeners_to_binary(&listeners, 77, [0u8; 32]).unwrap();
         fs::write(runtime_dir.join("listeners.bin"), bin).unwrap();

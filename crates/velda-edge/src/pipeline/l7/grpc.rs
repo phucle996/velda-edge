@@ -1,26 +1,93 @@
 //! Layer 7 gRPC pipeline: downstream stream worker, route evaluation, and streaming forwarding.
 //!
 //! Powered entirely by `velda-grpc`. Operates strictly for listeners explicitly configured
-//! with `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and full duplex streaming.
+//! with `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and bidirectional streaming.
 
 use std::net::SocketAddr;
+
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_composer::ComposerContext;
 use velda_core::{L7Request, L7Response};
+use velda_grpc::GrpcConfig;
 use velda_grpc::composer_parse::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::upstream_connector::GrpcUpstreamConnector;
 use velda_grpc::{GrpcStatus, pipe_grpc_stream};
 use velda_router::GrpcRouteRequest;
+use velda_tls::TlsServerEngine;
+use velda_transport::Connection;
 
 use crate::error::EdgeError;
+use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
 
-/// Dispatches an accepted downstream gRPC stream.
+/// Asynchronous stream worker dispatching incoming gRPC connections.
 ///
-/// If routing succeeds, pipes the stream in full-duplex streaming mode to the selected upstream backend.
-/// If routing fails, responds immediately with standard Trailers-Only gRPC status.
-pub async fn handle_grpc_stream<IO>(stream: IO, context: ComposerContext, runtime: SharedRuntime)
-where
+/// Inspects the pre-compiled listener metadata to determine whether downstream
+/// TLS termination is active. If TLS is required, negotiates the handshake, validates
+/// ALPN against the declared protocol, and passes the encrypted stream to the gRPC loop.
+pub async fn handle_grpc_stream(
+    connection: Connection,
+    context: IngressContext,
+    config: GrpcConfig,
+    runtime: SharedRuntime,
+) {
+    let rt = runtime.load();
+
+    if context.tls_enabled {
+        let Some(tls_server) = rt.tls_server.as_ref() else {
+            tracing::error!(
+                listener = %context.listener_id,
+                peer = %context.peer,
+                "TLS required for listener, but no TLS server engine is compiled; dropping connection"
+            );
+            return;
+        };
+
+        match tls_server.accept_with_timeout(connection).await {
+            Ok(tls_stream) => {
+                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
+                tracing::debug!(
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    sni = ?handshake_info.sni,
+                    alpn = ?handshake_info.alpn,
+                    "Downstream TLS handshake succeeded"
+                );
+                let enriched_context =
+                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
+
+                if let Err(err) = enriched_context.validate_alpn("grpc") {
+                    tracing::warn!(
+                        error = %err,
+                        listener = %enriched_context.listener_id,
+                        peer = %enriched_context.peer,
+                        "Dropping connection due to protocol ALPN mismatch"
+                    );
+                    return;
+                }
+
+                run_grpc_loop(tls_stream, enriched_context, config, runtime).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    "Downstream TLS handshake failed"
+                );
+            }
+        }
+    } else {
+        run_grpc_loop(connection, context, config, runtime).await;
+    }
+}
+
+/// Core gRPC downstream stream worker loop decoupled from transport layer.
+pub async fn run_grpc_loop<IO>(
+    stream: IO,
+    context: IngressContext,
+    config: GrpcConfig,
+    runtime: SharedRuntime,
+) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut conn = match GrpcServerConnection::handshake(stream).await {
@@ -35,16 +102,17 @@ where
         }
     };
 
-    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
+    let timeout_duration = std::time::Duration::from_millis(config.idle_timeout_ms);
 
     while let Ok(accept_result) = tokio::time::timeout(timeout_duration, conn.accept()).await {
         match accept_result {
             Ok(Some(server_stream)) => {
                 let ctx = context.clone();
                 let rt = runtime.clone();
+                let cfg = config.clone();
 
                 tokio::spawn(async move {
-                    dispatch_grpc_request_stream(server_stream, &ctx, &rt).await;
+                    dispatch_grpc_request_stream(server_stream, &ctx, &cfg, &rt).await;
                 });
             }
             Ok(None) => break,
@@ -59,7 +127,8 @@ where
 /// Dispatches a single downstream gRPC request stream through the router to upstream backend.
 async fn dispatch_grpc_request_stream(
     server_stream: GrpcServerStream,
-    context: &ComposerContext,
+    context: &IngressContext,
+    _config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
     let path = server_stream.parts.uri.path();
@@ -114,7 +183,7 @@ async fn dispatch_grpc_request_stream(
         target = %target,
         service = %grpc_req.service,
         method = ?grpc_req.method,
-        "Piping gRPC full-duplex stream to upstream backend"
+        "Piping gRPC bidirectional stream to upstream backend"
     );
 
     if let Err(e) = pipe_grpc_stream(server_stream, target).await {
@@ -130,7 +199,8 @@ async fn dispatch_grpc_request_stream(
 /// Helper for UDP L7 (HTTP/3) or single request dispatch returning an `L7Response`.
 pub async fn process_grpc_request(
     req: &L7Request,
-    context: &ComposerContext,
+    context: &IngressContext,
+    config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) -> L7Response {
     let authority = req
@@ -159,7 +229,7 @@ pub async fn process_grpc_request(
         return GrpcStatus::Unavailable.to_l7_response(Some("no healthy upstream endpoints"));
     };
 
-    match forward_grpc_unary_request(req, target, &context.limits).await {
+    match forward_grpc_unary_request(req, target, config).await {
         Ok(resp) => resp,
         Err(e) => GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}"))),
     }
@@ -169,9 +239,9 @@ pub async fn process_grpc_request(
 pub async fn forward_grpc_unary_request(
     req: &L7Request,
     target: SocketAddr,
-    limits: &velda_core::IngressLimits,
+    config: &GrpcConfig,
 ) -> Result<L7Response, EdgeError> {
-    GrpcUpstreamConnector::forward_unary(req, target, limits)
+    GrpcUpstreamConnector::forward_unary(req, target, config)
         .await
         .map_err(|e| EdgeError::Internal(format!("Failed to forward gRPC unary request: {e}")))
 }

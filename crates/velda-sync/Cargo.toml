@@ -33,17 +33,17 @@ rcgen = "0.14.10"
 tempfile = "3"
 
 [[bench]]
-name = "stage_providers"
+name = "single_thread_bench"
 harness = false
 
 [[bench]]
-name = "stage1_presync"
+name = "multi_thread_bench"
 harness = false
 
 [[bench]]
-name = "stage2_sync"
+name = "adversarial_bench"
 harness = false
 
 [[bench]]
-name = "stage3_postsync"
+name = "memory_leak_bench"
 harness = false

@@ -15,17 +15,18 @@ use crate::config::{
     EdgeConfig, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
 };
 use crate::error::EdgeError;
-use crate::pipeline::{dispatch_l4, dispatch_tcp_l7, dispatch_udp_l4, dispatch_udp_l7};
-use crate::runtime::composer::build_composer;
+use crate::pipeline::{handle_l4_tcp, handle_l4_udp, handle_tcp_l7, handle_udp_l7};
 use crate::runtime::router::build_router;
 use crate::runtime::tls::{compile_tls_client, compile_tls_server};
 use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
+use crate::runtime_profile::{RuntimeProfile, resolve_runtime_profile};
 use crate::uds::run_ipc_server;
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
 pub struct EdgeSupervisor {
     config: EdgeConfig,
     hardware: HardwareTopology,
+    runtime_profile: RuntimeProfile,
     shared_runtime: SharedRuntime,
     engine: TrafficEngine,
 }
@@ -39,15 +40,25 @@ impl EdgeSupervisor {
 
         let runtime_dir = config.runtime_dir();
 
-        // Load initial LKG state if available on disk
-        let initial_runtime = if runtime_dir.exists() {
+        // Resolve runtime profile: file > probe fallback > write-back
+        let runtime_profile = resolve_runtime_profile(&runtime_dir, &hardware);
+
+        // Load initial LKG state if available on disk (requires binary artifacts)
+        let has_lkg = runtime_dir.join("listeners.bin").exists()
+            || runtime_dir.join("routes.bin").exists()
+            || runtime_dir.join("upstreams.bin").exists();
+
+        let initial_runtime = if has_lkg {
             let listeners = load_listeners(&runtime_dir)?;
             let routes = load_routes(&runtime_dir)?;
             let upstreams = load_upstreams(&runtime_dir)?;
+            velda_sync::post_sync::validate_streaming_policy(&listeners, &routes, &upstreams)
+                .map_err(|e| EdgeError::InvalidConfig {
+                    detail: e.to_string(),
+                })?;
             let tls = load_tls(&runtime_dir)?;
-            let tls_server = compile_tls_server(&tls)?;
+            let tls_server = compile_tls_server(&tls, &runtime_profile.to_tls_server_params())?;
             let tls_client = compile_tls_client(&upstreams)?;
-            let composer = build_composer(&listeners)?;
             let router = build_router(&routes, &upstreams, &listeners)?;
             let upstreams_table = crate::runtime::build_upstreams(&upstreams);
 
@@ -77,7 +88,6 @@ impl EdgeSupervisor {
             Runtime {
                 revision: 1,
                 config: runtime_config,
-                composer,
                 router,
                 pipelines,
                 upstreams: upstreams_table,
@@ -97,9 +107,13 @@ impl EdgeSupervisor {
 
         let shared_runtime = new_shared_runtime(initial_runtime);
 
-        // Populate TrafficEngine with declared ingress bindings
+        // Populate TrafficEngine with declared ingress bindings tuned to runtime profile
         let mut engine = TrafficEngine::new();
-        let bindings = shared_runtime.load().active_bindings()?;
+        let tcp_cfg = runtime_profile.to_tcp_listener_config();
+        let udp_cfg = runtime_profile.to_udp_socket_config();
+        let bindings = shared_runtime
+            .load()
+            .active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
         for binding in bindings {
             engine.add_binding(binding)?;
         }
@@ -108,13 +122,17 @@ impl EdgeSupervisor {
             listeners = initial_listeners,
             routes = initial_routes,
             storage = %config.storage_dir.display(),
-            workers = hardware.worker_threads,
+            cores = hardware.available_cores,
+            workers = runtime_profile.transport.io_workers,
+            cpu_tier = hardware.cpu_tier().as_str(),
+            memory_tier = hardware.memory_tier().as_str(),
             "Velda Edge supervisor bootstrapped successfully"
         );
 
         Ok(Self {
             config,
             hardware,
+            runtime_profile,
             shared_runtime,
             engine,
         })
@@ -124,6 +142,12 @@ impl EdgeSupervisor {
     #[inline]
     pub fn hardware(&self) -> HardwareTopology {
         self.hardware
+    }
+
+    /// Returns the active runtime tuning profile.
+    #[inline]
+    pub fn runtime_profile(&self) -> &RuntimeProfile {
+        &self.runtime_profile
     }
 
     /// Returns a reference to the active shared runtime container.
@@ -155,12 +179,12 @@ impl EdgeSupervisor {
             }
         });
 
-        // 2. Run TrafficEngine accept and dispatch loops
+        // 2. Run TrafficEngine accept and pipeline execution loops
         let runtime_l4 = self.shared_runtime.clone();
         let l4_handler = move |conn: Connection| {
             let rt = runtime_l4.clone();
             async move {
-                dispatch_l4(conn, &rt).await;
+                handle_l4_tcp(conn, &rt).await;
             }
         };
 
@@ -168,7 +192,7 @@ impl EdgeSupervisor {
         let l7_handler = move |handoff: TcpL7Handoff| {
             let rt = runtime_l7.clone();
             async move {
-                dispatch_tcp_l7(handoff, &rt).await;
+                handle_tcp_l7(handoff, &rt).await;
             }
         };
 
@@ -176,7 +200,7 @@ impl EdgeSupervisor {
         let udp_l4_handler = move |id, socket, dgram| {
             let rt = runtime_udp_l4.clone();
             async move {
-                dispatch_udp_l4(id, socket, dgram, &rt).await;
+                handle_l4_udp(id, socket, dgram, &rt).await;
             }
         };
 
@@ -184,7 +208,7 @@ impl EdgeSupervisor {
         let udp_l7_handler = move |handoff: UdpL7Handoff| {
             let rt = runtime_udp_l7.clone();
             async move {
-                dispatch_udp_l7(handoff, &rt).await;
+                handle_udp_l7(handoff, &rt).await;
             }
         };
 
@@ -220,30 +244,4 @@ pub async fn start(config: EdgeConfig) -> Result<(), EdgeError> {
     });
 
     supervisor.run(shutdown_rx).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn test_supervisor_bootstrap_and_graceful_shutdown() {
-        let tmp = tempdir().unwrap();
-        let config = EdgeConfig::new(tmp.path().join("storage"), tmp.path().join("test.sock"));
-
-        let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
-        assert_eq!(supervisor.shared_runtime().load().revision, 0);
-
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let handle = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        shutdown_tx.send(true).unwrap();
-
-        let res = handle.await.unwrap();
-        assert!(res.is_ok());
-    }
 }

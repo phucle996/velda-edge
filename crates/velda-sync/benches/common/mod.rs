@@ -13,25 +13,49 @@ use velda_sync::post_sync::upstream::{UpstreamConfig, UpstreamsFile};
 use velda_sync::{ManifestConfig, ManifestFileEntry, ManifestFiles};
 
 // ============================================================================
-// 1. Precise Heap Allocation Counter
+// 1. Precise Heap Allocation Counter & AllocSnapshot
 // ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocSnapshot {
+    pub alloc_count: u64,
+    pub dealloc_count: u64,
+    pub bytes_allocated: u64,
+    pub bytes_deallocated: u64,
+}
+
+impl AllocSnapshot {
+    pub fn net_bytes(&self) -> i64 {
+        self.bytes_allocated as i64 - self.bytes_deallocated as i64
+    }
+
+    pub fn net_allocs(&self) -> i64 {
+        self.alloc_count as i64 - self.dealloc_count as i64
+    }
+}
 
 pub struct CountingAllocator {
     alloc_count: AtomicU64,
+    dealloc_count: AtomicU64,
     bytes_allocated: AtomicU64,
+    bytes_deallocated: AtomicU64,
 }
 
 impl CountingAllocator {
     pub const fn new() -> Self {
         Self {
             alloc_count: AtomicU64::new(0),
+            dealloc_count: AtomicU64::new(0),
             bytes_allocated: AtomicU64::new(0),
+            bytes_deallocated: AtomicU64::new(0),
         }
     }
 
     pub fn reset(&self) {
         self.alloc_count.store(0, Ordering::SeqCst);
+        self.dealloc_count.store(0, Ordering::SeqCst);
         self.bytes_allocated.store(0, Ordering::SeqCst);
+        self.bytes_deallocated.store(0, Ordering::SeqCst);
     }
 
     pub fn snapshot(&self) -> (u64, u64) {
@@ -39,6 +63,15 @@ impl CountingAllocator {
             self.alloc_count.load(Ordering::SeqCst),
             self.bytes_allocated.load(Ordering::SeqCst),
         )
+    }
+
+    pub fn detailed_snapshot(&self) -> AllocSnapshot {
+        AllocSnapshot {
+            alloc_count: self.alloc_count.load(Ordering::SeqCst),
+            dealloc_count: self.dealloc_count.load(Ordering::SeqCst),
+            bytes_allocated: self.bytes_allocated.load(Ordering::SeqCst),
+            bytes_deallocated: self.bytes_deallocated.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -52,7 +85,44 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.dealloc_count.fetch_add(1, Ordering::Relaxed);
+        self.bytes_deallocated
+            .fetch_add(layout.size() as u64, Ordering::Relaxed);
         unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+// ============================================================================
+// Fast Deterministic PRNG for Benchmarks
+// ============================================================================
+
+pub struct FastRng {
+    state: u64,
+}
+
+impl FastRng {
+    pub const fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { 0xdeadbeefcafebabe } else { seed },
+        }
+    }
+
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    #[inline]
+    pub fn next_usize(&mut self, max: usize) -> usize {
+        if max == 0 {
+            return 0;
+        }
+        (self.next_u64() as usize) % max
     }
 }
 
@@ -193,6 +263,9 @@ pub fn generate_upstreams_workload(num_upstreams: usize) -> (Vec<UpstreamConfig>
             u.id = format!("{}_{i:05}", u.id);
             if let Some(ref mut target) = u.target {
                 target.host = format!("inst-{}.{}", i, target.host);
+            }
+            if let Some(ref mut tls) = u.tls.as_mut().filter(|t| t.sni.is_empty()) {
+                tls.sni = vec![format!("backend-{i}.internal")];
             }
             for (idx, ep) in u.endpoints.iter_mut().enumerate() {
                 ep.address = format!(

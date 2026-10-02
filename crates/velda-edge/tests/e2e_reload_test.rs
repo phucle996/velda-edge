@@ -8,8 +8,7 @@ use tokio::sync::watch;
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::ipc::{SyncNotification, send_notification};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
-    compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig, compile_listeners_to_binary,
 };
 
 #[tokio::test]
@@ -31,10 +30,14 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
         application: ListenerApplicationConfig {
             protocol: "http1".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: Default::default(),
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
 
     let initial_bin = compile_listeners_to_binary(&initial_listeners, 1, [0x11u8; 32]).unwrap();
@@ -76,10 +79,14 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             application: ListenerApplicationConfig {
                 protocol: "http1".into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
@@ -90,10 +97,14 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
             application: ListenerApplicationConfig {
                 protocol: "raw".into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         },
     ];
     let updated_bin = compile_listeners_to_binary(&updated_listeners, 2, [0x22u8; 32]).unwrap();

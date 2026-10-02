@@ -1,134 +1,267 @@
-//! Layer 7 HTTP/1.1 pipeline: downstream stream worker, route evaluation, and upstream forwarding.
+//! Layer 7 HTTP/1.1 pipeline: downstream stream worker, route evaluation, and upstream connection handoff.
 //!
 //! Operates strictly for listeners explicitly configured with `protocol = "http1"`.
-//! Routes matched via `velda-router::Http1Router`, forwarded via `velda-http1`.
-
-use std::net::SocketAddr;
+//! Routes matched via `velda-router::Http1Router`, protocol lifecycle and wire streaming
+//! piped via `velda-http1`.
+//!
+//! Follows strict architectural boundary: `velda-edge` orchestrates the ingress pipeline
+//! (`accept head -> route -> target -> enrich -> connect -> pipe`), while all HTTP/1.1
+//! wire protocol mechanics, hop-by-hop sanitization, and progressive streaming pumps
+//! belong entirely inside `velda-http1`.
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_composer::ComposerContext;
-use velda_http1::{Http1Request, Http1Response, Http1ServerConnection, Http1UpstreamConnector};
+use velda_core::StreamingMode;
+use velda_http1::{
+    Http1BodyFraming, Http1Config, Http1PipeStrategy, Http1Response, Http1ServerConnection,
+    pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+};
 use velda_router::Http1RouteRequest;
+use velda_tls::TlsServerEngine;
+use velda_transport::Connection;
 
 use crate::error::EdgeError;
+use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
+use crate::runtime::upstream::Http1Upstream;
 
-/// Forwards an HTTP/1.1 request over cleartext TCP to the upstream target endpoint.
+pub use crate::runtime::upstream::UpstreamHttp1Stream;
+
+/// Enriches HTTP request headers with standard proxy forwarding metadata.
 ///
-/// Opens a fresh TCP connection per call. When `velda-connection-pool` is integrated,
-/// replace `TcpStream::connect` with a pooled connection lease.
-pub async fn forward_http1_request(
-    req: &Http1Request,
-    target: SocketAddr,
-    limits: &velda_core::IngressLimits,
-) -> Result<Http1Response, EdgeError> {
-    let mut stream = tokio::net::TcpStream::connect(target).await.map_err(|e| {
-        EdgeError::Internal(format!(
-            "Failed to connect to HTTP/1.1 upstream {target}: {e}"
-        ))
-    })?;
-    Http1UpstreamConnector::forward_on_stream(req, &mut stream, limits)
-        .await
-        .map_err(|e| {
-            EdgeError::Internal(format!(
-                "Failed to forward HTTP/1.1 request to {target}: {e}"
-            ))
-        })
+/// Implements both the IETF official standard ([RFC 7239]) and the de-facto
+/// industry standards (`X-Forwarded-*`, `X-Real-IP`) used by modern reverse proxies
+/// (Nginx, Envoy, HAProxy, AWS ALB).
+///
+/// ### Standards Complied:
+/// 1. **RFC 7239 (Forwarded HTTP Extension)**:
+///    - Injects `Forwarded: for=<client>;proto=<http|https>;by=<local>;host=<host>`.
+///    - RFC 7239 §5.2: IPv6 addresses are explicitly wrapped in quotes and square brackets `"[...]"`
+///      to distinguish colons from port/parameter delimiters.
+///    - Chains with existing downstream `Forwarded` headers via comma separation.
+/// 2. **X-Forwarded-For (RFC 7239 §5.2 reference / Squid / Nginx)**:
+///    - Appends downstream client IP to existing list or initializes new header.
+/// 3. **X-Forwarded-Proto (De-facto industry standard / Envoy / Nginx / AWS ALB)**:
+///    - Authoritative downstream protocol (`"https"` if TLS terminated, else `"http"`).
+///    - Security Invariant: Overwrites any forged downstream `X-Forwarded-Proto` to prevent
+///      protocol spoofing and security bypasses on internal backends.
+/// 4. **X-Forwarded-Port (RFC 7239 §5.4 reference / Spring Boot / ASP.NET)**:
+///    - Sets the ingress listener port (`context.local_addr.port()`).
+///    - Enables upstream services to construct accurate absolute redirect URLs (301/302 `Location`).
+/// 5. **X-Forwarded-Host (RFC 7239 §5.3 reference / Apache / Envoy)**:
+///    - Injects original downstream `Host` if present and not already defined.
+/// 6. **X-Real-IP (Nginx `proxy_set_header` standard)**:
+///    - Sets direct peer client IP address without comma-separated multi-hop traversal.
+pub fn enrich_forwarded_headers(
+    headers: &mut http::HeaderMap,
+    context: &IngressContext,
+    host: Option<&str>,
+) {
+    let client_ip = context.peer.ip();
+    let client_ip_str = client_ip.to_string();
+    let is_tls = context.tls.is_some();
+    let proto = if is_tls { "https" } else { "http" };
+
+    // 1. Standard: X-Forwarded-For (De-facto industry standard / RFC 7239 §5.2)
+    // Preserves proxy traversal chain by appending immediate peer IP.
+    let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
+    if let Some(existing) = headers.get(&x_forwarded_for) {
+        if let Ok(existing_str) = existing.to_str() {
+            let combined = format!("{existing_str}, {client_ip_str}");
+            if let Ok(val) = HeaderValue::from_str(&combined) {
+                headers.insert(x_forwarded_for, val);
+            }
+        }
+    } else if let Ok(val) = HeaderValue::from_str(&client_ip_str) {
+        headers.insert(x_forwarded_for, val);
+    }
+
+    // 2. Standard: X-Forwarded-Proto (De-facto industry standard / Envoy / Nginx)
+    // Security Invariant: As an edge proxy terminating downstream connections,
+    // we authoritatively declare the ingress transport protocol to prevent client spoofing.
+    let x_forwarded_proto = HeaderName::from_static("x-forwarded-proto");
+    headers.insert(x_forwarded_proto, HeaderValue::from_static(proto));
+
+    // 3. Standard: X-Forwarded-Port (De-facto industry standard / RFC 7239 §5.4)
+    // Advertises the ingress listener port so backends can generate correct 301/302 redirects.
+    let x_forwarded_port = HeaderName::from_static("x-forwarded-port");
+    let port_str = context.local_addr.port().to_string();
+    if let Ok(val) = HeaderValue::from_str(&port_str) {
+        headers.insert(x_forwarded_port, val);
+    }
+
+    // 4. Standard: X-Forwarded-Host (De-facto industry standard / RFC 7239 §5.3)
+    // Advertises the original Host requested by the client if not already present.
+    let x_forwarded_host = HeaderName::from_static("x-forwarded-host");
+    if !headers.contains_key(&x_forwarded_host)
+        && let Some(h) = host
+        && let Ok(val) = HeaderValue::from_str(h)
+    {
+        headers.insert(x_forwarded_host, val);
+    }
+
+    // 5. Standard: X-Real-IP (Nginx de-facto standard)
+    // Supplies immediate client IP directly without requiring upstream to parse CSV chains.
+    let x_real_ip = HeaderName::from_static("x-real-ip");
+    if let Ok(val) = HeaderValue::from_str(&client_ip_str) {
+        headers.insert(x_real_ip, val);
+    }
+
+    // 6. Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
+    // Format: for=<client>;proto=<http|https>;by=<local>;host=<host>
+    // RFC 7239 §5.2: IPv6 addresses must be quoted with square brackets: "[...]"
+    let forwarded = HeaderName::from_static("forwarded");
+    let rfc_for = match client_ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("\"[{v6}]\""),
+    };
+    let rfc_by = match context.local_addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("\"[{v6}]\""),
+    };
+
+    let mut entry = format!("for={rfc_for};proto={proto};by={rfc_by}");
+    if let Some(h) = host {
+        entry.push_str(&format!(";host=\"{h}\""));
+    }
+
+    if let Some(existing) = headers.get(&forwarded) {
+        if let Ok(existing_str) = existing.to_str() {
+            let combined = format!("{existing_str}, {entry}");
+            if let Ok(val) = HeaderValue::from_str(&combined) {
+                headers.insert(forwarded, val);
+            }
+        }
+    } else if let Ok(val) = HeaderValue::from_str(&entry) {
+        headers.insert(forwarded, val);
+    }
 }
 
-/// Dispatches an HTTP/1.1 request through `Http1Router` and forwards to upstream backend.
-pub async fn process_http1_request(
-    req: &Http1Request,
-    context: &ComposerContext,
-    runtime: &SharedRuntime,
-) -> Http1Response {
-    let host = req
-        .host()
-        .and_then(|h| h.to_str().ok())
-        .or_else(|| req.uri.host());
-
-    let mut http_req = Http1RouteRequest::new(req.path());
-    if let Some(h) = host {
-        http_req = http_req.with_host(h);
-    }
-    http_req = http_req.with_method(req.method.as_str());
-
-    let rt = runtime.load();
-    let Some(route) = rt.router.route_http1(&context.listener_id, &http_req) else {
-        tracing::debug!(
-            listener = %context.listener_id,
-            path = %req.path(),
-            host = ?host,
-            method = %req.method,
-            "No HTTP/1.1 route matched"
-        );
-        return Http1Response::from_bytes(
-            StatusCode::NOT_FOUND,
-            b"404 Not Found: no matching route\n".to_vec(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-    };
-
-    let target = if let Some(up) = rt.upstreams.http1.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
+/// Connects to the upstream backend endpoint, establishing TLS if required by configuration.
+///
+/// ### Architectural Rationale: Why `connect_stream` over direct `send_request()` in HTTP/1.1?
+/// 1. **Exclusive 1-to-1 Connection Model**: Unlike HTTP/2 and HTTP/3 which multiplex hundreds of
+///    concurrent requests over a single shared connection via Stream IDs, RFC 9112 HTTP/1.1 has head-of-line
+///    blocking: each active in-flight request occupies a physical transport stream exclusively until finished.
+/// 2. **Streaming & Bidi Pipe Versatility**: Acquiring the raw I/O stream ([`UpstreamHttp1Stream`]) allows
+///    `velda-http1` to drive all 4 streaming modes (`Buffered`, `ServerStream` for SSE/LLM, `ClientStream`
+///    for large uploads, and `Duplex` for WebSockets/tunnels) without loading entire payloads into RAM (Zero-OOM).
+/// 3. **Keep-Alive Connection Reuse (Pooling)**: Holding the underlying stream allows the Gateway to keep
+///    the connection alive (`Connection: keep-alive`) and return it to the pool upon completion, eliminating
+///    the heavy latency and CPU cost of repeated TCP 3-way handshakes and TLS 1.3 handshakes for subsequent requests.
+pub async fn connect_upstream(
+    target: SocketAddr,
+    up: Option<&Http1Upstream>,
+    tls_client: Option<&velda_tls::TlsClientEngine>,
+    host: Option<&str>,
+) -> Result<UpstreamHttp1Stream, EdgeError> {
+    if let Some(u) = up {
+        let is_tls = u.is_tls();
+        let target_sni = u.target_sni().map(|s| s.to_string());
+        u.execute(|endpoint| {
+            let sni_ref = target_sni.clone();
+            async move {
+                velda_http1::client::stream::connect_stream(
+                    endpoint,
+                    is_tls,
+                    sni_ref.as_deref(),
+                    tls_client,
+                    host,
+                )
+                .await
+            }
+        })
+        .await
+        .map_err(EdgeError::Upstream)
     } else {
-        route.select_target()
-    };
-
-    let Some(target) = target else {
-        tracing::error!(
-            listener = %context.listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            "No healthy backend endpoints available for HTTP/1.1 upstream"
-        );
-        return Http1Response::from_bytes(
-            StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-    };
-
-    match forward_http1_request(req, target, &context.limits).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                target = %target,
-                upstream = %route.upstream_name,
-                "HTTP/1.1 upstream forwarding failed"
-            );
-            Http1Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-        }
+        velda_http1::client::stream::connect_stream(target, false, None, tls_client, host)
+            .await
+            .map_err(|e| EdgeError::Internal(e.to_string()))
     }
 }
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
-pub async fn handle_http1_stream<IO>(stream: IO, context: ComposerContext, runtime: SharedRuntime)
-where
+///
+/// Inspects the pre-compiled listener metadata to determine whether downstream
+/// TLS termination is active. If TLS is required, negotiates the handshake, validates
+/// ALPN against the declared protocol, and passes the encrypted stream to the HTTP/1.1 loop.
+pub async fn handle_http1_stream(
+    connection: Connection,
+    context: IngressContext,
+    config: Http1Config,
+    runtime: SharedRuntime,
+) {
+    let rt = runtime.load();
+
+    if context.tls_enabled {
+        let Some(tls_server) = rt.tls_server.as_ref() else {
+            tracing::error!(
+                listener = %context.listener_id,
+                peer = %context.peer,
+                "TLS required for listener, but no TLS server engine is compiled; dropping connection"
+            );
+            return;
+        };
+
+        match tls_server.accept_with_timeout(connection).await {
+            Ok(tls_stream) => {
+                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
+                tracing::debug!(
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    sni = ?handshake_info.sni,
+                    alpn = ?handshake_info.alpn,
+                    "Downstream TLS handshake succeeded"
+                );
+                let enriched_context =
+                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
+
+                if let Err(err) = enriched_context.validate_alpn("http1") {
+                    tracing::warn!(
+                        error = %err,
+                        listener = %enriched_context.listener_id,
+                        peer = %enriched_context.peer,
+                        "Dropping connection due to protocol ALPN mismatch"
+                    );
+                    return;
+                }
+
+                run_http1_loop(tls_stream, enriched_context, config, runtime).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    listener = %context.listener_id,
+                    peer = %context.peer,
+                    "Downstream TLS handshake failed"
+                );
+            }
+        }
+    } else {
+        run_http1_loop(connection, context, config, runtime).await;
+    }
+}
+
+/// Core HTTP/1.1 downstream request-response loop decoupled from transport layer.
+pub async fn run_http1_loop<IO>(
+    stream: IO,
+    context: IngressContext,
+    config: Http1Config,
+    runtime: SharedRuntime,
+) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let timeout_duration = std::time::Duration::from_millis(context.limits.idle_timeout_ms);
-    let mut conn = Http1ServerConnection::new(stream, context.limits);
+    let header_timeout =
+        std::time::Duration::from_millis(config.header_read_timeout_ms.min(config.idle_timeout_ms));
+    let mut conn = Http1ServerConnection::new(stream, config);
+    let mut requests_served: u32 = 0;
+
     loop {
-        // Phase 1: decode request head (fail-fast, header inspection, plugin hook point)
-        let (head, framing) =
-            match tokio::time::timeout(timeout_duration, conn.next_request_head()).await {
+        // Phase 1: decode request head (fail-fast, header inspection, Slowloris protection)
+        let (mut head, framing) =
+            match tokio::time::timeout(header_timeout, conn.next_request_head()).await {
                 Ok(Ok(Some(parts))) => parts,
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
@@ -138,43 +271,181 @@ where
                 Err(_) => {
                     tracing::debug!(
                         listener = %context.listener_id,
-                        timeout_ms = context.limits.idle_timeout_ms,
-                        "HTTP/1.1 request read timed out"
+                        timeout_ms = config.header_read_timeout_ms,
+                        "HTTP/1.1 request head read timed out"
                     );
                     break;
                 }
             };
 
-        // Phase 2: decode request body
-        let body = match tokio::time::timeout(timeout_duration, conn.read_body(framing)).await {
-            Ok(Ok(body)) => body,
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "HTTP/1.1 request body decode error");
-                break;
-            }
-            Err(_) => {
-                tracing::debug!(
-                    listener = %context.listener_id,
-                    timeout_ms = context.limits.idle_timeout_ms,
-                    "HTTP/1.1 request body read timed out"
+        requests_served += 1;
+        let reach_max_keepalive = requests_served >= config.max_keepalive_requests;
+        let rt = runtime.load();
+
+        // Enforce Ingress Streaming Policy (Option A):
+        // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
+        if framing == Http1BodyFraming::Chunked && !context.streaming.client {
+            tracing::warn!(
+                listener = %context.listener_id,
+                "Rejecting chunked request: streaming upload is disabled on this listener"
+            );
+            let rejected = Http1Response::from_bytes(
+                StatusCode::FORBIDDEN,
+                b"403 Forbidden: streaming upload is disabled on this listener\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = conn.send_response(&rejected).await;
+            break;
+        }
+
+        let host_str: Option<String> = head
+            .headers
+            .get(http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| head.uri.host())
+            .map(|s| s.to_string());
+
+        let mut http_req = Http1RouteRequest::new(head.path());
+        if let Some(ref h) = host_str {
+            http_req = http_req.with_host(h);
+        }
+        http_req = http_req.with_method(head.method.as_str());
+
+        let Some(route) = rt.router.route_http1(&context.listener_id, &http_req) else {
+            tracing::debug!(
+                listener = %context.listener_id,
+                path = %head.path(),
+                host = ?host_str,
+                method = %head.method,
+                "No HTTP/1.1 route matched"
+            );
+            let not_found = Http1Response::from_bytes(
+                StatusCode::NOT_FOUND,
+                b"404 Not Found: no matching route\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = conn.send_response(&not_found).await;
+            break;
+        };
+
+        let up = rt.upstreams.http1.get(&route.upstream_name);
+        let target = if let Some(u) = up {
+            u.select_target().or_else(|| route.select_target())
+        } else {
+            route.select_target()
+        };
+
+        let Some(target) = target else {
+            tracing::error!(
+                listener = %context.listener_id,
+                route = %route.id,
+                upstream = %route.upstream_name,
+                "No healthy backend endpoints available for HTTP/1.1 upstream"
+            );
+            let no_backend = Http1Response::from_bytes(
+                StatusCode::SERVICE_UNAVAILABLE,
+                b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = conn.send_response(&no_backend).await;
+            break;
+        };
+
+        let up_streaming = up
+            .as_ref()
+            .map(|u| u.streaming)
+            .unwrap_or(StreamingMode::DISABLED);
+
+        // Concrete execution strategy derived directly from upstream capability.
+        // Listener allowance is pre-validated at configuration compile/reload time.
+        let strategy = Http1PipeStrategy::from_streaming(up_streaming);
+
+        // Enrich downstream request with proxy forwarding metadata (X-Forwarded-*)
+        enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
+
+        // Connect to upstream backend target
+        let mut upstream_stream = match connect_upstream(
+            target,
+            up.map(|u| u.as_ref()),
+            rt.tls_client.as_ref(),
+            host_str.as_deref(),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    target = %target,
+                    upstream = %route.upstream_name,
+                    "Failed to connect to HTTP/1.1 upstream"
                 );
+                let err_resp = Http1Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                let _ = conn.send_response(&err_resp).await;
                 break;
             }
         };
 
-        let req = Http1Request::from_parts(head, body);
-        tracing::debug!(
-            method = %req.method,
-            path = %req.path(),
-            listener = %context.listener_id,
-            "Decoded HTTP/1.1 request"
-        );
-        let response = process_http1_request(&req, &context, &runtime).await;
-        if let Err(e) = conn.send_response(&response).await {
-            tracing::warn!(error = %e, "Failed to send HTTP/1.1 response to client");
+        // Execute concrete pipe workflow decoupled by streaming strategy
+        let cfg = *conn.config();
+        let pipe_result = match strategy {
+            Http1PipeStrategy::Buffered => {
+                pipe_buffered(&mut conn, head, framing, &mut upstream_stream, &cfg).await
+            }
+            Http1PipeStrategy::ServerStream => {
+                pipe_server_stream(&mut conn, head, framing, &mut upstream_stream, &cfg).await
+            }
+            Http1PipeStrategy::ClientStream => {
+                pipe_client_stream(&mut conn, head, &mut upstream_stream, &cfg).await
+            }
+            Http1PipeStrategy::Duplex => {
+                pipe_duplex(&mut conn, head, &mut upstream_stream, &cfg).await
+            }
+        };
+
+        if let Err(e) = pipe_result {
+            tracing::warn!(
+                error = %e,
+                target = %target,
+                upstream = %route.upstream_name,
+                strategy = ?strategy,
+                "HTTP/1.1 upstream stream pipe failed"
+            );
+            let err_resp = Http1Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = conn.send_response(&err_resp).await;
             break;
         }
-        if conn.is_closed() {
+
+        if reach_max_keepalive || conn.is_closed() {
+            tracing::debug!(
+                listener = %context.listener_id,
+                requests_served,
+                max = config.max_keepalive_requests,
+                "Closing HTTP/1.1 connection (reached max keepalive requests or connection closed)"
+            );
             break;
         }
     }

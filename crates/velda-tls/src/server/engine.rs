@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
-use super::config::ServerTlsConfig;
+use super::config::{ServerTlsConfig, TlsServerParams};
 use super::handshake::{TlsHandshakeInfo, extract_handshake_info};
 use crate::error::TlsError;
 
@@ -23,33 +23,57 @@ where
         .map_err(|e| TlsError::HandshakeFailed(e.to_string()))
 }
 
-/// Downstream TLS server engine wrapper holding a compiled `Arc<ServerConfig>`.
+/// Downstream TLS server engine wrapper holding a compiled `Arc<ServerConfig>` and runtime parameters.
 #[derive(Clone)]
 pub struct TlsServerEngine {
     config: Arc<ServerConfig>,
     acceptor: TlsAcceptor,
+    params: TlsServerParams,
 }
 
 impl std::fmt::Debug for TlsServerEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TlsServerEngine")
             .field("alpn_protocols", &self.config.alpn_protocols)
+            .field("params", &self.params)
             .finish()
     }
 }
 
 impl TlsServerEngine {
-    /// Builds a new downstream TLS server engine from server configurations.
+    /// Builds a new downstream TLS server engine from server configurations using hardware probe.
     pub fn new(servers: &[ServerTlsConfig]) -> Result<Self, TlsError> {
-        let config = ServerTlsConfig::build(servers)?;
+        let params = TlsServerParams::from_hardware();
+        Self::new_with_params(servers, &params)
+    }
+
+    /// Builds a new downstream TLS server engine from server configurations and explicit runtime parameters.
+    pub fn new_with_params(
+        servers: &[ServerTlsConfig],
+        params: &TlsServerParams,
+    ) -> Result<Self, TlsError> {
+        let config = ServerTlsConfig::build_with_params(servers, params)?;
         let acceptor = TlsAcceptor::from(config.clone());
-        Ok(Self { config, acceptor })
+        Ok(Self {
+            config,
+            acceptor,
+            params: params.clone(),
+        })
     }
 
     /// Creates an engine directly from an existing `Arc<ServerConfig>`.
     pub fn from_config(config: Arc<ServerConfig>) -> Self {
+        Self::from_config_with_params(config, TlsServerParams::from_hardware())
+    }
+
+    /// Creates an engine directly from an existing `Arc<ServerConfig>` and explicit runtime parameters.
+    pub fn from_config_with_params(config: Arc<ServerConfig>, params: TlsServerParams) -> Self {
         let acceptor = TlsAcceptor::from(config.clone());
-        Self { config, acceptor }
+        Self {
+            config,
+            acceptor,
+            params,
+        }
     }
 
     /// Performs downstream TLS termination on an incoming connection.
@@ -61,6 +85,38 @@ impl TlsServerEngine {
             .accept(stream)
             .await
             .map_err(|e| TlsError::HandshakeFailed(e.to_string()))
+    }
+
+    /// Performs downstream TLS termination on an incoming connection bounded by the configured handshake timeout.
+    pub async fn accept_with_timeout<IO>(&self, stream: IO) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.accept_with_explicit_timeout(stream, self.params.handshake_timeout)
+            .await
+    }
+
+    /// Performs downstream TLS termination on an incoming connection bounded by an explicit handshake timeout.
+    pub async fn accept_with_explicit_timeout<IO>(
+        &self,
+        stream: IO,
+        timeout: std::time::Duration,
+    ) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        match tokio::time::timeout(timeout, self.accept(stream)).await {
+            Ok(res) => res,
+            Err(_) => Err(TlsError::HandshakeFailed(format!(
+                "Downstream TLS handshake timed out after {:?}",
+                timeout
+            ))),
+        }
+    }
+
+    /// Returns a reference to the active parameters.
+    pub fn params(&self) -> &TlsServerParams {
+        &self.params
     }
 
     /// Returns a reference to the compiled `ServerConfig`.

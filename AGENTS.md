@@ -81,12 +81,11 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 ### 3.1 Rust Data Plane (`crates/`)
 - `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
 - `velda-transport`: Edge Traffic Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff).
-- `velda-composer`: Protocol composition and runtime coordination boundary (bridges `velda-transport` with `velda-tls` and application protocol engines `velda-http1`, `velda-http2`, `velda-http3`, and `velda-grpc`). Does NOT implement protocols, parsing, or routing.
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
 - `velda-http1`: Owns L7 HTTP/1.1 protocol lifecycle (RFC 9112: text streaming, keep-alive, zero-copy parsing, and downstream connection handling).
 - `velda-http2`: Owns L7 HTTP/2 protocol engine (RFC 9113: binary framing, flow control, multiplexed stream lifecycle, and responder).
 - `velda-http3`: Owns L7 HTTP/3 protocol engine (RFC 9114: QUIC datagrams, frame encoding/decoding, packet-driven state machine).
-- `velda-grpc`: Owns L7 gRPC protocol engine (length-prefixed message framing, canonical status codes, server/client H2 stream lifecycle, and full-duplex bidirectional streaming proxying). Completely decoupled from HTTP crates.
+- `velda-grpc`: Owns L7 gRPC protocol engine (length-prefixed message framing, canonical status codes, server/client H2 stream lifecycle, and bidirectional streaming proxying). Completely decoupled from HTTP crates.
 - `velda-router`: Owns route matching (Path, Host, Method, Headers) and route selection.
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
 - `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).

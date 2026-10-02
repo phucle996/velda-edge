@@ -388,6 +388,103 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         self.acquire_with_target(AcquireTarget::new(protocol)).await
     }
 
+    /// Selects a healthy endpoint address using the configured load balancer.
+    pub fn select_endpoint(&self) -> Result<SocketAddr> {
+        let endpoints = self.discovery.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+        }
+
+        let cached_degraded;
+        let usable: &[Endpoint] = if !self.health.has_unhealthy() {
+            all_eps
+        } else {
+            let current_gen = endpoints.generation();
+            let current_epoch = self.health.epoch();
+            cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
+            if cached_degraded.is_empty() {
+                return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+            }
+            &cached_degraded[..]
+        };
+
+        let selected = self
+            .balancer
+            .select(usable, &SelectionContext::NONE)
+            .ok_or_else(|| UpstreamError::NoEndpointsAvailable(self.id.clone()))?;
+
+        Ok(selected.address)
+    }
+
+    /// Executes a protocol-specific asynchronous operation against a healthy target endpoint.
+    ///
+    /// Manages healthy candidate selection, health success/failure tracking, and automatic
+    /// failover if the operation encounters a network/connection error.
+    pub async fn execute<F, Fut, T, E>(&self, mut action: F) -> Result<T>
+    where
+        F: FnMut(SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        let endpoints = self.discovery.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+        }
+
+        let cached_degraded;
+        let usable: &[Endpoint] = if !self.health.has_unhealthy() {
+            all_eps
+        } else {
+            let current_gen = endpoints.generation();
+            let current_epoch = self.health.epoch();
+            cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
+            if cached_degraded.is_empty() {
+                return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+            }
+            &cached_degraded[..]
+        };
+
+        let max_attempts = usable.len().min(2);
+        let mut last_err = None;
+        let mut candidate_slice = usable;
+        let mut fallback_endpoints: Vec<Endpoint>;
+
+        for _ in 0..max_attempts {
+            let Some(selected) = self
+                .balancer
+                .select(candidate_slice, &SelectionContext::NONE)
+            else {
+                break;
+            };
+
+            let target_addr = selected.address;
+            match action(target_addr).await {
+                Ok(val) => {
+                    self.health.record_success(&target_addr);
+                    return Ok(val);
+                }
+                Err(e) => {
+                    self.health.record_failure(&target_addr);
+                    last_err = Some(e.to_string());
+
+                    fallback_endpoints = candidate_slice
+                        .iter()
+                        .filter(|ep| ep.address != target_addr)
+                        .cloned()
+                        .collect();
+                    candidate_slice = &fallback_endpoints[..];
+                }
+            }
+        }
+
+        Err(UpstreamError::ConnectionFailed {
+            endpoint: usable[0].address,
+            reason: last_err.unwrap_or_else(|| "all candidate endpoints failed".into()),
+        })
+    }
+
     /// The core Flat Workflow Pipeline:
     ///
     /// 1. Query Discovery -> Filter healthy endpoints.

@@ -27,6 +27,9 @@ pub enum TlsError {
     #[error("Upstream target configuration not found for SNI: {0}")]
     UpstreamTargetNotFound(String),
 
+    #[error("Unsupported TLS protocol version: {0}")]
+    UnsupportedProtocolVersion(String),
+
     #[error("Rustls error: {0}")]
     Rustls(#[from] rustls::Error),
 
@@ -43,6 +46,7 @@ impl From<TlsError> for CoreError {
             TlsError::InvalidCertificate(_)
             | TlsError::InvalidPrivateKey(_)
             | TlsError::InvalidCaBundle(_)
+            | TlsError::UnsupportedProtocolVersion(_)
             | TlsError::UpstreamTargetNotFound(_) => {
                 CoreError::new(ErrorKind::Internal, err.to_string())
             }

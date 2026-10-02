@@ -14,7 +14,6 @@ path = "src/main.rs"
 [dependencies]
 velda-core = { path = "../velda-core" }
 velda-transport = { path = "../velda-transport" }
-velda-composer = { path = "../velda-composer" }
 velda-tls = { path = "../velda-tls" }
 velda-http1 = { path = "../velda-http1" }
 velda-http2 = { path = "../velda-http2" }

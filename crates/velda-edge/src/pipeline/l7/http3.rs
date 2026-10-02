@@ -310,103 +310,7 @@ pub async fn handle_grpc_udp_handoff(
     }
 }
 
-/// In-memory upstream connection pool multiplexing multiple HTTP/3 streams over active connections.
-pub struct H3UpstreamPool {
-    clients: tokio::sync::RwLock<HashMap<(SocketAddr, String), velda_http3::Http3Client>>,
-}
-
-impl Default for H3UpstreamPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl H3UpstreamPool {
-    /// Creates a new empty [`H3UpstreamPool`].
-    pub fn new() -> Self {
-        Self {
-            clients: tokio::sync::RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Acquires an active multiplexed client for `(target, server_name)`, or connects and stores a new one.
-    pub async fn get_or_connect(
-        &self,
-        target: SocketAddr,
-        server_name: &str,
-        config: &velda_http3::Http3Config,
-    ) -> Result<velda_http3::Http3Client, EdgeError> {
-        let key = (target, server_name.to_string());
-
-        // 1. Fast path: check if existing connection is still active
-        {
-            let guard = self.clients.read().await;
-            if let Some(client) = guard.get(&key)
-                && !client.is_closed()
-            {
-                return Ok(client.clone());
-            }
-        }
-
-        // 2. Slow path: connect new HTTP/3 client and store in pool
-        let mut guard = self.clients.write().await;
-        if let Some(client) = guard.get(&key)
-            && !client.is_closed()
-        {
-            return Ok(client.clone());
-        }
-
-        let new_client = velda_http3::connect(target, server_name, config)
-            .await
-            .map_err(|e| {
-                EdgeError::Internal(format!(
-                    "Failed to connect HTTP/3 client to {target} (SNI {server_name}): {e}"
-                ))
-            })?;
-        guard.insert(key, new_client.clone());
-        Ok(new_client)
-    }
-
-    /// Forwards an HTTP/3 request using pooled connection with automatic retry on stale connection.
-    pub async fn send_request(
-        &self,
-        target: SocketAddr,
-        server_name: &str,
-        req: &L7Request,
-        config: &velda_http3::Http3Config,
-    ) -> Result<L7Response, EdgeError> {
-        let client = self.get_or_connect(target, server_name, config).await?;
-        match client.send_request_ref(req).await {
-            Ok(resp) => Ok(resp),
-            Err(velda_http3::Http3Error::ConnectionClosed) => {
-                // Connection was stale or closed by backend; evict from pool and retry once with fresh connection
-                {
-                    let key = (target, server_name.to_string());
-                    let mut guard = self.clients.write().await;
-                    guard.remove(&key);
-                }
-                let fresh_client = self.get_or_connect(target, server_name, config).await?;
-                fresh_client.send_request_ref(req).await.map_err(|e| {
-                    EdgeError::Internal(format!(
-                        "HTTP/3 upstream retry failed to {target} (SNI {server_name}): {e}"
-                    ))
-                })
-            }
-            Err(e) => Err(EdgeError::Internal(format!(
-                "HTTP/3 request failed to {target} (SNI {server_name}): {e}"
-            ))),
-        }
-    }
-}
-
-static H3_UPSTREAM_POOL: OnceLock<H3UpstreamPool> = OnceLock::new();
-
-/// Returns a reference to the global HTTP/3 upstream connection multiplexing pool.
-pub fn get_h3_upstream_pool() -> &'static H3UpstreamPool {
-    H3_UPSTREAM_POOL.get_or_init(H3UpstreamPool::new)
-}
-
-/// Forwards an HTTP/3 request over QUIC to the upstream target endpoint using multiplexed connection pool.
+/// Forwards an HTTP/3 request over QUIC to the upstream target endpoint without connection pooling.
 pub async fn forward_http3_request(
     req: &L7Request,
     target: SocketAddr,
@@ -414,9 +318,13 @@ pub async fn forward_http3_request(
 ) -> Result<L7Response, EdgeError> {
     let server_name = velda_http3::resolve_sni(req, &target, target_sni);
     let config = velda_http3::Http3Config::auto();
-    get_h3_upstream_pool()
-        .send_request(target, &server_name, req, &config)
+    let client = velda_http3::connect(target, &server_name, &config)
         .await
+        .map_err(|e| EdgeError::Internal(e.to_string()))?;
+    client
+        .send_request_ref(req)
+        .await
+        .map_err(|e| EdgeError::Internal(e.to_string()))
 }
 
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
@@ -455,7 +363,8 @@ pub async fn process_http3_request(
         );
     };
 
-    let (target, target_sni) = if let Some(up) = rt.upstreams.http3.get(&route.upstream_name) {
+    let up = rt.upstreams.http3.get(&route.upstream_name);
+    let (target, target_sni) = if let Some(up) = up {
         (
             up.select_target().or_else(|| route.select_target()),
             up.target_sni(),
@@ -481,7 +390,38 @@ pub async fn process_http3_request(
         );
     };
 
-    match forward_http3_request(req, target, target_sni).await {
+    let server_name = velda_http3::resolve_sni(req, &target, target_sni);
+    let h3_config = velda_http3::Http3Config::auto();
+
+    // HTTP/3 QUIC Multiplexing Invariant (RFC 9114):
+    // Like HTTP/2, HTTP/3 multiplexes concurrent requests over a single QUIC connection per backend IP
+    // without requiring separate physical socket allocations or exclusive stream leases.
+    // Each request is assigned a logical QUIC Stream ID over UDP, completely eliminating TCP head-of-line blocking.
+    // We execute the request closure through `up.execute` to ensure healthy endpoint selection,
+    // health metrics tracking, and automatic candidate failover if the backend connection fails.
+    let resp_res = if let Some(up) = up {
+        let sni = server_name.clone();
+        let cfg = h3_config.clone();
+        up.execute(|endpoint| {
+            let sni = sni.clone();
+            let cfg = cfg.clone();
+            async move {
+                let client = velda_http3::connect(endpoint, &sni, &cfg)
+                    .await
+                    .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string()))?;
+                client
+                    .send_request_ref(req)
+                    .await
+                    .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string()))
+            }
+        })
+        .await
+        .map_err(EdgeError::Upstream)
+    } else {
+        forward_http3_request(req, target, target_sni).await
+    };
+
+    match resp_res {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(

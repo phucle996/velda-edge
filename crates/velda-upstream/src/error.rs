@@ -32,6 +32,14 @@ pub enum UpstreamError {
     #[error("invalid upstream configuration: {0}")]
     InvalidConfig(String),
 
+    /// TLS handshake failure with backend endpoint.
+    #[error("upstream TLS handshake failed for '{sni}': {reason}")]
+    Tls { sni: String, reason: String },
+
+    /// Upstream protocol failure (e.g., HTTP/2, HTTP/3, gRPC).
+    #[error("upstream protocol error: {0}")]
+    Protocol(String),
+
     /// IO error during connection establishment or polling.
     #[error("upstream I/O error: {0}")]
     Io(#[from] std::io::Error),

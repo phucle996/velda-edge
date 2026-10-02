@@ -18,6 +18,7 @@ pub mod error;
 pub mod pipeline;
 pub mod reload;
 pub mod runtime;
+pub mod runtime_profile;
 pub mod uds;
 
 pub use bootstrap::{EdgeSupervisor, start};
@@ -25,4 +26,5 @@ pub use config::EdgeConfig;
 pub use error::EdgeError;
 pub use reload::{ReloadOutcome, apply_reload};
 pub use runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
+pub use runtime_profile::{RuntimeProfile, resolve_runtime_profile};
 pub use velda_core::hardware::{HardwareTopology, global_hardware_topology};

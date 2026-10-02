@@ -55,8 +55,7 @@ fn bench_steady_state_serving_zero_leak(rt: &Runtime) {
         let listener_id = target_listeners[i % target_listeners.len()];
         let guard = shared.load();
         let pipe = guard.pipelines.tcp_pipeline(listener_id);
-        let comp = guard.composer.get_listener(listener_id);
-        let _ = std::hint::black_box((pipe, comp));
+        let _ = std::hint::black_box(pipe);
     }
 
     let elapsed = start.elapsed();

@@ -2,6 +2,28 @@
   "schema_version": 1,
   "listeners": [
     {
+      "id": "http-in",
+      "address": "0.0.0.0:80",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "protocol": "http1",
+        "streaming": []
+      },
+      "tls": {
+        "enabled": false
+      },
+      "http1": {
+        "max_body_size": 10485760,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_keepalive_requests": 10000,
+        "header_read_timeout_ms": 10000
+      }
+    },
+    {
       "id": "web-in",
       "address": "0.0.0.0:443",
       "transport": {
@@ -9,16 +31,22 @@
       },
       "application": {
         "protocol": "http2",
-        "streaming": "server"
+        "streaming": [
+          "server"
+        ]
       },
       "tls": {
         "enabled": true
       },
-      "limits": {
+      "http2": {
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
-        "idle_timeout_ms": 30000
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "max_consecutive_resets": 500,
+        "max_pending_control_frames": 200,
+        "max_continuation_frames": 16
       }
     },
     {
@@ -29,16 +57,46 @@
       },
       "application": {
         "protocol": "grpc",
-        "streaming": "duplex"
+        "streaming": [
+          "client",
+          "server"
+        ]
       },
       "tls": {
         "enabled": true
       },
-      "limits": {
+      "grpc": {
+        "max_message_size": 8388608,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "keepalive_ping_interval_ms": 45000,
+        "keepalive_ping_timeout_ms": 10000,
+        "max_call_duration_ms": 120000
+      }
+    },
+    {
+      "id": "h3-in",
+      "address": "0.0.0.0:8443",
+      "transport": {
+        "protocol": "udp"
+      },
+      "application": {
+        "protocol": "http3",
+        "streaming": []
+      },
+      "tls": {
+        "enabled": true
+      },
+      "http3": {
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
-        "idle_timeout_ms": 30000
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "max_concurrent_uni_streams": 64,
+        "max_qpack_table_capacity": 8192
       }
     },
     {
@@ -49,15 +107,13 @@
       },
       "application": {
         "protocol": "raw",
-        "streaming": false
+        "streaming": []
       },
       "tls": {
         "enabled": false
       },
-      "limits": {
-        "max_body_size": 10485760,
-        "max_header_size": 65536,
-        "max_headers": 64,
+      "raw": {
+        "copy_buffer_size": 16384,
         "idle_timeout_ms": 30000
       }
     }

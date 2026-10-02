@@ -13,75 +13,78 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use velda_sync::post_sync::upstream::{UpstreamConfig, UpstreamTlsConfig};
+use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_upstream::{Endpoint, RoundRobin, TcpConnector, Upstream, UpstreamTimeouts};
 
-/// Concrete compiled L4 TCP upstream managing socket endpoints, health, and pooling without TLS.
-pub type TcpUpstream = Upstream<TcpConnector, RoundRobin>;
-pub type L4Upstream = TcpUpstream;
+pub use velda_http1::UpstreamHttp1Stream;
 
-/// Represents a compiled target endpoint resource for protocol-isolated routing.
-#[derive(Debug)]
-pub struct ProtocolUpstream {
-    pub id: String,
-    pub endpoints: Vec<SocketAddr>,
-    pub timeouts: UpstreamTimeouts,
-    pub tls: Option<UpstreamTlsConfig>,
-    pub target_sni: Option<String>,
-    rr_index: AtomicUsize,
+/// Runtime upstream wrapper delegating to protocol-agnostic [`velda_upstream::Upstream`].
+pub struct RuntimeUpstream {
+    inner: Upstream<TcpConnector, RoundRobin>,
+    target_sni: Option<String>,
+    is_tls: bool,
+    pub streaming: velda_core::StreamingMode,
 }
 
-impl ProtocolUpstream {
+impl std::fmt::Debug for RuntimeUpstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeUpstream")
+            .field("id", &self.inner.id())
+            .field("target_sni", &self.target_sni)
+            .field("is_tls", &self.is_tls)
+            .field("streaming", &self.streaming)
+            .finish()
+    }
+}
+
+impl std::ops::Deref for RuntimeUpstream {
+    type Target = Upstream<TcpConnector, RoundRobin>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl RuntimeUpstream {
     pub fn new(
-        id: impl Into<String>,
-        endpoints: Vec<SocketAddr>,
-        timeouts: UpstreamTimeouts,
-        tls: Option<UpstreamTlsConfig>,
+        inner: Upstream<TcpConnector, RoundRobin>,
+        target_sni: Option<String>,
+        is_tls: bool,
+        streaming: velda_core::StreamingMode,
     ) -> Self {
-        let target_sni = tls.as_ref().and_then(|t| t.sni.first().cloned());
         Self {
-            id: id.into(),
-            endpoints,
-            timeouts,
-            tls,
+            inner,
             target_sni,
-            rr_index: AtomicUsize::new(0),
+            is_tls,
+            streaming,
         }
     }
 
-    /// Returns the primary target SNI if TLS is configured for this upstream.
     #[inline]
     pub fn target_sni(&self) -> Option<&str> {
         self.target_sni.as_deref()
     }
 
-    /// Returns whether this upstream requires a TLS connection.
     #[inline]
     pub fn is_tls(&self) -> bool {
-        self.tls.is_some()
+        self.is_tls
     }
 
-    /// Selects an eligible target backend address using round-robin.
     #[inline]
     pub fn select_target(&self) -> Option<SocketAddr> {
-        if self.endpoints.is_empty() {
-            return None;
-        }
-        if self.endpoints.len() == 1 {
-            return Some(self.endpoints[0]);
-        }
-        let idx = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        Some(self.endpoints[idx % self.endpoints.len()])
+        self.inner.select_endpoint().ok()
     }
 }
 
-pub type UdpUpstream = ProtocolUpstream;
-pub type Http1Upstream = ProtocolUpstream;
-pub type Http2Upstream = ProtocolUpstream;
-pub type Http3Upstream = ProtocolUpstream;
-pub type GrpcUpstream = ProtocolUpstream;
+pub type TcpUpstream = RuntimeUpstream;
+pub type UdpUpstream = RuntimeUpstream;
+pub type Http1Upstream = RuntimeUpstream;
+pub type Http2Upstream = RuntimeUpstream;
+pub type Http3Upstream = RuntimeUpstream;
+pub type GrpcUpstream = RuntimeUpstream;
+pub type L4Upstream = RuntimeUpstream;
 
 /// Generic single-protocol lookup table.
 pub struct SubUpstreamTable<T> {
@@ -179,12 +182,10 @@ pub fn build_upstreams(configs: &[UpstreamConfig]) -> UpstreamTable {
 
     for config in configs {
         let mut endpoints = Vec::new();
-        let mut addrs = Vec::new();
         for (i, ep) in config.endpoints.iter().enumerate() {
             if let Ok(addr) = ep.address.parse::<SocketAddr>() {
                 let id = format!("{}-ep-{}", config.id, i);
                 endpoints.push(Endpoint::new(id, addr, ep.weight));
-                addrs.push(addr);
             }
         }
 
@@ -195,7 +196,6 @@ pub fn build_upstreams(configs: &[UpstreamConfig]) -> UpstreamTable {
             let addr = SocketAddr::new(ip, target.port);
             let id = format!("{}-target", config.id);
             endpoints.push(Endpoint::new(id, addr, 1));
-            addrs.push(addr);
         }
 
         let timeouts = UpstreamTimeouts {
@@ -207,66 +207,38 @@ pub fn build_upstreams(configs: &[UpstreamConfig]) -> UpstreamTable {
                 .map(std::time::Duration::from_millis),
         };
 
+        let target_sni = config.tls.as_ref().and_then(|t| t.sni.first().cloned());
+        let is_tls = config.tls.is_some();
+        let protocol_str = Arc::from(config.protocol.transport.as_str());
+        let inner = Upstream::new_explicit(&config.id, protocol_str, endpoints, timeouts);
+        let runtime_upstream = Arc::new(RuntimeUpstream::new(
+            inner,
+            target_sni,
+            is_tls,
+            config.protocol.streaming,
+        ));
+
         let transport = config.protocol.transport.to_ascii_lowercase();
         let app = config.protocol.application.to_ascii_lowercase();
 
         match app.as_str() {
             "grpc" => {
-                grpc_map.insert(
-                    config.id.clone(),
-                    Arc::new(GrpcUpstream::new(
-                        &config.id,
-                        addrs,
-                        timeouts,
-                        config.tls.clone(),
-                    )),
-                );
+                grpc_map.insert(config.id.clone(), runtime_upstream);
             }
             "http3" => {
-                http3_map.insert(
-                    config.id.clone(),
-                    Arc::new(Http3Upstream::new(
-                        &config.id,
-                        addrs,
-                        timeouts,
-                        config.tls.clone(),
-                    )),
-                );
+                http3_map.insert(config.id.clone(), runtime_upstream);
             }
             "http2" => {
-                http2_map.insert(
-                    config.id.clone(),
-                    Arc::new(Http2Upstream::new(
-                        &config.id,
-                        addrs,
-                        timeouts,
-                        config.tls.clone(),
-                    )),
-                );
+                http2_map.insert(config.id.clone(), runtime_upstream);
             }
             "http1" => {
-                http1_map.insert(
-                    config.id.clone(),
-                    Arc::new(Http1Upstream::new(
-                        &config.id,
-                        addrs,
-                        timeouts,
-                        config.tls.clone(),
-                    )),
-                );
+                http1_map.insert(config.id.clone(), runtime_upstream);
             }
             "raw" if transport == "udp" => {
-                udp_map.insert(
-                    config.id.clone(),
-                    Arc::new(UdpUpstream::new(&config.id, addrs, timeouts, None)),
-                );
+                udp_map.insert(config.id.clone(), runtime_upstream);
             }
             "raw" => {
-                let protocol: Arc<str> = Arc::from(config.protocol.transport.as_str());
-                let upstream = Arc::new(TcpUpstream::new_explicit(
-                    &config.id, protocol, endpoints, timeouts,
-                ));
-                tcp_map.insert(config.id.clone(), upstream);
+                tcp_map.insert(config.id.clone(), runtime_upstream);
             }
             other => {
                 tracing::warn!(

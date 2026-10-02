@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "hardware": {
+    "detected_ram_bytes": 8589934592,
+    "detected_cores": 8,
+    "worker_threads": 4,
+    "cpu_tier": "medium",
+    "memory_tier": "medium",
+    "tier": "medium"
+  },
+  "discovery": {
+    "max_dns_cache_capacity": 50000,
+    "max_lkg_capacity": 10000,
+    "dns_max_packet_size": 1024,
+    "query_timeout_ms": 2000,
+    "negative_ttl_secs": 10,
+    "positive_ttl_secs": 300
+  },
+  "transport": {
+    "io_workers": 4,
+    "max_active_connections": 200000,
+    "reconcile_channel_capacity": 128,
+    "tcp": {
+      "backlog": 2048,
+      "nodelay": true,
+      "keepalive_secs": 60,
+      "recv_buffer_size": 262144,
+      "send_buffer_size": 262144,
+      "copy_buffer_size": 16384
+    },
+    "udp": {
+      "recv_buffer_size": 1048576,
+      "send_buffer_size": 1048576
+    }
+  },
+  "tls": {
+    "session_cache_capacity": 8192,
+    "max_early_data_size": 8192,
+    "send_tls13_tickets": 4,
+    "handshake_timeout_secs": 5
+  }
+}

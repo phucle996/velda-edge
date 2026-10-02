@@ -25,15 +25,13 @@ pub mod hardware;
 pub mod l4;
 pub mod l7;
 pub mod lifecycle;
-pub mod limits;
 pub mod streaming;
 pub mod types;
 
 // -----------------------------------------------------------------------------
-// Ingress Limits & Streaming
+// Streaming
 // -----------------------------------------------------------------------------
 
-pub use limits::IngressLimits;
 pub use streaming::StreamingMode;
 
 // -----------------------------------------------------------------------------

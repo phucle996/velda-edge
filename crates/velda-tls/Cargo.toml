@@ -12,9 +12,29 @@ rustls-pki-types = "1"
 rustls-pemfile = "2.2"
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls"] }
 thiserror = "2.0"
-tokio = { version = "1.43", features = ["io-util", "sync", "net"] }
-tracing = "0.1"
+tokio = { version = "1.43", features = ["io-util", "time"] }
 
 [dev-dependencies]
 rcgen = "0.14.10"
 tokio = { version = "1.43", features = ["full", "test-util"] }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false
+
+[[bench]]
+name = "crypto_bench"
+harness = false
+

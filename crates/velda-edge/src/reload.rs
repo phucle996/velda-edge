@@ -15,7 +15,6 @@ use velda_transport::EngineHandle;
 
 use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_upstreams};
 use crate::error::EdgeError;
-use crate::runtime::composer::build_composer;
 use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, SharedRuntime};
@@ -81,12 +80,17 @@ pub async fn apply_reload(
         }
     }
 
-    // Recompile Composer only if listeners changed
-    let composer = if listeners_changed {
-        build_composer(&config.listeners)?
-    } else {
-        current.composer.clone()
-    };
+    // Validate cross-domain streaming policy if routes, upstreams, or listeners changed
+    if routes_changed || upstreams_changed || listeners_changed {
+        velda_sync::post_sync::validate_streaming_policy(
+            &config.listeners,
+            &config.routes,
+            &config.upstreams,
+        )
+        .map_err(|e| EdgeError::InvalidConfig {
+            detail: e.to_string(),
+        })?;
+    }
 
     // Recompile Router if routes, upstreams, or listeners changed
     let router = if routes_changed || upstreams_changed || listeners_changed {
@@ -132,7 +136,6 @@ pub async fn apply_reload(
     let candidate = Runtime {
         revision: new_revision,
         config,
-        composer,
         router,
         pipelines,
         upstreams,
@@ -177,7 +180,7 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::tempdir;
     use velda_sync::post_sync::listener::{
-        ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
+        ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
         compile_listeners_to_binary,
     };
 
@@ -196,10 +199,14 @@ mod tests {
             application: ListenerApplicationConfig {
                 protocol: "http1".into(),
                 version: None,
-                streaming: velda_sync::StreamingMode::Disabled,
+                streaming: velda_sync::StreamingMode::DISABLED,
             },
             tls: Default::default(),
-            limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
         }];
         let bin = compile_listeners_to_binary(&listeners, 10, [0u8; 32]).unwrap();
         std::fs::write(runtime_dir.join("listeners.bin"), bin).unwrap();
@@ -228,7 +235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_reload_with_tls_compiles_composer() {
+    async fn test_apply_reload_with_tls_compiles_tls_server() {
         use rcgen::generate_simple_self_signed;
         use velda_sync::post_sync::tls::{TlsConfig, compile_tls_to_binary};
 

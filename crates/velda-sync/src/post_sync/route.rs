@@ -244,8 +244,11 @@ pub fn compile_routes_to_binary(
     revision: u64,
     source_checksum: [u8; 32],
 ) -> Result<Vec<u8>, SyncError> {
-    // Single contiguous buffer: reserve header slot then serialize payload directly
-    let mut binary_output = vec![0; DOMAIN_HEADER_SIZE];
+    // OPTIMIZATION: Pre-allocate contiguous buffer with estimated capacity (header + 128B per route)
+    // to avoid multiple vector reallocations during streaming bincode serialization.
+    let estimated_cap = DOMAIN_HEADER_SIZE + routes.len().saturating_mul(128);
+    let mut binary_output = Vec::with_capacity(estimated_cap);
+    binary_output.resize(DOMAIN_HEADER_SIZE, 0);
 
     bincode::serialize_into(&mut binary_output, routes).map_err(|e| SyncError::Compile {
         domain: "routes".into(),

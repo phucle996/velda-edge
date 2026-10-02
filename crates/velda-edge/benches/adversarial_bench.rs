@@ -49,10 +49,8 @@ fn bench_unregistered_listener_flooding_storm(rt: &Runtime) {
         let idx = (i ^ (i >> 3)) % hostile_pool.len();
         let target = &hostile_pool[idx];
         let p_res = rt.pipelines.tcp_pipeline(target);
-        let c_res = rt.composer.get_listener(target);
         assert!(p_res.is_none());
-        assert!(c_res.is_none());
-        let _ = std::hint::black_box((p_res, c_res));
+        let _ = std::hint::black_box(p_res);
     }
 
     let elapsed = start.elapsed();

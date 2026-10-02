@@ -24,8 +24,11 @@ pub enum Body {
 impl Body {
     /// Returns `true` if the body is empty.
     #[inline]
-    pub const fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Bytes(b) => b.is_empty(),
+        }
     }
 
     /// Returns the length of the body in bytes.

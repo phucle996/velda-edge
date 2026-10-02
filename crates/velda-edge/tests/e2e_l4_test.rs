@@ -8,8 +8,7 @@ use tokio::sync::watch;
 
 use velda_edge::{EdgeConfig, EdgeSupervisor};
 use velda_sync::post_sync::listener::{
-    ListenerApplicationConfig, ListenerConfig, ListenerLimitsConfig, ListenerTransportConfig,
-    compile_listeners_to_binary,
+    ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig, compile_listeners_to_binary,
 };
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, compile_routes_to_binary,
@@ -58,10 +57,14 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: Default::default(),
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -73,7 +76,7 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "tcp".into(),
             application: "raw".into(),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         target: None,
         resolver: None,
@@ -194,10 +197,14 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: Default::default(),
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -208,7 +215,7 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         target: None,
         resolver: None,
@@ -323,10 +330,14 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         application: ListenerApplicationConfig {
             protocol: "raw".into(),
             version: None,
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         tls: Default::default(),
-        limits: ListenerLimitsConfig::new(10 * 1024 * 1024, 64 * 1024, 64, 30_000),
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
     }];
     let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
@@ -337,7 +348,7 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         protocol: UpstreamProtocolConfig {
             transport: "udp".into(),
             application: "raw".into(),
-            streaming: velda_sync::StreamingMode::Disabled,
+            streaming: velda_sync::StreamingMode::DISABLED,
         },
         target: None,
         resolver: None,

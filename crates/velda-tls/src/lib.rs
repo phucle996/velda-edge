@@ -12,12 +12,18 @@ pub mod engine;
 pub mod error;
 pub mod pem;
 pub mod server;
+pub mod version;
 
-pub use client::{ClientTlsConfig, TlsClientEngine};
+pub use client::{
+    ClientTlsConfig, InsecureCertVerifier, TlsClientEngine, build_insecure_client_config,
+    build_quic_client_config,
+};
 pub use engine::TlsEngine;
 pub use error::TlsError;
 pub use server::{
-    MAX_SESSION_CACHE_CAPACITY, MIN_SESSION_CACHE_CAPACITY, ServerTlsConfig, SniResolver,
-    TlsHandshakeInfo, TlsServerEngine, build_quic_server_config, optimal_session_cache_capacity,
-    probed_session_cache_capacity,
+    ServerTlsConfig, SniResolver, TlsHandshakeInfo, TlsServerEngine, TlsServerParams,
+    WILDCARD_PREFIX, build_quic_server_config, is_alpn_compatible, is_protocol_alpn_compatible,
+    normalize_alpn_bytes,
 };
+pub use tokio_rustls::client::TlsStream;
+pub use version::resolve_protocol_versions;

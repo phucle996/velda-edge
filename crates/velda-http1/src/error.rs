@@ -40,4 +40,7 @@ pub enum Http1Error {
 
     #[error("Streaming policy violation: {0}")]
     StreamingViolation(String),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }

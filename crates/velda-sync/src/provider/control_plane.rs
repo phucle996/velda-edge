@@ -21,12 +21,37 @@ pub mod proto {
 use proto::control_plane_sync_service_client::ControlPlaneSyncServiceClient;
 pub use proto::{DomainDelta, FetchDeltaRequest, FetchDeltaResponse, SyncStatus};
 
+/// Maximum allowed decompressed payload size (64 MB) to prevent zip-bomb denial-of-service / OOM attacks.
+pub const MAX_DECOMPRESSED_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
 /// Decompresses binary payload if Gzip-compressed (magic 0x1F, 0x8B), otherwise returns raw bytes.
+///
+/// OPTIMIZATION & HARDENING:
+/// 1. Pre-allocates destination buffer capacity based on compressed length to minimize incremental reallocations.
+/// 2. Applies `std::io::Read::take(MAX_DECOMPRESSED_PAYLOAD_SIZE + 1)` to prevent runaway memory exhaustion (Zip Bomb guard).
 pub fn decompress_payload(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-        let mut decoder = GzDecoder::new(data);
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)?;
+        let decoder = GzDecoder::new(data);
+        // OPTIMIZATION: Heuristic pre-allocation (4x compressed size clamped to reasonable bounds)
+        // to reduce multiple vector doubling/reallocations during streaming decompression.
+        let initial_capacity =
+            (data.len().saturating_mul(4)).clamp(1024, MAX_DECOMPRESSED_PAYLOAD_SIZE);
+        let mut decompressed = Vec::with_capacity(initial_capacity);
+
+        // OPTIMIZATION: Guard against zip bomb / infinite decompression stream by bounding reader.
+        let mut bounded_decoder = decoder.take((MAX_DECOMPRESSED_PAYLOAD_SIZE + 1) as u64);
+        bounded_decoder.read_to_end(&mut decompressed)?;
+
+        if decompressed.len() > MAX_DECOMPRESSED_PAYLOAD_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Decompressed payload exceeded safety cap of {} bytes (potential zip bomb detected)",
+                    MAX_DECOMPRESSED_PAYLOAD_SIZE
+                ),
+            ));
+        }
+
         Ok(decompressed)
     } else {
         Ok(data.to_vec())
