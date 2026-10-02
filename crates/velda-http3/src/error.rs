@@ -13,4 +13,16 @@ pub enum Http3Error {
 
     #[error("Frame parsing error: {0}")]
     Frame(String),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] http::Error),
+
+    #[error("Payload too large: {0} bytes exceeds max_body_size")]
+    PayloadTooLarge(usize),
+
+    #[error("Connection closed unexpectedly")]
+    ConnectionClosed,
+
+    #[error("Streaming policy violation: {0}")]
+    StreamingViolation(String),
 }

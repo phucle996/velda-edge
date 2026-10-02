@@ -17,19 +17,71 @@ use std::sync::{Arc, OnceLock, RwLock};
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::sync::Mutex;
-use velda_composer::{ComposedDatagram, ComposerContext};
 use velda_core::{L7Request, L7Response};
-use velda_http3::{Http3Engine, Http3UpstreamConnector};
+use velda_http3::Http3Engine;
 use velda_router::Http3RouteRequest;
 use velda_tls::TlsServerEngine;
+use velda_transport::{Datagram, UdpSocket};
 
 use crate::error::EdgeError;
+use crate::pipeline::context::IngressContext;
 use crate::runtime::SharedRuntime;
 
-/// Global registry holding long-lived HTTP/3 QUIC engines indexed by listener identifier.
-static H3_ENGINES: OnceLock<RwLock<HashMap<String, Arc<Mutex<Http3Engine>>>>> = OnceLock::new();
+/// Sharded container of HTTP/3 engines partitioned by remote peer address to eliminate
+/// lock contention on multi-core hardware topologies.
+#[derive(Clone)]
+pub struct H3EngineShards {
+    shards: Arc<Vec<Arc<Mutex<Http3Engine>>>>,
+}
 
-fn engines_table() -> &'static RwLock<HashMap<String, Arc<Mutex<Http3Engine>>>> {
+impl H3EngineShards {
+    /// Creates a sharded pool scaled dynamically to available hardware parallelism.
+    pub fn new(
+        quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
+        h3_config: velda_http3::Http3Config,
+    ) -> Self {
+        let count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 64)
+            .next_power_of_two();
+
+        let mut shards = Vec::with_capacity(count);
+        for _ in 0..count {
+            let engine = Http3Engine::new_with_config(quic_cfg.clone(), h3_config.clone());
+            shards.push(Arc::new(Mutex::new(engine)));
+        }
+        Self {
+            shards: Arc::new(shards),
+        }
+    }
+
+    /// Selects an engine shard deterministically by hashing remote peer IP and port.
+    #[inline]
+    pub fn get_shard_for_peer(&self, peer: SocketAddr) -> Arc<Mutex<Http3Engine>> {
+        let port = peer.port() as usize;
+        let ip_hash = match peer.ip() {
+            std::net::IpAddr::V4(v4) => u32::from_ne_bytes(v4.octets()) as usize,
+            std::net::IpAddr::V6(v6) => {
+                let o = v6.octets();
+                u32::from_ne_bytes([o[12], o[13], o[14], o[15]]) as usize
+            }
+        };
+        let idx = (port ^ ip_hash) % self.shards.len();
+        self.shards[idx].clone()
+    }
+
+    /// Returns the primary shard (shard 0) for lifecycle checks and API stability.
+    #[inline]
+    pub fn primary_shard(&self) -> Arc<Mutex<Http3Engine>> {
+        self.shards[0].clone()
+    }
+}
+
+/// Global registry holding long-lived HTTP/3 QUIC sharded engines indexed by listener identifier.
+static H3_ENGINES: OnceLock<RwLock<HashMap<String, H3EngineShards>>> = OnceLock::new();
+
+fn engines_table() -> &'static RwLock<HashMap<String, H3EngineShards>> {
     H3_ENGINES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -38,12 +90,15 @@ fn engines_table() -> &'static RwLock<HashMap<String, Arc<Mutex<Http3Engine>>>> 
 /// If an engine already exists for this listener, its active connection state is PRESERVED,
 /// ensuring zero-downtime and zero connection drop during configuration reloads!
 pub fn init_h3_engine(listener_id: &str, tls_server: &TlsServerEngine) -> Result<(), EdgeError> {
-    let quic_cfg = tls_server.build_quic_config().map_err(EdgeError::Tls)?;
+    let mut quic_cfg = tls_server.build_quic_config().map_err(EdgeError::Tls)?;
+    let h3_config = velda_http3::Http3Config::auto();
+    quic_cfg.transport = Arc::new(h3_config.build_transport_config());
+
     let table = engines_table();
     let mut write = table.write().unwrap();
     if !write.contains_key(listener_id) {
-        let engine = Http3Engine::new(Arc::new(quic_cfg));
-        write.insert(listener_id.to_string(), Arc::new(Mutex::new(engine)));
+        let pool = H3EngineShards::new(Arc::new(quic_cfg), h3_config);
+        write.insert(listener_id.to_string(), pool);
     }
     Ok(())
 }
@@ -71,8 +126,8 @@ pub fn get_or_init_h3_engine(
     runtime: &SharedRuntime,
 ) -> Option<Arc<Mutex<Http3Engine>>> {
     let table = engines_table();
-    if let Some(engine) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
-        return Some(engine);
+    if let Some(pool) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
+        return Some(pool.primary_shard());
     }
 
     let rt = runtime.load();
@@ -80,19 +135,51 @@ pub fn get_or_init_h3_engine(
     let _ = init_h3_engine(listener_id, tls_server);
 
     let table = engines_table();
-    table.read().ok()?.get(listener_id).cloned()
+    table
+        .read()
+        .ok()?
+        .get(listener_id)
+        .map(|p| p.primary_shard())
+}
+
+/// Retrieves the specific sharded engine for a given remote peer to eliminate lock contention.
+pub fn get_or_init_h3_engine_for_peer(
+    listener_id: &str,
+    peer: SocketAddr,
+    runtime: &SharedRuntime,
+) -> Option<Arc<Mutex<Http3Engine>>> {
+    let table = engines_table();
+    if let Some(pool) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
+        return Some(pool.get_shard_for_peer(peer));
+    }
+
+    let rt = runtime.load();
+    let tls_server = rt.tls_server.as_ref()?;
+    let _ = init_h3_engine(listener_id, tls_server);
+
+    let table = engines_table();
+    table
+        .read()
+        .ok()?
+        .get(listener_id)
+        .map(|p| p.get_shard_for_peer(peer))
 }
 
 /// Dispatches incoming UDP L7 handoff to the persistent HTTP/3 state machine.
 ///
 /// Ingests the packet, drives QUIC handshake/flow control, transmits outgoing datagrams,
 /// and passes decoded requests through `Http3Router`.
-pub async fn handle_http3_handoff(composed: ComposedDatagram, runtime: &SharedRuntime) {
-    let context = composed.context().clone();
+pub async fn handle_http3_handoff(
+    datagram: Datagram,
+    socket: Arc<UdpSocket>,
+    context: IngressContext,
+    _config: velda_http3::Http3Config,
+    runtime: &SharedRuntime,
+) {
     let listener_id = context.listener_id.clone();
-    let (datagram, socket) = composed.into_parts();
+    let peer = datagram.peer();
 
-    let Some(engine_lock) = get_or_init_h3_engine(&listener_id, runtime) else {
+    let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %context.peer,
@@ -102,47 +189,64 @@ pub async fn handle_http3_handoff(composed: ComposedDatagram, runtime: &SharedRu
     };
 
     let now = std::time::Instant::now();
-    let mut engine = engine_lock.lock().await;
-    let (outgoing, requests) = engine.handle_datagram(
-        now,
-        datagram.peer(),
-        Some(datagram.local_addr().ip()),
-        datagram.data(),
-    );
+    let (outgoing, requests) = {
+        let mut engine = engine_lock.lock().await;
+        engine.handle_datagram(
+            now,
+            datagram.peer(),
+            Some(datagram.local_addr().ip()),
+            datagram.data(),
+        )
+    };
 
-    // 1. Send all outgoing handshake / ACK datagrams
+    // 1. Send all outgoing handshake / ACK datagrams immediately outside the engine lock
     for pkt in outgoing {
         let _ = socket.send_to(&pkt.payload, pkt.peer).await;
     }
 
-    // 2. Process complete L7 requests through the router
+    // 2. Process complete L7 requests concurrently without blocking other datagrams
     for req_event in requests {
-        tracing::debug!(
-            method = %req_event.request.method,
-            path = %req_event.request.path(),
-            peer = %datagram.peer(),
-            "Decoded HTTP/3 request from UDP"
-        );
+        let socket = socket.clone();
+        let engine_lock = engine_lock.clone();
+        let context = context.clone();
+        let runtime = runtime.clone();
 
-        let response = process_http3_request(&req_event.request, &context, runtime).await;
+        tokio::spawn(async move {
+            tracing::debug!(
+                method = %req_event.request.method,
+                path = %req_event.request.path(),
+                peer = %context.peer,
+                "Decoded HTTP/3 request from UDP"
+            );
 
-        if let Ok(resp_pkts) =
-            engine.send_response(now, req_event.handle, req_event.stream_id, &response)
-        {
-            for pkt in resp_pkts {
-                let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+            let response = process_http3_request(&req_event.request, &context, &runtime).await;
+            let resp_now = std::time::Instant::now();
+            let resp_pkts = {
+                let mut engine = engine_lock.lock().await;
+                engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
+            };
+
+            if let Ok(pkts) = resp_pkts {
+                for pkt in pkts {
+                    let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                }
             }
-        }
+        });
     }
 }
 
 /// Dispatches incoming UDP L7 handoff for gRPC over QUIC to the persistent state machine.
-pub async fn handle_grpc_udp_handoff(composed: ComposedDatagram, runtime: &SharedRuntime) {
-    let context = composed.context().clone();
+pub async fn handle_grpc_udp_handoff(
+    datagram: Datagram,
+    socket: Arc<UdpSocket>,
+    context: IngressContext,
+    config: velda_grpc::GrpcConfig,
+    runtime: &SharedRuntime,
+) {
     let listener_id = context.listener_id.clone();
-    let (datagram, socket) = composed.into_parts();
+    let peer = datagram.peer();
 
-    let Some(engine_lock) = get_or_init_h3_engine(&listener_id, runtime) else {
+    let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %context.peer,
@@ -152,56 +256,173 @@ pub async fn handle_grpc_udp_handoff(composed: ComposedDatagram, runtime: &Share
     };
 
     let now = std::time::Instant::now();
-    let mut engine = engine_lock.lock().await;
-    let (outgoing, requests) = engine.handle_datagram(
-        now,
-        datagram.peer(),
-        Some(datagram.local_addr().ip()),
-        datagram.data(),
-    );
+    let (outgoing, requests) = {
+        let mut engine = engine_lock.lock().await;
+        engine.handle_datagram(
+            now,
+            datagram.peer(),
+            Some(datagram.local_addr().ip()),
+            datagram.data(),
+        )
+    };
 
+    // 1. Send all outgoing handshake / ACK datagrams immediately outside the engine lock
     for pkt in outgoing {
         let _ = socket.send_to(&pkt.payload, pkt.peer).await;
     }
 
+    // 2. Process complete gRPC requests concurrently without blocking other datagrams
     for req_event in requests {
-        tracing::debug!(
-            method = %req_event.request.method,
-            path = %req_event.request.path(),
-            peer = %datagram.peer(),
-            "Decoded gRPC request from UDP"
-        );
+        let socket = socket.clone();
+        let engine_lock = engine_lock.clone();
+        let context = context.clone();
+        let runtime = runtime.clone();
+        let config = config.clone();
 
-        let response =
-            crate::pipeline::l7::grpc::process_grpc_request(&req_event.request, &context, runtime)
-                .await;
+        tokio::spawn(async move {
+            tracing::debug!(
+                method = %req_event.request.method,
+                path = %req_event.request.path(),
+                peer = %context.peer,
+                "Decoded gRPC request from UDP"
+            );
 
-        if let Ok(resp_pkts) =
-            engine.send_response(now, req_event.handle, req_event.stream_id, &response)
-        {
-            for pkt in resp_pkts {
-                let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+            let response = crate::pipeline::l7::grpc::process_grpc_request(
+                &req_event.request,
+                &context,
+                &config,
+                &runtime,
+            )
+            .await;
+
+            let resp_now = std::time::Instant::now();
+            let resp_pkts = {
+                let mut engine = engine_lock.lock().await;
+                engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
+            };
+
+            if let Ok(pkts) = resp_pkts {
+                for pkt in pkts {
+                    let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                }
             }
+        });
+    }
+}
+
+/// In-memory upstream connection pool multiplexing multiple HTTP/3 streams over active connections.
+pub struct H3UpstreamPool {
+    clients: tokio::sync::RwLock<HashMap<(SocketAddr, String), velda_http3::Http3Client>>,
+}
+
+impl Default for H3UpstreamPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl H3UpstreamPool {
+    /// Creates a new empty [`H3UpstreamPool`].
+    pub fn new() -> Self {
+        Self {
+            clients: tokio::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Acquires an active multiplexed client for `(target, server_name)`, or connects and stores a new one.
+    pub async fn get_or_connect(
+        &self,
+        target: SocketAddr,
+        server_name: &str,
+        config: &velda_http3::Http3Config,
+    ) -> Result<velda_http3::Http3Client, EdgeError> {
+        let key = (target, server_name.to_string());
+
+        // 1. Fast path: check if existing connection is still active
+        {
+            let guard = self.clients.read().await;
+            if let Some(client) = guard.get(&key)
+                && !client.is_closed()
+            {
+                return Ok(client.clone());
+            }
+        }
+
+        // 2. Slow path: connect new HTTP/3 client and store in pool
+        let mut guard = self.clients.write().await;
+        if let Some(client) = guard.get(&key)
+            && !client.is_closed()
+        {
+            return Ok(client.clone());
+        }
+
+        let new_client = velda_http3::connect(target, server_name, config)
+            .await
+            .map_err(|e| {
+                EdgeError::Internal(format!(
+                    "Failed to connect HTTP/3 client to {target} (SNI {server_name}): {e}"
+                ))
+            })?;
+        guard.insert(key, new_client.clone());
+        Ok(new_client)
+    }
+
+    /// Forwards an HTTP/3 request using pooled connection with automatic retry on stale connection.
+    pub async fn send_request(
+        &self,
+        target: SocketAddr,
+        server_name: &str,
+        req: &L7Request,
+        config: &velda_http3::Http3Config,
+    ) -> Result<L7Response, EdgeError> {
+        let client = self.get_or_connect(target, server_name, config).await?;
+        match client.send_request_ref(req).await {
+            Ok(resp) => Ok(resp),
+            Err(velda_http3::Http3Error::ConnectionClosed) => {
+                // Connection was stale or closed by backend; evict from pool and retry once with fresh connection
+                {
+                    let key = (target, server_name.to_string());
+                    let mut guard = self.clients.write().await;
+                    guard.remove(&key);
+                }
+                let fresh_client = self.get_or_connect(target, server_name, config).await?;
+                fresh_client.send_request_ref(req).await.map_err(|e| {
+                    EdgeError::Internal(format!(
+                        "HTTP/3 upstream retry failed to {target} (SNI {server_name}): {e}"
+                    ))
+                })
+            }
+            Err(e) => Err(EdgeError::Internal(format!(
+                "HTTP/3 request failed to {target} (SNI {server_name}): {e}"
+            ))),
         }
     }
 }
 
-/// Forwards an HTTP/3 request over QUIC to the upstream target endpoint.
+static H3_UPSTREAM_POOL: OnceLock<H3UpstreamPool> = OnceLock::new();
+
+/// Returns a reference to the global HTTP/3 upstream connection multiplexing pool.
+pub fn get_h3_upstream_pool() -> &'static H3UpstreamPool {
+    H3_UPSTREAM_POOL.get_or_init(H3UpstreamPool::new)
+}
+
+/// Forwards an HTTP/3 request over QUIC to the upstream target endpoint using multiplexed connection pool.
 pub async fn forward_http3_request(
     req: &L7Request,
     target: SocketAddr,
+    target_sni: Option<&str>,
 ) -> Result<L7Response, EdgeError> {
-    Http3UpstreamConnector::forward_request(req, target)
+    let server_name = velda_http3::resolve_sni(req, &target, target_sni);
+    let config = velda_http3::Http3Config::auto();
+    get_h3_upstream_pool()
+        .send_request(target, &server_name, req, &config)
         .await
-        .map_err(|e| {
-            EdgeError::Internal(format!("Failed to forward HTTP/3 request to {target}: {e}"))
-        })
 }
 
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 pub async fn process_http3_request(
     req: &L7Request,
-    context: &ComposerContext,
+    context: &IngressContext,
     runtime: &SharedRuntime,
 ) -> L7Response {
     let host = req
@@ -234,10 +455,13 @@ pub async fn process_http3_request(
         );
     };
 
-    let target = if let Some(up) = rt.upstreams.http3.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
+    let (target, target_sni) = if let Some(up) = rt.upstreams.http3.get(&route.upstream_name) {
+        (
+            up.select_target().or_else(|| route.select_target()),
+            up.target_sni(),
+        )
     } else {
-        route.select_target()
+        (route.select_target(), None)
     };
 
     let Some(target) = target else {
@@ -257,7 +481,7 @@ pub async fn process_http3_request(
         );
     };
 
-    match forward_http3_request(req, target).await {
+    match forward_http3_request(req, target, target_sni).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(

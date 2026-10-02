@@ -4,6 +4,88 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::Http3Error;
 
+/// Canonical RFC 9114 HTTP/3 error codes.
+pub mod error_code {
+    /// No error or graceful shutdown.
+    pub const H3_NO_ERROR: u64 = 0x0100;
+    /// General protocol violation.
+    pub const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
+    /// Internal edge engine error.
+    pub const H3_INTERNAL_ERROR: u64 = 0x0102;
+    /// Stream creation error.
+    pub const H3_STREAM_CREATION_ERROR: u64 = 0x0103;
+    /// Critical stream closed unexpectedly.
+    pub const H3_CLOSED_CRITICAL_STREAM: u64 = 0x0104;
+    /// Frame received unexpectedly for stream state.
+    pub const H3_FRAME_UNEXPECTED: u64 = 0x0105;
+    /// Frame syntax or length error.
+    pub const H3_FRAME_ERROR: u64 = 0x0106;
+    /// Excessive load or resource exhaustion.
+    pub const H3_EXCESSIVE_LOAD: u64 = 0x0107;
+    /// Frame or stream ID exceeds permissible maximum.
+    pub const H3_ID_ERROR: u64 = 0x0108;
+    /// Invalid SETTINGS parameter or value.
+    pub const H3_SETTINGS_ERROR: u64 = 0x0109;
+    /// Missing mandatory SETTINGS frame.
+    pub const H3_MISSING_SETTINGS: u64 = 0x010a;
+    /// Request rejected before processing started.
+    pub const H3_REQUEST_REJECTED: u64 = 0x010b;
+    /// Request cancelled by client or stream abort.
+    pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
+    /// Incomplete request stream before FIN.
+    pub const H3_REQUEST_INCOMPLETE: u64 = 0x010d;
+    /// Malformed HTTP message framing.
+    pub const H3_MESSAGE_ERROR: u64 = 0x010e;
+    /// CONNECT request tunnel negotiation failure.
+    pub const H3_CONNECT_ERROR: u64 = 0x010f;
+    /// Peer requires ALPN or HTTP version fallback.
+    pub const H3_VERSION_FALLBACK: u64 = 0x0110;
+}
+
+/// Canonical RFC 9114 unidirectional stream types.
+pub mod stream_type {
+    /// Control stream carrying SETTINGS and connection-level frames (RFC 9114 Section 6.2.1).
+    pub const CONTROL: u64 = 0x00;
+    /// Push stream carrying server push responses (RFC 9114 Section 6.2.2).
+    pub const PUSH: u64 = 0x01;
+    /// QPACK encoder stream carrying dynamic table insertions (RFC 9204 Section 4.2).
+    pub const QPACK_ENCODER: u64 = 0x02;
+    /// QPACK decoder stream carrying table acknowledgments (RFC 9204 Section 4.2).
+    pub const QPACK_DECODER: u64 = 0x03;
+}
+
+/// Canonical RFC 9114 and RFC 9204 SETTINGS identifiers.
+pub mod settings_id {
+    /// Maximum capacity of QPACK dynamic table (RFC 9204 Section 5).
+    pub const QPACK_MAX_TABLE_CAPACITY: u64 = 0x01;
+    /// Maximum size of field section in bytes (RFC 9114 Section 7.2.4.1).
+    pub const MAX_FIELD_SECTION_SIZE: u64 = 0x06;
+    /// Maximum number of streams blocked on dynamic QPACK insertions (RFC 9204 Section 5).
+    pub const QPACK_BLOCKED_STREAMS: u64 = 0x07;
+    /// Extended CONNECT protocol support (RFC 9220).
+    pub const ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
+    /// HTTP/3 Datagram support (RFC 9297).
+    pub const H3_DATAGRAM: u64 = 0x0033_3877;
+}
+
+/// Canonical RFC 9114 HTTP/3 Frame type identifiers.
+pub mod frame_id {
+    /// DATA frame (RFC 9114 Section 7.2.1).
+    pub const DATA: u64 = 0x00;
+    /// HEADERS frame (RFC 9114 Section 7.2.2).
+    pub const HEADERS: u64 = 0x01;
+    /// CANCEL_PUSH frame (RFC 9114 Section 7.2.3).
+    pub const CANCEL_PUSH: u64 = 0x02;
+    /// SETTINGS frame (RFC 9114 Section 7.2.4).
+    pub const SETTINGS: u64 = 0x04;
+    /// PUSH_PROMISE frame (RFC 9114 Section 7.2.5).
+    pub const PUSH_PROMISE: u64 = 0x05;
+    /// GOAWAY frame (RFC 9114 Section 7.2.6).
+    pub const GOAWAY: u64 = 0x07;
+    /// MAX_PUSH_ID frame (RFC 9114 Section 7.2.7).
+    pub const MAX_PUSH_ID: u64 = 0x0d;
+}
+
 /// HTTP/3 Frame Types defined in RFC 9114.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
@@ -20,13 +102,13 @@ pub enum FrameType {
 impl From<u64> for FrameType {
     fn from(val: u64) -> Self {
         match val {
-            0x00 => Self::Data,
-            0x01 => Self::Headers,
-            0x03 => Self::CancelPush,
-            0x04 => Self::Settings,
-            0x05 => Self::PushPromise,
-            0x07 => Self::GoAway,
-            0x0d => Self::MaxPushId,
+            frame_id::DATA => Self::Data,
+            frame_id::HEADERS => Self::Headers,
+            frame_id::CANCEL_PUSH => Self::CancelPush,
+            frame_id::SETTINGS => Self::Settings,
+            frame_id::PUSH_PROMISE => Self::PushPromise,
+            frame_id::GOAWAY => Self::GoAway,
+            frame_id::MAX_PUSH_ID => Self::MaxPushId,
             other => Self::Unknown(other),
         }
     }
@@ -39,6 +121,8 @@ pub enum Http3Frame {
     Data(Bytes),
     /// HEADERS frame carrying QPACK-encoded headers.
     Headers(Bytes),
+    /// CANCEL_PUSH frame signaling push stream cancellation.
+    CancelPush(u64),
     /// SETTINGS frame carrying connection configuration pairs.
     Settings(Vec<(u64, u64)>),
     /// GOAWAY frame signaling graceful connection termination.
@@ -47,13 +131,16 @@ pub enum Http3Frame {
     Other { frame_type: u64, payload: Bytes },
 }
 
-/// Decodes an RFC 9000 variable-length integer from a byte buffer.
-pub fn decode_varint(buf: &mut BytesMut) -> Option<u64> {
-    if buf.is_empty() {
+/// Decodes an RFC 9000 variable-length integer from a borrowed byte slice.
+///
+/// Returns `Some((value, bytes_consumed))` without mutating or cloning the slice.
+#[inline]
+pub fn decode_varint_slice(slice: &[u8]) -> Option<(u64, usize)> {
+    if slice.is_empty() {
         return None;
     }
 
-    let first = buf[0];
+    let first = slice[0];
     let prefix = first >> 6;
     let length = match prefix {
         0 => 1,
@@ -63,17 +150,22 @@ pub fn decode_varint(buf: &mut BytesMut) -> Option<u64> {
         _ => unreachable!(),
     };
 
-    if buf.len() < length {
+    if slice.len() < length {
         return None;
     }
 
     let mut val = (first & 0x3f) as u64;
-    buf.advance(1);
-
-    for _ in 1..length {
-        val = (val << 8) | (buf.get_u8() as u64);
+    for &b in slice.iter().take(length).skip(1) {
+        val = (val << 8) | (b as u64);
     }
 
+    Some((val, length))
+}
+
+/// Decodes an RFC 9000 variable-length integer from a byte buffer.
+pub fn decode_varint(buf: &mut BytesMut) -> Option<u64> {
+    let (val, len) = decode_varint_slice(buf)?;
+    buf.advance(len);
     Some(val)
 }
 
@@ -102,35 +194,59 @@ pub fn encode_varint(val: u64, dst: &mut BytesMut) {
 }
 
 /// Decodes the next HTTP/3 frame from the buffer.
+///
+/// Inspects framing headers zero-copy via [`decode_varint_slice`] before consuming bytes.
 pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error> {
     if buf.is_empty() {
         return Ok(None);
     }
 
-    let mut peek_buf = buf.clone();
-    let Some(frame_type) = decode_varint(&mut peek_buf) else {
+    let Some((frame_type, type_len)) = decode_varint_slice(buf) else {
         return Ok(None);
     };
 
-    let Some(length) = decode_varint(&mut peek_buf) else {
+    let Some((length, len_len)) = decode_varint_slice(&buf[type_len..]) else {
         return Ok(None);
     };
 
-    let header_bytes = buf.len() - peek_buf.len();
-    if peek_buf.len() < length as usize {
+    let header_bytes = type_len + len_len;
+    let payload_len = length as usize;
+
+    if buf.len() < header_bytes + payload_len {
         return Ok(None); // Need more payload bytes
     }
 
     // Consume header from real buffer
     buf.advance(header_bytes);
-    let payload = buf.split_to(length as usize).freeze();
+    let payload = buf.split_to(payload_len).freeze();
 
     let frame = match FrameType::from(frame_type) {
         FrameType::Data => Http3Frame::Data(payload),
         FrameType::Headers => Http3Frame::Headers(payload),
+        FrameType::CancelPush => {
+            let id = decode_varint_slice(&payload).map(|(v, _)| v).unwrap_or(0);
+            Http3Frame::CancelPush(id)
+        }
+        FrameType::Settings => {
+            let mut settings = Vec::new();
+            let mut rem = &payload[..];
+            while !rem.is_empty() {
+                if let Some((id, id_len)) = decode_varint_slice(rem) {
+                    rem = &rem[id_len..];
+                    if let Some((val, val_len)) = decode_varint_slice(rem) {
+                        rem = &rem[val_len..];
+                        settings.push((id, val));
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            Http3Frame::Settings(settings)
+        }
         FrameType::GoAway => {
-            let mut p = BytesMut::from(&payload[..]);
-            let id = decode_varint(&mut p).unwrap_or(0);
+            let id = decode_varint_slice(&payload).map(|(v, _)| v).unwrap_or(0);
             Http3Frame::GoAway(id)
         }
         _ => Http3Frame::Other {
@@ -146,19 +262,26 @@ pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error
 pub fn encode_frame(frame: &Http3Frame, dst: &mut BytesMut) {
     match frame {
         Http3Frame::Data(data) => {
-            encode_varint(0x00, dst);
+            encode_varint(frame_id::DATA, dst);
             encode_varint(data.len() as u64, dst);
             dst.put_slice(data);
         }
         Http3Frame::Headers(headers) => {
-            encode_varint(0x01, dst);
+            encode_varint(frame_id::HEADERS, dst);
             encode_varint(headers.len() as u64, dst);
             dst.put_slice(headers);
+        }
+        Http3Frame::CancelPush(id) => {
+            let mut id_buf = BytesMut::new();
+            encode_varint(*id, &mut id_buf);
+            encode_varint(frame_id::CANCEL_PUSH, dst);
+            encode_varint(id_buf.len() as u64, dst);
+            dst.put_slice(&id_buf);
         }
         Http3Frame::GoAway(id) => {
             let mut id_buf = BytesMut::new();
             encode_varint(*id, &mut id_buf);
-            encode_varint(0x07, dst);
+            encode_varint(frame_id::GOAWAY, dst);
             encode_varint(id_buf.len() as u64, dst);
             dst.put_slice(&id_buf);
         }
@@ -168,7 +291,7 @@ pub fn encode_frame(frame: &Http3Frame, dst: &mut BytesMut) {
                 encode_varint(*k, &mut s_buf);
                 encode_varint(*v, &mut s_buf);
             }
-            encode_varint(0x04, dst);
+            encode_varint(frame_id::SETTINGS, dst);
             encode_varint(s_buf.len() as u64, dst);
             dst.put_slice(&s_buf);
         }
@@ -203,6 +326,10 @@ mod tests {
         for val in values {
             let mut buf = BytesMut::new();
             encode_varint(val, &mut buf);
+            let (decoded_slice, len) = decode_varint_slice(&buf).unwrap();
+            assert_eq!(decoded_slice, val);
+            assert_eq!(len, buf.len());
+
             let decoded = decode_varint(&mut buf).unwrap();
             assert_eq!(decoded, val);
             assert!(buf.is_empty());
@@ -223,6 +350,33 @@ mod tests {
     #[test]
     fn test_headers_frame_roundtrip() {
         let frame = Http3Frame::Headers(Bytes::from_static(b"qpack headers block"));
+        let mut buf = BytesMut::new();
+        encode_frame(&frame, &mut buf);
+
+        let decoded = decode_frame(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_settings_frame_roundtrip() {
+        let settings = vec![
+            (settings_id::QPACK_MAX_TABLE_CAPACITY, 4096),
+            (settings_id::MAX_FIELD_SECTION_SIZE, 65536),
+            (settings_id::QPACK_BLOCKED_STREAMS, 100),
+        ];
+        let frame = Http3Frame::Settings(settings);
+        let mut buf = BytesMut::new();
+        encode_frame(&frame, &mut buf);
+
+        let decoded = decode_frame(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_cancel_push_roundtrip() {
+        let frame = Http3Frame::CancelPush(42);
         let mut buf = BytesMut::new();
         encode_frame(&frame, &mut buf);
 
