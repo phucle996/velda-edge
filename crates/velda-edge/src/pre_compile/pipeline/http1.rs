@@ -56,21 +56,33 @@ pub fn enrich_forwarded_headers(
     host: Option<&str>,
 ) {
     let client_ip = context.peer.ip();
-    let client_ip_str = client_ip.to_string();
     let is_tls = context.tls.is_some();
     let proto = if is_tls { "https" } else { "http" };
+
+    // Format peer IP directly into stack buffer
+    let mut ip_buf = [0u8; 64];
+    let ip_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
+        let _ = write!(cursor, "{}", client_ip);
+        cursor.position() as usize
+    };
+    let client_ip_bytes = &ip_buf[..ip_len];
 
     // 1. Standard: X-Forwarded-For (De-facto industry standard / RFC 7239 §5.2)
     // Preserves proxy traversal chain by appending immediate peer IP.
     let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
     if let Some(existing) = headers.get(&x_forwarded_for) {
-        if let Ok(existing_str) = existing.to_str() {
-            let combined = format!("{existing_str}, {client_ip_str}");
-            if let Ok(val) = HeaderValue::from_str(&combined) {
+        if let Ok(existing_bytes) = existing.to_str() {
+            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + ip_len);
+            combined.extend_from_slice(existing_bytes.as_bytes());
+            combined.extend_from_slice(b", ");
+            combined.extend_from_slice(client_ip_bytes);
+            if let Ok(val) = HeaderValue::from_bytes(&combined) {
                 headers.insert(x_forwarded_for, val);
             }
         }
-    } else if let Ok(val) = HeaderValue::from_str(&client_ip_str) {
+    } else if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
         headers.insert(x_forwarded_for, val);
     }
 
@@ -83,8 +95,14 @@ pub fn enrich_forwarded_headers(
     // 3. Standard: X-Forwarded-Port (De-facto industry standard / RFC 7239 §5.4)
     // Advertises the ingress listener port so backends can generate correct 301/302 redirects.
     let x_forwarded_port = HeaderName::from_static("x-forwarded-port");
-    let port_str = context.local_addr.port().to_string();
-    if let Ok(val) = HeaderValue::from_str(&port_str) {
+    let mut port_buf = [0u8; 8];
+    let port_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
+        let _ = write!(cursor, "{}", context.local_addr.port());
+        cursor.position() as usize
+    };
+    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
         headers.insert(x_forwarded_port, val);
     }
 
@@ -101,7 +119,7 @@ pub fn enrich_forwarded_headers(
     // 5. Standard: X-Real-IP (Nginx de-facto standard)
     // Supplies immediate client IP directly without requiring upstream to parse CSV chains.
     let x_real_ip = HeaderName::from_static("x-real-ip");
-    if let Ok(val) = HeaderValue::from_str(&client_ip_str) {
+    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
         headers.insert(x_real_ip, val);
     }
 
@@ -109,28 +127,45 @@ pub fn enrich_forwarded_headers(
     // Format: for=<client>;proto=<http|https>;by=<local>;host=<host>
     // RFC 7239 §5.2: IPv6 addresses must be quoted with square brackets: "[...]"
     let forwarded = HeaderName::from_static("forwarded");
-    let rfc_for = match client_ip {
-        std::net::IpAddr::V4(v4) => v4.to_string(),
-        std::net::IpAddr::V6(v6) => format!("\"[{v6}]\""),
+    let mut fwd_buf = [0u8; 256];
+    let fwd_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
+        match client_ip {
+            std::net::IpAddr::V4(v4) => {
+                let _ = write!(cursor, "for={v4}");
+            }
+            std::net::IpAddr::V6(v6) => {
+                let _ = write!(cursor, "for=\"[{v6}]\"");
+            }
+        }
+        let _ = write!(cursor, ";proto={proto};by=");
+        match context.local_addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                let _ = write!(cursor, "{v4}");
+            }
+            std::net::IpAddr::V6(v6) => {
+                let _ = write!(cursor, "\"[{v6}]\"");
+            }
+        }
+        if let Some(h) = host {
+            let _ = write!(cursor, ";host=\"{h}\"");
+        }
+        cursor.position() as usize
     };
-    let rfc_by = match context.local_addr.ip() {
-        std::net::IpAddr::V4(v4) => v4.to_string(),
-        std::net::IpAddr::V6(v6) => format!("\"[{v6}]\""),
-    };
-
-    let mut entry = format!("for={rfc_for};proto={proto};by={rfc_by}");
-    if let Some(h) = host {
-        entry.push_str(&format!(";host=\"{h}\""));
-    }
+    let fwd_bytes = &fwd_buf[..fwd_len];
 
     if let Some(existing) = headers.get(&forwarded) {
-        if let Ok(existing_str) = existing.to_str() {
-            let combined = format!("{existing_str}, {entry}");
-            if let Ok(val) = HeaderValue::from_str(&combined) {
+        if let Ok(existing_bytes) = existing.to_str() {
+            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + fwd_len);
+            combined.extend_from_slice(existing_bytes.as_bytes());
+            combined.extend_from_slice(b", ");
+            combined.extend_from_slice(fwd_bytes);
+            if let Ok(val) = HeaderValue::from_bytes(&combined) {
                 headers.insert(forwarded, val);
             }
         }
-    } else if let Ok(val) = HeaderValue::from_str(&entry) {
+    } else if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
         headers.insert(forwarded, val);
     }
 }
@@ -254,15 +289,30 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        let host_str: Option<String> = head
+        let mut host_buf = [0u8; 128];
+        let mut host_len = 0;
+        let mut heap_host = None;
+        if let Some(h) = head
             .headers
             .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .or_else(|| head.uri.host())
-            .map(|s| s.to_string());
+        {
+            if h.len() <= host_buf.len() {
+                host_buf[..h.len()].copy_from_slice(h.as_bytes());
+                host_len = h.len();
+            } else {
+                heap_host = Some(h.to_string());
+            }
+        }
+        let host_str: Option<&str> = if host_len > 0 {
+            std::str::from_utf8(&host_buf[..host_len]).ok()
+        } else {
+            heap_host.as_deref()
+        };
 
         let mut http_req = Http1RouteRequest::new(head.path());
-        if let Some(ref h) = host_str {
+        if let Some(h) = host_str {
             http_req = http_req.with_host(h);
         }
         http_req = http_req.with_method(head.method.as_str());
@@ -307,7 +357,7 @@ pub async fn run_http1_loop<IO>(
         };
 
         let strategy = upstream.strategy;
-        enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
+        enrich_forwarded_headers(&mut head.headers, &context, host_str);
         let cfg = *conn.config();
 
         // HTTP/1.1 Pipeline Invariant (RFC 9112):
@@ -315,7 +365,7 @@ pub async fn run_http1_loop<IO>(
         // The upstream manages single-round Load Balancing selection, idle connection pooling,
         // pre-compiled TLS handshakes, error recovery, and streaming pipe execution.
         let pipe_result = upstream
-            .dispatch_pipe(host_str.as_deref(), |mut upstream_stream| {
+            .dispatch_pipe(host_str, |mut upstream_stream| {
                 let conn_ref = &mut conn;
                 async move {
                     match strategy {

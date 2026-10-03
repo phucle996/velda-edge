@@ -1861,6 +1861,7 @@ dependencies = [
  "h2",
  "http",
  "rcgen",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",

@@ -5,11 +5,11 @@
 //! - **Bidirectional proxying (2 chiều)**: Stateful flow/session tracking via [`UdpSessionTable`]
 //!   with ephemeral upstream sockets, automatic response routing back to client, and idle eviction.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use velda_core::TransportProtocol;
 use velda_transport::{Datagram, UdpSocket};
 
@@ -39,12 +39,12 @@ pub enum SessionAcquisition {
     },
 }
 
-pub type UdpSessionShard = RwLock<HashMap<UdpSessionKey, tokio::sync::mpsc::Sender<Vec<u8>>>>;
+pub type UdpSessionShard = RwLock<FxHashMap<UdpSessionKey, tokio::sync::mpsc::Sender<Vec<u8>>>>;
 
 /// In-memory sharded session table tracking active bidirectional L4 UDP flows with zero cross-client contention.
 pub struct UdpSessionTable {
     shards: Box<[UdpSessionShard]>,
-    hash_builder: std::collections::hash_map::RandomState,
+    hash_builder: FxBuildHasher,
     mask: usize,
 }
 
@@ -63,12 +63,12 @@ impl UdpSessionTable {
             .clamp(4, 64)
             .next_power_of_two();
         let shards = (0..count)
-            .map(|_| RwLock::new(HashMap::new()))
+            .map(|_| RwLock::new(FxHashMap::default()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
             shards,
-            hash_builder: std::collections::hash_map::RandomState::new(),
+            hash_builder: FxBuildHasher,
             mask: count - 1,
         }
     }

@@ -1,8 +1,8 @@
 //! Layer 7 gRPC Upstream managing streaming and unary proxying handoff.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use tokio::sync::RwLock;
 use velda_core::{L7Request, L7Response, StreamingMode};
@@ -26,7 +26,7 @@ pub struct GrpcUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcPipeStrategy,
     /// Persistent multiplexed gRPC client connection cache for Unary RPC reuse.
-    clients: RwLock<HashMap<SocketAddr, GrpcUpstreamConnector>>,
+    clients: RwLock<FxHashMap<SocketAddr, GrpcUpstreamConnector>>,
 }
 
 impl std::fmt::Debug for GrpcUpstream {
@@ -47,7 +47,7 @@ impl GrpcUpstream {
             inner,
             streaming,
             strategy,
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(FxHashMap::default()),
         }
     }
 
@@ -63,21 +63,19 @@ impl GrpcUpstream {
         server_stream: GrpcServerStream,
         config: &velda_grpc::GrpcConfig,
     ) -> Result<(), EdgeError> {
-        let stream_cell = Arc::new(std::sync::Mutex::new(Some(server_stream)));
+        let stream_cell = std::sync::Mutex::new(Some(server_stream));
         let strategy = self.strategy;
-        let config = config.clone();
 
         self.inner
             .execute(|endpoint| {
-                let cell = Arc::clone(&stream_cell);
-                let cfg = config.clone();
+                let cell = &stream_cell;
                 async move {
                     let stream = cell
                         .lock()
                         .unwrap()
                         .take()
                         .ok_or_else(|| "gRPC server stream already consumed".to_string())?;
-                    pipe_grpc_stream(stream, endpoint, strategy, &cfg)
+                    pipe_grpc_stream(stream, endpoint, strategy, config)
                         .await
                         .map_err(|e| e.to_string())
                 }

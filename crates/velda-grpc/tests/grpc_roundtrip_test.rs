@@ -13,7 +13,7 @@ use velda_grpc::status::GrpcStatus;
 #[tokio::test]
 async fn test_grpc_unary_one_way_roundtrip() {
     let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
-    let srv_config = test_config.clone();
+    let srv_config = test_config;
 
     // 1. Start mock gRPC server using GrpcServerConnection
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,7 +83,7 @@ async fn test_grpc_unary_one_way_roundtrip() {
 #[tokio::test]
 async fn test_grpc_server_trailers_only_response() {
     let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
-    let srv_config = test_config.clone();
+    let srv_config = test_config;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
@@ -134,8 +134,8 @@ async fn test_grpc_server_trailers_only_response() {
 #[tokio::test]
 async fn test_grpc_streaming_pipe_roundtrip() {
     let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
-    let srv_config = test_config.clone();
-    let pipe_config = test_config.clone();
+    let srv_config = test_config;
+    let pipe_config = test_config;
 
     // 1. Mock upstream gRPC backend
     let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -178,7 +178,7 @@ async fn test_grpc_streaming_pipe_roundtrip() {
             .await
             .unwrap();
         while let Some(server_stream) = conn.accept().await.unwrap() {
-            let cfg = pipe_config.clone();
+            let cfg = pipe_config;
             tokio::spawn(async move {
                 pipe_grpc_stream(server_stream, backend_addr, GrpcPipeStrategy::Duplex, &cfg)
                     .await
@@ -227,8 +227,8 @@ async fn test_grpc_streaming_pipe_roundtrip() {
 #[tokio::test]
 async fn test_grpc_buffered_pipe_roundtrip() {
     let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
-    let srv_config = test_config.clone();
-    let pipe_config = test_config.clone();
+    let srv_config = test_config;
+    let pipe_config = test_config;
 
     // 1. Mock upstream gRPC backend responding with 1 message
     let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -266,7 +266,7 @@ async fn test_grpc_buffered_pipe_roundtrip() {
             .await
             .unwrap();
         while let Some(server_stream) = conn.accept().await.unwrap() {
-            let cfg = pipe_config.clone();
+            let cfg = pipe_config;
             tokio::spawn(async move {
                 pipe_grpc_stream(
                     server_stream,
@@ -321,8 +321,8 @@ async fn test_grpc_buffered_pipe_roundtrip() {
 async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
     // Limit max_message_size to 32 bytes
     let restricted_config = GrpcConfig::for_tier(MemoryTier::Constrained).with_max_message_size(32);
-    let srv_config = restricted_config.clone();
-    let pipe_config = restricted_config.clone();
+    let srv_config = restricted_config;
+    let pipe_config = restricted_config;
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
@@ -336,7 +336,7 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
             .await
             .unwrap();
         while let Some(server_stream) = conn.accept().await.unwrap() {
-            let cfg = pipe_config.clone();
+            let cfg = pipe_config;
             tokio::spawn(async move {
                 let _ = pipe_grpc_stream(
                     server_stream,
@@ -383,8 +383,8 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
 #[tokio::test]
 async fn test_grpc_server_stream_pipe_roundtrip() {
     let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
-    let srv_config = test_config.clone();
-    let pipe_config = test_config.clone();
+    let srv_config = test_config;
+    let pipe_config = test_config;
 
     // 1. Mock upstream gRPC backend streaming responses
     let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -426,7 +426,7 @@ async fn test_grpc_server_stream_pipe_roundtrip() {
             .await
             .unwrap();
         while let Some(server_stream) = conn.accept().await.unwrap() {
-            let cfg = pipe_config.clone();
+            let cfg = pipe_config;
             tokio::spawn(async move {
                 pipe_grpc_stream(
                     server_stream,

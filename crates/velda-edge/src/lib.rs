@@ -20,7 +20,7 @@ pub mod pre_compile;
 pub mod reload;
 pub mod runtime_profile;
 
-pub use bootstrap::{EdgeSupervisor, start};
+pub use bootstrap::{EdgeSupervisor, bootstrap};
 pub use config::EdgeConfig;
 pub use error::EdgeError;
 pub use lifecycle::run_gateway;

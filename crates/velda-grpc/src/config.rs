@@ -6,7 +6,7 @@
 use velda_core::hardware::MemoryTier;
 
 /// Tunable settings for gRPC framing, metadata limits, and stream concurrency.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrpcConfig {
     /// Maximum length-prefixed message size in bytes.
     pub max_message_size: usize,

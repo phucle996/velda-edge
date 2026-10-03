@@ -99,28 +99,17 @@ impl Http1Upstream {
         Fut: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        let target_sni = self.target_sni.clone();
+        let target_sni = self.target_sni.as_deref();
         let is_tls = self.is_tls;
-        let host = host_override.map(|s| s.to_string());
-        let tls_engine = self.tls_engine.clone();
+        let host = host_override;
+        let tls_engine = self.tls_engine.as_deref();
 
         let stream = self
             .inner
-            .execute(|endpoint| {
-                let target_sni = target_sni.clone();
-                let host = host.clone();
-                let tls_engine = tls_engine.clone();
-                async move {
-                    velda_http1::client::connect_stream(
-                        endpoint,
-                        is_tls,
-                        target_sni.as_deref(),
-                        tls_engine.as_deref(),
-                        host.as_deref(),
-                    )
+            .execute(|endpoint| async move {
+                velda_http1::client::connect_stream(endpoint, is_tls, target_sni, tls_engine, host)
                     .await
                     .map_err(|e| e.to_string())
-                }
             })
             .await
             .map_err(EdgeError::Upstream)?;

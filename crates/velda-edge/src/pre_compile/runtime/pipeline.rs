@@ -4,7 +4,7 @@
 //! Each listener is mapped to a single `TcpPipeline` or `UdpPipeline` variant
 //! at compile time, so dispatch becomes a flat `match` on a lookup result.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use velda_core::{MemoryTier, StreamingMode};
 use velda_grpc::GrpcConfig;
@@ -153,8 +153,8 @@ impl UdpPipeline {
 /// Built once during bootstrap/reload and stored in `Runtime` for single-lookup O(1) hot-path resolution.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineTable {
-    tcp: HashMap<String, TcpPipeline>,
-    udp: HashMap<String, UdpPipeline>,
+    tcp: FxHashMap<String, TcpPipeline>,
+    udp: FxHashMap<String, UdpPipeline>,
 }
 
 impl PipelineTable {
@@ -163,8 +163,8 @@ impl PipelineTable {
     /// Resolves protocol limits from the configuration or falls back deterministically
     /// by host hardware [`MemoryTier`].
     pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
-        let mut tcp = HashMap::new();
-        let mut udp = HashMap::new();
+        let mut tcp = FxHashMap::default();
+        let mut udp = FxHashMap::default();
         let tier = velda_core::global_hardware_topology().memory_tier();
 
         for listener in listeners {

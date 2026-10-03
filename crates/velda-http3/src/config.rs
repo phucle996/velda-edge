@@ -6,7 +6,7 @@
 use velda_core::hardware::MemoryTier;
 
 /// Tunable settings for HTTP/3 framing, QPACK metadata limits, and stream concurrency.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http3Config {
     /// Maximum request/response body size in bytes.
     pub max_body_size: usize,

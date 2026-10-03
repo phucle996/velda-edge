@@ -10,9 +10,10 @@
 //! are NOT disconnected; new incoming requests on existing connections seamlessly
 //! evaluate against the latest swapped runtime snapshot.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
+
+use rustc_hash::FxHashMap;
 
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
@@ -48,7 +49,7 @@ impl H3EngineShards {
 
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
-            let engine = Http3Engine::new_with_config(quic_cfg.clone(), h3_config.clone());
+            let engine = Http3Engine::new_with_config(quic_cfg.clone(), h3_config);
             shards.push(Arc::new(Mutex::new(engine)));
         }
         Self {
@@ -79,10 +80,10 @@ impl H3EngineShards {
 }
 
 /// Global registry holding long-lived HTTP/3 QUIC sharded engines indexed by listener identifier.
-static H3_ENGINES: OnceLock<RwLock<HashMap<String, H3EngineShards>>> = OnceLock::new();
+static H3_ENGINES: OnceLock<RwLock<FxHashMap<String, H3EngineShards>>> = OnceLock::new();
 
-fn engines_table() -> &'static RwLock<HashMap<String, H3EngineShards>> {
-    H3_ENGINES.get_or_init(|| RwLock::new(HashMap::new()))
+fn engines_table() -> &'static RwLock<FxHashMap<String, H3EngineShards>> {
+    H3_ENGINES.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
 /// Initializes or updates the HTTP/3 QUIC engine for the given listener.
@@ -277,7 +278,6 @@ pub async fn handle_grpc_udp_handoff(
         let engine_lock = engine_lock.clone();
         let context = context.clone();
         let runtime = runtime.clone();
-        let config = config.clone();
 
         tokio::spawn(async move {
             tracing::debug!(

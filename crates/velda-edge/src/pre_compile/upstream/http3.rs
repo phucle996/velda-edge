@@ -1,8 +1,9 @@
 //! Layer 7 HTTP/3 Upstream managing persistent QUIC client multiplexing (RFC 9114) and request handoff.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use tokio::sync::RwLock;
 use velda_core::{L7Request, L7Response, StreamingMode};
@@ -27,7 +28,7 @@ pub struct Http3Upstream {
     pub strategy: Http3PipeStrategy,
     /// [PRE-COMPILED STATE]: Lock-free persistent HTTP/3 (QUIC) multiplexed client connection cache.
     /// Manages persistent UDP datagram streams to eliminate handshake delays.
-    clients: RwLock<HashMap<SocketAddr, velda_http3::Http3Client>>,
+    clients: RwLock<FxHashMap<SocketAddr, velda_http3::Http3Client>>,
 }
 
 impl std::fmt::Debug for Http3Upstream {
@@ -50,7 +51,7 @@ impl Http3Upstream {
             target_sni,
             streaming,
             strategy,
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(FxHashMap::default()),
         }
     }
 

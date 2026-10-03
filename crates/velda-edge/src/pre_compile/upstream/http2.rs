@@ -1,10 +1,9 @@
 //! Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe handoff.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
 use velda_core::StreamingMode;
 use velda_http2::pipe::Http2PipeStrategy;
@@ -26,7 +25,7 @@ pub struct Http2Upstream {
     pub strategy: Http2PipeStrategy,
     /// [PRE-COMPILED STATE]: Lock-free persistent HTTP/2 multiplexed client connection cache.
     /// Reuses existing established H2 streams across hundreds of concurrent requests.
-    clients: RwLock<HashMap<SocketAddr, h2::client::SendRequest<Bytes>>>,
+    clients: RwLock<FxHashMap<SocketAddr, h2::client::SendRequest<Bytes>>>,
 }
 
 impl std::fmt::Debug for Http2Upstream {
@@ -47,7 +46,7 @@ impl Http2Upstream {
             inner,
             streaming,
             strategy,
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(FxHashMap::default()),
         }
     }
 
@@ -71,11 +70,11 @@ impl Http2Upstream {
         Fut: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        let pipe_cell = Arc::new(std::sync::Mutex::new(Some(pipe)));
+        let pipe_cell = std::sync::Mutex::new(Some(pipe));
 
         self.inner
             .execute(|endpoint| {
-                let cell = Arc::clone(&pipe_cell);
+                let cell = &pipe_cell;
                 async move {
                     let existing_client = {
                         let guard = self.clients.read().await;

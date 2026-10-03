@@ -4,8 +4,7 @@
 //! 1. Reads Last Known Good (LKG) binary artifacts from disk.
 //! 2. Compiles initial in-memory [`Runtime`] snapshot into [`SharedRuntime`].
 //! 3. Binds declarative ingress ports onto [`TrafficEngine`].
-//! 4. Launches the UDS IPC server for live reloads.
-//! 5. Supervises execution until process termination signal.
+//! 4. Prepares [`EdgeSupervisor`] for execution.
 
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
@@ -19,62 +18,24 @@ use crate::runtime_profile::{RuntimeProfile, resolve_runtime_profile};
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
 pub struct EdgeSupervisor {
-    config: EdgeConfig,
-    hardware: HardwareTopology,
-    runtime_profile: RuntimeProfile,
-    shared_runtime: SharedRuntime,
-    engine: TrafficEngine,
+    pub config: EdgeConfig,
+    pub hardware: HardwareTopology,
+    pub runtime_profile: RuntimeProfile,
+    pub shared_runtime: SharedRuntime,
+    pub engine: TrafficEngine,
 }
 
 impl EdgeSupervisor {
     /// Cold-starts the supervisor from disk artifacts according to specified configuration.
+    #[inline]
     pub fn bootstrap(config: EdgeConfig) -> Result<Self, EdgeError> {
-        // Probe host hardware topology once during cold-start bootstrap and cache in RAM
-        let hardware = HardwareTopology::probe();
-        let _ = init_hardware_topology(hardware);
+        bootstrap(config)
+    }
 
-        let runtime_dir = config.runtime_dir();
-
-        // Resolve runtime profile: file > probe fallback > write-back
-        let runtime_profile = resolve_runtime_profile(&runtime_dir, &hardware);
-
-        // Cold-start runtime snapshot assembly delegated entirely to reload subsystem
-        let initial_runtime = load_initial_runtime(&runtime_dir, &runtime_profile)?;
-
-        let initial_listeners = initial_runtime.listener_count();
-        let initial_routes = initial_runtime.route_count();
-
-        let shared_runtime = new_shared_runtime(initial_runtime);
-
-        // Populate TrafficEngine with declared ingress bindings tuned to runtime profile
-        let mut engine = TrafficEngine::new();
-        let tcp_cfg = runtime_profile.to_tcp_listener_config();
-        let udp_cfg = runtime_profile.to_udp_socket_config();
-        let bindings = shared_runtime
-            .load()
-            .active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
-        for binding in bindings {
-            engine.add_binding(binding)?;
-        }
-
-        tracing::info!(
-            listeners = initial_listeners,
-            routes = initial_routes,
-            storage = %config.storage_dir.display(),
-            cores = hardware.available_cores,
-            workers = runtime_profile.transport.io_workers,
-            cpu_tier = hardware.cpu_tier().as_str(),
-            memory_tier = hardware.memory_tier().as_str(),
-            "Velda Edge supervisor bootstrapped successfully"
-        );
-
-        Ok(Self {
-            config,
-            hardware,
-            runtime_profile,
-            shared_runtime,
-            engine,
-        })
+    /// Runs the edge gateway until `shutdown` is signaled.
+    #[inline]
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), EdgeError> {
+        crate::lifecycle::run_gateway(self.engine, self.shared_runtime, self.config, shutdown).await
     }
 
     /// Returns the hardware topology probed during cold-start bootstrap.
@@ -90,47 +51,58 @@ impl EdgeSupervisor {
     }
 
     /// Returns a reference to the active shared runtime container.
+    #[inline]
     pub fn shared_runtime(&self) -> &SharedRuntime {
         &self.shared_runtime
     }
-
-    /// Runs the edge gateway until `shutdown` is signaled.
-    pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), EdgeError> {
-        crate::lifecycle::run_gateway(self.engine, self.shared_runtime, self.config, shutdown).await
-    }
 }
 
-/// Convenience function to bootstrap and run the edge process with OS signal termination.
-pub async fn start(config: EdgeConfig) -> Result<(), EdgeError> {
-    let supervisor = EdgeSupervisor::bootstrap(config)?;
+/// Cold-starts the supervisor from disk artifacts according to specified configuration.
+pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
+    // Probe host hardware topology once during cold-start bootstrap and cache in RAM
+    let hardware = HardwareTopology::probe();
+    let _ = init_hardware_topology(hardware);
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runtime_dir = config.runtime_dir();
 
-    // Trap Ctrl+C (SIGINT) and SIGTERM signals for graceful shutdown
-    tokio::spawn(async move {
-        let ctrl_c = async {
-            let _ = tokio::signal::ctrl_c().await;
-        };
+    // Resolve runtime profile: file > probe fallback > write-back
+    let runtime_profile = resolve_runtime_profile(&runtime_dir, &hardware);
 
-        #[cfg(unix)]
-        let terminate = async {
-            if let Ok(mut sig) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            {
-                sig.recv().await;
-            }
-        };
+    // Cold-start runtime snapshot assembly delegated entirely to reload subsystem
+    let initial_runtime = load_initial_runtime(&runtime_dir, &runtime_profile)?;
 
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
+    let initial_listeners = initial_runtime.listener_count();
+    let initial_routes = initial_runtime.route_count();
 
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("Received SIGINT (Ctrl+C); initiating graceful edge shutdown"),
-            _ = terminate => tracing::info!("Received SIGTERM; initiating graceful edge shutdown"),
-        }
+    let shared_runtime = new_shared_runtime(initial_runtime);
 
-        let _ = shutdown_tx.send(true);
-    });
+    // Populate TrafficEngine with declared ingress bindings tuned to runtime profile
+    let mut engine = TrafficEngine::new();
+    let tcp_cfg = runtime_profile.to_tcp_listener_config();
+    let udp_cfg = runtime_profile.to_udp_socket_config();
+    let bindings = shared_runtime
+        .load()
+        .active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
+    for binding in bindings {
+        engine.add_binding(binding)?;
+    }
 
-    supervisor.run(shutdown_rx).await
+    tracing::info!(
+        listeners = initial_listeners,
+        routes = initial_routes,
+        storage = %config.storage_dir.display(),
+        cores = hardware.available_cores,
+        workers = runtime_profile.transport.io_workers,
+        cpu_tier = hardware.cpu_tier().as_str(),
+        memory_tier = hardware.memory_tier().as_str(),
+        "Velda Edge supervisor bootstrapped successfully"
+    );
+
+    Ok(EdgeSupervisor {
+        config,
+        hardware,
+        runtime_profile,
+        shared_runtime,
+        engine,
+    })
 }

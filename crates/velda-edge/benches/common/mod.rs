@@ -211,16 +211,28 @@ pub fn build_mock_upstreams(count: usize) -> Vec<UpstreamConfig> {
     let mut upstreams = Vec::with_capacity(count);
 
     for i in 0..count {
+        let (proto, transport) = match i {
+            0 => ("http1", "tcp"),
+            1 => ("http2", "tcp"),
+            2 => ("http3", "udp"),
+            3 => ("grpc", "tcp"),
+            _ => match i % 10 {
+                0..=3 => ("http1", "tcp"),
+                4..=6 => ("http2", "tcp"),
+                7..=8 => ("http3", "udp"),
+                _ => ("grpc", "tcp"),
+            },
+        };
         let port = (20_000 + (i % 40_000)) as u16;
         let addr = format!("10.0.0.1:{port}");
-        let id = format!("upstream_{i:04}");
+        let id = format!("upstream_{proto}_{i:04}");
 
         upstreams.push(UpstreamConfig {
             id,
             mode: "endpoints".into(),
             protocol: UpstreamProtocolConfig {
-                transport: "tcp".into(),
-                application: "http1".into(),
+                transport: transport.into(),
+                application: proto.into(),
                 streaming: velda_sync::StreamingMode::DISABLED,
             },
             target: None,
@@ -257,7 +269,12 @@ pub fn build_mock_routes(
 
     for i in 0..count {
         let listener = &listeners[i % listeners.len()];
-        let upstream = &upstreams[i % upstreams.len()];
+        let Some(matching_upstream) = upstreams
+            .iter()
+            .find(|u| u.protocol.application == listener.application.protocol)
+        else {
+            continue;
+        };
         let id = format!("route_{i:04}");
         let prefix = format!("/api/v1/resource_{:03}", i % 50);
 
@@ -271,7 +288,7 @@ pub fn build_mock_routes(
                 ..Default::default()
             },
             timeouts: RouteTimeouts::default(),
-            upstream: upstream.id.clone(),
+            upstream: matching_upstream.id.clone(),
             plugins: vec![],
         });
     }

@@ -7,7 +7,7 @@
 use velda_core::hardware::MemoryTier;
 
 /// Tunable settings for HTTP/2 connection parameters, framing, flow control, and safety limits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http2Config {
     /// Maximum request/response body size in bytes.
     pub max_body_size: usize,

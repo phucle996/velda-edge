@@ -105,7 +105,7 @@ pub async fn run_grpc_loop<IO>(
             Ok(Some(server_stream)) => {
                 let ctx = context.clone();
                 let rt = runtime.clone();
-                let cfg = config.clone();
+                let cfg = config;
 
                 tokio::spawn(async move {
                     dispatch_grpc_request_stream(server_stream, &ctx, &cfg, &rt).await;

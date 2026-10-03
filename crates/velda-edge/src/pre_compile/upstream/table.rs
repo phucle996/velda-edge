@@ -1,9 +1,9 @@
 //! Protocol-isolated in-memory upstream tables and snapshot builder.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use velda_core::Endpoint;
 use velda_discovery::Discovery;
 use velda_sync::post_sync::upstream::UpstreamConfig;
@@ -23,7 +23,7 @@ use super::udp::UdpUpstream;
 /// Pre-constructed during snapshot build; maps upstream_id -> Arc<T>.
 pub struct SubUpstreamTable<T> {
     /// [PRE-COMPILED]: In-memory mapping of upstream identifiers to protocol processors.
-    entries: HashMap<String, Arc<T>>,
+    entries: FxHashMap<String, Arc<T>>,
 }
 
 impl<T> Clone for SubUpstreamTable<T> {
@@ -37,7 +37,7 @@ impl<T> Clone for SubUpstreamTable<T> {
 impl<T> Default for SubUpstreamTable<T> {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
         }
     }
 }
@@ -52,7 +52,7 @@ impl<T> std::fmt::Debug for SubUpstreamTable<T> {
 
 impl<T> SubUpstreamTable<T> {
     /// Creates a new protocol sub-table from an owned entry map.
-    pub fn new(entries: HashMap<String, Arc<T>>) -> Self {
+    pub fn new(entries: FxHashMap<String, Arc<T>>) -> Self {
         Self { entries }
     }
 
@@ -119,12 +119,12 @@ pub fn build_upstreams(
     configs: &[UpstreamConfig],
     tls_client: Option<&TlsClientEngine>,
 ) -> UpstreamTable {
-    let mut tcp_map = HashMap::new();
-    let mut udp_map = HashMap::new();
-    let mut http1_map = HashMap::new();
-    let mut http2_map = HashMap::new();
-    let mut http3_map = HashMap::new();
-    let mut grpc_map = HashMap::new();
+    let mut tcp_map = FxHashMap::default();
+    let mut udp_map = FxHashMap::default();
+    let mut http1_map = FxHashMap::default();
+    let mut http2_map = FxHashMap::default();
+    let mut http3_map = FxHashMap::default();
+    let mut grpc_map = FxHashMap::default();
 
     let shared_tls_client = tls_client.map(|c| Arc::new(c.clone()));
 
