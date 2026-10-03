@@ -1,7 +1,7 @@
 //! Canonical gRPC status codes and trailer metadata helpers.
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use velda_core::L7Response;
 
 /// Standard gRPC canonical status codes according to gRPC Core specification.
@@ -86,11 +86,11 @@ impl GrpcStatus {
     pub fn to_trailers(self, message: Option<&str>) -> HeaderMap {
         let mut map = HeaderMap::with_capacity(2);
         map.insert(
-            HeaderName::from_static("grpc-status"),
+            crate::wire::GrpcWire::STATUS_NAME,
             HeaderValue::from_static(self.code_str()),
         );
         if let Some(val) = message.and_then(|m| HeaderValue::from_str(m).ok()) {
-            map.insert(HeaderName::from_static("grpc-message"), val);
+            map.insert(crate::wire::GrpcWire::MESSAGE_NAME, val);
         }
         map
     }
@@ -98,14 +98,14 @@ impl GrpcStatus {
     /// Constructs a standard gRPC Trailers-Only `L7Response`.
     pub fn to_l7_response(self, message: Option<&str>) -> L7Response {
         let mut resp = L7Response::empty(StatusCode::OK)
-            .with_header(CONTENT_TYPE, HeaderValue::from_static("application/grpc"))
+            .with_header(CONTENT_TYPE, crate::wire::GrpcWire::CONTENT_TYPE_VALUE)
             .with_header(
-                HeaderName::from_static("grpc-status"),
+                crate::wire::GrpcWire::STATUS_NAME,
                 HeaderValue::from_static(self.code_str()),
             );
 
         if let Some(val) = message.and_then(|m| HeaderValue::from_str(m).ok()) {
-            resp = resp.with_header(HeaderName::from_static("grpc-message"), val);
+            resp = resp.with_header(crate::wire::GrpcWire::MESSAGE_NAME, val);
         }
         resp
     }

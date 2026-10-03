@@ -188,7 +188,8 @@ RuntimeSnapshot (Gen N, Revision: u64)
 │   └── grpc:  upstream_name ──> GrpcUpstream
 │       ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
 │       ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved Target SNI for gRPCS)
-│       └── [PRE-COMPILED] streaming ──────────> StreamingMode (Unary | ServerStream | ClientStream | Duplex)
+│       ├── [PRE-COMPILED] streaming ──────────> StreamingMode
+│       └── [PRE-COMPILED] strategy ───────────> GrpcPipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
 │
 └── 4. rt.tls (TLS Engines) ──────────────────────────── [Pre-Compiled Cryptographic Contexts]
     │

@@ -1,11 +1,11 @@
 //! Upstream gRPC client connector for `velda-upstream` and connection pool.
 //!
-//! Owns connection establishment, HTTP/2 client framing, and both Unary (1 chiều)
+//! Owns connection establishment, HTTP/2 client framing, and both Unary
 //! and Streaming request dispatch to physical backend endpoints.
 
 use bytes::{Bytes, BytesMut};
 use h2::SendStream;
-use h2::client::{Connection, ResponseFuture, SendRequest, handshake};
+use h2::client::{Connection, ResponseFuture, SendRequest};
 use http::Version;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -15,16 +15,32 @@ use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 
 /// Active gRPC client connector to an upstream backend endpoint.
+#[derive(Clone)]
 pub struct GrpcUpstreamConnector {
     send_request: SendRequest<Bytes>,
 }
 
 impl GrpcUpstreamConnector {
-    /// Establishes a new HTTP/2 connection to the upstream target backend endpoint.
-    pub async fn connect(target: SocketAddr) -> Result<Self, GrpcError> {
+    /// Polls or awaits readiness of the underlying HTTP/2 connection to accept a new request stream.
+    pub async fn ready(&mut self) -> Result<(), GrpcError> {
+        let ready_send = self
+            .send_request
+            .clone()
+            .ready()
+            .await
+            .map_err(GrpcError::H2)?;
+        self.send_request = ready_send;
+        Ok(())
+    }
+    /// Establishes a new HTTP/2 connection to the upstream target backend endpoint
+    /// applying limits from [`GrpcConfig`].
+    pub async fn connect(target: SocketAddr, config: &GrpcConfig) -> Result<Self, GrpcError> {
         let stream = TcpStream::connect(target).await.map_err(GrpcError::Io)?;
+        let mut builder = h2::client::Builder::default();
+        builder.max_header_list_size(config.max_header_size as u32);
+
         let (send_request, connection): (SendRequest<Bytes>, Connection<TcpStream, Bytes>) =
-            handshake(stream).await.map_err(GrpcError::H2)?;
+            builder.handshake(stream).await.map_err(GrpcError::H2)?;
 
         // Drive background H2 connection management
         tokio::spawn(async move {
@@ -47,7 +63,7 @@ impl GrpcUpstreamConnector {
             .map_err(GrpcError::H2)
     }
 
-    /// Invokes a 1 chiều (Unary) gRPC request and returns the upstream `L7Response`.
+    /// Invokes a Unary gRPC request and returns the upstream `L7Response`.
     ///
     /// Seamlessly forwards request payload, waits for response headers, reads response LPM frame,
     /// and collects trailers (`grpc-status`). Enforces `max_message_size` from [`GrpcConfig`]
@@ -58,8 +74,8 @@ impl GrpcUpstreamConnector {
         config: &GrpcConfig,
     ) -> Result<L7Response, GrpcError> {
         let mut request_builder = http::Request::builder()
-            .method(req.method.clone())
-            .uri(req.uri.clone())
+            .method(&req.method)
+            .uri(&req.uri)
             .version(Version::HTTP_2);
 
         for (name, val) in &req.headers {
@@ -80,16 +96,41 @@ impl GrpcUpstreamConnector {
         let response = response_future.await.map_err(GrpcError::H2)?;
         let (parts, mut body_stream) = response.into_parts();
         let max_body = config.max_message_size;
-        let mut resp_body = BytesMut::new();
 
-        while let Some(chunk_res) = body_stream.data().await {
-            let chunk = chunk_res.map_err(GrpcError::H2)?;
-            resp_body.extend_from_slice(&chunk);
-            let _ = body_stream.flow_control().release_capacity(chunk.len());
-            if resp_body.len() > max_body {
-                return Err(GrpcError::PayloadTooLarge(resp_body.len()));
+        // Zero-allocation fast path for single-chunk Unary responses
+        let body = if body_stream.is_end_stream() {
+            Body::Empty
+        } else if let Some(first_chunk) = body_stream.data().await {
+            let chunk = first_chunk.map_err(GrpcError::H2)?;
+            let len = chunk.len();
+            if len > max_body {
+                let _ = body_stream.flow_control().release_capacity(len);
+                return Err(GrpcError::PayloadTooLarge(len));
             }
-        }
+            let _ = body_stream.flow_control().release_capacity(len);
+
+            if body_stream.is_end_stream() {
+                Body::Bytes(chunk)
+            } else {
+                let mut resp_body = BytesMut::with_capacity(len * 2);
+                resp_body.extend_from_slice(&chunk);
+
+                while let Some(chunk_res) = body_stream.data().await {
+                    let chunk = chunk_res.map_err(GrpcError::H2)?;
+                    let len = chunk.len();
+                    if resp_body.len() + len > max_body {
+                        let _ = body_stream.flow_control().release_capacity(len);
+                        return Err(GrpcError::PayloadTooLarge(resp_body.len() + len));
+                    }
+                    resp_body.extend_from_slice(&chunk);
+                    let _ = body_stream.flow_control().release_capacity(len);
+                }
+
+                Body::Bytes(resp_body.freeze())
+            }
+        } else {
+            Body::Empty
+        };
 
         let mut headers = parts.headers;
         if let Some(trailers) = body_stream.trailers().await.map_err(GrpcError::H2)? {
@@ -100,27 +141,11 @@ impl GrpcUpstreamConnector {
             }
         }
 
-        let body = if resp_body.is_empty() {
-            Body::Empty
-        } else {
-            Body::Bytes(resp_body.freeze())
-        };
-
         Ok(L7Response::new(
             parts.status,
             Version::HTTP_2,
             headers,
             body,
         ))
-    }
-
-    /// Helper that connects to `target` and executes a 1 chiều (Unary) gRPC request in one call.
-    pub async fn forward_unary(
-        req: &L7Request,
-        target: SocketAddr,
-        config: &GrpcConfig,
-    ) -> Result<L7Response, GrpcError> {
-        let mut connector = Self::connect(target).await?;
-        connector.invoke_unary(req, config).await
     }
 }

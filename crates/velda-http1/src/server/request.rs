@@ -97,29 +97,6 @@ impl Http1Request {
         }
     }
 
-    /// Returns a shared reference to the request head metadata.
-    #[inline]
-    pub fn head(&self) -> Http1RequestHead {
-        Http1RequestHead {
-            method: self.method.clone(),
-            uri: self.uri.clone(),
-            version: self.version,
-            headers: self.headers.clone(),
-        }
-    }
-
-    /// Fast-path lookup for request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
-
-    /// Fast-path lookup for the `Host` header.
-    #[inline]
-    pub fn host(&self) -> Option<&HeaderValue> {
-        self.headers.get(http::header::HOST)
-    }
-
     /// Adds a header to the request.
     #[inline]
     pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {

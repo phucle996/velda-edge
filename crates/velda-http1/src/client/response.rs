@@ -101,16 +101,6 @@ impl Http1Response {
         }
     }
 
-    /// Returns a shared reference to the response head metadata.
-    #[inline]
-    pub fn head(&self) -> Http1ResponseHead {
-        Http1ResponseHead {
-            status: self.status,
-            version: self.version,
-            headers: self.headers.clone(),
-        }
-    }
-
     /// Adds a header to the response.
     #[inline]
     pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {

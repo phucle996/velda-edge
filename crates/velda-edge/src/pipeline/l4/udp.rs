@@ -15,6 +15,8 @@ use velda_transport::{Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
 
+use std::hash::{BuildHasher, Hash};
+
 /// Unique identifier for an active client flow in the L4 UDP session table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UdpSessionKey {
@@ -24,46 +26,123 @@ pub struct UdpSessionKey {
     pub client_addr: SocketAddr,
 }
 
-/// In-memory session table tracking active bidirectional L4 UDP flows.
-#[derive(Debug, Default)]
+/// Result of acquiring or registering a session slot in [`UdpSessionTable`].
+pub enum SessionAcquisition {
+    /// An existing active session channel is already running.
+    Existing(tokio::sync::mpsc::Sender<Vec<u8>>),
+    /// A new session was atomically registered; the caller must drive the receive loop.
+    Created {
+        /// Sender handle stored in the session table.
+        sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+        /// Receiver channel to consume incoming client datagrams.
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    },
+}
+
+pub type UdpSessionShard = RwLock<HashMap<UdpSessionKey, tokio::sync::mpsc::Sender<Vec<u8>>>>;
+
+/// In-memory sharded session table tracking active bidirectional L4 UDP flows with zero cross-client contention.
 pub struct UdpSessionTable {
-    sessions: RwLock<HashMap<UdpSessionKey, tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    shards: Box<[UdpSessionShard]>,
+    hash_builder: std::collections::hash_map::RandomState,
+    mask: usize,
+}
+
+impl Default for UdpSessionTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UdpSessionTable {
-    /// Creates a new empty UDP session table.
+    /// Creates a new sharded UDP session table scaled to hardware topology.
     pub fn new() -> Self {
-        Self::default()
+        let count = velda_core::global_hardware_topology()
+            .worker_threads
+            .max(4)
+            .clamp(4, 64)
+            .next_power_of_two();
+        let shards = (0..count)
+            .map(|_| RwLock::new(HashMap::new()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            shards,
+            hash_builder: std::collections::hash_map::RandomState::new(),
+            mask: count - 1,
+        }
+    }
+
+    #[inline]
+    fn shard_for(&self, key: &UdpSessionKey) -> &UdpSessionShard {
+        let idx = (self.hash_builder.hash_one(key) as usize) & self.mask;
+        &self.shards[idx]
+    }
+
+    /// Atomically retrieves an existing session or registers a new session slot.
+    ///
+    /// Eliminates TOCTOU race conditions where concurrent packets from the same client flow
+    /// might attempt to spawn multiple duplicate ephemeral upstream sockets.
+    pub fn get_or_create(&self, key: &UdpSessionKey) -> SessionAcquisition {
+        let shard = self.shard_for(key);
+
+        // Fast path: existing active session
+        if let Ok(guard) = shard.read()
+            && let Some(sender) = guard.get(key)
+            && !sender.is_closed()
+        {
+            return SessionAcquisition::Existing(sender.clone());
+        }
+
+        // Write path: double-check and register fresh channel atomically
+        if let Ok(mut guard) = shard.write() {
+            if let Some(sender) = guard.get(key)
+                && !sender.is_closed()
+            {
+                return SessionAcquisition::Existing(sender.clone());
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(128);
+            guard.insert(key.clone(), tx.clone());
+            SessionAcquisition::Created { sender: tx, rx }
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::channel(128);
+            SessionAcquisition::Created { sender: tx, rx }
+        }
     }
 
     /// Retrieves an active sender channel for the given session key.
     pub fn get_sender(&self, key: &UdpSessionKey) -> Option<tokio::sync::mpsc::Sender<Vec<u8>>> {
-        self.sessions.read().ok()?.get(key).cloned()
+        self.shard_for(key).read().ok()?.get(key).cloned()
     }
 
-    /// Inserts a new active session into the table.
+    /// Inserts an active session into the appropriate shard.
     pub fn insert(&self, key: UdpSessionKey, sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
-        if let Ok(mut lock) = self.sessions.write() {
+        if let Ok(mut lock) = self.shard_for(&key).write() {
             lock.insert(key, sender);
         }
     }
 
     /// Removes a session from the table upon completion or idle timeout.
     pub fn remove(&self, key: &UdpSessionKey) {
-        if let Ok(mut lock) = self.sessions.write() {
+        if let Ok(mut lock) = self.shard_for(key).write() {
             lock.remove(key);
         }
     }
 
-    /// Returns the number of currently active UDP sessions.
+    /// Returns the number of currently active UDP sessions across all shards.
     pub fn active_session_count(&self) -> usize {
-        self.sessions.read().map(|l| l.len()).unwrap_or(0)
+        self.shards
+            .iter()
+            .map(|s| s.read().map(|l| l.len()).unwrap_or(0))
+            .sum()
     }
 
-    /// Clears all sessions from the table.
+    /// Clears all sessions across all shards.
     pub fn clear(&self) {
-        if let Ok(mut lock) = self.sessions.write() {
-            lock.clear();
+        for shard in self.shards.iter() {
+            if let Ok(mut lock) = shard.write() {
+                lock.clear();
+            }
         }
     }
 }
@@ -139,28 +218,22 @@ pub async fn handle_l4_udp(
 
     let session_table = get_udp_session_table();
 
-    // Route through existing active session if present
-    if let Some(sender) = session_table.get_sender(&key) {
-        match sender.try_send(datagram.data().to_vec()) {
-            Ok(()) => return,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+    // Atomically acquire existing session or register fresh session
+    let mut rx = match session_table.get_or_create(&key) {
+        SessionAcquisition::Existing(sender) => {
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                sender.try_send(datagram.data().to_vec())
+            {
                 tracing::warn!(
                     listener = %listener_id,
                     peer = %datagram.peer(),
                     "UDP session buffer full; dropping datagram"
                 );
-                return;
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                session_table.remove(&key);
-                // Session closing, fall through to establish fresh session
-            }
+            return;
         }
-    }
-
-    // Establish a new bidirectional UDP session
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
-    session_table.insert(key.clone(), tx);
+        SessionAcquisition::Created { sender: _, rx } => rx,
+    };
 
     let client_addr = datagram.peer();
     let initial_data = datagram.data().to_vec();

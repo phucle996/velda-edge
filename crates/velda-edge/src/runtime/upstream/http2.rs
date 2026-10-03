@@ -82,35 +82,37 @@ impl Http2Upstream {
                         guard.get(&endpoint).cloned()
                     };
 
-                    let mut client = match existing_client {
-                        Some(c) => c,
-                        None => {
-                            let mut guard = self.clients.write().await;
-                            if let Some(c) = guard.get(&endpoint) {
-                                c.clone()
-                            } else {
-                                let c = velda_http2::client::connect(endpoint, config)
+                    let client = match existing_client {
+                        Some(c) => match c.clone().ready().await {
+                            Ok(ready_client) => ready_client,
+                            Err(_) => {
+                                self.clients.write().await.remove(&endpoint);
+                                let fresh = velda_http2::client::connect(endpoint, config)
                                     .await
                                     .map_err(|e| e.to_string())?;
-                                guard.insert(endpoint, c.clone());
-                                c
+                                let ready_fresh = fresh.ready().await.map_err(|err| {
+                                    format!("Reconnected H2 client not ready: {err}")
+                                })?;
+                                self.clients
+                                    .write()
+                                    .await
+                                    .insert(endpoint, ready_fresh.clone());
+                                ready_fresh
                             }
-                        }
-                    };
-
-                    client = match client.ready().await {
-                        Ok(ready_client) => ready_client,
-                        Err(_) => {
-                            let mut guard = self.clients.write().await;
-                            guard.remove(&endpoint);
+                        },
+                        None => {
                             let fresh = velda_http2::client::connect(endpoint, config)
                                 .await
                                 .map_err(|e| e.to_string())?;
-                            guard.insert(endpoint, fresh.clone());
-                            fresh
+                            let ready_fresh = fresh
                                 .ready()
                                 .await
-                                .map_err(|err| format!("Reconnected H2 client not ready: {err}"))?
+                                .map_err(|err| format!("Fresh H2 client not ready: {err}"))?;
+                            self.clients
+                                .write()
+                                .await
+                                .insert(endpoint, ready_fresh.clone());
+                            ready_fresh
                         }
                     };
 

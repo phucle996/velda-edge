@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use velda_core::{L7Request, L7Response};
 
-use crate::client::forward_request;
+use crate::client::{connect, extract_sni};
 use crate::config::Http3Config;
 use crate::error::Http3Error;
 
@@ -16,7 +16,9 @@ use crate::error::Http3Error;
 pub async fn pipe_duplex(
     req: &L7Request,
     target: SocketAddr,
-    _config: &Http3Config,
+    config: &Http3Config,
 ) -> Result<L7Response, Http3Error> {
-    forward_request(req, target).await
+    let server_name = extract_sni(req, &target);
+    let client = connect(target, &server_name, config).await?;
+    client.send_request_ref(req).await
 }

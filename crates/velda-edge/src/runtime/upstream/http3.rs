@@ -104,21 +104,16 @@ impl Http3Upstream {
                     let client = match existing_client {
                         Some(c) if !c.is_closed() => c,
                         _ => {
+                            let fresh = velda_http3::connect(endpoint, server_name, config)
+                                .await
+                                .map_err(|e| e.to_string())?;
+
                             let mut guard = self.clients.write().await;
-                            if let Some(c) = guard.get(&endpoint) {
-                                if !c.is_closed() {
-                                    c.clone()
-                                } else {
-                                    let fresh = velda_http3::connect(endpoint, server_name, config)
-                                        .await
-                                        .map_err(|e| e.to_string())?;
-                                    guard.insert(endpoint, fresh.clone());
-                                    fresh
-                                }
+                            if let Some(c) = guard.get(&endpoint)
+                                && !c.is_closed()
+                            {
+                                c.clone()
                             } else {
-                                let fresh = velda_http3::connect(endpoint, server_name, config)
-                                    .await
-                                    .map_err(|e| e.to_string())?;
                                 guard.insert(endpoint, fresh.clone());
                                 fresh
                             }

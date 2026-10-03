@@ -1,34 +1,33 @@
-//! Layer 7 gRPC response serialization and streaming responder.
+//! Downstream gRPC response serialization and streaming responder.
 //!
-//! Operates on borrowed payload and metadata references without holding or retaining
-//! response business data inside the protocol engine.
+//! Encodes canonical gRPC status codes, Length-Prefixed Message (LPM) data frames,
+//! and HTTP/2 response headers/trailers over the downstream send stream.
 
 use bytes::{Bytes, BytesMut};
 use h2::server::SendResponse;
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, HeaderValue, Response, StatusCode};
-use velda_core::{Body, L7Response};
+use http::{HeaderMap, Response, StatusCode};
 
 use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
 use crate::status::GrpcStatus;
+use crate::wire::GrpcWire;
 
 /// Streaming responder for an active downstream gRPC call.
 ///
-/// Pure encoder capability: caller provides response payload or status;
-/// the responder serializes headers, LPM data frames, and HTTP/2 trailers
-/// over the underlying H2 send stream.
+/// Encodes response payload or status, serializing headers, LPM data frames,
+/// and HTTP/2 trailers over the underlying H2 send stream.
 pub struct GrpcResponder {
-    respond: SendResponse<Bytes>,
+    pub respond: SendResponse<Bytes>,
 }
 
 impl GrpcResponder {
-    /// Creates a new [`GrpcResponder`] from an underlying H2 send handle.
+    /// Creates a new [`GrpcResponder`] wrapping an active H2 send handle.
     pub fn new(respond: SendResponse<Bytes>) -> Self {
         Self { respond }
     }
 
-    /// Sends a standard Unary response: HTTP 200 + 1 LPM frame + trailers with grpc-status.
+    /// Sends a standard Unary response: HTTP 200 + 1 LPM frame + trailers with `grpc-status`.
     pub fn send_unary_response(
         &mut self,
         status: GrpcStatus,
@@ -38,7 +37,7 @@ impl GrpcResponder {
         let mut resp_builder = Response::builder()
             .status(StatusCode::OK)
             .version(http::Version::HTTP_2)
-            .header(CONTENT_TYPE, "application/grpc");
+            .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
 
         if let Some(headers) = extra_headers {
             for (name, val) in headers {
@@ -79,12 +78,8 @@ impl GrpcResponder {
                 .map_err(GrpcError::H2)?;
         }
 
-        // Send trailers
-        let mut trailers = status.to_trailers(None);
-        if let Ok(val) = HeaderValue::from_str(&format!("{}", status as u32)) {
-            trailers.insert("grpc-status", val);
-        }
-
+        // Send trailers with status code
+        let trailers = status.to_trailers(None);
         send_stream.send_trailers(trailers).map_err(GrpcError::H2)?;
 
         Ok(())
@@ -92,14 +87,14 @@ impl GrpcResponder {
 
     /// Responds immediately with a Trailers-Only gRPC response (e.g. for routing errors).
     pub fn send_trailers_only(
-        mut self,
+        &mut self,
         status: GrpcStatus,
         message: Option<&str>,
     ) -> Result<(), GrpcError> {
         let mut builder = Response::builder()
             .status(StatusCode::OK)
             .version(http::Version::HTTP_2)
-            .header(CONTENT_TYPE, "application/grpc");
+            .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
 
         let trailers = status.to_trailers(message);
         for (name, val) in trailers {
@@ -122,23 +117,5 @@ impl GrpcResponder {
         end_of_stream: bool,
     ) -> Result<h2::SendStream<Bytes>, h2::Error> {
         self.respond.send_response(response, end_of_stream)
-    }
-
-    /// Translates an [`L7Response`] into gRPC frames and sends to downstream client.
-    pub fn send_l7_response(mut self, response: &L7Response) -> Result<(), GrpcError> {
-        let status = response
-            .headers
-            .get("grpc-status")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .map(GrpcStatus::from_code)
-            .unwrap_or(GrpcStatus::Ok);
-
-        let payload = match response.body {
-            Body::Bytes(ref b) => Some(b.as_ref()),
-            Body::Empty => None,
-        };
-
-        self.send_unary_response(status, payload, Some(response.headers.clone()))
     }
 }

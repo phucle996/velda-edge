@@ -72,60 +72,6 @@ impl Http2Request {
         Self { head, body }
     }
 
-    /// Returns the HTTP method.
-    #[inline]
-    pub fn method(&self) -> &Method {
-        &self.head.method
-    }
-
-    /// Returns the target URI.
-    #[inline]
-    pub fn uri(&self) -> &Uri {
-        &self.head.uri
-    }
-
-    /// Returns the request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.head.path()
-    }
-
-    /// Returns the request host, if present.
-    #[inline]
-    pub fn host(&self) -> Option<&str> {
-        self.head.host()
-    }
-
-    /// Returns a reference to the request headers.
-    #[inline]
-    pub fn headers(&self) -> &HeaderMap {
-        &self.head.headers
-    }
-
-    /// Returns a mutable reference to the request headers.
-    #[inline]
-    pub fn headers_mut(&mut self) -> &mut HeaderMap {
-        &mut self.head.headers
-    }
-
-    /// Returns a reference to the body.
-    #[inline]
-    pub fn body(&self) -> &Body {
-        &self.body
-    }
-
-    /// Returns whether this request has a non-empty body.
-    #[inline]
-    pub fn has_body(&self) -> bool {
-        !self.body.is_empty()
-    }
-
-    /// Returns the HTTP/2 stream identifier, if assigned.
-    #[inline]
-    pub fn stream_id(&self) -> Option<h2::StreamId> {
-        self.head.stream_id
-    }
-
     /// Deconstructs the request into its constituent head and body parts.
     #[inline]
     pub fn into_parts(self) -> (Http2RequestHead, Body) {

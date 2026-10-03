@@ -98,7 +98,7 @@ async fn test_http2_multiplexing_concurrent_streams() {
     for _ in 0..4 {
         let (h2_req, responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
         tasks.spawn(async move {
-            let path = h2_req.path().to_string();
+            let path = h2_req.head.path().to_string();
             let id = path.trim_start_matches("/stream/");
             let resp_bytes = format!("response-{id}").into_bytes();
             let resp = Http2Response::from_bytes(StatusCode::OK, resp_bytes);

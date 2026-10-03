@@ -8,19 +8,18 @@
 //! - Upstream response body is accumulated into RAM with flow-control (`release_capacity`) and limits.
 //! - Full response is sent downstream.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use h2::client::SendRequest;
 use http::Version;
 use velda_core::{Body, L7Response};
 
-use super::{accumulate_response_body, build_outbound_request};
 use crate::config::Http2Config;
 use crate::error::Http2Error;
 use crate::server::{Http2RequestHead, Http2Responder, Http2StreamReceiver};
 
 /// Pipes a non-streaming HTTP/2 request between downstream responder and upstream client.
 pub async fn pipe_buffered(
-    head: Http2RequestHead,
+    mut head: Http2RequestHead,
     mut body_rx: Http2StreamReceiver,
     responder: Http2Responder,
     client: &mut SendRequest<Bytes>,
@@ -30,7 +29,20 @@ pub async fn pipe_buffered(
     let body = body_rx.consume_all().await?;
 
     // 2. Build and sanitize outbound upstream H2 request (zero-clone)
-    let http_req = build_outbound_request(head)?;
+    crate::headers::sanitize_h2_headers(&mut head.headers);
+    let mut builder = http::Request::builder()
+        .method(head.method)
+        .uri(head.uri)
+        .version(Version::HTTP_2);
+
+    for (k, v) in head.headers.drain() {
+        if let Some(k) = k {
+            builder = builder.header(k, v);
+        }
+    }
+    let http_req = builder
+        .body(())
+        .map_err(|e| Http2Error::Parse(e.to_string()))?;
 
     // 3. Transmit HEADERS frame and optional DATA body frame to upstream
     let has_body = !body.is_empty();
@@ -59,7 +71,39 @@ pub async fn pipe_buffered(
     }
 
     // 6. Accumulate bounded response body while releasing H2 flow-control window
-    let resp_body = accumulate_response_body(&mut body_stream, config.max_body_size).await?;
+    let resp_body = if body_stream.is_end_stream() {
+        Body::Empty
+    } else if let Some(first_chunk) = body_stream.data().await {
+        let data = first_chunk?;
+        let len = data.len();
+        if len > config.max_body_size {
+            let _ = body_stream.flow_control().release_capacity(len);
+            return Err(Http2Error::PayloadTooLarge(len));
+        }
+        let _ = body_stream.flow_control().release_capacity(len);
+
+        if body_stream.is_end_stream() {
+            Body::Bytes(data)
+        } else {
+            let mut body_buf = BytesMut::with_capacity(len * 2);
+            body_buf.extend_from_slice(&data);
+
+            while let Some(chunk) = body_stream.data().await {
+                let chunk_data = chunk?;
+                let chunk_len = chunk_data.len();
+                if body_buf.len() + chunk_len > config.max_body_size {
+                    let _ = body_stream.flow_control().release_capacity(chunk_len);
+                    return Err(Http2Error::PayloadTooLarge(body_buf.len() + chunk_len));
+                }
+                body_buf.extend_from_slice(&chunk_data);
+                let _ = body_stream.flow_control().release_capacity(chunk_len);
+            }
+
+            Body::Bytes(body_buf.freeze())
+        }
+    } else {
+        Body::Empty
+    };
 
     // 7. Send full response downstream
     let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);

@@ -9,13 +9,34 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::GrpcError;
 
-/// Header size of a standard gRPC Length-Prefixed Message frame.
-pub const GRPC_FRAME_HEADER_SIZE: usize = 5;
+/// Canonical gRPC Length-Prefixed Message (LPM) framing constants.
+pub struct GrpcFrame;
+
+impl GrpcFrame {
+    /// Size of the 1-byte compression flag in the LPM header.
+    pub const FLAG_SIZE: usize = 1;
+
+    /// Size of the 4-byte big-endian message length in the LPM header.
+    pub const LENGTH_SIZE: usize = 4;
+
+    /// Total header size of a standard gRPC Length-Prefixed Message frame (5 bytes).
+    pub const HEADER_SIZE: usize = Self::FLAG_SIZE + Self::LENGTH_SIZE;
+
+    /// Flag byte indicating uncompressed payload (0).
+    pub const FLAG_UNCOMPRESSED: u8 = 0;
+
+    /// Flag byte indicating compressed payload (1).
+    pub const FLAG_COMPRESSED: u8 = 1;
+}
 
 /// Encodes a payload into a gRPC Length-Prefixed Message (LPM).
 pub fn encode_grpc_frame(data: &[u8], compressed: bool, dst: &mut BytesMut) {
-    dst.reserve(GRPC_FRAME_HEADER_SIZE + data.len());
-    dst.put_u8(if compressed { 1 } else { 0 });
+    dst.reserve(GrpcFrame::HEADER_SIZE + data.len());
+    dst.put_u8(if compressed {
+        GrpcFrame::FLAG_COMPRESSED
+    } else {
+        GrpcFrame::FLAG_UNCOMPRESSED
+    });
     dst.put_u32(data.len() as u32);
     dst.put_slice(data);
 }
@@ -24,19 +45,37 @@ pub fn encode_grpc_frame(data: &[u8], compressed: bool, dst: &mut BytesMut) {
 ///
 /// Returns `Ok(Some((compressed, payload)))` if a complete frame is available,
 /// or `Ok(None)` if more data is required.
+///
+/// Enforces the gRPC RFC invariant: returns [`GrpcError::Protocol`] if the compression
+/// flag byte is neither `0` nor `1`.
 pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, GrpcError> {
-    if src.len() < GRPC_FRAME_HEADER_SIZE {
+    if src.len() < GrpcFrame::HEADER_SIZE {
         return Ok(None);
     }
 
-    let compressed = src[0] != 0;
-    let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
+    let flag = src[0];
+    let compressed = match flag {
+        GrpcFrame::FLAG_UNCOMPRESSED => false,
+        GrpcFrame::FLAG_COMPRESSED => true,
+        _ => {
+            return Err(GrpcError::Protocol(format!(
+                "invalid gRPC compression flag: {flag}; must be 0 or 1 per RFC"
+            )));
+        }
+    };
 
-    if src.len() < GRPC_FRAME_HEADER_SIZE + length {
+    let length = u32::from_be_bytes([
+        src[GrpcFrame::FLAG_SIZE],
+        src[GrpcFrame::FLAG_SIZE + 1],
+        src[GrpcFrame::FLAG_SIZE + 2],
+        src[GrpcFrame::FLAG_SIZE + 3],
+    ]) as usize;
+
+    if src.len() < GrpcFrame::HEADER_SIZE + length {
         return Ok(None);
     }
 
-    src.advance(GRPC_FRAME_HEADER_SIZE);
+    src.advance(GrpcFrame::HEADER_SIZE);
     let payload = src.split_to(length).freeze();
 
     Ok(Some((compressed, payload)))
@@ -52,7 +91,7 @@ mod tests {
         let payload = b"hello grpc world";
         encode_grpc_frame(payload, false, &mut buf);
 
-        assert_eq!(buf.len(), GRPC_FRAME_HEADER_SIZE + payload.len());
+        assert_eq!(buf.len(), GrpcFrame::HEADER_SIZE + payload.len());
 
         let decoded = decode_grpc_frame(&mut buf).unwrap();
         assert!(decoded.is_some());
@@ -67,5 +106,16 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&[0, 0, 0, 0, 10, 1, 2]); // Only 2 bytes of 10-byte payload
         assert_eq!(decode_grpc_frame(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn test_grpc_frame_invalid_compression_flag() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&[2, 0, 0, 0, 4, 1, 2, 3, 4]); // Flag 2 is invalid per RFC
+        let err = decode_grpc_frame(&mut buf).unwrap_err();
+        match err {
+            GrpcError::Protocol(msg) => assert!(msg.contains("invalid gRPC compression flag: 2")),
+            _ => panic!("Expected GrpcError::Protocol"),
+        }
     }
 }

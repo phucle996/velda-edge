@@ -264,9 +264,9 @@ fn bench_pipeline_boundary_fuzzing() {
         // Pipelined buffer must decode first request, leaving second in buffer
         let mut pipe_buf = BytesMut::from(&pipelined_stream[..]);
         let first = decode_request(&mut pipe_buf, &config).unwrap().unwrap();
-        debug_assert_eq!(first.path(), "/first");
+        debug_assert_eq!(first.uri.path(), "/first");
         let second = decode_request(&mut pipe_buf, &config).unwrap().unwrap();
-        debug_assert_eq!(second.path(), "/second");
+        debug_assert_eq!(second.uri.path(), "/second");
     }
 
     let elapsed = start.elapsed();

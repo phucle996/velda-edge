@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::{L7Request, L7Response};
 use velda_grpc::GrpcConfig;
 use velda_grpc::GrpcStatus;
-use velda_grpc::composer_parse::{GrpcServerConnection, GrpcServerStream};
+use velda_grpc::server::{GrpcServerConnection, GrpcServerStream};
 use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
@@ -86,7 +86,7 @@ pub async fn run_grpc_loop<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut conn = match GrpcServerConnection::handshake(stream).await {
+    let mut conn = match GrpcServerConnection::handshake(stream, &config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -122,9 +122,9 @@ pub async fn run_grpc_loop<IO>(
 
 /// Dispatches a single downstream gRPC request stream through the router to upstream backend.
 async fn dispatch_grpc_request_stream(
-    server_stream: GrpcServerStream,
+    mut server_stream: GrpcServerStream,
     context: &IngressContext,
-    _config: &GrpcConfig,
+    config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
     let path = server_stream.parts.uri.path();
@@ -136,7 +136,7 @@ async fn dispatch_grpc_request_stream(
         .or_else(|| server_stream.parts.uri.authority().map(|a| a.as_str()));
 
     let Some(grpc_req) = GrpcRouteRequest::from_path(path, authority) else {
-        let _ = server_stream.send_trailers_only(
+        let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::Unimplemented,
             Some("no route matched for empty path"),
         );
@@ -145,7 +145,7 @@ async fn dispatch_grpc_request_stream(
 
     let rt = runtime.load();
     let Some(route) = rt.router.route_grpc(&context.listener_id, &grpc_req) else {
-        let _ = server_stream.send_trailers_only(
+        let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
         );
@@ -160,6 +160,7 @@ async fn dispatch_grpc_request_stream(
             "No healthy backend endpoints available for gRPC upstream"
         );
         let _ = server_stream
+            .respond
             .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
         return;
     };
@@ -173,7 +174,7 @@ async fn dispatch_grpc_request_stream(
         "Piping gRPC bidirectional stream to upstream backend"
     );
 
-    if let Err(e) = upstream.dispatch_stream(server_stream).await {
+    if let Err(e) = upstream.dispatch_stream(server_stream, config).await {
         tracing::warn!(
             error = %e,
             upstream = %route.upstream_name,
@@ -182,7 +183,8 @@ async fn dispatch_grpc_request_stream(
     }
 }
 
-/// Helper for UDP L7 (HTTP/3) or single request dispatch returning an `L7Response`.
+/// Dispatches a single unary gRPC request through `GrpcRouter` to the upstream backend.
+/// Used for unary RPC execution or UDP L7 datagram handoff when the listener explicitly declares protocol = "grpc".
 pub async fn process_grpc_request(
     req: &L7Request,
     context: &IngressContext,

@@ -33,14 +33,20 @@ The goal is not to clone Pingora, Kong, APISIX, or Envoy. External systems are r
 - **No inheritance-style hierarchies**: Avoid chains like `Base -> Abstract -> Manager -> Coordinator -> Handler -> Adapter`.
 - **Duplicate first. Abstract second**: A few lines of duplication are preferable to accidental coupling across subsystems.
 
-### 2.2 Workflow Isolation over Helpers
-- Do not create helper functions by default.
-- Keep logic at the workflow owner and call site when it clarifies ownership, state transitions, and failure paths.
-- Only introduce a helper when strictly required for correctness or security, or when an invariant cannot be maintained consistently across call sites without operational risk.
-- Helpers must have the narrowest possible scope (module-private before package-local). Never move helpers into shared/global utilities without proven identical contracts across multiple consumers.
+### 2.2 Workflow Isolation over Helpers & No Arbitrary Function Splitting
+- **No Arbitrary Function Splitting ("Không chia func vô tội vạ")**:
+  - Keep sequential workflows contiguous, linear, and readable top-to-bottom within a single function whenever possible.
+  - Do NOT chop a cohesive sequential workflow (e.g., streaming pipes, encode/decode loops, connection handshakes, request forwarding) into micro-functions, trivial 1-line wrappers, or artificial parent-module helpers just to reduce line count.
+  - Do NOT create OOP-style getters/setters on structs where fields are already public or should be public (e.g., `stream.path()`, `req.method()`, `resp.status()`). Access struct fields directly (`stream.parts.uri.path()`, `req.head.method`, `resp.status`).
+- **Carefully Consider Subsystem & Ownership Boundaries**:
+  - Keep logic at the workflow owner and call site when it clarifies ownership, state transitions, and failure paths.
+  - Duplicating 5–10 lines of setup, framing, or connection logic inside an isolated strategy module is vastly superior to creating an artificial helper in a parent module (`super::*`) that introduces accidental coupling across peer modules and forces the reader to jump back and forth.
+  - Only introduce a helper or separate function when strictly required for recursive logic, reusable cross-module invariants with identical contracts, or boundary enforcement (e.g., protocol codecs, hardware topology probing).
+  - Helpers must have the narrowest possible scope (module-private before package-local). Never move helpers into shared/global utilities without proven identical contracts across multiple consumers.
 
 ### 2.3 Flat Workflow & Flat Entity
-- A request path must be readable from top to bottom.
+- A request path must be readable from top to bottom within its workflow owner.
+- Every pipeline strategy module (e.g., `buffered.rs`, `client_stream.rs`, `server_stream.rs`, `duplex.rs` in `pipe/`) must be self-contained from Step 1 to the end, without relying on ad-hoc cross-module glue in parent `mod.rs`.
 - Entities own state; workflow modules own behavior.
 - API workflow entities must be flat projections specific to the workflow owner. Do not create deeply nested entity graphs or generic dynamic bags like `HashMap<String, Box<dyn Any>>`.
 - Mutations must read authority via their own dedicated projection/port. Never invoke read/detail workflows from mutation/publish workflows.

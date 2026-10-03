@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 
 use velda_core::{Body, L7Request, L7Response};
 
-use crate::client::forward_request;
+use crate::client::{connect, extract_sni};
 use crate::config::Http3Config;
 use crate::error::Http3Error;
 
@@ -27,7 +27,9 @@ pub async fn pipe_server_stream(
     }
 
     // 2. Forward request to upstream HTTP/3 backend
-    let resp = forward_request(req, target).await?;
+    let server_name = extract_sni(req, &target);
+    let client = connect(target, &server_name, config).await?;
+    let resp = client.send_request_ref(req).await?;
 
     // 3. Verify upstream response size limit
     if let Body::Bytes(ref b) = resp.body

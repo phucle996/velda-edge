@@ -27,7 +27,7 @@ async fn test_http1_server_connection() {
 
     let req = conn.next_request().await.unwrap().unwrap();
     assert_eq!(req.method, Method::GET);
-    assert_eq!(req.path(), "/index.html");
+    assert_eq!(req.uri.path(), "/index.html");
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ fn test_chunked_request_decoding() {
         .unwrap()
         .expect("request parsed");
     assert_eq!(req.method, Method::POST);
-    assert_eq!(req.path(), "/upload");
+    assert_eq!(req.uri.path(), "/upload");
     assert_eq!(req.body.len(), 19);
     assert_eq!(
         req.body,
