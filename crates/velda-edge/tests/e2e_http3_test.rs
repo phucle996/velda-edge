@@ -67,7 +67,7 @@ async fn test_end_to_end_http3_udp_handoff_and_processing() {
     let _shared = supervisor.shared_runtime().clone();
 
     assert!(
-        velda_edge::pipeline::l7::http3::has_h3_engine("h3-in"),
+        velda_edge::pipeline::http3::has_h3_engine("h3-in"),
         "HTTP/3 engine must be initialized in pipeline for listener"
     );
 
@@ -151,9 +151,8 @@ async fn test_reload_preserves_active_http3_engine_instance() {
     let shared = supervisor.shared_runtime().clone();
 
     // 1. Verify engine initialized and grab its pointer
-    let engine_before =
-        velda_edge::pipeline::l7::http3::get_or_init_h3_engine("h3-reload-in", &shared)
-            .expect("H3 engine must exist");
+    let engine_before = velda_edge::pipeline::http3::get_or_init_h3_engine("h3-reload-in", &shared)
+        .expect("H3 engine must exist");
 
     // 2. Perform a configuration reload (e.g. upstreams or routes changed)
     let notif = SyncNotification {
@@ -170,9 +169,8 @@ async fn test_reload_preserves_active_http3_engine_instance() {
     assert_eq!(outcome.revision, 2);
 
     // 3. Verify the exact same H3 engine instance is preserved (Arc pointer equality!)
-    let engine_after =
-        velda_edge::pipeline::l7::http3::get_or_init_h3_engine("h3-reload-in", &shared)
-            .expect("H3 engine must still exist");
+    let engine_after = velda_edge::pipeline::http3::get_or_init_h3_engine("h3-reload-in", &shared)
+        .expect("H3 engine must still exist");
 
     assert!(
         Arc::ptr_eq(&engine_before, &engine_after),

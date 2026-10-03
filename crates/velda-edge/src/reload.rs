@@ -17,7 +17,8 @@ use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_up
 use crate::error::EdgeError;
 use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
-use crate::runtime::{Runtime, SharedRuntime};
+use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime};
+use crate::runtime_profile::RuntimeProfile;
 
 /// Summary of a successfully applied hot reload operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,76 @@ pub struct ReloadOutcome {
     pub changed_domains: Vec<String>,
     /// Whether the listener definitions were modified (requiring socket adjustments).
     pub listeners_changed: bool,
+}
+
+/// Loads the initial LKG runtime snapshot from disk artifacts.
+///
+/// Used during cold-start bootstrap. If LKG binary artifacts are present on disk,
+/// parses and compiles them into an initial [`Runtime`] snapshot; otherwise returns an
+/// empty initial runtime.
+pub fn load_initial_runtime(
+    runtime_dir: &Path,
+    profile: &RuntimeProfile,
+) -> Result<Runtime, EdgeError> {
+    let has_lkg = runtime_dir.join("listeners.bin").exists()
+        || runtime_dir.join("routes.bin").exists()
+        || runtime_dir.join("upstreams.bin").exists();
+
+    if !has_lkg {
+        tracing::info!(
+            path = %runtime_dir.display(),
+            "Runtime directory does not exist yet; initializing with empty state"
+        );
+        return Ok(Runtime::empty());
+    }
+
+    let listeners = load_listeners(runtime_dir)?;
+    let routes = load_routes(runtime_dir)?;
+    let upstreams = load_upstreams(runtime_dir)?;
+
+    velda_sync::post_sync::validate_streaming_policy(&listeners, &routes, &upstreams).map_err(
+        |e| EdgeError::InvalidConfig {
+            detail: e.to_string(),
+        },
+    )?;
+
+    let tls = load_tls(runtime_dir)?;
+    let tls_server = compile_tls_server(&tls, &profile.to_tls_server_params())?;
+    let tls_client = crate::runtime::tls::compile_tls_client(&upstreams)?;
+    let router = build_router(&routes, &upstreams, &listeners)?;
+    let upstreams_table = crate::runtime::build_upstreams(&upstreams, tls_client.as_ref());
+
+    // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
+    if let Some(tls) = tls_server.as_ref() {
+        for listener in &listeners {
+            if listener.transport.protocol.eq_ignore_ascii_case("udp")
+                && (listener.application.protocol.eq_ignore_ascii_case("http3")
+                    || listener.application.protocol.eq_ignore_ascii_case("grpc"))
+            {
+                let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
+            }
+        }
+    }
+
+    let runtime_config = RuntimeConfig {
+        listeners,
+        routes,
+        upstreams,
+        plugins: load_plugins(runtime_dir)?,
+        tls,
+    };
+
+    let pipelines = crate::runtime::pipeline::PipelineTable::build(&runtime_config.listeners)?;
+
+    Ok(Runtime {
+        revision: 1,
+        config: runtime_config,
+        router,
+        pipelines,
+        upstreams: upstreams_table,
+        tls_server,
+        tls_client,
+    })
 }
 
 /// Applies a reload notification from `velda-sync` against the active shared runtime.
@@ -128,7 +199,7 @@ pub async fn apply_reload(
                 && (listener.application.protocol.eq_ignore_ascii_case("http3")
                     || listener.application.protocol.eq_ignore_ascii_case("grpc"))
             {
-                let _ = crate::pipeline::l7::http3::init_h3_engine(&listener.id, tls);
+                let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
             }
         }
     }

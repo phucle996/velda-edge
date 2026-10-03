@@ -5,9 +5,9 @@
 //! Architected as an ultra-thin supervisor:
 //! - [`bootstrap`]: Cold-start initialization, component assembly, and supervisor loop.
 //! - [`config`]: Configuration paths, options, and LKG binary artifact loaders.
-//! - [`runtime`]: Lock-free in-memory snapshot (`Runtime`) wrapped in [`ArcSwap`].
+//! - [`lifecycle`]: End-to-end traffic serving, runner, and IPC listener.
+//! - [`pre_compile`]: Pre-compiled runtime structures, routers, upstreams, and execution pipelines.
 //! - [`reload`]: Hot-reload orchestration and atomic runtime swapping.
-//! - [`uds`]: Unix Domain Socket IPC listener receiving reload notifications from `velda-sync`.
 //!
 //! `velda-edge` does NOT process network requests directly; request handling
 //! is owned by `velda-transport` and downstream protocol crates.
@@ -15,16 +15,17 @@
 pub mod bootstrap;
 pub mod config;
 pub mod error;
-pub mod pipeline;
+pub mod lifecycle;
+pub mod pre_compile;
 pub mod reload;
-pub mod runtime;
 pub mod runtime_profile;
-pub mod uds;
 
 pub use bootstrap::{EdgeSupervisor, start};
 pub use config::EdgeConfig;
 pub use error::EdgeError;
-pub use reload::{ReloadOutcome, apply_reload};
+pub use lifecycle::run_gateway;
+pub use pre_compile::{pipeline, runtime, upstream};
+pub use reload::{ReloadOutcome, apply_reload, load_initial_runtime};
 pub use runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
 pub use runtime_profile::{RuntimeProfile, resolve_runtime_profile};
 pub use velda_core::hardware::{HardwareTopology, global_hardware_topology};

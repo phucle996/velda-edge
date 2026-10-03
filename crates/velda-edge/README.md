@@ -77,11 +77,11 @@ Upon process startup, `velda-edge` operates autonomously without requiring the G
 | `tls.handshake_timeout_secs` | 10 s | 8 s | 5 s | 5 s | 3 s | 3 s | 2 s | `CpuTier` (Crypto CPU / Slowloris defense) |
 
 - **Operator Priority**: Explicit tuning in `<runtime_dir>/runtime.json` is always strictly honored and deep-merged over detected hardware tiers. No generic global env variables are used.
-- **Grouped & Flat Overrides**: Supports clean nested structures (`"tcp": { ... }`, `"udp": { ... }`, `"tls": { ... }`) as well as flat backward-compatible overrides (`"worker_threads"`, `"tcp_backlog"`).
+- **Grouped Overrides**: Supports clean nested structures (`"tcp": { ... }`, `"udp": { ... }`, `"tls": { ... }`) for operator overrides.
 - **Zero-Config Baseline**: On new nodes without configuration, edge automatically probes hardware and generates an optimized baseline `runtime.json`.
 - **Read-Only Resilient**: If the filesystem is read-only, write-back failures are logged as warnings while the process boots cleanly in memory.
 
-### Hot-Reload Pipeline (`reload.rs` & `uds.rs`)
+### Hot-Reload Pipeline (`reload.rs` & `lifecycle/ipc.rs`)
 When `velda-sync` publishes updated binary artifacts to LKG, it notifies `velda-edge` over UDS without sending raw JSON:
 
 ```text
@@ -89,7 +89,7 @@ When `velda-sync` publishes updated binary artifacts to LKG, it notifies `velda-
       │
       │ UDS Notification: { changed_domains: ["listeners"], manifest_rev: 42 }
       ▼
-  velda.sock (uds.rs)
+  velda.sock (lifecycle/ipc.rs)
       │
       ▼
   apply_reload() (reload.rs)

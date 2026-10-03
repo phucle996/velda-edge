@@ -1,9 +1,10 @@
 //! Velda Edge binary entrypoint.
 
-use velda_core::hardware::{HardwareTopology, init_hardware_topology};
-use velda_edge::{EdgeConfig, start};
+use tokio::sync::watch;
+use velda_edge::{EdgeConfig, EdgeSupervisor};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -12,28 +13,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // 1. Probe host hardware topology once during cold-start (respects container cgroups)
-    let hardware = HardwareTopology::probe();
-    let _ = init_hardware_topology(hardware);
+    tracing::info!("Initializing Velda Edge Data Plane supervisor...");
+    let config = EdgeConfig::default();
+    let supervisor = EdgeSupervisor::bootstrap(config)?;
 
-    tracing::info!(
-        available_cores = hardware.available_cores,
-        cpu_tier = hardware.cpu_tier().as_str(),
-        memory_tier = hardware.memory_tier().as_str(),
-        "Configured Velda Edge runtime from HardwareTopology"
-    );
+    // Trap OS signals (Ctrl+C / SIGINT and SIGTERM) for graceful shutdown
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
 
-    // 2. Build multi-threaded Tokio runtime explicitly matched to HardwareTopology available cores
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(hardware.available_cores)
-        .enable_all()
-        .build()?;
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+            }
+        };
 
-    runtime.block_on(async {
-        tracing::info!("Initializing Velda Edge Data Plane supervisor...");
-        let config = EdgeConfig::default();
-        start(config).await?;
-        tracing::info!("Velda Edge Data Plane stopped cleanly.");
-        Ok(())
-    })
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("Received SIGINT (Ctrl+C); initiating graceful edge shutdown..."),
+            _ = terminate => tracing::info!("Received SIGTERM; initiating graceful edge shutdown..."),
+        }
+
+        // Notify supervisor and traffic engine to stop accepting new connections and drain
+        let _ = shutdown_tx.send(true);
+
+        // If a second interrupt is received while draining, force immediate exit
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::warn!("Received second interrupt signal; forcing immediate exit");
+        std::process::exit(1);
+    });
+
+    supervisor.run(shutdown_rx).await?;
+    tracing::info!("Velda Edge Data Plane stopped cleanly.");
+    Ok(())
 }

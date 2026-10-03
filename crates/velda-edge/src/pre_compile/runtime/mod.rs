@@ -7,9 +7,14 @@
 
 pub mod pipeline;
 pub mod router;
-pub(crate) mod tls;
+pub mod tls;
 mod transport;
-pub mod upstream;
+
+pub use crate::pre_compile::upstream;
+pub use pipeline::{PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol};
+pub use router::build_router;
+pub use tls::{compile_tls_client, compile_tls_server};
+pub use upstream::{UpstreamTable, build_upstreams};
 
 use std::sync::Arc;
 
@@ -24,11 +29,6 @@ use velda_tls::{TlsClientEngine, TlsServerEngine};
 use velda_transport::IngressBinding;
 
 use crate::error::EdgeError;
-pub use crate::runtime::pipeline::{
-    PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol,
-};
-pub use crate::runtime::router::build_router;
-pub use crate::runtime::upstream::{UpstreamTable, build_upstreams};
 
 /// Read-only snapshot of declarative domain configurations loaded into RAM.
 #[derive(Debug, Clone, Default)]

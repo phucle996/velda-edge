@@ -142,8 +142,8 @@ pub trait GrpcPlugin: Send + Sync {
 ## 6. Implementation Roadmap
 
 - [ ] **Stage 1**: Define core plugin lifecycle contracts in `velda-plugin` (`PluginId`, `Action`, execution chain coordinator).
-- [ ] **Stage 2**: Implement `Http1PluginChain` in `velda-edge::pipeline::l7::http1`.
-- [ ] **Stage 3**: Implement `GrpcPluginChain` in `velda-edge::pipeline::l7::grpc`.
+- [ ] **Stage 2**: Implement `Http1PluginChain` in `velda-edge::pipeline::http1`.
+- [ ] **Stage 3**: Implement `GrpcPluginChain` in `velda-edge::pipeline::grpc`.
 - [ ] **Stage 4**: Compile-time route-to-plugin mapping in `velda-router`.
 - [ ] **Stage 5**: Standard built-in plugins:
   - `cors`: Cross-Origin Resource Sharing header management.

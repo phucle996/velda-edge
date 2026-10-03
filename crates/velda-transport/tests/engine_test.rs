@@ -305,26 +305,22 @@ async fn test_traffic_engine_declarative_reconciliation() {
 async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
     use velda_transport::{UdpL7Handoff, UdpSocket, UdpSocketConfig};
 
-    let free_tcp: SocketAddr = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
-    let free_h1: SocketAddr = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
-    let free_h2: SocketAddr = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
-    let free_udp: SocketAddr = {
-        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        s.local_addr().unwrap()
-    };
-    let free_h3: SocketAddr = {
-        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        s.local_addr().unwrap()
-    };
+    let l_tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let free_tcp = l_tcp.local_addr().unwrap();
+    let l_h1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let free_h1 = l_h1.local_addr().unwrap();
+    let l_h2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let free_h2 = l_h2.local_addr().unwrap();
+    drop(l_tcp);
+    drop(l_h1);
+    drop(l_h2);
+
+    let s_udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let free_udp = s_udp.local_addr().unwrap();
+    let s_h3 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let free_h3 = s_h3.local_addr().unwrap();
+    drop(s_udp);
+    drop(s_h3);
 
     let tcp_bind = IngressBinding::from_protocols("tcp", free_tcp, "tcp", "raw", false).unwrap();
     let h1_bind = IngressBinding::from_protocols("h1", free_h1, "tcp", "http1", false).unwrap();

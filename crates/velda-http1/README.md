@@ -54,7 +54,7 @@ velda-router             route matching (separate crate, called by pipeline)
 velda-upstream           backend topology & health (separate crate, no dependency on velda-http1)
 ```
 
-**Important:** All connection and request processing is orchestrated by `velda-edge::pipeline::l7::http1`, which creates `Http1ServerConnection` and passes upstream streams into `forward_request()`.
+**Important:** All connection and request processing is orchestrated by `velda-edge::pipeline::http1`, which creates `Http1ServerConnection` and passes upstream streams into `forward_request()`.
 
 ---
 

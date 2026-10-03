@@ -133,8 +133,7 @@ Cung cấp khả năng nhận diện tài nguyên hệ thống thực tế (CPU 
   - **`MemoryTier`**: `Constrained` (< 512 MB), `Small` (512 MB – 2 GB), `Medium` (2 GB – 8 GB), `Large` (8 GB – 32 GB), `XLarge` (32 GB – 64 GB), `TwoXLarge` (64 GB – 128 GB), `Ultra` (> 128 GB).
   - Dùng để scale socket buffers (TCP/UDP), socket backlog, và DNS/LKG cache capacities.
 - `src/hardware/mod.rs`:
-  - `HardwareTopology`: Tổng hợp `CpuProfile` và `MemoryProfile`.
-  - Hỗ trợ đầy đủ backward-compatibility (`available_cores`, `worker_threads`, `memory_bytes`, `resource_tier()`, alias `ResourceTier = MemoryTier`).
+  - `HardwareTopology`: Tổng hợp `CpuProfile` và `MemoryProfile`, cung cấp `cpu_tier()` và `memory_tier()`.
 
 ---
 

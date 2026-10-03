@@ -23,9 +23,6 @@ use std::sync::OnceLock;
 pub use cpu::{CpuProfile, CpuTier, probe_cpu};
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
 
-/// Canonical resource classification tier (alias to [`MemoryTier`] for backwards compatibility).
-pub type ResourceTier = MemoryTier;
-
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardwareTopology {
@@ -115,12 +112,6 @@ impl HardwareTopology {
     pub fn memory_tier(&self) -> MemoryTier {
         self.memory.tier
     }
-
-    /// Categorizes the current hardware environment into a [`ResourceTier`] (alias to [`MemoryTier`]).
-    #[inline]
-    pub fn resource_tier(&self) -> ResourceTier {
-        self.memory.tier
-    }
 }
 
 static TOPOLOGY: OnceLock<HardwareTopology> = OnceLock::new();
@@ -170,7 +161,6 @@ mod tests {
         assert_eq!(topo.memory_bytes(), 512 * 1024 * 1024);
         assert_eq!(topo.cpu_tier(), CpuTier::Small);
         assert_eq!(topo.memory_tier(), MemoryTier::Small);
-        assert_eq!(topo.resource_tier(), ResourceTier::Small);
     }
 
     #[test]

@@ -9,18 +9,13 @@
 
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
-use velda_transport::{Connection, TcpL7Handoff, TrafficEngine, UdpL7Handoff};
+use velda_transport::TrafficEngine;
 
-use crate::config::{
-    EdgeConfig, load_listeners, load_plugins, load_routes, load_tls, load_upstreams,
-};
+use crate::config::EdgeConfig;
 use crate::error::EdgeError;
-use crate::pipeline::{handle_l4_tcp, handle_l4_udp, handle_tcp_l7, handle_udp_l7};
-use crate::runtime::router::build_router;
-use crate::runtime::tls::{compile_tls_client, compile_tls_server};
-use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
+use crate::reload::load_initial_runtime;
+use crate::runtime::{SharedRuntime, new_shared_runtime};
 use crate::runtime_profile::{RuntimeProfile, resolve_runtime_profile};
-use crate::uds::run_ipc_server;
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
 pub struct EdgeSupervisor {
@@ -43,64 +38,8 @@ impl EdgeSupervisor {
         // Resolve runtime profile: file > probe fallback > write-back
         let runtime_profile = resolve_runtime_profile(&runtime_dir, &hardware);
 
-        // Load initial LKG state if available on disk (requires binary artifacts)
-        let has_lkg = runtime_dir.join("listeners.bin").exists()
-            || runtime_dir.join("routes.bin").exists()
-            || runtime_dir.join("upstreams.bin").exists();
-
-        let initial_runtime = if has_lkg {
-            let listeners = load_listeners(&runtime_dir)?;
-            let routes = load_routes(&runtime_dir)?;
-            let upstreams = load_upstreams(&runtime_dir)?;
-            velda_sync::post_sync::validate_streaming_policy(&listeners, &routes, &upstreams)
-                .map_err(|e| EdgeError::InvalidConfig {
-                    detail: e.to_string(),
-                })?;
-            let tls = load_tls(&runtime_dir)?;
-            let tls_server = compile_tls_server(&tls, &runtime_profile.to_tls_server_params())?;
-            let tls_client = compile_tls_client(&upstreams)?;
-            let router = build_router(&routes, &upstreams, &listeners)?;
-            let upstreams_table = crate::runtime::build_upstreams(&upstreams, tls_client.as_ref());
-
-            // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
-            if let Some(tls) = tls_server.as_ref() {
-                for listener in &listeners {
-                    if listener.transport.protocol.eq_ignore_ascii_case("udp")
-                        && (listener.application.protocol.eq_ignore_ascii_case("http3")
-                            || listener.application.protocol.eq_ignore_ascii_case("grpc"))
-                    {
-                        let _ = crate::pipeline::l7::http3::init_h3_engine(&listener.id, tls);
-                    }
-                }
-            }
-
-            let runtime_config = RuntimeConfig {
-                listeners,
-                routes,
-                upstreams,
-                plugins: load_plugins(&runtime_dir)?,
-                tls,
-            };
-
-            let pipelines =
-                crate::runtime::pipeline::PipelineTable::build(&runtime_config.listeners)?;
-
-            Runtime {
-                revision: 1,
-                config: runtime_config,
-                router,
-                pipelines,
-                upstreams: upstreams_table,
-                tls_server,
-                tls_client,
-            }
-        } else {
-            tracing::info!(
-                path = %runtime_dir.display(),
-                "Runtime directory does not exist yet; initializing with empty state"
-            );
-            Runtime::empty()
-        };
+        // Cold-start runtime snapshot assembly delegated entirely to reload subsystem
+        let initial_runtime = load_initial_runtime(&runtime_dir, &runtime_profile)?;
 
         let initial_listeners = initial_runtime.listener_count();
         let initial_routes = initial_runtime.route_count();
@@ -157,76 +96,7 @@ impl EdgeSupervisor {
 
     /// Runs the edge gateway until `shutdown` is signaled.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), EdgeError> {
-        let socket_path = self.config.socket_path.clone();
-        let runtime_dir = self.config.runtime_dir();
-        let shared_runtime = self.shared_runtime.clone();
-
-        let engine_handle = self.engine.handle();
-
-        // 1. Spawn UDS IPC listener task in background
-        let ipc_shutdown = shutdown.clone();
-        let ipc_task = tokio::spawn(async move {
-            if let Err(e) = run_ipc_server(
-                socket_path,
-                runtime_dir,
-                shared_runtime,
-                Some(engine_handle),
-                ipc_shutdown,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "IPC server task exited with error");
-            }
-        });
-
-        // 2. Run TrafficEngine accept and pipeline execution loops
-        let runtime_l4 = self.shared_runtime.clone();
-        let l4_handler = move |conn: Connection| {
-            let rt = runtime_l4.clone();
-            async move {
-                handle_l4_tcp(conn, &rt).await;
-            }
-        };
-
-        let runtime_l7 = self.shared_runtime.clone();
-        let l7_handler = move |handoff: TcpL7Handoff| {
-            let rt = runtime_l7.clone();
-            async move {
-                handle_tcp_l7(handoff, &rt).await;
-            }
-        };
-
-        let runtime_udp_l4 = self.shared_runtime.clone();
-        let udp_l4_handler = move |id, socket, dgram| {
-            let rt = runtime_udp_l4.clone();
-            async move {
-                handle_l4_udp(id, socket, dgram, &rt).await;
-            }
-        };
-
-        let runtime_udp_l7 = self.shared_runtime.clone();
-        let udp_l7_handler = move |handoff: UdpL7Handoff| {
-            let rt = runtime_udp_l7.clone();
-            async move {
-                handle_udp_l7(handoff, &rt).await;
-            }
-        };
-
-        let engine_result = self
-            .engine
-            .run_all(
-                shutdown,
-                l4_handler,
-                l7_handler,
-                udp_l4_handler,
-                udp_l7_handler,
-            )
-            .await;
-
-        // 3. Await background IPC task termination
-        let _ = ipc_task.await;
-
-        engine_result.map_err(EdgeError::Transport)
+        crate::lifecycle::run_gateway(self.engine, self.shared_runtime, self.config, shutdown).await
     }
 }
 
@@ -236,10 +106,29 @@ pub async fn start(config: EdgeConfig) -> Result<(), EdgeError> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Trap Ctrl+C (SIGINT) and SIGTERM signals
+    // Trap Ctrl+C (SIGINT) and SIGTERM signals for graceful shutdown
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("Received interrupt signal; initiating graceful edge shutdown");
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+            }
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("Received SIGINT (Ctrl+C); initiating graceful edge shutdown"),
+            _ = terminate => tracing::info!("Received SIGTERM; initiating graceful edge shutdown"),
+        }
+
         let _ = shutdown_tx.send(true);
     });
 

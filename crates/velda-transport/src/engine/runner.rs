@@ -34,7 +34,12 @@ impl Default for TrafficEngine {
 impl TrafficEngine {
     /// Creates a new empty traffic engine with an integrated declarative reconciliation channel.
     pub fn new() -> Self {
-        let (reconcile_tx, reconcile_rx) = mpsc::channel(32);
+        Self::with_reconcile_capacity(32)
+    }
+
+    /// Creates a new empty traffic engine with a specified reconciliation channel buffer capacity.
+    pub fn with_reconcile_capacity(capacity: usize) -> Self {
+        let (reconcile_tx, reconcile_rx) = mpsc::channel(capacity.max(1));
         Self {
             initial_tcp: Vec::new(),
             initial_udp: Vec::new(),
@@ -42,6 +47,15 @@ impl TrafficEngine {
             reconcile_tx,
             reconcile_rx,
         }
+    }
+
+    /// Creates a traffic engine sized for the given hardware CPU and memory tiers.
+    pub fn for_tiers(
+        cpu: velda_core::hardware::CpuTier,
+        mem: velda_core::hardware::MemoryTier,
+    ) -> Self {
+        let cfg = super::config::EngineConfig::for_tiers(cpu, mem);
+        Self::with_reconcile_capacity(cfg.reconcile_channel_capacity)
     }
 
     /// Returns a lightweight controller handle to dynamically submit declarative listener reconciliations.

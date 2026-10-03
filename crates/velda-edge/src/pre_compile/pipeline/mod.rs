@@ -1,20 +1,25 @@
-//! Layer 7 (L7) protocol services: each file represents an isolated protocol pipeline.
+//! Flat protocol pipelines: each module represents an isolated, self-contained protocol pipeline.
 
+pub mod context;
 pub mod grpc;
 pub mod http1;
 pub mod http2;
 pub mod http3;
+pub mod tcp;
+pub mod udp;
 
+pub use context::{IngressContext, TlsMetadata};
 pub use grpc::handle_grpc_stream;
 pub use http1::handle_http1_stream;
 pub use http2::handle_http2_stream;
 pub use http3::{
     clear_h3_engines, handle_grpc_udp_handoff, handle_http3_handoff, has_h3_engine, init_h3_engine,
 };
+pub use tcp::handle_l4_tcp;
+pub use udp::{UdpSessionKey, UdpSessionTable, get_udp_session_table, handle_l4_udp};
 
 use velda_transport::{TcpL7Handoff, UdpL7Handoff};
 
-use crate::pipeline::context::IngressContext;
 use crate::runtime::SharedRuntime;
 use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 

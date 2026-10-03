@@ -24,7 +24,7 @@ use crate::error::EdgeError;
 ///   in $O(1)$ lock-free time without any dynamic allocation or PEM re-parsing.
 ///
 /// Returns `Ok(None)` if no TLS configurations are provided.
-pub(crate) fn compile_tls_server(
+pub fn compile_tls_server(
     tls_configs: &[TlsConfig],
     params: &TlsServerParams,
 ) -> Result<Option<TlsServerEngine>, EdgeError> {
@@ -53,7 +53,7 @@ pub(crate) fn compile_tls_server(
 ///
 /// Pre-compiles all client certificates, root stores, ALPN protocols, and SNI connectors
 /// into RAM ready for O(1) lock-free lookup and zero-IO handshake execution on the hot path.
-pub(crate) fn compile_tls_client(
+pub fn compile_tls_client(
     upstreams: &[velda_sync::post_sync::upstream::UpstreamConfig],
 ) -> Result<Option<TlsClientEngine>, EdgeError> {
     let client_configs: Vec<ClientTlsConfig> = upstreams

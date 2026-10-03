@@ -15,9 +15,9 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use velda_core::hardware::{CpuTier, HardwareTopology, MemoryTier};
+use velda_core::hardware::HardwareTopology;
 use velda_discovery::DnsResolverConfig;
-use velda_transport::{TcpListenerConfig, UdpSocketConfig};
+use velda_transport::{EngineConfig, TcpListenerConfig, UdpSocketConfig};
 
 /// Hardware information snapshot recorded in `runtime.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,38 +121,15 @@ impl RuntimeProfile {
         let memory_tier = hardware.memory_tier();
 
         let dns_config = DnsResolverConfig::for_tier(memory_tier);
-        let tcp_config = TcpListenerConfig::for_tiers(cpu_tier, memory_tier);
-        let udp_config = UdpSocketConfig::for_tier(memory_tier);
+        let engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
         let tls_params = velda_tls::TlsServerParams::for_tiers(cpu_tier, memory_tier);
-
-        // Explicit 7-tier CPU mapping for I/O workers and channel capacity
-        let (io_workers, channel_cap) = match cpu_tier {
-            CpuTier::Constrained => (1, 32),
-            CpuTier::Small => (2, 64),
-            CpuTier::Medium => (4, 128),
-            CpuTier::Large => (8, 256),
-            CpuTier::XLarge => (16, 512),
-            CpuTier::TwoXLarge => (32, 1024),
-            CpuTier::Ultra => (64, 2048),
-        };
-
-        // Explicit 7-tier Memory mapping for maximum concurrent connections
-        let max_conns = match memory_tier {
-            MemoryTier::Constrained => 10_000,
-            MemoryTier::Small => 50_000,
-            MemoryTier::Medium => 200_000,
-            MemoryTier::Large => 500_000,
-            MemoryTier::XLarge => 1_000_000,
-            MemoryTier::TwoXLarge => 2_000_000,
-            MemoryTier::Ultra => 4_000_000,
-        };
 
         Self {
             version: 1,
             hardware: HardwareProfile {
                 detected_ram_bytes: hardware.memory_bytes(),
                 detected_cores: hardware.available_cores(),
-                worker_threads: io_workers,
+                worker_threads: engine_config.io_workers,
                 cpu_tier: cpu_tier.as_str().to_string(),
                 memory_tier: memory_tier.as_str().to_string(),
                 tier: memory_tier.as_str().to_string(),
@@ -166,20 +143,20 @@ impl RuntimeProfile {
                 positive_ttl_secs: dns_config.positive_ttl.as_secs(),
             },
             transport: TransportRuntimeConfig {
-                io_workers,
-                max_active_connections: max_conns,
-                reconcile_channel_capacity: channel_cap,
+                io_workers: engine_config.io_workers,
+                max_active_connections: engine_config.max_active_connections,
+                reconcile_channel_capacity: engine_config.reconcile_channel_capacity,
                 tcp: TcpRuntimeConfig {
-                    backlog: tcp_config.backlog,
-                    nodelay: tcp_config.nodelay,
-                    keepalive_secs: tcp_config.keepalive.map(|d| d.as_secs()),
-                    recv_buffer_size: tcp_config.recv_buffer_size,
-                    send_buffer_size: tcp_config.send_buffer_size,
-                    copy_buffer_size: tcp_config.copy_buffer_size,
+                    backlog: engine_config.tcp.backlog,
+                    nodelay: engine_config.tcp.nodelay,
+                    keepalive_secs: engine_config.tcp.keepalive.map(|d| d.as_secs()),
+                    recv_buffer_size: engine_config.tcp.recv_buffer_size,
+                    send_buffer_size: engine_config.tcp.send_buffer_size,
+                    copy_buffer_size: engine_config.tcp.copy_buffer_size,
                 },
                 udp: UdpRuntimeConfig {
-                    recv_buffer_size: udp_config.recv_buffer_size,
-                    send_buffer_size: udp_config.send_buffer_size,
+                    recv_buffer_size: engine_config.udp.recv_buffer_size,
+                    send_buffer_size: engine_config.udp.send_buffer_size,
                 },
             },
             tls: TlsRuntimeConfig {

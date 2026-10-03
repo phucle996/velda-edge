@@ -45,12 +45,6 @@ impl MemoryTier {
         }
     }
 
-    /// Alias for backwards compatibility with earlier API.
-    #[inline]
-    pub fn from_memory_bytes(bytes: usize) -> Self {
-        Self::from_bytes(bytes)
-    }
-
     /// Returns the canonical kebab-case string representation of this tier.
     #[inline]
     pub const fn as_str(&self) -> &'static str {

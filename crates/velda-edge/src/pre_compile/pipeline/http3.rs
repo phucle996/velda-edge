@@ -287,13 +287,9 @@ pub async fn handle_grpc_udp_handoff(
                 "Decoded gRPC request from UDP"
             );
 
-            let response = crate::pipeline::l7::grpc::process_grpc_request(
-                &req_event.request,
-                &context,
-                &config,
-                &runtime,
-            )
-            .await;
+            let response =
+                super::grpc::process_grpc_request(&req_event.request, &context, &config, &runtime)
+                    .await;
 
             let resp_now = std::time::Instant::now();
             let resp_pkts = {

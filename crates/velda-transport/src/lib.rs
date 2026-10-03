@@ -19,7 +19,7 @@ pub mod tcp;
 pub mod udp;
 
 pub use connection::{Connection, ConnectionReader, ConnectionWriter, next_connection_id};
-pub use engine::{EngineHandle, TrafficEngine};
+pub use engine::{EngineConfig, EngineHandle, TrafficEngine};
 pub use error::{Result, TransportError};
 pub use handoff::{TcpL7Handoff, UdpL7Handoff};
 pub use ingress::{IngressBinding, IngressListener, PathKind};
