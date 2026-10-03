@@ -4,6 +4,7 @@ pub mod grpc;
 pub mod http1;
 pub mod http2;
 pub mod http3;
+pub(crate) mod trie;
 
 pub use grpc::{GrpcRoute, GrpcRouteRequest, GrpcRouter, ListenerGrpcRouter};
 pub use http1::{Http1Route, Http1RouteRequest, Http1Router, ListenerHttp1Router};

@@ -21,11 +21,14 @@ High-performance, protocol-isolated in-memory routing engine for the Velda Edge 
               L4 Direct Traffic                   L7 Application Stream
              (Raw TCP / Raw UDP)            (Declared Protocol on Ingress)
                       │                                   │
-                      ▼                                   │
-             ┌─────────────────┐                          │
-             │    L4Router     │                          │
-             │   (O(1) Slot)   │                          │
-             └────────┬────────┘                          │
+         ┌────────────┴────────────┐                      │
+         ▼                         ▼                      │
+┌─────────────────┐       ┌─────────────────┐             │
+│    TcpRouter    │       │    UdpRouter    │             │
+│   (O(1) Map)    │       │   (O(1) Map)    │             │
+└────────┬────────┘       └────────┬────────┘             │
+         │                         │                      │
+         └────────────┬────────────┘                      │
                       │                                   │
          ┌────────────┴────────────┬──────────────────────┴──────────────────┐
          ▼                         ▼                      ▼                  ▼
@@ -46,7 +49,7 @@ High-performance, protocol-isolated in-memory routing engine for the Velda Edge 
 
 ---
 
-## 2. Two-Tier Routing Engine (Exact + Aho-Corasick)
+## 2. Two-Tier Routing Engine (Exact + Compressed Radix Trie)
 
 For L7 HTTP protocols (HTTP/1.1, HTTP/2, HTTP/3), routes often combine fixed endpoints (`/login`, `/healthz`) with parameterized or nested prefixes (`/api/v1/*`, `/users/*`). 
 
@@ -58,14 +61,14 @@ Incoming Path: "/api/v1/orders/12345/details"
                      ▼
        ┌───────────────────────────┐
        │   Tier 1: Exact Match     │ ───[HIT]───► Match Host & Method ──► Route Found
-       │  (O(1) Hash Map Lookup)   │
+       │  (O(1) FxHashMap Lookup)  │
        └─────────────┬─────────────┘
                      │ [MISS]
                      ▼
        ┌───────────────────────────┐
        │   Tier 2: Prefix Match    │
-       │   (Aho-Corasick Automaton)│ ───[HIT]───► Longest Prefix Match ──► Route Found
-       │    O(M) URI Length Scan   │
+       │   (Compressed Radix Trie) │ ───[HIT]───► Longest Prefix Match ──► Route Found
+       │    O(P) Early Termination │
        └─────────────┬─────────────┘
                      │ [MISS]
                      ▼
@@ -73,44 +76,45 @@ Incoming Path: "/api/v1/orders/12345/details"
 ```
 
 1. **Tier 1 — Exact Match ($O(1)$)**:
-   - Direct hash lookup on exact path strings (`exact_path`).
-   - Resolves in **~65 ns** on 5,000-route tables with **0 heap allocations**.
-2. **Tier 2 — Anchored Aho-Corasick Prefix Match ($O(M)$)**:
-   - Compiled finite-state automaton ([`AhoCorasick`](https://docs.rs/aho-corasick)) configured with `LeftmostLongest` match semantics and `Anchored::Yes`.
-   - Scans the URI string **exactly once** in $O(M)$ time where $M$ is the path length in bytes, completely independent of whether the table contains 100 or 5,000 prefixes.
-   - Evaluates prefixes in **~86 ns** with **0 heap allocations**.
+   - Direct hash lookup on exact path strings (`exact_path`) via Fibonacci hashing (`FxHashMap`).
+   - Resolves in **~38 ns** on 5,000-route tables with **0 heap allocations**.
+2. **Tier 2 — Compressed Radix Trie (Patricia Trie) ($O(P)$)**:
+   - Custom in-house zero-allocation Trie ([`trie.rs`](src/l7/trie.rs)) caching edge `first_byte` for branch selection without pointer chasing.
+   - Strictly $O(P)$ complexity (where $P$ is the matched prefix depth, not the full URI length $M$). Early-terminates as soon as an edge diverges.
+   - Evaluates prefix matching in **~29 ns** with **0 heap allocations** across 100 to 5,000 routes.
+   - Zero external automaton dependencies (`aho-corasick` eliminated).
 
 ---
 
 ## 3. Subsystem Breakdown
 
-### 3.1 Layer 4 Router (`L4Router`)
-- **Location**: [`src/l4/`](src/l4/)
+### 3.1 Layer 4 Routers (`TcpRouter`, `UdpRouter`)
+- **Location**: [`src/l4/tcp.rs`](src/l4/tcp.rs), [`src/l4/udp.rs`](src/l4/udp.rs)
 - **Scope**: L4 Raw TCP and UDP streams.
-- **Data Model**: `ListenerL4Router` holds dedicated `Option<L4Route>` slots for `Tcp` and `Udp`.
-- **Performance**: Direct slot lookup in **15.07 ns** (66.4M ops/s).
+- **Data Model**: Dedicated, protocol-isolated `TcpRouter` and `UdpRouter` storing `TcpRoute` and `UdpRoute`.
+- **Performance**: Direct lookup in **0.24 ns** (TCP) and **1.80 ns** (UDP).
 
 ### 3.2 Layer 7 HTTP Routers (`Http1Router`, `Http2Router`, `Http3Router`)
 - **Location**: [`src/l7/http1.rs`](src/l7/http1.rs), [`src/l7/http2.rs`](src/l7/http2.rs), [`src/l7/http3.rs`](src/l7/http3.rs)
 - **Scope**: HTTP/1.1 text streaming, HTTP/2 binary framing, and HTTP/3 QUIC datagram streams.
 - **Request Views**: Zero-copy borrowed projections (`Http1RouteRequest<'a>`, `Http2RouteRequest<'a>`, `Http3RouteRequest<'a>`) holding `&'a str` references to `path`, `host`, and `method`.
-- **Filter Rules**: Enforces URI path, optional `Host` header (case-insensitive), and optional HTTP `Method`.
+- **Filter Rules**: Enforces URI path, optional `Host` header (case-insensitive with fast byte-scanned `clean_host`), and optional HTTP `Method`.
 
 ### 3.3 Layer 7 gRPC Router (`GrpcRouter`)
 - **Location**: [`src/l7/grpc.rs`](src/l7/grpc.rs)
 - **Scope**: Dedicated RPC routing over HTTP/2 framing.
 - **Request View**: `GrpcRouteRequest<'a>` holding `service`, `method`, and optional `authority`.
 - **Dispatch**: Direct hash map lookup on `service` name, followed by method and authority matching; falls back to `catch_all` wildcard services (`"*"`) if configured.
-- **Performance**: Service dispatch in **41.45 ns**; zero-alloc URI slice parse & match in **51.63 ns** (24.1M ops/s).
+- **Performance**: Service dispatch in **10.94 ns**; zero-alloc URI slice parse & match in **52.13 ns**.
 
 ---
 
 ## 4. Invariants & Engineering Guarantees
 
 1. **Hot-Path Zero-Allocation Invariant**:
-   All route resolution functions (`route_l4`, `route_http1`, `route_http2`, `route_http3`, `route_grpc`) take borrowed request views and return `Option<&Route>`. **No `String`, `Vec`, or heap memory is allocated during lookup.**
+   All route resolution functions (`route_tcp`, `route_udp`, `route_http1`, `route_http2`, `route_http3`, `route_grpc`) take borrowed request views and return `Option<&Route>`. **No `String`, `Vec`, or heap memory is allocated during lookup.**
 2. **Deterministic Lookups & ReDoS Immunity**:
-   No backtracking regex engines (`regex` crate with dynamic NFA/DFA) are used on the serving path. All prefix matching uses anchored Aho-Corasick.
+   No dynamic regex engines are used on the serving path. All prefix matching uses deterministic, non-backtracking Radix Trie traversal.
 3. **Lock-Free Concurrency**:
    Compiled `Router` structures are immutable once built and safely shared across CPU threads via `Arc<Router>` or `ArcSwap<Runtime>`. Readers execute concurrent lookups with zero cross-core locking or cache contention.
 4. **Clean Protocol Boundaries**:
@@ -121,35 +125,34 @@ Incoming Path: "/api/v1/orders/12345/details"
 ## 5. Usage Example
 
 ```rust
-use velda_core::{RouteId, TransportProtocol, UpstreamId};
+use velda_core::{RouteId, UpstreamId};
 use velda_router::{
-    Http1Route, Http1RouteRequest, L4Route, RouterBuilder,
+    Http1Route, Http1RouteRequest, RouterBuilder, TcpRoute,
 };
 
 // 1. Build routes using the builder
 let mut builder = RouterBuilder::default();
 
-// Add an L4 route
-builder.add_l4(L4Route::new(
-    RouteId::new("l4-rule-1"),
+// Add an L4 TCP route
+builder = builder.add_tcp_route(TcpRoute::new(
+    RouteId::new(1),
     "listener-tcp-1",
-    TransportProtocol::Tcp,
-    UpstreamId::new("postgres-backend"),
+    UpstreamId::new(10),
     "postgres_cluster",
 ));
 
 // Add an L7 HTTP/1.1 prefix route
 let http_route = Http1Route::new(
-    RouteId::new("http-rule-1"),
+    RouteId::new(2),
     "listener-http-1",
     "/api/v1",
-    UpstreamId::new("api-backend"),
+    UpstreamId::new(20),
     "api_service",
 )
 .with_host("api.velda.io")
 .with_method("GET");
 
-builder.add_http1(http_route);
+builder = builder.add_http1_route(http_route);
 
 // 2. Compile into immutable in-memory Router
 let router = builder.build().expect("Router compilation succeeded");
@@ -168,14 +171,15 @@ if let Some(route) = router.route_http1("listener-http-1", &req) {
 
 ## 6. Empirical Performance Summary
 
-Empirical data extracted from [`benchmark.md`](benchmark.md) on a 5,000-route, 1,000-upstream production dataset:
+Empirical data extracted from production benchmarks on a 5,000-route, 1,000-upstream dataset:
 
 | Target Scenario | Operation / Path | Latency / op | Allocs / op | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **L4 TCP Route** | `listener:tcp` | **15.07 ns** | **0.00** | **66.4 M ops/s** |
-| **L4 UDP Route** | `listener:udp` | **24.58 ns** | **0.00** | **40.7 M ops/s** |
-| **L7 HTTP Exact** | `/endpoints/action_0005/exec` | **65.70 ns** | **0.00** | **15.2 M ops/s** |
-| **L7 HTTP Prefix** | `/api/v1/service_1000/orders/items/42` | **86.73 ns** | **0.00** | **11.5 M ops/s** |
-| **L7 HTTP Miss** | `/unmatched/path/404` | **45.04 ns** | **0.00** | **22.2 M ops/s** |
-| **L7 gRPC Exact** | `service.v1.Service_0007` | **41.45 ns** | **0.00** | **24.1 M ops/s** |
-| **Multicore (128 Workers)**| Concurrent mixed traffic | **9.66 ns** | **0.00** | **103.5 M ops/s** |
+| **L4 TCP Route** | `l4-in-0:tcp` | **0.24 ns** | **0.00** | **4,150.2 M ops/s** |
+| **L4 UDP Route** | `l4-in-9:udp` | **1.80 ns** | **0.00** | **555.7 M ops/s** |
+| **L7 HTTP Exact** | `/endpoints/action_0005/exec` | **38.52 ns** | **0.00** | **25.9 M ops/s** |
+| **L7 HTTP Prefix** | `/api/v1/service_1000/orders/items/42` | **29.61 ns** | **0.00** | **33.7 M ops/s** |
+| **L7 HTTP Miss** | `/unknown/unmatched/path/404` | **9.36 ns** | **0.00** | **106.8 M ops/s** |
+| **L7 gRPC Exact** | `service.v1.Service_0007` | **10.94 ns** | **0.00** | **91.4 M ops/s** |
+| **L7 gRPC Parse+Route** | `/service.v1.Service_0007/CreateOrder` | **52.13 ns** | **0.00** | **19.1 M ops/s** |
+| **Multicore (256 Workers)**| Mixed Concurrent Traffic | **2.50 ns** | **0.00** | **399.3 M ops/s** |

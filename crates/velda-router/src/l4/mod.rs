@@ -1,7 +1,7 @@
-//! Layer 4 routing module.
+//! Layer 4 (TCP and UDP) routing domain models and lookup tables.
 
-pub mod route;
-pub mod router;
+pub mod tcp;
+pub mod udp;
 
-pub use route::L4Route;
-pub use router::L4Router;
+pub use tcp::{TcpRoute, TcpRouter};
+pub use udp::{UdpRoute, UdpRouter};

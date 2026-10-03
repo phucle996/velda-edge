@@ -1,9 +1,9 @@
 //! Router compilation from route and upstream configurations.
 
-use std::net::SocketAddr;
-
-use velda_core::{RouteId, TransportProtocol, UpstreamId};
-use velda_router::{GrpcRoute, Http1Route, Http2Route, Http3Route, L4Route, Router, RouterBuilder};
+use velda_core::{RouteId, UpstreamId};
+use velda_router::{
+    GrpcRoute, Http1Route, Http2Route, Http3Route, Router, RouterBuilder, TcpRoute, UdpRoute,
+};
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::route::RouteConfig;
 use velda_sync::post_sync::upstream::UpstreamConfig;
@@ -19,31 +19,6 @@ fn hash_id_to_u32(s: &str) -> u32 {
     h
 }
 
-fn resolve_target_endpoints(upstream_id: &str, upstreams: &[UpstreamConfig]) -> Vec<SocketAddr> {
-    let mut target_endpoints = Vec::new();
-    if let Some(up) = upstreams.iter().find(|u| u.id == upstream_id) {
-        for ep in &up.endpoints {
-            if let Ok(addr) = ep.address.parse::<SocketAddr>() {
-                target_endpoints.push(addr);
-            } else {
-                tracing::warn!(
-                    upstream = %up.id,
-                    endpoint = %ep.address,
-                    "Unable to parse endpoint address as SocketAddr"
-                );
-            }
-        }
-
-        if target_endpoints.is_empty()
-            && let Some(ref target) = up.target
-            && let Ok(ip) = target.host.parse::<std::net::IpAddr>()
-        {
-            target_endpoints.push(SocketAddr::new(ip, target.port));
-        }
-    }
-    target_endpoints
-}
-
 /// Compiles declarative route, upstream, and listener configurations into a [`Router`] instance.
 pub fn build_router(
     routes: &[RouteConfig],
@@ -53,23 +28,8 @@ pub fn build_router(
     let mut builder = RouterBuilder::new();
 
     for route in routes {
-        let target_endpoints = resolve_target_endpoints(&route.upstream, upstreams);
-
         if route.kind.eq_ignore_ascii_case("l4") {
             let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("tcp");
-
-            let protocol = match protocol_str.to_ascii_lowercase().as_str() {
-                "tcp" => TransportProtocol::Tcp,
-                "udp" => TransportProtocol::Udp,
-                other => {
-                    return Err(EdgeError::InvalidConfig {
-                        detail: format!(
-                            "route '{}': unsupported L4 transport protocol '{}'",
-                            route.id, other
-                        ),
-                    });
-                }
-            };
 
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
@@ -88,34 +48,42 @@ pub fn build_router(
                 }
             }
 
-            let udp_idle_timeout = if protocol == TransportProtocol::Udp {
-                if route.timeouts.downstream_idle_ms == Some(0)
-                    || route.plugins.iter().any(|p| {
-                        p.eq_ignore_ascii_case("unidirectional")
-                            || p.eq_ignore_ascii_case("fire_and_forget")
-                    })
-                {
-                    None
-                } else {
-                    let ms = route.timeouts.downstream_idle_ms.unwrap_or(30_000);
-                    Some(std::time::Duration::from_millis(ms))
+            match protocol_str.to_ascii_lowercase().as_str() {
+                "tcp" => {
+                    let tcp_route =
+                        TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_plugins(route.plugins.clone());
+
+                    builder = builder.add_tcp_route(tcp_route);
                 }
-            } else {
-                None
-            };
+                "udp" => {
+                    let udp_idle_timeout = if route.timeouts.downstream_idle_ms == Some(0)
+                        || route.plugins.iter().any(|p| {
+                            p.eq_ignore_ascii_case("unidirectional")
+                                || p.eq_ignore_ascii_case("fire_and_forget")
+                        }) {
+                        None
+                    } else {
+                        let ms = route.timeouts.downstream_idle_ms.unwrap_or(30_000);
+                        Some(std::time::Duration::from_millis(ms))
+                    };
 
-            let l4_route = L4Route::new(
-                route_id,
-                &route.listener,
-                protocol,
-                upstream_id,
-                &route.upstream,
-            )
-            .with_target_endpoints(target_endpoints)
-            .with_udp_idle_timeout(udp_idle_timeout)
-            .with_plugins(route.plugins.clone());
+                    let udp_route =
+                        UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_udp_idle_timeout(udp_idle_timeout)
+                            .with_plugins(route.plugins.clone());
 
-            builder = builder.add_l4_route(l4_route);
+                    builder = builder.add_udp_route(udp_route);
+                }
+                other => {
+                    return Err(EdgeError::InvalidConfig {
+                        detail: format!(
+                            "route '{}': unsupported L4 transport protocol '{}'",
+                            route.id, other
+                        ),
+                    });
+                }
+            }
         } else if route.kind.eq_ignore_ascii_case("l7") {
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
@@ -186,7 +154,6 @@ pub fn build_router(
                         upstream_id,
                         &route.upstream,
                     )
-                    .with_target_endpoints(target_endpoints)
                     .with_plugins(route.plugins.clone());
 
                     if let Some(ref auth) = route.match_rule.host {
@@ -221,7 +188,6 @@ pub fn build_router(
                             &route.upstream,
                         )
                     }
-                    .with_target_endpoints(target_endpoints)
                     .with_plugins(route.plugins.clone());
 
                     if let Some(ref host) = route.match_rule.host {
@@ -256,7 +222,6 @@ pub fn build_router(
                             &route.upstream,
                         )
                     }
-                    .with_target_endpoints(target_endpoints)
                     .with_plugins(route.plugins.clone());
 
                     if let Some(ref host) = route.match_rule.host {
@@ -291,7 +256,6 @@ pub fn build_router(
                             &route.upstream,
                         )
                     }
-                    .with_target_endpoints(target_endpoints)
                     .with_plugins(route.plugins.clone());
 
                     if let Some(ref host) = route.match_rule.host {
@@ -473,26 +437,17 @@ mod tests {
         ];
 
         let router = build_router(&routes, &upstreams, &listeners).unwrap();
-        let tcp = router
-            .route_l4("postgres-in", TransportProtocol::Tcp)
-            .unwrap();
+
+        // Verify L4 TCP route
+        let tcp = router.route_tcp("postgres-in").unwrap();
         assert_eq!(tcp.listener_id, "postgres-in");
-        assert_eq!(tcp.protocol, TransportProtocol::Tcp);
         assert_eq!(tcp.upstream_name, "postgres-backend");
         assert_eq!(tcp.plugins, vec!["rate-limit"]);
-        assert_eq!(
-            tcp.select_target().unwrap(),
-            "127.0.0.1:5432".parse::<SocketAddr>().unwrap()
-        );
 
-        let udp = router.route_l4("dns-in", TransportProtocol::Udp).unwrap();
+        // Verify L4 UDP route
+        let udp = router.route_udp("dns-in").unwrap();
         assert_eq!(udp.listener_id, "dns-in");
-        assert_eq!(udp.protocol, TransportProtocol::Udp);
         assert_eq!(udp.upstream_name, "dns-backend");
-        assert_eq!(
-            udp.select_target().unwrap(),
-            "127.0.0.1:53".parse::<SocketAddr>().unwrap()
-        );
 
         // Verify L7 HTTP/1.1 route compilation
         let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");
@@ -503,6 +458,8 @@ mod tests {
         let h2_req = velda_router::Http2RouteRequest::new("/api/v1/users");
         assert!(router.route_http2("http-in", &h2_req).is_none());
 
-        assert!(router.route_l4("unknown", TransportProtocol::Tcp).is_none());
+        // Verify unknown listeners return None
+        assert!(router.route_tcp("unknown").is_none());
+        assert!(router.route_udp("unknown").is_none());
     }
 }

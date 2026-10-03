@@ -17,7 +17,8 @@ use std::time::Instant;
 use common::{CountingAllocator, format_duration};
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
 use velda_router::{
-    GrpcRoute, GrpcRouteRequest, Http1Route, Http1RouteRequest, L4Route, Router, RouterBuilder,
+    GrpcRoute, GrpcRouteRequest, Http1Route, Http1RouteRequest, Router, RouterBuilder, TcpRoute,
+    UdpRoute,
 };
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, RoutesFile, compile_routes_to_binary, parse_routes,
@@ -206,17 +207,20 @@ fn compile_to_runtime_router(
                 }
             }
 
-            let l4 = L4Route::new(
-                route_id,
-                &route.listener,
-                proto,
-                upstream_id,
-                &route.upstream,
-            )
-            .with_target_endpoints(targets)
-            .with_plugins(route.plugins.clone());
-
-            builder = builder.add_l4_route(l4);
+            match proto {
+                TransportProtocol::Tcp => {
+                    let tcp =
+                        TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_plugins(route.plugins.clone());
+                    builder = builder.add_tcp_route(tcp);
+                }
+                TransportProtocol::Udp => {
+                    let udp =
+                        UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_plugins(route.plugins.clone());
+                    builder = builder.add_udp_route(udp);
+                }
+            }
         } else if route.kind.eq_ignore_ascii_case("l7") {
             let is_grpc = route
                 .match_rule
@@ -472,8 +476,8 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_l4("l4-in-9", TransportProtocol::Udp).unwrap();
-        let target = r.select_target();
+        let r = router.route_udp("l4-in-9").unwrap();
+        let target = r.id;
         let _ = std::hint::black_box(target);
     }
     let elapsed = start.elapsed();
@@ -521,8 +525,8 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
                         let _ = std::hint::black_box(route);
                     }
                     _ => {
-                        if let Some(route) = r.route_l4("l4-in-9", TransportProtocol::Udp) {
-                            let ep = route.select_target();
+                        if let Some(route) = r.route_udp("l4-in-9") {
+                            let ep = route.id;
                             let _ = std::hint::black_box(ep);
                         }
                     }

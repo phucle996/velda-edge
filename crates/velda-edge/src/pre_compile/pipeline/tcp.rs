@@ -3,7 +3,6 @@
 //! Direct byte-level proxying between downstream client and upstream backend
 //! via `velda_transport::forward_connection`. Pure raw TCP with zero TLS termination.
 
-use velda_core::TransportProtocol;
 use velda_transport::Connection;
 
 use crate::runtime::SharedRuntime;
@@ -17,7 +16,7 @@ pub async fn handle_l4_tcp(conn: Connection, runtime: &SharedRuntime) {
     };
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_l4(&listener_id, TransportProtocol::Tcp) else {
+    let Some(route) = rt.router.route_tcp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %peer,

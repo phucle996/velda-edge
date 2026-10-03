@@ -9,17 +9,16 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use common::{CountingAllocator, format_duration};
-use velda_core::{RouteId, TransportProtocol, UpstreamId};
+use velda_core::{RouteId, UpstreamId};
 use velda_router::{
-    GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router, L4Route,
-    L4Router, Router,
+    GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router, Router,
+    TcpRoute, TcpRouter, UdpRoute, UdpRouter,
 };
 
 #[global_allocator]
@@ -110,28 +109,25 @@ fn build_baseline_router(prefix_count: usize) -> Router {
     ];
     let grpc_router = GrpcRouter::new(grpc_routes).unwrap();
 
-    let l4_routes = vec![
-        L4Route::new(
-            RouteId::new(200),
-            "tcp-in",
-            TransportProtocol::Tcp,
-            UpstreamId::new(200),
-            "tcp-backend",
-        )
-        .with_target_endpoints(vec!["127.0.0.1:5432".parse::<SocketAddr>().unwrap()]),
-        L4Route::new(
-            RouteId::new(201),
-            "udp-in",
-            TransportProtocol::Udp,
-            UpstreamId::new(201),
-            "udp-backend",
-        )
-        .with_target_endpoints(vec!["127.0.0.1:53".parse::<SocketAddr>().unwrap()]),
-    ];
-    let l4_router = L4Router::new(l4_routes).unwrap();
+    let tcp_routes = vec![TcpRoute::new(
+        RouteId::new(200),
+        "tcp-in",
+        UpstreamId::new(200),
+        "tcp-backend",
+    )];
+    let tcp_router = TcpRouter::new(tcp_routes).unwrap();
+
+    let udp_routes = vec![UdpRoute::new(
+        RouteId::new(201),
+        "udp-in",
+        UpstreamId::new(201),
+        "udp-backend",
+    )];
+    let udp_router = UdpRouter::new(udp_routes).unwrap();
 
     Router::new(
-        l4_router,
+        tcp_router,
+        udp_router,
         http_router,
         Default::default(),
         Default::default(),
@@ -416,7 +412,7 @@ fn bench_concurrent_traffic_under_hot_reload() {
                         let _ = std::hint::black_box(route);
                     }
                     _ => {
-                        let route = current_table.route_l4("udp-in", TransportProtocol::Udp);
+                        let route = current_table.route_udp("udp-in");
                         let _ = std::hint::black_box(route);
                     }
                 }

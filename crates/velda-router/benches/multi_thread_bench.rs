@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common::{format_duration, load_router_from_large_dataset};
-use velda_core::TransportProtocol;
 use velda_router::{GrpcRouteRequest, Http1RouteRequest, Router};
 
 fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
@@ -52,13 +51,13 @@ fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
                     match (i + w) % 4 {
                         0 => {
                             // L4 TCP route lookup
-                            let route = r.route_l4("l4-in-0", TransportProtocol::Tcp);
+                            let route = r.route_tcp("l4-in-0");
                             let _ = std::hint::black_box(route);
                         }
                         1 => {
                             // L4 UDP route lookup + round-robin target select
-                            if let Some(route) = r.route_l4("l4-in-9", TransportProtocol::Udp) {
-                                let target = route.select_target();
+                            if let Some(route) = r.route_udp("l4-in-9") {
+                                let target = route.id;
                                 let _ = std::hint::black_box(target);
                             }
                         }

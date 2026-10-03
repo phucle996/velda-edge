@@ -10,7 +10,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use velda_core::TransportProtocol;
 use velda_transport::{Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
@@ -162,7 +161,7 @@ pub async fn handle_l4_udp(
     runtime: &SharedRuntime,
 ) {
     let rt = runtime.load();
-    let Some(route) = rt.router.route_l4(&listener_id, TransportProtocol::Udp) else {
+    let Some(route) = rt.router.route_udp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %datagram.peer(),
@@ -171,13 +170,18 @@ pub async fn handle_l4_udp(
         return;
     };
 
-    let target_addr = if let Some(up) = rt.upstreams.udp.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
-    } else {
-        route.select_target()
+    let Some(up) = rt.upstreams.udp.get(&route.upstream_name) else {
+        tracing::error!(
+            listener = %listener_id,
+            route = %route.id,
+            upstream = %route.upstream_name,
+            peer = %datagram.peer(),
+            "No backend upstream available in UDP upstream table; dropping datagram"
+        );
+        return;
     };
 
-    let Some(target_addr) = target_addr else {
+    let Some(target_addr) = up.select_target() else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,

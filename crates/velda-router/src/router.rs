@@ -1,21 +1,21 @@
-//! Unified top-level Router coordinating L4 and L7 (HTTP/1.1, HTTP/2, HTTP/3, and gRPC) routing.
-
-use velda_core::TransportProtocol;
+//! Unified top-level Router coordinating L4 (TCP, UDP) and L7 (HTTP/1.1, HTTP/2, HTTP/3, and gRPC) routing.
 
 use crate::error::RouterError;
-use crate::l4::{L4Route, L4Router};
+use crate::l4::tcp::{TcpRoute, TcpRouter};
+use crate::l4::udp::{UdpRoute, UdpRouter};
 use crate::l7::grpc::{GrpcRoute, GrpcRouteRequest, GrpcRouter};
 use crate::l7::http1::{Http1Route, Http1RouteRequest, Http1Router};
 use crate::l7::http2::{Http2Route, Http2RouteRequest, Http2Router};
 use crate::l7::http3::{Http3Route, Http3RouteRequest, Http3Router};
 
-/// Unified runtime router holding L4, HTTP/1.1, HTTP/2, HTTP/3, and gRPC routing structures.
+/// Unified runtime router holding dedicated routing structures for each supported protocol.
 ///
 /// Designed to be stored in an [`Arc`] or [`ArcSwap`] inside the in-memory runtime snapshot,
 /// supporting lock-free concurrent lookups on the request serving hot path.
 #[derive(Debug, Default, Clone)]
 pub struct Router {
-    l4: L4Router,
+    tcp: TcpRouter,
+    udp: UdpRouter,
     http1: Http1Router,
     http2: Http2Router,
     http3: Http3Router,
@@ -25,14 +25,16 @@ pub struct Router {
 impl Router {
     /// Creates a new router from individual protocol routers.
     pub fn new(
-        l4: L4Router,
+        tcp: TcpRouter,
+        udp: UdpRouter,
         http1: Http1Router,
         http2: Http2Router,
         http3: Http3Router,
         grpc: GrpcRouter,
     ) -> Self {
         Self {
-            l4,
+            tcp,
+            udp,
             http1,
             http2,
             http3,
@@ -40,10 +42,16 @@ impl Router {
         }
     }
 
-    /// Resolves an L4 route by `listener_id` and `protocol`.
+    /// Resolves an L4 TCP route by `listener_id`.
     #[inline]
-    pub fn route_l4(&self, listener_id: &str, protocol: TransportProtocol) -> Option<&L4Route> {
-        self.l4.route(listener_id, protocol)
+    pub fn route_tcp(&self, listener_id: &str) -> Option<&TcpRoute> {
+        self.tcp.route(listener_id)
+    }
+
+    /// Resolves an L4 UDP route by `listener_id`.
+    #[inline]
+    pub fn route_udp(&self, listener_id: &str) -> Option<&UdpRoute> {
+        self.udp.route(listener_id)
     }
 
     /// Resolves an HTTP/1.1 route by `listener_id` and request view.
@@ -82,10 +90,16 @@ impl Router {
         self.grpc.route(listener_id, req)
     }
 
-    /// Returns a reference to the underlying [`L4Router`].
+    /// Returns a reference to the underlying [`TcpRouter`].
     #[inline]
-    pub fn l4(&self) -> &L4Router {
-        &self.l4
+    pub fn tcp(&self) -> &TcpRouter {
+        &self.tcp
+    }
+
+    /// Returns a reference to the underlying [`UdpRouter`].
+    #[inline]
+    pub fn udp(&self) -> &UdpRouter {
+        &self.udp
     }
 
     /// Returns a reference to the underlying [`Http1Router`].
@@ -116,7 +130,8 @@ impl Router {
 /// Builder for constructing a compiled [`Router`].
 #[derive(Debug, Default)]
 pub struct RouterBuilder {
-    l4_routes: Vec<L4Route>,
+    tcp_routes: Vec<TcpRoute>,
+    udp_routes: Vec<UdpRoute>,
     http1_routes: Vec<Http1Route>,
     http2_routes: Vec<Http2Route>,
     http3_routes: Vec<Http3Route>,
@@ -129,9 +144,15 @@ impl RouterBuilder {
         Self::default()
     }
 
-    /// Adds an L4 route rule.
-    pub fn add_l4_route(mut self, route: L4Route) -> Self {
-        self.l4_routes.push(route);
+    /// Adds an L4 TCP route rule.
+    pub fn add_tcp_route(mut self, route: TcpRoute) -> Self {
+        self.tcp_routes.push(route);
+        self
+    }
+
+    /// Adds an L4 UDP route rule.
+    pub fn add_udp_route(mut self, route: UdpRoute) -> Self {
+        self.udp_routes.push(route);
         self
     }
 
@@ -161,11 +182,12 @@ impl RouterBuilder {
 
     /// Compiles the router into its in-memory lookup representation.
     pub fn build(self) -> Result<Router, RouterError> {
-        let l4 = L4Router::new(self.l4_routes)?;
+        let tcp = TcpRouter::new(self.tcp_routes)?;
+        let udp = UdpRouter::new(self.udp_routes)?;
         let http1 = Http1Router::new(self.http1_routes)?;
         let http2 = Http2Router::new(self.http2_routes)?;
         let http3 = Http3Router::new(self.http3_routes)?;
         let grpc = GrpcRouter::new(self.grpc_routes)?;
-        Ok(Router::new(l4, http1, http2, http3, grpc))
+        Ok(Router::new(tcp, udp, http1, http2, http3, grpc))
     }
 }

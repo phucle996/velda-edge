@@ -13,7 +13,6 @@ mod common;
 use std::time::Instant;
 
 use common::{CountingAllocator, format_duration, load_router_from_large_dataset};
-use velda_core::TransportProtocol;
 use velda_router::{GrpcRouteRequest, Http1RouteRequest};
 
 #[global_allocator]
@@ -37,7 +36,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_l4("l4-in-0", TransportProtocol::Tcp);
+        let r = router.route_tcp("l4-in-0");
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -55,8 +54,8 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_l4("l4-in-9", TransportProtocol::Udp).unwrap();
-        let target = r.select_target();
+        let r = router.route_udp("l4-in-9").unwrap();
+        let target = r.id;
         let _ = std::hint::black_box(target);
     }
     let elapsed = start.elapsed();

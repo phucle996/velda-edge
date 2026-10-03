@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use velda_core::{RouteId, TransportProtocol, UpstreamId};
-use velda_router::{GrpcRoute, Http1Route, L4Route, Router, RouterBuilder};
+use velda_router::{GrpcRoute, Http1Route, Router, RouterBuilder, TcpRoute, UdpRoute};
 use velda_sync::post_sync::route::{
     RouteConfig, RouteMatch, RouteTimeouts, RoutesFile, compile_routes_to_binary, parse_routes,
     unpack_routes_from_binary, validate_routes,
@@ -296,17 +296,23 @@ pub fn compile_to_runtime_router(
                 }
             }
 
-            let l4 = L4Route::new(
-                route_id,
-                &route.listener,
-                proto,
-                upstream_id,
-                &route.upstream,
-            )
-            .with_target_endpoints(targets)
-            .with_plugins(route.plugins.clone());
-
-            builder = builder.add_l4_route(l4);
+            match proto {
+                TransportProtocol::Tcp => {
+                    let tcp =
+                        TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_plugins(route.plugins.clone());
+                    builder = builder.add_tcp_route(tcp);
+                }
+                TransportProtocol::Udp => {
+                    let udp =
+                        UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
+                            .with_udp_idle_timeout(
+                                route.timeouts.downstream_idle_ms.map(Duration::from_millis),
+                            )
+                            .with_plugins(route.plugins.clone());
+                    builder = builder.add_udp_route(udp);
+                }
+            }
         } else if route.kind.eq_ignore_ascii_case("l7") {
             let is_grpc = route
                 .match_rule

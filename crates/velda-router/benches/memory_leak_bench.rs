@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use common::{CountingAllocator, format_bytes, format_duration, load_router_from_large_dataset};
-use velda_core::TransportProtocol;
 use velda_router::{GrpcRouteRequest, Http1RouteRequest, Router};
 
 #[global_allocator]
@@ -47,12 +46,12 @@ fn bench_steady_state_request_serving_zero_alloc(router: &Router) {
     for i in 0..iters {
         match i % 5 {
             0 => {
-                let r = router.route_l4("l4-in-0", TransportProtocol::Tcp);
+                let r = router.route_tcp("l4-in-0");
                 let _ = std::hint::black_box(r);
             }
             1 => {
-                if let Some(r) = router.route_l4("l4-in-9", TransportProtocol::Udp) {
-                    let ep = r.select_target();
+                if let Some(r) = router.route_udp("l4-in-9") {
+                    let ep = r.id;
                     let _ = std::hint::black_box(ep);
                 }
             }
@@ -211,7 +210,7 @@ fn bench_concurrent_traffic_storm_under_hot_reload() {
                     let route = current.route_http1("https-in", &req);
                     let _ = std::hint::black_box(route);
                 } else {
-                    let route = current.route_l4("l4-in-0", TransportProtocol::Tcp);
+                    let route = current.route_tcp("l4-in-0");
                     let _ = std::hint::black_box(route);
                 }
             }

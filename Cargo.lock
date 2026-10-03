@@ -1969,9 +1969,9 @@ dependencies = [
 name = "velda-router"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
  "arc-swap",
  "bincode",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",
