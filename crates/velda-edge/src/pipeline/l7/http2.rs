@@ -6,7 +6,7 @@
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{L7Response, StreamingMode};
+use velda_core::L7Response;
 use velda_http2::config::Http2Config;
 use velda_http2::pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
@@ -221,14 +221,7 @@ async fn serve_http2_stream(
         return;
     };
 
-    let up = rt.upstreams.http2.get(&route.upstream_name);
-    let target = if let Some(u) = up {
-        u.select_target().or_else(|| route.select_target())
-    } else {
-        route.select_target()
-    };
-
-    let Some(target) = target else {
+    let Some(upstream) = rt.upstreams.http2.get(&route.upstream_name) else {
         tracing::error!(
             listener = %context.listener_id,
             route = %route.id,
@@ -237,7 +230,7 @@ async fn serve_http2_stream(
         );
         let no_backend = L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
+            b"503 Service Unavailable: upstream not configured\n".to_vec(),
         )
         .with_header(
             CONTENT_TYPE,
@@ -247,72 +240,39 @@ async fn serve_http2_stream(
         return;
     };
 
-    let up_streaming = up
-        .as_ref()
-        .map(|u| u.streaming)
-        .unwrap_or(StreamingMode::DISABLED);
-
+    let strategy = upstream.strategy;
     let mut head = head;
     enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
 
-    // HTTP/2 Multiplexing Invariant (RFC 9113):
-    // Unlike HTTP/1.1 which requires an exclusive 1-to-1 stream lease per request, HTTP/2 establishes
-    // a single persistent multiplexed connection per backend IP. Hundreds of concurrent requests share
-    // this single connection simultaneously via interleaved binary frames and unique Stream IDs.
-    // We invoke `up.execute` to ensure healthy endpoint selection, automatic failover, and client acquisition.
-    let client_res = match up {
-        Some(u) => {
-            let cfg = config.clone();
-            u.execute(|endpoint| {
-                let cfg = cfg.clone();
-                async move { velda_http2::client::connect(endpoint, &cfg).await }
-            })
-            .await
-        }
-        None => velda_http2::client::connect(target, &config)
-            .await
-            .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string())),
-    };
-
-    let mut client = match client_res {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                target = %target,
-                upstream = %route.upstream_name,
-                "Failed to acquire HTTP/2 upstream connection"
-            );
-            let err_resp = L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-            let _ = responder.send_response(&err_resp);
-            return;
-        }
-    };
-
-    let strategy = Http2PipeStrategy::from_streaming(up_streaming);
-    let pipe_res = match strategy {
-        Http2PipeStrategy::Buffered => {
-            pipe_buffered(head, receiver, responder, &mut client, &config).await
-        }
-        Http2PipeStrategy::ServerStream => {
-            pipe_server_stream(head, receiver, responder, &mut client, &config).await
-        }
-        Http2PipeStrategy::ClientStream => {
-            pipe_client_stream(head, receiver, responder, &mut client, &config).await
-        }
-        Http2PipeStrategy::Duplex => {
-            pipe_duplex(head, receiver, responder, &mut client, &config).await
-        }
-    };
+    // HTTP/2 Pipeline Invariant (RFC 9113):
+    // The Edge pipeline hands off the request processing closure directly to the upstream.
+    // The upstream manages single-round Load Balancing selection, persistent multiplexed client
+    // reuse, ready check, error recovery, and zero-overhead binary framing.
+    let upstream_cfg = config.clone();
+    let pipe_res = upstream
+        .dispatch_pipe(&upstream_cfg, move |mut client| async move {
+            match strategy {
+                Http2PipeStrategy::Buffered => {
+                    pipe_buffered(head, receiver, responder, &mut client, &config).await
+                }
+                Http2PipeStrategy::ServerStream => {
+                    pipe_server_stream(head, receiver, responder, &mut client, &config).await
+                }
+                Http2PipeStrategy::ClientStream => {
+                    pipe_client_stream(head, receiver, responder, &mut client, &config).await
+                }
+                Http2PipeStrategy::Duplex => {
+                    pipe_duplex(head, receiver, responder, &mut client, &config).await
+                }
+            }
+        })
+        .await;
 
     if let Err(e) = pipe_res {
-        tracing::warn!(error = %e, target = %target, "HTTP/2 pipe failed");
+        tracing::warn!(
+            error = %e,
+            upstream = %route.upstream_name,
+            "HTTP/2 upstream dispatch pipe failed"
+        );
     }
 }

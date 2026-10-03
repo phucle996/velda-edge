@@ -21,8 +21,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use velda_connection_pool::{PoolManager, PoolStats};
 use velda_core::Endpoint;
-use velda_discovery::Discovery;
-use velda_discovery::{DnsResolverProvider, DnsServerProvider, DnsTransport, EndpointSet};
+use velda_discovery::{Discovery, EndpointSet};
 use velda_lb::{LoadBalancer, RoundRobin, SelectionContext};
 
 use crate::connection::{BackendConnection, ConnectionKey, Connector, TcpConnector};
@@ -485,6 +484,35 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         })
     }
 
+    /// Executes a closure against an acquired backend lease, automatically releasing the lease
+    /// on completion with health metrics tracking.
+    pub async fn acquire_and_pipe<F, Fut, T, E>(
+        &self,
+        target: AcquireTarget<'_>,
+        mut pipe: F,
+    ) -> Result<T>
+    where
+        F: FnMut(&mut BackendLease) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        let mut lease = self.acquire_with_target(target).await?;
+        let addr = lease.endpoint();
+        match pipe(&mut lease).await {
+            Ok(res) => {
+                lease.release(true);
+                Ok(res)
+            }
+            Err(e) => {
+                lease.release(false);
+                Err(UpstreamError::ConnectionFailed {
+                    endpoint: addr,
+                    reason: e.to_string(),
+                })
+            }
+        }
+    }
+
     /// The core Flat Workflow Pipeline:
     ///
     /// 1. Query Discovery -> Filter healthy endpoints.
@@ -651,52 +679,7 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
 }
 
 // ============================================================================
-// 6. Convenience Constructors (Production Defaults)
-// ============================================================================
-
-impl Upstream<TcpConnector, RoundRobin> {
-    /// Creates a new upstream using static explicit endpoints and a specified protocol.
-    pub fn new_explicit(
-        id: impl Into<String>,
-        protocol: impl Into<Arc<str>>,
-        endpoints: Vec<Endpoint>,
-        timeouts: UpstreamTimeouts,
-    ) -> Self {
-        let discovery = Discovery::new_explicit(endpoints);
-        Self::new(
-            id,
-            protocol,
-            discovery,
-            RoundRobin::new(),
-            timeouts,
-            Arc::new(TcpConnector),
-        )
-    }
-
-    /// Creates a new upstream using dynamic DNS discovery and a specified protocol.
-    pub fn new_dns<S: DnsServerProvider, T: DnsTransport>(
-        id: impl Into<String>,
-        protocol: impl Into<Arc<str>>,
-        host: String,
-        port: u16,
-        refresh_interval: Duration,
-        resolver: Arc<DnsResolverProvider<S, T>>,
-        timeouts: UpstreamTimeouts,
-    ) -> Self {
-        let discovery = Discovery::new_dns(host, port, refresh_interval, resolver);
-        Self::new(
-            id,
-            protocol,
-            discovery,
-            RoundRobin::new(),
-            timeouts,
-            Arc::new(TcpConnector),
-        )
-    }
-}
-
-// ============================================================================
-// 7. Testing & Custom Connector Constructors
+// 6. Testing & Custom Connector Constructors
 // ============================================================================
 
 #[cfg(any(test, feature = "test-utils"))]

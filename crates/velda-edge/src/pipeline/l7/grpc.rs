@@ -3,19 +3,15 @@
 //! Powered entirely by `velda-grpc`. Operates strictly for listeners explicitly configured
 //! with `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and bidirectional streaming.
 
-use std::net::SocketAddr;
-
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::{L7Request, L7Response};
 use velda_grpc::GrpcConfig;
+use velda_grpc::GrpcStatus;
 use velda_grpc::composer_parse::{GrpcServerConnection, GrpcServerStream};
-use velda_grpc::upstream_connector::GrpcUpstreamConnector;
-use velda_grpc::{GrpcStatus, pipe_grpc_stream};
 use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::error::EdgeError;
 use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
 
@@ -156,23 +152,15 @@ async fn dispatch_grpc_request_stream(
         return;
     };
 
-    let target = if let Some(up) = rt.upstreams.grpc.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
-    } else {
-        route.select_target()
-    };
-
-    let Some(target) = target else {
+    let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
         tracing::error!(
             listener = %context.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for gRPC upstream"
         );
-        let _ = server_stream.send_trailers_only(
-            GrpcStatus::Unavailable,
-            Some("no healthy upstream endpoints"),
-        );
+        let _ = server_stream
+            .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
         return;
     };
 
@@ -180,16 +168,14 @@ async fn dispatch_grpc_request_stream(
         listener = %context.listener_id,
         route = %route.id,
         upstream = %route.upstream_name,
-        target = %target,
         service = %grpc_req.service,
         method = ?grpc_req.method,
         "Piping gRPC bidirectional stream to upstream backend"
     );
 
-    if let Err(e) = pipe_grpc_stream(server_stream, target).await {
+    if let Err(e) = upstream.dispatch_stream(server_stream).await {
         tracing::warn!(
             error = %e,
-            target = %target,
             upstream = %route.upstream_name,
             "gRPC stream pipe terminated with error"
         );
@@ -219,29 +205,12 @@ pub async fn process_grpc_request(
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 
-    let target = if let Some(up) = rt.upstreams.grpc.get(&route.upstream_name) {
-        up.select_target().or_else(|| route.select_target())
-    } else {
-        route.select_target()
+    let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
+        return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
     };
 
-    let Some(target) = target else {
-        return GrpcStatus::Unavailable.to_l7_response(Some("no healthy upstream endpoints"));
-    };
-
-    match forward_grpc_unary_request(req, target, config).await {
+    match upstream.dispatch_unary(req, config).await {
         Ok(resp) => resp,
         Err(e) => GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}"))),
     }
-}
-
-/// Forwards an in-memory L7Request to upstream backend via HTTP/2 and returns L7Response.
-pub async fn forward_grpc_unary_request(
-    req: &L7Request,
-    target: SocketAddr,
-    config: &GrpcConfig,
-) -> Result<L7Response, EdgeError> {
-    GrpcUpstreamConnector::forward_unary(req, target, config)
-        .await
-        .map_err(|e| EdgeError::Internal(format!("Failed to forward gRPC unary request: {e}")))
 }

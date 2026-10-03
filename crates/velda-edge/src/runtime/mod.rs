@@ -28,7 +28,7 @@ pub use crate::runtime::pipeline::{
     PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol,
 };
 pub use crate::runtime::router::build_router;
-pub use crate::runtime::upstream::{L4Upstream, UpstreamTable, build_upstreams};
+pub use crate::runtime::upstream::{UpstreamTable, build_upstreams};
 
 /// Read-only snapshot of declarative domain configurations loaded into RAM.
 #[derive(Debug, Clone, Default)]
@@ -92,7 +92,7 @@ pub struct Runtime {
     pub router: Router,
     /// Pre-compiled pipeline table mapping listener_id → TcpPipeline/UdpPipeline for zero-branch dispatch.
     pub pipelines: PipelineTable,
-    /// Pre-compiled upstream table mapping upstream_id → L4Upstream.
+    /// Pre-compiled upstream table holding protocol-isolated tables (tcp, udp, http1, http2, http3, grpc).
     pub upstreams: UpstreamTable,
     /// Pre-compiled downstream TLS server engine for O(1) hot-path handshake execution.
     pub tls_server: Option<TlsServerEngine>,

@@ -26,58 +26,32 @@ pub async fn handle_l4_tcp(conn: Connection, runtime: &SharedRuntime) {
         return;
     };
 
-    // 1. Acquire backend connection from Upstream L4 TCP (Zero-TLS, pure raw TCP)
-    let (target_addr, backend_stream) =
-        if let Some(upstream) = rt.upstreams.tcp.get(&route.upstream_name) {
-            match upstream.acquire().await {
-                Ok(lease) => {
-                    let target = lease.endpoint();
-                    if let Some(stream) = lease.into_tcp_stream() {
-                        (target, stream)
-                    } else {
-                        tracing::error!(
-                            upstream = %route.upstream_name,
-                            "L4 TCP upstream lease did not contain raw TcpStream"
-                        );
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        listener = %listener_id,
-                        route = %route.id,
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        error = %e,
-                        "Failed to acquire L4 TCP upstream connection; dropping connection"
-                    );
-                    return;
-                }
-            }
-        } else {
-            tracing::error!(
-                listener = %listener_id,
-                route = %route.id,
-                upstream = %route.upstream_name,
-                peer = %peer,
-                "No backend upstream available in TCP upstream table; dropping connection"
-            );
-            return;
-        };
+    let Some(upstream) = rt.upstreams.tcp.get(&route.upstream_name) else {
+        tracing::error!(
+            listener = %listener_id,
+            route = %route.id,
+            upstream = %route.upstream_name,
+            peer = %peer,
+            "No backend upstream available in TCP upstream table; dropping connection"
+        );
+        return;
+    };
 
     tracing::debug!(
         listener = %listener_id,
         route = %route.id,
         upstream = %route.upstream_name,
-        target = %target_addr,
         peer = %peer,
         "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
     );
 
-    match velda_transport::forward_connection(conn, backend_stream).await {
+    match upstream
+        .dispatch_stream(|stream| velda_transport::forward_connection(conn, stream))
+        .await
+    {
         Ok(stats) => {
             tracing::debug!(
-                target = %target_addr,
+                upstream = %route.upstream_name,
                 peer = %peer,
                 client_to_server = stats.client_to_server_bytes,
                 server_to_client = stats.server_to_client_bytes,
@@ -87,7 +61,7 @@ pub async fn handle_l4_tcp(conn: Connection, runtime: &SharedRuntime) {
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                target = %target_addr,
+                upstream = %route.upstream_name,
                 peer = %peer,
                 "L4 TCP stream forwarding terminated with error"
             );

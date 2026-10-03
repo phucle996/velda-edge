@@ -106,18 +106,18 @@ pub async fn apply_reload(
         current.pipelines.clone()
     };
 
-    // Recompile UpstreamTable if upstreams changed
-    let upstreams = if upstreams_changed {
-        crate::runtime::build_upstreams(&config.upstreams)
-    } else {
-        current.upstreams.clone()
-    };
-
     // Recompile TlsClientEngine if upstreams changed
     let tls_client = if upstreams_changed {
         crate::runtime::tls::compile_tls_client(&config.upstreams)?
     } else {
         current.tls_client.clone()
+    };
+
+    // Recompile UpstreamTable if upstreams changed
+    let upstreams = if upstreams_changed {
+        crate::runtime::build_upstreams(&config.upstreams, tls_client.as_ref())
+    } else {
+        current.upstreams.clone()
     };
 
     // If listeners or TLS changed, ensure HTTP/3 pipeline engines are registered for any new listeners

@@ -1874,6 +1874,7 @@ dependencies = [
  "velda-http1",
  "velda-http2",
  "velda-http3",
+ "velda-lb",
  "velda-router",
  "velda-sync",
  "velda-tls",

@@ -11,9 +11,7 @@
 
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
-use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::StreamingMode;
 use velda_http1::{
     Http1BodyFraming, Http1Config, Http1PipeStrategy, Http1Response, Http1ServerConnection,
     pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
@@ -22,10 +20,8 @@ use velda_router::Http1RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::error::EdgeError;
 use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
-use crate::runtime::upstream::Http1Upstream;
 
 pub use crate::runtime::upstream::UpstreamHttp1Stream;
 
@@ -136,49 +132,6 @@ pub fn enrich_forwarded_headers(
         }
     } else if let Ok(val) = HeaderValue::from_str(&entry) {
         headers.insert(forwarded, val);
-    }
-}
-
-/// Connects to the upstream backend endpoint, establishing TLS if required by configuration.
-///
-/// ### Architectural Rationale: Why `connect_stream` over direct `send_request()` in HTTP/1.1?
-/// 1. **Exclusive 1-to-1 Connection Model**: Unlike HTTP/2 and HTTP/3 which multiplex hundreds of
-///    concurrent requests over a single shared connection via Stream IDs, RFC 9112 HTTP/1.1 has head-of-line
-///    blocking: each active in-flight request occupies a physical transport stream exclusively until finished.
-/// 2. **Streaming & Bidi Pipe Versatility**: Acquiring the raw I/O stream ([`UpstreamHttp1Stream`]) allows
-///    `velda-http1` to drive all 4 streaming modes (`Buffered`, `ServerStream` for SSE/LLM, `ClientStream`
-///    for large uploads, and `Duplex` for WebSockets/tunnels) without loading entire payloads into RAM (Zero-OOM).
-/// 3. **Keep-Alive Connection Reuse (Pooling)**: Holding the underlying stream allows the Gateway to keep
-///    the connection alive (`Connection: keep-alive`) and return it to the pool upon completion, eliminating
-///    the heavy latency and CPU cost of repeated TCP 3-way handshakes and TLS 1.3 handshakes for subsequent requests.
-pub async fn connect_upstream(
-    target: SocketAddr,
-    up: Option<&Http1Upstream>,
-    tls_client: Option<&velda_tls::TlsClientEngine>,
-    host: Option<&str>,
-) -> Result<UpstreamHttp1Stream, EdgeError> {
-    if let Some(u) = up {
-        let is_tls = u.is_tls();
-        let target_sni = u.target_sni().map(|s| s.to_string());
-        u.execute(|endpoint| {
-            let sni_ref = target_sni.clone();
-            async move {
-                velda_http1::client::stream::connect_stream(
-                    endpoint,
-                    is_tls,
-                    sni_ref.as_deref(),
-                    tls_client,
-                    host,
-                )
-                .await
-            }
-        })
-        .await
-        .map_err(EdgeError::Upstream)
-    } else {
-        velda_http1::client::stream::connect_stream(target, false, None, tls_client, host)
-            .await
-            .map_err(|e| EdgeError::Internal(e.to_string()))
     }
 }
 
@@ -334,23 +287,16 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
-        let up = rt.upstreams.http1.get(&route.upstream_name);
-        let target = if let Some(u) = up {
-            u.select_target().or_else(|| route.select_target())
-        } else {
-            route.select_target()
-        };
-
-        let Some(target) = target else {
+        let Some(upstream) = rt.upstreams.http1.get(&route.upstream_name) else {
             tracing::error!(
                 listener = %context.listener_id,
                 route = %route.id,
                 upstream = %route.upstream_name,
-                "No healthy backend endpoints available for HTTP/1.1 upstream"
+                "No HTTP/1.1 upstream configured"
             );
             let no_backend = Http1Response::from_bytes(
                 StatusCode::SERVICE_UNAVAILABLE,
-                b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
+                b"503 Service Unavailable: upstream not configured\n".to_vec(),
             )
             .with_header(
                 CONTENT_TYPE,
@@ -360,69 +306,40 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
-        let up_streaming = up
-            .as_ref()
-            .map(|u| u.streaming)
-            .unwrap_or(StreamingMode::DISABLED);
-
-        // Concrete execution strategy derived directly from upstream capability.
-        // Listener allowance is pre-validated at configuration compile/reload time.
-        let strategy = Http1PipeStrategy::from_streaming(up_streaming);
-
-        // Enrich downstream request with proxy forwarding metadata (X-Forwarded-*)
+        let strategy = upstream.strategy;
         enrich_forwarded_headers(&mut head.headers, &context, host_str.as_deref());
-
-        // Connect to upstream backend target
-        let mut upstream_stream = match connect_upstream(
-            target,
-            up.map(|u| u.as_ref()),
-            rt.tls_client.as_ref(),
-            host_str.as_deref(),
-        )
-        .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    target = %target,
-                    upstream = %route.upstream_name,
-                    "Failed to connect to HTTP/1.1 upstream"
-                );
-                let err_resp = Http1Response::from_bytes(
-                    StatusCode::BAD_GATEWAY,
-                    format!("502 Bad Gateway: {e}\n").into_bytes(),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                );
-                let _ = conn.send_response(&err_resp).await;
-                break;
-            }
-        };
-
-        // Execute concrete pipe workflow decoupled by streaming strategy
         let cfg = *conn.config();
-        let pipe_result = match strategy {
-            Http1PipeStrategy::Buffered => {
-                pipe_buffered(&mut conn, head, framing, &mut upstream_stream, &cfg).await
-            }
-            Http1PipeStrategy::ServerStream => {
-                pipe_server_stream(&mut conn, head, framing, &mut upstream_stream, &cfg).await
-            }
-            Http1PipeStrategy::ClientStream => {
-                pipe_client_stream(&mut conn, head, &mut upstream_stream, &cfg).await
-            }
-            Http1PipeStrategy::Duplex => {
-                pipe_duplex(&mut conn, head, &mut upstream_stream, &cfg).await
-            }
-        };
+
+        // HTTP/1.1 Pipeline Invariant (RFC 9112):
+        // The Edge pipeline hands off the request processing closure directly to the upstream.
+        // The upstream manages single-round Load Balancing selection, idle connection pooling,
+        // pre-compiled TLS handshakes, error recovery, and streaming pipe execution.
+        let pipe_result = upstream
+            .dispatch_pipe(host_str.as_deref(), |mut upstream_stream| {
+                let conn_ref = &mut conn;
+                async move {
+                    match strategy {
+                        Http1PipeStrategy::Buffered => {
+                            pipe_buffered(conn_ref, head, framing, &mut upstream_stream, &cfg).await
+                        }
+                        Http1PipeStrategy::ServerStream => {
+                            pipe_server_stream(conn_ref, head, framing, &mut upstream_stream, &cfg)
+                                .await
+                        }
+                        Http1PipeStrategy::ClientStream => {
+                            pipe_client_stream(conn_ref, head, &mut upstream_stream, &cfg).await
+                        }
+                        Http1PipeStrategy::Duplex => {
+                            pipe_duplex(conn_ref, head, &mut upstream_stream, &cfg).await
+                        }
+                    }
+                }
+            })
+            .await;
 
         if let Err(e) = pipe_result {
             tracing::warn!(
                 error = %e,
-                target = %target,
                 upstream = %route.upstream_name,
                 strategy = ?strategy,
                 "HTTP/1.1 upstream stream pipe failed"

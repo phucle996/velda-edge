@@ -60,7 +60,7 @@ impl EdgeSupervisor {
             let tls_server = compile_tls_server(&tls, &runtime_profile.to_tls_server_params())?;
             let tls_client = compile_tls_client(&upstreams)?;
             let router = build_router(&routes, &upstreams, &listeners)?;
-            let upstreams_table = crate::runtime::build_upstreams(&upstreams);
+            let upstreams_table = crate::runtime::build_upstreams(&upstreams, tls_client.as_ref());
 
             // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
             if let Some(tls) = tls_server.as_ref() {

@@ -310,23 +310,6 @@ pub async fn handle_grpc_udp_handoff(
     }
 }
 
-/// Forwards an HTTP/3 request over QUIC to the upstream target endpoint without connection pooling.
-pub async fn forward_http3_request(
-    req: &L7Request,
-    target: SocketAddr,
-    target_sni: Option<&str>,
-) -> Result<L7Response, EdgeError> {
-    let server_name = velda_http3::resolve_sni(req, &target, target_sni);
-    let config = velda_http3::Http3Config::auto();
-    let client = velda_http3::connect(target, &server_name, &config)
-        .await
-        .map_err(|e| EdgeError::Internal(e.to_string()))?;
-    client
-        .send_request_ref(req)
-        .await
-        .map_err(|e| EdgeError::Internal(e.to_string()))
-}
-
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 pub async fn process_http3_request(
     req: &L7Request,
@@ -363,26 +346,16 @@ pub async fn process_http3_request(
         );
     };
 
-    let up = rt.upstreams.http3.get(&route.upstream_name);
-    let (target, target_sni) = if let Some(up) = up {
-        (
-            up.select_target().or_else(|| route.select_target()),
-            up.target_sni(),
-        )
-    } else {
-        (route.select_target(), None)
-    };
-
-    let Some(target) = target else {
+    let Some(upstream) = rt.upstreams.http3.get(&route.upstream_name) else {
         tracing::error!(
             listener = %context.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
-            "No healthy backend endpoints available for HTTP/3 upstream"
+            "No HTTP/3 upstream configured"
         );
         return L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: no healthy upstream endpoint\n".to_vec(),
+            b"503 Service Unavailable: upstream not configured\n".to_vec(),
         )
         .with_header(
             CONTENT_TYPE,
@@ -390,45 +363,23 @@ pub async fn process_http3_request(
         );
     };
 
-    let server_name = velda_http3::resolve_sni(req, &target, target_sni);
+    let server_name = upstream.resolve_sni(req, host);
     let h3_config = velda_http3::Http3Config::auto();
 
     // HTTP/3 QUIC Multiplexing Invariant (RFC 9114):
-    // Like HTTP/2, HTTP/3 multiplexes concurrent requests over a single QUIC connection per backend IP
-    // without requiring separate physical socket allocations or exclusive stream leases.
-    // Each request is assigned a logical QUIC Stream ID over UDP, completely eliminating TCP head-of-line blocking.
-    // We execute the request closure through `up.execute` to ensure healthy endpoint selection,
-    // health metrics tracking, and automatic candidate failover if the backend connection fails.
-    let resp_res = if let Some(up) = up {
-        let sni = server_name.clone();
-        let cfg = h3_config.clone();
-        up.execute(|endpoint| {
-            let sni = sni.clone();
-            let cfg = cfg.clone();
-            async move {
-                let client = velda_http3::connect(endpoint, &sni, &cfg)
-                    .await
-                    .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string()))?;
-                client
-                    .send_request_ref(req)
-                    .await
-                    .map_err(|e| velda_upstream::UpstreamError::Protocol(e.to_string()))
-            }
-        })
+    // The Edge pipeline hands off the request directly to the upstream.
+    // The upstream manages single-round Load Balancing selection, persistent multiplexed QUIC
+    // client reuse across concurrent requests, and candidate failover without HOL blocking.
+    match upstream
+        .dispatch_request(req.clone(), &server_name, &h3_config)
         .await
-        .map_err(EdgeError::Upstream)
-    } else {
-        forward_http3_request(req, target, target_sni).await
-    };
-
-    match resp_res {
+    {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                target = %target,
                 upstream = %route.upstream_name,
-                "HTTP/3 upstream forwarding failed"
+                "HTTP/3 upstream dispatch request failed"
             );
             L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,

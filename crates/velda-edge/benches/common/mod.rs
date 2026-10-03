@@ -291,7 +291,7 @@ pub fn build_mock_runtime(
 
     let router = build_router(&routes, &upstreams, &listeners).unwrap();
     let pipelines = PipelineTable::build(&listeners).unwrap();
-    let upstreams_table = build_upstreams(&upstreams);
+    let upstreams_table = build_upstreams(&upstreams, None);
 
     let config = RuntimeConfig {
         listeners,
