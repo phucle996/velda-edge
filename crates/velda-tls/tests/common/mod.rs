@@ -21,12 +21,13 @@ pub fn make_test_cert(sans: Vec<String>) -> (String, String) {
 /// Builds a client `TlsConnector` that trusts the provided CA PEM and configures ALPN.
 pub fn make_client_connector(ca_pem: &str, alpn: Option<Vec<&str>>) -> TlsConnector {
     let root_store = parse_ca_bundle_pem(ca_pem).expect("Failed to parse CA bundle");
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("Valid protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("Valid protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
 
     if let Some(alpns) = alpn {
         client_config.alpn_protocols = alpns.into_iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -46,13 +47,14 @@ pub fn make_mtls_client_connector(
     let client_certs = parse_certs_pem(client_cert_pem).expect("Failed to parse client certs");
     let client_key = parse_private_key_pem(client_key_pem).expect("Failed to parse client key");
 
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("Valid protocol versions")
-            .with_root_certificates(root_store)
-            .with_client_auth_cert(client_certs, client_key)
-            .expect("Failed to set client auth cert");
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("Valid protocol versions")
+    .with_root_certificates(root_store)
+    .with_client_auth_cert(client_certs, client_key)
+    .expect("Failed to set client auth cert");
 
     if let Some(alpns) = alpn {
         client_config.alpn_protocols = alpns.into_iter().map(|s| s.as_bytes().to_vec()).collect();

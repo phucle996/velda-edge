@@ -231,7 +231,7 @@ fn bench_active_bindings_transformation() {
         ALLOCATOR.reset();
         let start = Instant::now();
         for _ in 0..iters {
-            let bindings = rt.active_bindings().unwrap();
+            let bindings = rt.config.active_bindings().unwrap();
             let _ = std::hint::black_box(bindings);
         }
         let elapsed = start.elapsed();

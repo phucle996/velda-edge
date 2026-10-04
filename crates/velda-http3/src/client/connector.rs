@@ -282,7 +282,7 @@ pub fn resolve_sni<'a>(
 
 /// Builds default QUIC client configuration for HTTP/3 upstream.
 pub fn default_client_config() -> Result<ClientConfig, Http3Error> {
-    let rustls_client = velda_tls::client::build_insecure_client_config(vec![b"h3".to_vec()]);
+    let rustls_client = velda_tls::client::build_insecure_tls13_client_config(vec![b"h3".to_vec()]);
     velda_tls::client::build_quic_client_config(rustls_client)
         .map_err(|e| Http3Error::H3(format!("QUIC crypto config error: {e}")))
 }

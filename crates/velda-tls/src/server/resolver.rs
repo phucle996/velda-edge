@@ -59,7 +59,7 @@ impl SniResolver {
         certs: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
     ) -> Result<(), TlsError> {
-        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+        let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
             .map_err(|e| TlsError::InvalidPrivateKey(e.to_string()))?;
 
         let certified_key = Arc::new(CertifiedKey::new(certs, signing_key));
@@ -84,17 +84,34 @@ impl SniResolver {
 
     /// Resolves certified key for a given SNI string.
     pub fn lookup(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
-        let sni = sni.trim().to_ascii_lowercase();
+        let trimmed = sni.trim();
 
-        // 1. Exact match
-        if let Some(key) = self.exact_matches.get(&sni) {
-            return Some(key.clone());
+        // 🚀 Zero-Allocation Fast-Path: 99.9% of SNIs in TLS ClientHello are already lowercase ASCII.
+        // By checking bytes on CPU registers and borrowing the slice directly, we completely eliminate heap allocations!
+        if !trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+            // 1. Exact match
+            if let Some(key) = self.exact_matches.get(trimmed) {
+                return Some(key.clone());
+            }
+
+            // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only)
+            if let Some(idx) = trimmed.find('.') {
+                let parent_domain = &trimmed[idx + 1..];
+                if let Some(key) = self.wildcard_matches.get(parent_domain) {
+                    return Some(key.clone());
+                }
+            }
+
+            return None;
         }
 
-        // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only, e.g. "sub.example.com" matches "*.example.com",
-        // but multi-level "a.b.example.com" intentionally does not match to prevent subdomain hijack/spoofing).
-        if let Some(idx) = sni.find('.') {
-            let parent_domain = &sni[idx + 1..];
+        // Slow-path: client sent uppercase SNI, allocate once to normalize
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(key) = self.exact_matches.get(&lower) {
+            return Some(key.clone());
+        }
+        if let Some(idx) = lower.find('.') {
+            let parent_domain = &lower[idx + 1..];
             if let Some(key) = self.wildcard_matches.get(parent_domain) {
                 return Some(key.clone());
             }

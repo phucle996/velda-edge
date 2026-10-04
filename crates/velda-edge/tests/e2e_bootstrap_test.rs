@@ -35,7 +35,7 @@ async fn test_cold_start_bootstrap_unconfigured_node_and_graceful_shutdown() {
 
     // 2. Initial state without LKG binary artifacts has revision 0
     assert_eq!(supervisor.shared_runtime().load().revision, 0);
-    assert_eq!(supervisor.shared_runtime().load().listener_count(), 0);
+    assert_eq!(supervisor.shared_runtime().load().config.listeners.len(), 0);
 
     // 3. Launch background supervisor and verify graceful shutdown
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

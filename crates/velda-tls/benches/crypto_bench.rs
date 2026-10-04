@@ -148,6 +148,7 @@ async fn bench_upstream_egress_handshake() {
         ca_pem: Some(backend_cert),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let client_engine = TlsClientEngine::new(&[upstream_cfg]).unwrap();
 

@@ -48,7 +48,7 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s.
     pub fn active_bindings(&self) -> Result<Vec<IngressBinding>, EdgeError> {
-        transport::active_bindings(&self.listeners)
+        self.active_bindings_with_configs(None, None)
     }
 
     /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s
@@ -59,24 +59,6 @@ impl RuntimeConfig {
         udp_config: Option<&velda_transport::UdpSocketConfig>,
     ) -> Result<Vec<IngressBinding>, EdgeError> {
         transport::active_bindings_with_configs(&self.listeners, tcp_config, udp_config)
-    }
-
-    /// Returns the number of configured listeners.
-    #[inline]
-    pub fn listener_count(&self) -> usize {
-        self.listeners.len()
-    }
-
-    /// Returns the number of configured routes.
-    #[inline]
-    pub fn route_count(&self) -> usize {
-        self.routes.len()
-    }
-
-    /// Returns the number of configured upstreams.
-    #[inline]
-    pub fn upstream_count(&self) -> usize {
-        self.upstreams.len()
     }
 }
 
@@ -108,40 +90,6 @@ impl Runtime {
     pub fn empty() -> Self {
         Self::default()
     }
-
-    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s.
-    pub fn active_bindings(&self) -> Result<Vec<IngressBinding>, EdgeError> {
-        self.config.active_bindings()
-    }
-
-    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s
-    /// with explicit TCP/UDP configurations.
-    pub fn active_bindings_with_configs(
-        &self,
-        tcp_config: Option<&velda_transport::TcpListenerConfig>,
-        udp_config: Option<&velda_transport::UdpSocketConfig>,
-    ) -> Result<Vec<IngressBinding>, EdgeError> {
-        self.config
-            .active_bindings_with_configs(tcp_config, udp_config)
-    }
-
-    /// Returns the number of configured listeners.
-    #[inline]
-    pub fn listener_count(&self) -> usize {
-        self.config.listener_count()
-    }
-
-    /// Returns the number of configured routes.
-    #[inline]
-    pub fn route_count(&self) -> usize {
-        self.config.route_count()
-    }
-
-    /// Returns the number of configured upstreams.
-    #[inline]
-    pub fn upstream_count(&self) -> usize {
-        self.config.upstream_count()
-    }
 }
 
 /// Helper function to create a new shared runtime holder initialized with the given snapshot.
@@ -157,8 +105,8 @@ mod tests {
     fn test_empty_runtime() {
         let rt = Runtime::empty();
         assert_eq!(rt.revision, 0);
-        assert_eq!(rt.listener_count(), 0);
-        assert_eq!(rt.route_count(), 0);
+        assert_eq!(rt.config.listeners.len(), 0);
+        assert_eq!(rt.config.routes.len(), 0);
     }
 
     #[test]

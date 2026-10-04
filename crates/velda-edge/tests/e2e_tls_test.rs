@@ -141,7 +141,7 @@ async fn test_end_to_end_tls_downstream_termination() {
     let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
     let shared = supervisor.shared_runtime().clone();
 
-    assert_eq!(shared.load().listener_count(), 1);
+    assert_eq!(shared.load().config.listeners.len(), 1);
     assert_eq!(shared.load().config.tls.len(), 1);
     assert!(
         shared.load().tls_server.is_some(),
@@ -163,6 +163,7 @@ async fn test_end_to_end_tls_downstream_termination() {
         ca_pem: Some(cert_pem),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let client_engine = TlsClientEngine::new(&[client_config]).unwrap();
 
@@ -341,6 +342,7 @@ async fn test_end_to_end_tls_h2_downstream() {
         ca_pem: Some(cert_pem),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let client_engine = TlsClientEngine::new(&[client_config]).unwrap();
 
@@ -485,6 +487,7 @@ async fn test_end_to_end_tls_http1_upstream_forwarding() {
             versions: vec!["tls1.3".into()],
             alpn: vec!["http/1.1".into()],
             sni: vec!["localhost".into()],
+            insecure_skip_verify: false,
         }),
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();

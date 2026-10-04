@@ -32,10 +32,14 @@ fn generate_bench_crypto() -> ServerConfig {
         rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
     );
 
-    let mut rustls_server = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
-        .unwrap();
+    let mut rustls_server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(cert_chain, private_key)
+    .unwrap();
     rustls_server.alpn_protocols = vec![b"h3".to_vec()];
 
     let quic_server_crypto =

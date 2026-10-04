@@ -6,7 +6,7 @@ use tokio_rustls::server::TlsStream as ServerTlsStream;
 
 use crate::client::{ClientTlsConfig, TlsClientEngine};
 use crate::error::TlsError;
-use crate::server::{ServerTlsConfig, TlsHandshakeInfo, TlsServerEngine, TlsServerParams};
+use crate::server::{ServerTlsConfig, TlsServerEngine, TlsServerParams};
 
 /// Self-contained in-memory TLS engine ready for hot-path zero-IO execution.
 #[derive(Debug, Clone)]
@@ -70,10 +70,5 @@ impl TlsEngine {
     /// Returns a reference to the upstream client engine.
     pub fn client(&self) -> &TlsClientEngine {
         &self.client
-    }
-
-    /// Extracts connection metadata after a successful downstream TLS handshake.
-    pub fn extract_handshake_info<IO>(stream: &ServerTlsStream<IO>) -> TlsHandshakeInfo {
-        TlsServerEngine::extract_handshake_info(stream)
     }
 }

@@ -66,6 +66,7 @@ pub fn compile_tls_client(
                 ca_pem: t.ca_pem.clone(),
                 client_cert_pem: t.client_cert_pem.clone(),
                 client_key_pem: t.client_key_pem.clone(),
+                insecure_skip_verify: t.insecure_skip_verify,
             })
         })
         .collect();
@@ -156,6 +157,7 @@ mod tests {
                 versions: vec!["tls1.3".into()],
                 alpn: vec!["h2".into()],
                 sni: vec!["backend.internal".into()],
+                insecure_skip_verify: false,
             }),
         }];
 

@@ -40,12 +40,13 @@ async fn test_tls_session_resumption_and_tickets() {
 
     // Setup client connector with ClientSessionMemoryCache
     let root_store = parse_ca_bundle_pem(&cert_pem).unwrap();
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
 
     let client_session_cache = Arc::new(ClientSessionMemoryCache::new(32));
     client_config.resumption = rustls::client::Resumption::store(client_session_cache.clone());

@@ -53,6 +53,10 @@ const fn default_true() -> bool {
     true
 }
 
+const fn default_session_shards() -> usize {
+    16
+}
+
 /// TCP-specific runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TcpRuntimeConfig {
@@ -111,6 +115,9 @@ pub struct TransportRuntimeConfig {
 pub struct TlsRuntimeConfig {
     /// In-memory TLS session resumption cache capacity.
     pub session_cache_capacity: usize,
+    /// Number of cache-aligned shards partitioning session storage.
+    #[serde(default = "default_session_shards")]
+    pub session_shards: usize,
     /// Maximum size in bytes of TLS 1.3 0-RTT early data accepted from clients.
     pub max_early_data_size: u32,
     /// Number of single-use TLS 1.3 session tickets issued per handshake.
@@ -124,6 +131,7 @@ impl TlsRuntimeConfig {
     pub fn to_tls_server_params(&self) -> velda_tls::TlsServerParams {
         velda_tls::TlsServerParams {
             session_cache_capacity: self.session_cache_capacity,
+            session_shards: self.session_shards,
             max_early_data_size: self.max_early_data_size,
             send_tls13_tickets: self.send_tls13_tickets,
             handshake_timeout: std::time::Duration::from_secs(self.handshake_timeout_secs),
@@ -195,6 +203,7 @@ impl RuntimeProfile {
             },
             tls: TlsRuntimeConfig {
                 session_cache_capacity: tls_params.session_cache_capacity,
+                session_shards: tls_params.session_shards,
                 max_early_data_size: tls_params.max_early_data_size,
                 send_tls13_tickets: tls_params.send_tls13_tickets,
                 handshake_timeout_secs: tls_params.handshake_timeout.as_secs(),
@@ -376,6 +385,9 @@ impl RuntimeProfile {
             if let Some(c) = tls.session_cache_capacity {
                 self.tls.session_cache_capacity = c;
             }
+            if let Some(s) = tls.session_shards {
+                self.tls.session_shards = s;
+            }
             if let Some(e) = tls.max_early_data_size {
                 self.tls.max_early_data_size = e;
             }
@@ -445,6 +457,7 @@ struct PartialTransportConfig {
 #[derive(Debug, Deserialize, Default)]
 struct PartialTlsConfig {
     session_cache_capacity: Option<usize>,
+    session_shards: Option<usize>,
     max_early_data_size: Option<u32>,
     send_tls13_tickets: Option<usize>,
     handshake_timeout_secs: Option<u64>,
@@ -743,6 +756,7 @@ mod tests {
             "version": 1,
             "tls": {
                 "session_cache_capacity": 50000,
+                "session_shards": 64,
                 "max_early_data_size": 65536,
                 "send_tls13_tickets": 7,
                 "handshake_timeout_secs": 12
@@ -754,12 +768,14 @@ mod tests {
         let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
         assert_eq!(resolved.tls.session_cache_capacity, 50_000);
+        assert_eq!(resolved.tls.session_shards, 64);
         assert_eq!(resolved.tls.max_early_data_size, 65_536);
         assert_eq!(resolved.tls.send_tls13_tickets, 7);
         assert_eq!(resolved.tls.handshake_timeout_secs, 12);
 
         let params = resolved.to_tls_server_params();
         assert_eq!(params.session_cache_capacity, 50_000);
+        assert_eq!(params.session_shards, 64);
         assert_eq!(params.max_early_data_size, 65_536);
         assert_eq!(params.send_tls13_tickets, 7);
         assert_eq!(params.handshake_timeout.as_secs(), 12);

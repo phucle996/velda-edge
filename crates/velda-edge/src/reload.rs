@@ -217,7 +217,9 @@ pub async fn apply_reload(
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings
     let tcp_cfg = profile.to_tcp_listener_config();
     let udp_cfg = profile.to_udp_socket_config();
-    let bindings = candidate.active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
+    let bindings = candidate
+        .config
+        .active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
 
     // If listeners changed, notify TrafficEngine to reconcile ports dynamically
     if let (true, Some(engine)) = (listeners_changed, engine_handle) {
@@ -285,7 +287,7 @@ mod tests {
         let initial_runtime = Runtime::empty();
         let shared = new_shared_runtime(initial_runtime);
         assert_eq!(shared.load().revision, 0);
-        assert_eq!(shared.load().listener_count(), 0);
+        assert_eq!(shared.load().config.listeners.len(), 0);
 
         let notif = SyncNotification {
             manifest_revision: Some(42),
@@ -301,7 +303,7 @@ mod tests {
         assert_eq!(outcome.revision, 42);
         assert!(outcome.listeners_changed);
         assert_eq!(shared.load().revision, 42);
-        assert_eq!(shared.load().listener_count(), 1);
+        assert_eq!(shared.load().config.listeners.len(), 1);
         assert_eq!(shared.load().config.listeners[0].id, "http-reloaded");
     }
 

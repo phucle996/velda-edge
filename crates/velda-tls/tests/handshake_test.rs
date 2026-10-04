@@ -170,6 +170,7 @@ async fn test_tls_version_enforcement_downstream_and_upstream() {
         ca_pem: Some(cert_pem.clone()),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let client_engine_13 = velda_tls::TlsClientEngine::new(&[client_cfg_13]).unwrap();
 
@@ -192,6 +193,7 @@ async fn test_tls_version_enforcement_downstream_and_upstream() {
         ca_pem: Some(cert_pem.clone()),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let client_engine_12 = velda_tls::TlsClientEngine::new(&[client_cfg_12]).unwrap();
 

@@ -5,7 +5,7 @@ mod common;
 use common::make_test_cert;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use velda_tls::client::TlsClientEngine;
-use velda_tls::{ClientTlsConfig, ServerTlsConfig, TlsEngine, TlsError};
+use velda_tls::{ClientTlsConfig, ServerTlsConfig, TlsEngine, TlsError, TlsServerEngine};
 
 #[tokio::test]
 async fn test_tls_engine_end_to_end() {
@@ -28,6 +28,7 @@ async fn test_tls_engine_end_to_end() {
         ca_pem: Some(backend_cert.clone()),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     }];
 
     let engine = TlsEngine::new(&servers, &upstreams).expect("Failed to build TlsEngine");
@@ -91,9 +92,10 @@ async fn test_stateless_execution_accept_and_connect() {
         ca_pem: Some(server_cert),
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let arc_client_config = client_cfg.build().unwrap();
-    assert!(client_cfg.build_client_config().is_ok());
+    assert!(client_cfg.build().is_ok());
 
     let (client_io, server_io) = duplex(65536);
 
@@ -171,8 +173,9 @@ fn test_client_tls_config_mismatched_keypair_fails_transparently() {
         ca_pem: None,
         client_cert_pem: Some(cert_pem.clone()),
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
-    let err = cfg_no_key.build_client_config().unwrap_err();
+    let err = cfg_no_key.build().unwrap_err();
     assert!(
         matches!(err, TlsError::InvalidPrivateKey(_)),
         "Must error out when key is missing"
@@ -186,8 +189,9 @@ fn test_client_tls_config_mismatched_keypair_fails_transparently() {
         ca_pem: None,
         client_cert_pem: None,
         client_key_pem: Some(key_pem),
+        insecure_skip_verify: false,
     };
-    let err = cfg_no_cert.build_client_config().unwrap_err();
+    let err = cfg_no_cert.build().unwrap_err();
     assert!(
         matches!(err, TlsError::InvalidCertificate(_)),
         "Must error out when cert is missing"
@@ -203,10 +207,81 @@ fn test_client_engine_invalid_sni_fails_fast_at_startup() {
         ca_pem: None,
         client_cert_pem: None,
         client_key_pem: None,
+        insecure_skip_verify: false,
     };
     let res = TlsClientEngine::new(&[bad_cfg]);
     assert!(
         matches!(res, Err(TlsError::SniNotFound(_))),
         "Must fail fast at compilation when SNI is not a valid DNS name"
     );
+}
+
+#[tokio::test]
+async fn test_insecure_skip_verify_allows_untrusted_cert() {
+    let (server_cert, server_key) = make_test_cert(vec!["self-signed.internal".into()]);
+
+    let server_cfg = ServerTlsConfig {
+        sni: vec!["self-signed.internal".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: server_cert,
+        key_pem: server_key,
+        client_ca_pem: None,
+    };
+    let server_engine = TlsServerEngine::new(&[server_cfg]).unwrap();
+
+    // 1. Client with insecure_skip_verify = false and no ca_pem -> Handshake MUST FAIL (untrusted cert)
+    {
+        let secure_cfg = ClientTlsConfig {
+            sni: vec!["self-signed.internal".into()],
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            insecure_skip_verify: false,
+        };
+        let client_engine = TlsClientEngine::new(&[secure_cfg]).unwrap();
+        let (client_io, server_io) = duplex(65536);
+
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move { s_engine.accept(server_io).await });
+        let client_res = client_engine
+            .connect("self-signed.internal", client_io)
+            .await;
+        let _ = server_task.await;
+
+        assert!(
+            client_res.is_err(),
+            "Client without CA or insecure_skip_verify must reject self-signed cert"
+        );
+    }
+
+    // 2. Client with insecure_skip_verify = true and no ca_pem -> Handshake MUST SUCCEED!
+    {
+        let insecure_cfg = ClientTlsConfig {
+            sni: vec!["self-signed.internal".into()],
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            insecure_skip_verify: true,
+        };
+        let client_engine = TlsClientEngine::new(&[insecure_cfg]).unwrap();
+        let (client_io, server_io) = duplex(65536);
+
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move { s_engine.accept(server_io).await });
+        let client_res = client_engine
+            .connect("self-signed.internal", client_io)
+            .await;
+        let server_res = server_task.await.unwrap();
+
+        assert!(
+            client_res.is_ok(),
+            "Client with insecure_skip_verify = true must succeed connecting to self-signed cert"
+        );
+        assert!(server_res.is_ok(), "Server accept must succeed");
+    }
 }

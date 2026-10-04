@@ -71,8 +71,8 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
     // Cold-start runtime snapshot assembly delegated entirely to reload subsystem
     let initial_runtime = load_initial_runtime(&runtime_dir, &runtime_profile)?;
 
-    let initial_listeners = initial_runtime.listener_count();
-    let initial_routes = initial_runtime.route_count();
+    let initial_listeners = initial_runtime.config.listeners.len();
+    let initial_routes = initial_runtime.config.routes.len();
 
     let shared_runtime = new_shared_runtime(initial_runtime);
 
@@ -82,6 +82,7 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
     let udp_cfg = runtime_profile.to_udp_socket_config();
     let bindings = shared_runtime
         .load()
+        .config
         .active_bindings_with_configs(Some(&tcp_cfg), Some(&udp_cfg))?;
     for binding in bindings {
         engine.add_binding(binding)?;

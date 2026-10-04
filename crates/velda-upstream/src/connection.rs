@@ -14,15 +14,6 @@ pub trait BackendConnection: PoolableResource + Send + Sync + fmt::Debug + 'stat
     /// Remote socket address of this connection.
     fn peer(&self) -> SocketAddr;
 
-    /// Downcasts reference to `Any` for concrete backend connection extraction.
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Downcasts mutable reference to `Any`.
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-
-    /// Downcasts boxed connection to `Box<dyn Any>`.
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
-
     /// Consumes the boxed connection and returns the underlying raw [`TcpStream`] if available.
     fn into_tcp_stream(self: Box<Self>) -> Option<TcpStream> {
         None
@@ -52,6 +43,9 @@ impl Connector for TcpConnector {
                     reason: e.to_string(),
                 })?;
 
+        // Fast-path acceleration: disable Nagle's algorithm to eliminate 40ms delayed ACKs on Linux
+        let _ = stream.set_nodelay(true);
+
         Ok(Box::new(RealTcpConnection {
             stream: Some(stream),
             peer: target,
@@ -68,18 +62,6 @@ pub struct RealTcpConnection {
     peer: SocketAddr,
     created_at: Instant,
     last_used_at: Instant,
-}
-
-impl RealTcpConnection {
-    /// Consumes the wrapper and returns the underlying [`TcpStream`].
-    pub fn into_inner(mut self) -> Option<TcpStream> {
-        self.stream.take()
-    }
-
-    /// Returns a reference to the underlying [`TcpStream`] if active.
-    pub fn stream(&self) -> Option<&TcpStream> {
-        self.stream.as_ref()
-    }
 }
 
 impl PoolableResource for RealTcpConnection {
@@ -109,22 +91,12 @@ impl PoolableResource for RealTcpConnection {
 }
 
 impl BackendConnection for RealTcpConnection {
+    #[inline]
     fn peer(&self) -> SocketAddr {
         self.peer
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-        self
-    }
-
+    #[inline]
     fn into_tcp_stream(mut self: Box<Self>) -> Option<TcpStream> {
         self.stream.take()
     }
@@ -186,20 +158,9 @@ pub mod mock {
     }
 
     impl BackendConnection for MockConnection {
+        #[inline]
         fn peer(&self) -> SocketAddr {
             self.peer
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
-
-        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-            self
         }
     }
 
@@ -239,5 +200,19 @@ pub mod mock {
             }
             Ok(Box::new(MockConnection::new(target)))
         }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connector_nodelay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let connector = TcpConnector;
+        let conn = connector.connect(addr).await.unwrap();
+        assert_eq!(conn.peer(), addr);
+        assert!(conn.is_healthy());
+
+        let raw_stream = conn.into_tcp_stream().unwrap();
+        assert!(raw_stream.nodelay().unwrap());
     }
 }

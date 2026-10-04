@@ -8,7 +8,7 @@ use crate::error::TlsError;
 use crate::pem::{parse_ca_bundle_pem, parse_certs_pem, parse_private_key_pem};
 
 /// Upstream backend TLS configuration for initiating secure outbound connections.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClientTlsConfig {
     /// Target SNI hostnames to match and send in the ClientHello.
     pub sni: Vec<String>,
@@ -22,29 +22,32 @@ pub struct ClientTlsConfig {
     pub client_cert_pem: Option<String>,
     /// Optional client private key in PEM format for upstream mTLS.
     pub client_key_pem: Option<String>,
+    /// Whether to skip server certificate and SAN verification (for internal/lab backends).
+    pub insecure_skip_verify: bool,
 }
 
 impl ClientTlsConfig {
     /// Compiles this `ClientTlsConfig` definition into an `Arc<ClientConfig>`.
-    #[inline]
     pub fn build(&self) -> Result<Arc<ClientConfig>, TlsError> {
-        self.build_client_config()
-    }
-
-    /// Compiles a single `ClientTlsConfig` definition into an `Arc<ClientConfig>`.
-    pub fn build_client_config(&self) -> Result<Arc<ClientConfig>, TlsError> {
-        let mut root_store = rustls::RootCertStore::empty();
-        if let Some(ca_pem) = &self.ca_pem {
-            root_store = parse_ca_bundle_pem(ca_pem)?;
-        }
-
         let protocol_versions = crate::version::resolve_protocol_versions(&self.versions)?;
 
-        let builder =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_protocol_versions(&protocol_versions)
-                .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?
-                .with_root_certificates(root_store);
+        let builder = ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&protocol_versions)
+        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+
+        let builder = if self.insecure_skip_verify {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(crate::client::InsecureCertVerifier))
+        } else {
+            let mut root_store = rustls::RootCertStore::empty();
+            if let Some(ca_pem) = &self.ca_pem {
+                root_store = parse_ca_bundle_pem(ca_pem)?;
+            }
+            builder.with_root_certificates(root_store)
+        };
 
         let mut client_config = match (&self.client_cert_pem, &self.client_key_pem) {
             (Some(cert_pem), Some(key_pem)) => {

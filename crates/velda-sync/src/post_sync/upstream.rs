@@ -84,9 +84,12 @@ pub struct UpstreamTlsConfig {
     pub versions: Vec<String>,
     #[serde(default)]
     pub alpn: Vec<String>,
-    /// Auto-extracted SNIs compiled into binary (not present in raw JSON).
+    /// Auto-extracted or explicit SNIs compiled into binary.
     #[serde(default)]
     pub sni: Vec<String>,
+    /// Skip server certificate and SAN verification for internal/lab backends.
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +680,18 @@ fn extract_upstream_snis(
     target: Option<&DnsTarget>,
     tls: &UpstreamTlsConfig,
 ) -> Result<Vec<String>, SyncError> {
+    if !tls.sni.is_empty() {
+        let explicit: Vec<String> = tls
+            .sni
+            .iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !explicit.is_empty() {
+            return Ok(explicit);
+        }
+    }
+
     if let Some(ca) = &tls.ca_pem
         && !ca.trim().is_empty()
         && let Ok(snis) = tls_domain::extract_cert_snis(ca)
@@ -1194,5 +1209,47 @@ mod tests {
         valid_h2.protocol.application = "http2".into();
         valid_h2.protocol.streaming = velda_core::StreamingMode::SERVER;
         assert!(validate_upstreams(&mut [valid_h2]).is_ok());
+    }
+
+    #[test]
+    fn test_upstream_tls_insecure_skip_verify_and_explicit_sni() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "upstreams": [{
+                "id": "insecure_upstream",
+                "mode": "endpoints",
+                "protocol": { "transport": "tcp", "application": "http1", "streaming": [] },
+                "endpoints": [{ "address": "10.0.0.1:8443", "weight": 1 }],
+                "load_balancer": { "algorithm": "round_robin" },
+                "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
+                "tls": {
+                    "sni": ["insecure.internal"],
+                    "insecure_skip_verify": true,
+                    "versions": ["tls1.3"],
+                    "alpn": ["h2"]
+                }
+            }]
+        });
+
+        let mut upstreams = parse_upstreams(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(upstreams[0].tls.as_ref().unwrap().insecure_skip_verify);
+        assert_eq!(
+            upstreams[0].tls.as_ref().unwrap().sni,
+            vec!["insecure.internal".to_string()]
+        );
+
+        validate_upstreams(&mut upstreams).unwrap();
+        assert_eq!(
+            upstreams[0].tls.as_ref().unwrap().sni,
+            vec!["insecure.internal".to_string()]
+        );
+
+        let bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+        let (_, unpacked) = unpack_upstreams_from_binary(&bin).unwrap();
+        assert!(unpacked[0].tls.as_ref().unwrap().insecure_skip_verify);
+        assert_eq!(
+            unpacked[0].tls.as_ref().unwrap().sni,
+            vec!["insecure.internal".to_string()]
+        );
     }
 }

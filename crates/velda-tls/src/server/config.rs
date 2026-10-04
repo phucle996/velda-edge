@@ -33,6 +33,8 @@ pub struct ServerTlsConfig {
 pub struct TlsServerParams {
     /// In-memory TLS session resumption cache capacity (number of sessions).
     pub session_cache_capacity: usize,
+    /// Number of cache-aligned shards partitioning session storage.
+    pub session_shards: usize,
     /// Maximum size in bytes of TLS 1.3 0-RTT early data accepted from clients.
     pub max_early_data_size: u32,
     /// Number of single-use TLS 1.3 session tickets issued per handshake.
@@ -44,14 +46,14 @@ pub struct TlsServerParams {
 impl TlsServerParams {
     /// Creates parameters sized appropriately for the host's [`CpuTier`] and [`MemoryTier`].
     pub fn for_tiers(cpu: CpuTier, mem: MemoryTier) -> Self {
-        let (session_cache_capacity, max_early_data_size) = match mem {
-            MemoryTier::Constrained => (1024, 0),
-            MemoryTier::Small => (2 * 1024, 4 * 1024),
-            MemoryTier::Medium => (8 * 1024, 8 * 1024),
-            MemoryTier::Large => (16 * 1024, 8 * 1024),
-            MemoryTier::XLarge => (32 * 1024, 16 * 1024),
-            MemoryTier::TwoXLarge => (64 * 1024, 16 * 1024),
-            MemoryTier::Ultra => (128 * 1024, 32 * 1024),
+        let (session_cache_capacity, session_shards, max_early_data_size) = match mem {
+            MemoryTier::Constrained => (1024, 4, 0),
+            MemoryTier::Small => (2 * 1024, 8, 4 * 1024),
+            MemoryTier::Medium => (8 * 1024, 16, 8 * 1024),
+            MemoryTier::Large => (16 * 1024, 32, 8 * 1024),
+            MemoryTier::XLarge => (32 * 1024, 32, 16 * 1024),
+            MemoryTier::TwoXLarge => (64 * 1024, 64, 16 * 1024),
+            MemoryTier::Ultra => (128 * 1024, 128, 32 * 1024),
         };
 
         let (send_tls13_tickets, timeout_secs) = match cpu {
@@ -66,6 +68,7 @@ impl TlsServerParams {
 
         Self {
             session_cache_capacity,
+            session_shards,
             max_early_data_size,
             send_tls13_tickets,
             handshake_timeout: Duration::from_secs(timeout_secs),
@@ -81,6 +84,12 @@ impl TlsServerParams {
     /// Sets the session cache capacity.
     pub fn with_session_cache_capacity(mut self, capacity: usize) -> Self {
         self.session_cache_capacity = capacity;
+        self
+    }
+
+    /// Sets the number of session shards.
+    pub fn with_session_shards(mut self, shards: usize) -> Self {
+        self.session_shards = shards;
         self
     }
 
@@ -156,15 +165,19 @@ impl ServerTlsConfig {
 
         let protocol_versions = crate::version::resolve_protocol_versions(&all_versions)?;
 
-        let builder =
-            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_protocol_versions(&protocol_versions)
-                .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+        let builder = ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&protocol_versions)
+        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
 
         let mut server_config = if requires_client_auth {
-            let verifier = WebPkiClientVerifier::builder(Arc::new(client_root_store))
-                .build()
-                .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_root_store),
+                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            )
+            .build()
+            .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
             builder
                 .with_client_cert_verifier(verifier)
                 .with_cert_resolver(Arc::new(sni_resolver))
@@ -178,7 +191,10 @@ impl ServerTlsConfig {
         server_config.max_early_data_size = params.max_early_data_size;
         server_config.send_tls13_tickets = params.send_tls13_tickets;
         server_config.session_storage =
-            rustls::server::ServerSessionMemoryCache::new(params.session_cache_capacity);
+            crate::server::session::ShardedServerSessionCache::with_shards(
+                params.session_cache_capacity,
+                params.session_shards,
+            );
 
         Ok(Arc::new(server_config))
     }
@@ -194,6 +210,7 @@ mod tests {
         let p_constrained =
             TlsServerParams::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
         assert_eq!(p_constrained.session_cache_capacity, 1024);
+        assert_eq!(p_constrained.session_shards, 4);
         assert_eq!(p_constrained.max_early_data_size, 0);
         assert_eq!(p_constrained.send_tls13_tickets, 1);
         assert_eq!(p_constrained.handshake_timeout, Duration::from_secs(10));
@@ -201,6 +218,7 @@ mod tests {
         // Small
         let p_small = TlsServerParams::for_tiers(CpuTier::Small, MemoryTier::Small);
         assert_eq!(p_small.session_cache_capacity, 2048);
+        assert_eq!(p_small.session_shards, 8);
         assert_eq!(p_small.max_early_data_size, 4096);
         assert_eq!(p_small.send_tls13_tickets, 2);
         assert_eq!(p_small.handshake_timeout, Duration::from_secs(8));
@@ -208,6 +226,7 @@ mod tests {
         // Medium
         let p_med = TlsServerParams::for_tiers(CpuTier::Medium, MemoryTier::Medium);
         assert_eq!(p_med.session_cache_capacity, 8192);
+        assert_eq!(p_med.session_shards, 16);
         assert_eq!(p_med.max_early_data_size, 8192);
         assert_eq!(p_med.send_tls13_tickets, 4);
         assert_eq!(p_med.handshake_timeout, Duration::from_secs(5));
@@ -215,6 +234,7 @@ mod tests {
         // Large
         let p_large = TlsServerParams::for_tiers(CpuTier::Large, MemoryTier::Large);
         assert_eq!(p_large.session_cache_capacity, 16384);
+        assert_eq!(p_large.session_shards, 32);
         assert_eq!(p_large.max_early_data_size, 8192);
         assert_eq!(p_large.send_tls13_tickets, 4);
         assert_eq!(p_large.handshake_timeout, Duration::from_secs(5));
@@ -222,6 +242,7 @@ mod tests {
         // XLarge
         let p_xlarge = TlsServerParams::for_tiers(CpuTier::XLarge, MemoryTier::XLarge);
         assert_eq!(p_xlarge.session_cache_capacity, 32768);
+        assert_eq!(p_xlarge.session_shards, 32);
         assert_eq!(p_xlarge.max_early_data_size, 16384);
         assert_eq!(p_xlarge.send_tls13_tickets, 6);
         assert_eq!(p_xlarge.handshake_timeout, Duration::from_secs(3));
@@ -229,6 +250,7 @@ mod tests {
         // TwoXLarge
         let p_2xlarge = TlsServerParams::for_tiers(CpuTier::TwoXLarge, MemoryTier::TwoXLarge);
         assert_eq!(p_2xlarge.session_cache_capacity, 65536);
+        assert_eq!(p_2xlarge.session_shards, 64);
         assert_eq!(p_2xlarge.max_early_data_size, 16384);
         assert_eq!(p_2xlarge.send_tls13_tickets, 8);
         assert_eq!(p_2xlarge.handshake_timeout, Duration::from_secs(3));
@@ -236,6 +258,7 @@ mod tests {
         // Ultra
         let p_ultra = TlsServerParams::for_tiers(CpuTier::Ultra, MemoryTier::Ultra);
         assert_eq!(p_ultra.session_cache_capacity, 131072);
+        assert_eq!(p_ultra.session_shards, 128);
         assert_eq!(p_ultra.max_early_data_size, 32768);
         assert_eq!(p_ultra.send_tls13_tickets, 8);
         assert_eq!(p_ultra.handshake_timeout, Duration::from_secs(2));

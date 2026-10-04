@@ -58,7 +58,7 @@ impl TlsClientEngine {
         let mut connectors = HashMap::new();
 
         for upstream in upstreams {
-            let client_config = upstream.build_client_config()?;
+            let client_config = upstream.build()?;
             let connector = TlsConnector::from(client_config.clone());
 
             for sni in &upstream.sni {

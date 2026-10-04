@@ -183,7 +183,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(shared.load().revision, 77);
-        assert_eq!(shared.load().listener_count(), 1);
+        assert_eq!(shared.load().config.listeners.len(), 1);
         assert_eq!(shared.load().config.listeners[0].id, "ipc-test");
 
         // Shut down IPC server

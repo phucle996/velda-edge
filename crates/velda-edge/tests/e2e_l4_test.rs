@@ -118,9 +118,9 @@ async fn test_end_to_end_l4_tcp_forwarding() {
     let config = EdgeConfig::new(&storage_dir, &socket_path);
     let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
 
-    assert_eq!(supervisor.shared_runtime().load().listener_count(), 1);
-    assert_eq!(supervisor.shared_runtime().load().route_count(), 1);
-    assert_eq!(supervisor.shared_runtime().load().upstream_count(), 1);
+    assert_eq!(supervisor.shared_runtime().load().config.listeners.len(), 1);
+    assert_eq!(supervisor.shared_runtime().load().config.routes.len(), 1);
+    assert_eq!(supervisor.shared_runtime().load().config.upstreams.len(), 1);
 
     // 5. Run supervisor in background
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

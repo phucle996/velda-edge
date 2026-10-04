@@ -138,6 +138,7 @@ async fn test_upstream_mtls_with_tls_client_engine() {
             ca_pem: Some(backend_cert.clone()),
             client_cert_pem: Some(gateway_client_cert.clone()),
             client_key_pem: Some(gateway_client_key.clone()),
+            insecure_skip_verify: false,
         };
 
         let client_engine = TlsClientEngine::new(&[client_tls_config]).unwrap();
@@ -179,6 +180,7 @@ async fn test_upstream_mtls_with_tls_client_engine() {
             ca_pem: Some(backend_cert),
             client_cert_pem: None,
             client_key_pem: None,
+            insecure_skip_verify: false,
         };
 
         let client_engine = TlsClientEngine::new(&[client_tls_config_no_auth]).unwrap();

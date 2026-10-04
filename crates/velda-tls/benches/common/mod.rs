@@ -134,12 +134,13 @@ pub fn make_test_server(cpu: CpuTier, mem: MemoryTier) -> (TlsServerEngine, Stri
 /// Builds a client `TlsConnector` trusting the provided CA certificate and optionally enabling session cache.
 pub fn make_test_client(cert_pem: &str, with_session_cache: bool) -> TlsConnector {
     let root_store = parse_ca_bundle_pem(cert_pem).unwrap();
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
 
     if with_session_cache {
         let cache = Arc::new(ClientSessionMemoryCache::new(1024));
@@ -153,12 +154,13 @@ pub fn make_test_client(cert_pem: &str, with_session_cache: bool) -> TlsConnecto
 /// Builds a client `TlsConnector` that trusts the provided CA PEM and configures ALPN.
 pub fn make_client_connector(ca_pem: &str, alpn: Option<Vec<&str>>) -> TlsConnector {
     let root_store = parse_ca_bundle_pem(ca_pem).expect("Failed to parse CA bundle");
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("Valid protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("Valid protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
 
     if let Some(alpns) = alpn {
         client_config.alpn_protocols = alpns.into_iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -180,13 +182,14 @@ pub fn make_mtls_client_connector(
     let client_key =
         velda_tls::pem::parse_private_key_pem(client_key_pem).expect("Failed to parse client key");
 
-    let mut client_config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("Valid protocol versions")
-            .with_root_certificates(root_store)
-            .with_client_auth_cert(client_certs, client_key)
-            .expect("Failed to set client auth cert");
+    let mut client_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("Valid protocol versions")
+    .with_root_certificates(root_store)
+    .with_client_auth_cert(client_certs, client_key)
+    .expect("Failed to set client auth cert");
 
     if let Some(alpns) = alpn {
         client_config.alpn_protocols = alpns.into_iter().map(|s| s.as_bytes().to_vec()).collect();

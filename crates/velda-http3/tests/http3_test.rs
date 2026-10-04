@@ -21,10 +21,14 @@ fn generate_test_crypto() -> (ServerConfig, ClientConfig) {
         rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
     );
 
-    let mut rustls_server = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
-        .unwrap();
+    let mut rustls_server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(cert_chain, private_key)
+    .unwrap();
     rustls_server.alpn_protocols = vec![b"h3".to_vec()];
 
     let quic_server_crypto =
@@ -37,9 +41,13 @@ fn generate_test_crypto() -> (ServerConfig, ClientConfig) {
         .add(rustls::pki_types::CertificateDer::from(cert_der))
         .unwrap();
 
-    let mut rustls_client = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let mut rustls_client = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
     rustls_client.alpn_protocols = vec![b"h3".to_vec()];
 
     let quic_client_crypto =

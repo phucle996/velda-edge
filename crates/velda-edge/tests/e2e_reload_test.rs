@@ -49,7 +49,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
     let shared = supervisor.shared_runtime().clone();
 
     assert_eq!(shared.load().revision, 1);
-    assert_eq!(shared.load().listener_count(), 1);
+    assert_eq!(shared.load().config.listeners.len(), 1);
     assert_eq!(shared.load().config.listeners[0].id, "initial-http");
 
     // 3. Launch Edge supervisor in background task
@@ -126,7 +126,7 @@ async fn test_end_to_end_cold_start_and_uds_hot_reload() {
 
     // Verify atomic swap to revision 2 occurred in-memory without downtime
     assert_eq!(shared.load().revision, 2);
-    assert_eq!(shared.load().listener_count(), 2);
+    assert_eq!(shared.load().config.listeners.len(), 2);
     assert_eq!(shared.load().config.listeners[1].id, "reloaded-tcp");
 
     // Verify TrafficEngine dynamically bound and opened the new OS port

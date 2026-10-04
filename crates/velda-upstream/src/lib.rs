@@ -7,9 +7,9 @@
 //! **Router decides $\rightarrow$ Upstream resolves $\rightarrow$ Pool reuses $\rightarrow$ Execution executes.**
 
 pub mod connection;
-pub mod endpoint;
 pub mod error;
 pub mod health;
+pub mod lease;
 pub mod upstream;
 
 // Re-exports from velda-core
@@ -34,10 +34,10 @@ pub use velda_connection_pool::{ConnectionKey, PoolManager, PoolStats, PoolableR
 
 // Re-exports for clean, ergonomic usage within upstream
 pub use connection::{BackendConnection, Connector, RealTcpConnection, TcpConnector};
-pub use endpoint::EndpointState;
 pub use error::{Result, UpstreamError};
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
-pub use upstream::{AcquireTarget, BackendLease, Upstream, UpstreamPoolManager, UpstreamTimeouts};
+pub use lease::{AcquireTarget, BackendLease, UpstreamPoolManager};
+pub use upstream::{Upstream, UpstreamTimeouts};
 
 // Test utilities
 #[cfg(any(test, feature = "test-utils"))]
