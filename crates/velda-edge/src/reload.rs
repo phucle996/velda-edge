@@ -66,7 +66,9 @@ pub fn load_initial_runtime(
     let tls_server = compile_tls_server(&tls, &profile.to_tls_server_params())?;
     let tls_client = crate::runtime::tls::compile_tls_client(&upstreams)?;
     let router = build_router(&routes, &upstreams, &listeners)?;
-    let upstreams_table = crate::runtime::build_upstreams(&upstreams, tls_client.as_ref());
+    let dns_config = profile.to_dns_resolver_config();
+    let upstreams_table =
+        crate::runtime::build_upstreams(&upstreams, tls_client.as_ref(), &dns_config);
 
     // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
     if let Some(tls) = tls_server.as_ref() {
@@ -88,7 +90,10 @@ pub fn load_initial_runtime(
         tls,
     };
 
-    let pipelines = crate::runtime::pipeline::PipelineTable::build(&runtime_config.listeners)?;
+    let pipelines = crate::runtime::pipeline::PipelineTable::build_with_tier(
+        &runtime_config.listeners,
+        profile.memory_tier(),
+    )?;
 
     Ok(Runtime {
         revision: 1,
@@ -172,7 +177,10 @@ pub async fn apply_reload(
 
     // Recompile PipelineTable if listeners changed
     let pipelines = if listeners_changed {
-        crate::runtime::pipeline::PipelineTable::build(&config.listeners)?
+        crate::runtime::pipeline::PipelineTable::build_with_tier(
+            &config.listeners,
+            profile.memory_tier(),
+        )?
     } else {
         current.pipelines.clone()
     };
@@ -186,7 +194,8 @@ pub async fn apply_reload(
 
     // Recompile UpstreamTable if upstreams changed
     let upstreams = if upstreams_changed {
-        crate::runtime::build_upstreams(&config.upstreams, tls_client.as_ref())
+        let dns_config = profile.to_dns_resolver_config();
+        crate::runtime::build_upstreams(&config.upstreams, tls_client.as_ref(), &dns_config)
     } else {
         current.upstreams.clone()
     };

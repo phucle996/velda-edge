@@ -24,6 +24,21 @@ use crate::error::{DiscoveryError, Result};
 // 1. Wire Transport Trait
 // ============================================================================
 
+/// Addresses returned by one transport query, with the TTL the nameserver attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsAnswer {
+    /// Resolved A and AAAA addresses.
+    pub ips: Vec<IpAddr>,
+    /// Smallest TTL among the returned records, so the whole set is never cached
+    /// past the shortest-lived record. `None` when the transport cannot observe
+    /// TTLs (the OS resolver), in which case the resolver falls back to `positive_ttl`.
+    pub ttl: Option<Duration>,
+}
+
+/// Lower bound applied to record TTLs. A TTL of 0 means "do not cache" on the wire,
+/// but honoring it literally would turn every refresh tick into a wire query.
+const MIN_POSITIVE_TTL: Duration = Duration::from_secs(1);
+
 /// Asynchronous wire transport for querying DNS nameservers.
 pub trait DnsTransport: Send + Sync + 'static {
     /// Queries the target DNS server for `host` A and AAAA records.
@@ -31,7 +46,7 @@ pub trait DnsTransport: Send + Sync + 'static {
         &self,
         server: SocketAddr,
         host: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<IpAddr>>> + Send;
+    ) -> impl std::future::Future<Output = Result<DnsAnswer>> + Send;
 }
 
 impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
@@ -39,7 +54,7 @@ impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
         &self,
         server: SocketAddr,
         host: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<IpAddr>>> + Send {
+    ) -> impl std::future::Future<Output = Result<DnsAnswer>> + Send {
         (**self).query(server, host)
     }
 }
@@ -51,7 +66,12 @@ impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
 /// TTL and capacity configurations for DNS resolution, caching, and LKG resilience.
 #[derive(Debug, Clone, Copy)]
 pub struct DnsResolverConfig {
-    /// Positive cache TTL for nameserver responses (default: 30s).
+    /// Upper bound on the positive cache TTL for nameserver responses (default: 30s).
+    ///
+    /// The effective TTL is the record TTL clamped to `[1s, positive_ttl]`: a short
+    /// record TTL is honored so failover/rollouts propagate, while the cap bounds
+    /// staleness when a nameserver advertises hours. Transports that report no TTL
+    /// use this value directly.
     pub positive_ttl: Duration,
     /// Positive cache TTL for static `/etc/hosts` entries (default: 300s).
     pub hosts_ttl: Duration,
@@ -63,8 +83,12 @@ pub struct DnsResolverConfig {
     pub cache_capacity: usize,
     /// Maximum capacity of entries in the Last-Known-Good (LKG) resilience map.
     pub lkg_capacity: usize,
-    /// Maximum UDP packet buffer size for wire responses (default: 1024).
-    pub max_packet_size: usize,
+    /// Upper bound on SOA-derived negative TTLs (default: 60s).
+    ///
+    /// NXDOMAIN answers carry the zone's negative TTL (often minutes to hours); the
+    /// effective value is clamped to `[negative_ttl, max_negative_ttl]` so a name that
+    /// is created right after a miss becomes visible quickly.
+    pub max_negative_ttl: Duration,
 }
 
 impl Default for DnsResolverConfig {
@@ -76,7 +100,7 @@ impl Default for DnsResolverConfig {
             query_timeout: Duration::from_secs(2),
             cache_capacity: 50_000,
             lkg_capacity: 10_000,
-            max_packet_size: 1024,
+            max_negative_ttl: Duration::from_secs(60),
         }
     }
 }
@@ -92,7 +116,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(3),
                 cache_capacity: 1_000,
                 lkg_capacity: 500,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::Small => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -101,7 +125,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(2),
                 cache_capacity: 10_000,
                 lkg_capacity: 2_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::Medium => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -110,7 +134,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(2),
                 cache_capacity: 50_000,
                 lkg_capacity: 10_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::Large => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -119,7 +143,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_millis(1500),
                 cache_capacity: 150_000,
                 lkg_capacity: 30_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::XLarge => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -128,7 +152,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(1),
                 cache_capacity: 400_000,
                 lkg_capacity: 80_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::TwoXLarge => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -137,7 +161,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(1),
                 cache_capacity: 1_000_000,
                 lkg_capacity: 200_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
             velda_core::MemoryTier::Ultra => Self {
                 positive_ttl: Duration::from_secs(30),
@@ -146,7 +170,7 @@ impl DnsResolverConfig {
                 query_timeout: Duration::from_secs(1),
                 cache_capacity: 2_500_000,
                 lkg_capacity: 500_000,
-                max_packet_size: 1024,
+                max_negative_ttl: Duration::from_secs(60),
             },
         }
     }
@@ -166,7 +190,7 @@ pub struct DnsResolverProvider<S: DnsServerProvider, T: DnsTransport> {
     cache: DnsCache,
     config: DnsResolverConfig,
     lkg: RwLock<HashMap<String, Arc<[IpAddr]>>>,
-    // FIX (Blocker 3 - Cache Stampede / Thundering Herd): In-flight query deduplication map
+    // Singleflight map: concurrent misses for one host share a single wire query.
     inflight: tokio::sync::Mutex<InflightMap>,
 }
 
@@ -217,7 +241,7 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
     pub async fn resolve_ips(&self, host: &str) -> Result<Arc<[IpAddr]>> {
         // -------------------------------------------------------------
         // Step 1: DnsCache is the Single Source of Truth on Hot Path
-        // FIX (Optimization): Pass &str directly to DnsCache without allocating a lowercase String
+        // Pass &str straight to the cache; it normalizes lazily without allocating.
         // -------------------------------------------------------------
         match self.cache.get(host) {
             CacheLookup::Hit(ips) => {
@@ -236,17 +260,19 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         // -------------------------------------------------------------
         // Step 2: Local Hosts File Lookup
         // -------------------------------------------------------------
-        if let Some(ip) = self.hosts.lookup(&key) {
-            let ips: Arc<[IpAddr]> = Arc::from([ip]);
+        if let Some(ips) = self.hosts.lookup(&key)
+            && !ips.is_empty()
+        {
+            let ips_arc: Arc<[IpAddr]> = Arc::from(ips);
             // Cache static hosts entry uniformly into DnsCache
             self.cache
-                .insert_positive(&key, vec![ip], self.config.hosts_ttl);
+                .insert_positive(&key, ips.to_vec(), self.config.hosts_ttl);
 
-            return Ok(ips);
+            return Ok(ips_arc);
         }
 
         // -------------------------------------------------------------
-        // Step 3: FIX (Blocker 3 - Cache Stampede / Thundering Herd):
+        // Step 3:
         // Singleflight query deduplication to prevent flooding upstream DNS.
         // -------------------------------------------------------------
         let mut rx = {
@@ -297,16 +323,19 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         }
 
         let mut last_err = None;
-        for &server in &server_list {
-            // FIX (Blocker 4 - UDP Hang / Timeout): Wrap wire query with strict timeout to prevent indefinite hangs
+        let mut is_name_not_found = false;
+        for &server in server_list {
+            // UDP gives no failure signal for a dead server; the timeout bounds the wait and enables failover.
             let query_future = self.transport.query(server, key);
             match tokio::time::timeout(self.config.query_timeout, query_future).await {
-                Ok(Ok(ips_vec)) if !ips_vec.is_empty() => {
-                    let ips: Arc<[IpAddr]> = Arc::from(ips_vec);
+                Ok(Ok(answer)) if !answer.ips.is_empty() => {
+                    let ttl = answer.ttl.map_or(self.config.positive_ttl, |t| {
+                        t.max(MIN_POSITIVE_TTL).min(self.config.positive_ttl)
+                    });
+                    let ips: Arc<[IpAddr]> = Arc::from(answer.ips);
 
                     // Populate positive cache
-                    self.cache
-                        .insert_positive(key, ips.to_vec(), self.config.positive_ttl);
+                    self.cache.insert_positive(key, ips.to_vec(), ttl);
 
                     // Update LKG (Last-Known-Good) with bounded capacity
                     {
@@ -329,11 +358,23 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
                         reason: "no A/AAAA records returned".into(),
                     });
                 }
+                Ok(Err(DiscoveryError::NameNotFound {
+                    host: err_host,
+                    negative_ttl,
+                })) => {
+                    is_name_not_found = true;
+                    last_err = Some(DiscoveryError::NameNotFound {
+                        host: err_host,
+                        negative_ttl,
+                    });
+                    // Authoritative NXDOMAIN: the domain does not exist in the zone.
+                    break;
+                }
                 Ok(Err(err)) => {
                     last_err = Some(err);
                 }
                 Err(_) => {
-                    // FIX (Blocker 4 - UDP Hang / Timeout): Nameserver timed out; failover to next
+                    // Nameserver timed out; fail over to the next one.
                     tracing::warn!(
                         server = %server,
                         host = %host,
@@ -351,22 +392,42 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
         // -------------------------------------------------------------
         // Step 4: Resilience Fallback (LKG) or Negative Cache
         // -------------------------------------------------------------
-        if let Some(lkg_ips) = self.lkg.read().unwrap().get(key) {
+        // LKG fallback applies ONLY to transient network/server failures (timeout, SERVFAIL, unreachable).
+        // Authoritative NXDOMAIN (NameNotFound) means the domain has been deleted or is invalid:
+        // honoring LKG would route traffic to decommissioned zombie backends.
+        if !is_name_not_found && let Some(lkg_ips) = self.lkg.read().unwrap().get(key) {
             tracing::warn!(
                 host = %host,
                 "DNS lookup failed across all nameservers; falling back to Last-Known-Good (LKG) addresses"
             );
-            // FIX (Resilience & Anti-Storm - Stale-If-Error RFC 5861):
+            // Stale-if-error (RFC 5861):
             // Cache the Last-Known-Good addresses for a short grace period (`negative_ttl`).
-            // This prevents thundering herds and endless 14-alloc query loops from hammering
-            // dead upstream nameservers on every subsequent request during an outage!
+            // Prevents every subsequent request from re-hammering
+            // dead nameservers during an outage.
             self.cache
                 .insert_positive(key, lkg_ips.to_vec(), self.config.negative_ttl);
             return Ok(Arc::clone(lkg_ips));
         }
 
-        // Populate negative cache on complete failure
-        self.cache.insert_negative(key, self.config.negative_ttl);
+        // If authoritative NXDOMAIN, actively invalidate any stale LKG record for this name
+        if is_name_not_found {
+            let mut lkg = self.lkg.write().unwrap();
+            lkg.remove(key);
+        }
+
+        // Populate negative cache on complete failure. Authoritative NXDOMAINs use the
+        // zone's SOA-derived TTL; every other failure (timeouts, SERVFAIL) is transient
+        // and keeps the short configured TTL.
+        let negative_ttl = match &last_err {
+            Some(DiscoveryError::NameNotFound {
+                negative_ttl: Some(t),
+                ..
+            }) => (*t)
+                .max(self.config.negative_ttl)
+                .min(self.config.max_negative_ttl),
+            _ => self.config.negative_ttl,
+        };
+        self.cache.insert_negative(key, negative_ttl);
 
         Err(
             last_err.unwrap_or_else(|| DiscoveryError::DnsResolutionFailed {

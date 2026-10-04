@@ -9,7 +9,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use velda_discovery::{DiscoveryError, DnsTransport, Result};
+use velda_discovery::{DiscoveryError, DnsAnswer, DnsTransport, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocSnapshot {
@@ -154,11 +154,14 @@ impl BenchDnsTransport {
 }
 
 impl DnsTransport for BenchDnsTransport {
-    async fn query(&self, server: SocketAddr, host: &str) -> Result<Vec<IpAddr>> {
+    async fn query(&self, server: SocketAddr, host: &str) -> Result<DnsAnswer> {
         self.query_count.fetch_add(1, Ordering::Relaxed);
         let key = (server, host.to_lowercase());
         if let Some(ips) = self.table.read().unwrap().get(&key) {
-            Ok(ips.clone())
+            Ok(DnsAnswer {
+                ips: ips.clone(),
+                ttl: None,
+            })
         } else {
             Err(DiscoveryError::DnsResolutionFailed {
                 host: host.to_string(),

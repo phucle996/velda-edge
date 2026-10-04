@@ -69,7 +69,7 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
     AccelerationTier, CpuProfile, CpuTier, HardwareTopology, KernelProfile, KernelVersion,
-    MemoryProfile, MemoryTier, global_hardware_topology, init_hardware_topology, probe_cpu,
-    probe_kernel, probe_memory,
+    MemoryProfile, MemoryTier, ParseTierError, global_hardware_topology, init_hardware_topology,
+    probe_cpu, probe_kernel, probe_memory,
 };
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

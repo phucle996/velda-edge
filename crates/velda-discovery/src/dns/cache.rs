@@ -17,10 +17,6 @@ pub const DEFAULT_CACHE_CAPACITY: usize = 50_000;
 
 /// Returns a borrowed slice if `host` is already lowercase,
 /// avoiding heap allocation of a new `String` on the request serving hot path.
-///
-/// FIX (Optimization - Hot Path Zero-Allocation): In edge reverse-proxy workloads,
-/// domain names are normalized lowercase in 99.9% of requests. Borrowing avoids
-/// 1 String heap allocation on every single cache lookup.
 #[inline]
 fn normalize_host<'a>(host: &'a str) -> Cow<'a, str> {
     if host.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -35,8 +31,8 @@ fn normalize_host<'a>(host: &'a str) -> Cow<'a, str> {
 pub enum CacheLookup {
     /// Valid positive cache entry with resolved IP addresses.
     ///
-    /// FIX (Optimization - Zero-Allocation): Uses `Arc<[IpAddr]>` instead of `Vec<IpAddr>`
-    /// to make cache hits 100% allocation-free via cheap pointer copy (atomic refcount).
+    /// `Arc<[IpAddr]>` rather than `Vec<IpAddr>` so a hit is a refcount bump,
+    /// not an allocation + copy, on the hot path.
     Hit(Arc<[IpAddr]>),
     /// Valid negative cache entry (NXDOMAIN).
     NegativeHit,
@@ -60,7 +56,7 @@ struct NegativeEntry {
 pub struct DnsCache {
     positive: RwLock<HashMap<String, PositiveEntry>>,
     negative: RwLock<HashMap<String, NegativeEntry>>,
-    // FIX (Blocker 1 - Memory Leak/OOM): Bounded capacity limit per table to prevent memory blowup
+    // Hard cap per table: hostnames can be attacker-influenced (Host-derived upstreams, NXDOMAIN floods), so growth must be bounded.
     max_capacity: usize,
 }
 
@@ -92,7 +88,7 @@ impl DnsCache {
         // 1. Check positive cache
         {
             let pos = self.positive.read().unwrap();
-            // FIX (Optimization): Lookup with borrowed &str without allocating String
+            // Borrowed lookup; no key allocation on the read path.
             if let Some(entry) = pos.get(key.as_ref())
                 && entry.expires_at > Instant::now()
             {
@@ -125,12 +121,22 @@ impl DnsCache {
 
         let mut pos = self.positive.write().unwrap();
 
-        // FIX (Blocker 1 - Memory Leak/OOM): Auto-sweep on capacity limit saturation
+        // Bound eviction under write lock: sample up to 32 entries to evict expired ones,
+        // avoiding an O(N) full-table sweep that blocks concurrent readers.
         if !pos.contains_key(&key) && pos.len() >= self.max_capacity {
             let now = Instant::now();
-            pos.retain(|_, v| v.expires_at > now);
+            let expired: Vec<String> = pos
+                .iter()
+                .take(32)
+                .filter(|(_, v)| v.expires_at <= now)
+                .map(|(k, _)| k.clone())
+                .collect();
 
-            // If still full after purge, evict arbitrary entry to enforce invariant
+            for k in expired {
+                pos.remove(&k);
+            }
+
+            // If still full after bounded purge, evict arbitrary entry to strictly enforce invariant
             if pos.len() >= self.max_capacity
                 && let Some(first_key) = pos.keys().next().cloned()
             {
@@ -160,12 +166,22 @@ impl DnsCache {
 
         let mut neg = self.negative.write().unwrap();
 
-        // FIX (Blocker 1 - Memory Leak/OOM): Auto-sweep on capacity limit saturation
+        // Bound eviction under write lock: sample up to 32 entries to evict expired ones,
+        // avoiding an O(N) full-table sweep that blocks concurrent readers.
         if !neg.contains_key(&key) && neg.len() >= self.max_capacity {
             let now = Instant::now();
-            neg.retain(|_, v| v.expires_at > now);
+            let expired: Vec<String> = neg
+                .iter()
+                .take(32)
+                .filter(|(_, v)| v.expires_at <= now)
+                .map(|(k, _)| k.clone())
+                .collect();
 
-            // If still full after purge, evict arbitrary entry to enforce invariant
+            for k in expired {
+                neg.remove(&k);
+            }
+
+            // If still full after bounded purge, evict arbitrary entry to strictly enforce invariant
             if neg.len() >= self.max_capacity
                 && let Some(first_key) = neg.keys().next().cloned()
             {
@@ -174,6 +190,23 @@ impl DnsCache {
         }
 
         neg.insert(key, NegativeEntry { expires_at });
+    }
+
+    /// Time left before the live entry for `host` (positive, else negative) expires.
+    ///
+    /// Lets the background refresher wake exactly when the cache would go stale
+    /// instead of polling on a fixed period.
+    pub fn ttl_remaining(&self, host: &str) -> Option<Duration> {
+        let key = normalize_host(host);
+        let now = Instant::now();
+        if let Some(e) = self.positive.read().unwrap().get(key.as_ref()) {
+            return e.expires_at.checked_duration_since(now);
+        }
+        self.negative
+            .read()
+            .unwrap()
+            .get(key.as_ref())
+            .and_then(|e| e.expires_at.checked_duration_since(now))
     }
 
     /// Clears expired entries from both caches.
@@ -219,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_bounded_capacity_enforcement() {
-        // FIX (Blocker 1 - Memory Leak/OOM): Verify that cache strictly honors max_capacity
+        // The cache must never exceed max_capacity.
         let cache = DnsCache::with_capacity(3);
 
         cache.insert_positive(

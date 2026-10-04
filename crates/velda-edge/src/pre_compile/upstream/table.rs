@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use velda_core::Endpoint;
-use velda_discovery::Discovery;
+use velda_discovery::{
+    Discovery, DnsResolverConfig, DnsResolverProvider, HostsFileSource, ResolvConfServerProvider,
+    StaticServerProvider, UdpDnsTransport,
+};
 use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::TlsClientEngine;
 use velda_upstream::{TcpConnector, Upstream, UpstreamTimeouts};
@@ -115,9 +118,13 @@ impl UpstreamTable {
 ///
 /// Pre-bakes upstream TLS client engines and streaming strategies into each Upstream instance
 /// to guarantee zero runtime lookups on the request serving hot path.
+///
+/// Upstreams declared with `mode: "dns"` or hostname targets are bound to dynamic background
+/// DNS discovery sized according to [`DnsResolverConfig`].
 pub fn build_upstreams(
     configs: &[UpstreamConfig],
     tls_client: Option<&TlsClientEngine>,
+    dns_config: &DnsResolverConfig,
 ) -> UpstreamTable {
     let mut tcp_map = FxHashMap::default();
     let mut udp_map = FxHashMap::default();
@@ -128,6 +135,30 @@ pub fn build_upstreams(
 
     let shared_tls_client = tls_client.map(|c| Arc::new(c.clone()));
 
+    // Check if any upstream requires dynamic DNS resolution
+    let has_dns_upstreams = configs.iter().any(|c| {
+        c.mode.eq_ignore_ascii_case("dns")
+            || c.target
+                .as_ref()
+                .is_some_and(|t| t.host.parse::<std::net::IpAddr>().is_err())
+    });
+
+    // Lazily initialize shared DNS dependencies only when dynamic resolution is declared
+    let dns_env = if has_dns_upstreams {
+        let system_hosts = HostsFileSource::load_system();
+        let transport = UdpDnsTransport::new();
+        let default_servers = ResolvConfServerProvider::load_system();
+        let default_resolver = Arc::new(DnsResolverProvider::with_hosts_and_config(
+            default_servers,
+            system_hosts.clone(),
+            transport,
+            *dns_config,
+        ));
+        Some((system_hosts, transport, default_resolver))
+    } else {
+        None
+    };
+
     for config in configs {
         let mut endpoints = Vec::new();
         for (i, ep) in config.endpoints.iter().enumerate() {
@@ -137,14 +168,82 @@ pub fn build_upstreams(
             }
         }
 
-        if endpoints.is_empty()
-            && let Some(ref target) = config.target
-            && let Ok(ip) = target.host.parse::<std::net::IpAddr>()
-        {
-            let addr = SocketAddr::new(ip, target.port);
-            let id = format!("{}-target", config.id);
-            endpoints.push(Endpoint::new(id, addr, 1));
+        let is_dns_mode = config.mode.eq_ignore_ascii_case("dns");
+        let mut dns_hostname_target: Option<(String, u16)> = None;
+
+        if let Some(ref target) = config.target {
+            if let Ok(ip) = target.host.parse::<std::net::IpAddr>() {
+                if endpoints.is_empty() {
+                    let addr = SocketAddr::new(ip, target.port);
+                    let id = format!("{}-target", config.id);
+                    endpoints.push(Endpoint::new(id, addr, 1));
+                }
+            } else {
+                dns_hostname_target = Some((target.host.clone(), target.port));
+            }
         }
+
+        let discovery = if let Some((ref system_hosts, transport, ref default_resolver)) = dns_env {
+            if (is_dns_mode || dns_hostname_target.is_some())
+                && let Some((host, port)) = dns_hostname_target
+            {
+                let refresh_interval = config
+                    .resolver
+                    .as_ref()
+                    .and_then(|r| r.refresh_interval_ms)
+                    .map(std::time::Duration::from_millis)
+                    .unwrap_or(dns_config.positive_ttl);
+
+                let custom_nameservers: Vec<SocketAddr> = config
+                    .resolver
+                    .as_ref()
+                    .map(|r| {
+                        r.nameservers
+                            .iter()
+                            .filter_map(|ns| {
+                                if let Ok(sa) = ns.parse::<SocketAddr>() {
+                                    Some(sa)
+                                } else if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
+                                    Some(SocketAddr::new(ip, 53))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if !custom_nameservers.is_empty() {
+                    let server_provider = StaticServerProvider::from_addresses(custom_nameservers);
+                    let resolver = Arc::new(DnsResolverProvider::with_hosts_and_config(
+                        server_provider,
+                        system_hosts.clone(),
+                        transport,
+                        *dns_config,
+                    ));
+                    Discovery::new_dns_with_initial(
+                        host,
+                        port,
+                        refresh_interval,
+                        resolver,
+                        endpoints,
+                    )
+                } else {
+                    let resolver = Arc::clone(default_resolver);
+                    Discovery::new_dns_with_initial(
+                        host,
+                        port,
+                        refresh_interval,
+                        resolver,
+                        endpoints,
+                    )
+                }
+            } else {
+                Discovery::new_explicit(endpoints)
+            }
+        } else {
+            Discovery::new_explicit(endpoints)
+        };
 
         let timeouts = UpstreamTimeouts {
             connect: std::time::Duration::from_millis(config.timeouts.connect_ms),
@@ -159,7 +258,6 @@ pub fn build_upstreams(
         let is_tls = config.tls.is_some();
         let protocol_str = Arc::from(config.protocol.transport.as_str());
         let balancer = LbAlgorithm::from_name(&config.load_balancer.algorithm);
-        let discovery = Discovery::new_explicit(endpoints);
         let inner = Upstream::new(
             &config.id,
             protocol_str,
@@ -235,5 +333,92 @@ pub fn build_upstreams(
         http2: SubUpstreamTable::new(http2_map),
         http3: SubUpstreamTable::new(http3_map),
         grpc: SubUpstreamTable::new(grpc_map),
+    }
+}
+
+/// Compiles declarative UpstreamConfig entries using default hardware topology DNS configuration.
+pub fn build_upstreams_default(
+    configs: &[UpstreamConfig],
+    tls_client: Option<&TlsClientEngine>,
+) -> UpstreamTable {
+    let tier = velda_core::global_hardware_topology().memory_tier();
+    let dns_config = DnsResolverConfig::for_tier(tier);
+    build_upstreams(configs, tls_client, &dns_config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use velda_sync::post_sync::upstream::{
+        DnsTarget, EndpointConfig, LoadBalancerConfig, ResolverConfig, UpstreamProtocolConfig,
+        UpstreamTimeouts as SyncTimeouts,
+    };
+
+    fn make_test_upstream(id: &str, app: &str, mode: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            id: id.to_string(),
+            mode: mode.to_string(),
+            protocol: UpstreamProtocolConfig {
+                transport: "tcp".to_string(),
+                application: app.to_string(),
+                streaming: velda_core::StreamingMode::disabled(),
+            },
+            target: None,
+            resolver: None,
+            endpoints: vec![EndpointConfig {
+                address: "127.0.0.1:8080".to_string(),
+                weight: 1,
+            }],
+            load_balancer: LoadBalancerConfig {
+                algorithm: "round_robin".to_string(),
+            },
+            timeouts: SyncTimeouts {
+                connect_ms: 1000,
+                idle_ms: 5000,
+                request_ms: Some(3000),
+            },
+            health_check: None,
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn test_build_upstreams_explicit_endpoints() {
+        let configs = vec![
+            make_test_upstream("u1", "http1", "endpoints"),
+            make_test_upstream("u2", "http2", "endpoints"),
+            make_test_upstream("u3", "grpc", "endpoints"),
+        ];
+
+        let table = build_upstreams_default(&configs, None);
+        assert_eq!(table.len(), 3);
+        assert!(table.http1.get("u1").is_some());
+        assert!(table.http2.get("u2").is_some());
+        assert!(table.grpc.get("u3").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_build_upstreams_dns_mode_and_custom_resolver() {
+        let mut u_dns = make_test_upstream("u_dns", "http1", "dns");
+        u_dns.endpoints.clear();
+        u_dns.target = Some(DnsTarget {
+            host: "api.internal.service".to_string(),
+            port: 9000,
+        });
+        u_dns.resolver = Some(ResolverConfig {
+            mode: Some("custom".to_string()),
+            nameservers: vec!["1.1.1.1:53".to_string(), "8.8.8.8:53".to_string()],
+            refresh_interval_ms: Some(15000),
+        });
+
+        let dns_config = DnsResolverConfig {
+            positive_ttl: std::time::Duration::from_secs(10),
+            ..Default::default()
+        };
+
+        let table = build_upstreams(&[u_dns], None, &dns_config);
+        assert_eq!(table.len(), 1);
+        let http1 = table.http1.get("u_dns").expect("u_dns registered");
+        assert_eq!(http1.id(), "u_dns");
     }
 }

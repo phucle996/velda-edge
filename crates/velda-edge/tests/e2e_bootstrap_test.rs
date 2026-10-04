@@ -75,7 +75,7 @@ fn test_cold_start_with_partial_runtime_override() {
 
     // Omitted fields cleanly populated from hardware tier fallback
     assert!(profile.discovery.max_lkg_capacity > 0);
-    assert!(profile.discovery.dns_max_packet_size >= 1024);
+    assert!(profile.discovery.max_negative_ttl_secs >= profile.discovery.negative_ttl_secs);
     assert!(profile.discovery.query_timeout_ms >= 1000);
     assert!(profile.transport.io_workers >= 1);
 

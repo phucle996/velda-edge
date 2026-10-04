@@ -14,7 +14,7 @@ pub use crate::pre_compile::upstream;
 pub use pipeline::{PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol};
 pub use router::build_router;
 pub use tls::{compile_tls_client, compile_tls_server};
-pub use upstream::{UpstreamTable, build_upstreams};
+pub use upstream::{UpstreamTable, build_upstreams, build_upstreams_default};
 
 use std::sync::Arc;
 

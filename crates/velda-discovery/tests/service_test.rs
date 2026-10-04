@@ -49,6 +49,7 @@ async fn spawn_test_udp_server(ip: Ipv4Addr) -> TestDnsHandle {
 
             let current_ip = *ip_clone.read().unwrap();
             let req_id = u16::from_be_bytes([buf[0], buf[1]]);
+            let len = question_end(&buf, len);
             let qtype = u16::from_be_bytes([buf[len - 4], buf[len - 3]]);
             let mut resp = Vec::with_capacity(64);
             resp.extend_from_slice(&req_id.to_be_bytes());
@@ -176,6 +177,42 @@ async fn test_discovery_from_mode_dns() {
     let snapshot = disc.current_endpoints();
     assert_eq!(snapshot.len(), 1);
     assert!(snapshot.contains_addr(&SocketAddr::new(IpAddr::V4(target_ip), 9000)));
+
+    disc.shutdown();
+}
+
+#[tokio::test]
+async fn test_discovery_from_mode_async_eager_resolution() {
+    let target_ip = Ipv4Addr::new(10, 0, 5, 1);
+    let server = spawn_test_udp_server(target_ip).await;
+
+    let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
+    let hosts = HostsFileSource::empty();
+    let transport = UdpDnsTransport::new();
+
+    let resolver = Arc::new(DnsResolverProvider::with_hosts(servers, hosts, transport));
+
+    // Invariant: from_mode_async resolves eagerly so that immediately after return (0ms sleep),
+    // current_endpoints() is already primed with discovered endpoints, eliminating cold-start 503s!
+    let disc = Discovery::from_mode_async(
+        DiscoveryMode::Dns {
+            host: "eager.service".into(),
+            port: 8443,
+            refresh_interval: Duration::from_millis(50),
+        },
+        Some(resolver),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = disc.current_endpoints();
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "Snapshot must be eagerly primed without sleeping!"
+    );
+    assert!(snapshot.contains_addr(&SocketAddr::new(IpAddr::V4(target_ip), 8443)));
+    assert_eq!(snapshot.generation(), 1);
 
     disc.shutdown();
 }
@@ -326,4 +363,14 @@ async fn test_discovery_graceful_shutdown() {
 
     // Call shutdown cleanly
     disc.shutdown();
+}
+
+/// Offset just past the (single) question section, so mock servers echo the
+/// question without the EDNS0 OPT record appended by the client.
+fn question_end(buf: &[u8], len: usize) -> usize {
+    let mut p = 12;
+    while buf[p] != 0 {
+        p += 1 + buf[p] as usize;
+    }
+    (p + 5).min(len)
 }

@@ -5,6 +5,7 @@
 //! request serving hot path never performs DNS lookups.
 
 use arc_swap::ArcSwap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -64,17 +65,159 @@ impl Discovery {
         }
     }
 
+    /// Asynchronously creates a discovery instance from [`DiscoveryMode`], eagerly resolving
+    /// the first endpoint snapshot to eliminate cold-start 503 gaps.
+    pub async fn from_mode_async<S: DnsServerProvider, T: DnsTransport>(
+        mode: DiscoveryMode,
+        resolver: Option<Arc<DnsResolverProvider<S, T>>>,
+    ) -> crate::error::Result<Arc<Self>> {
+        match mode {
+            DiscoveryMode::Explicit(endpoints) => Ok(Self::new_explicit(endpoints)),
+            DiscoveryMode::Dns {
+                host,
+                port,
+                refresh_interval,
+            } => {
+                let res =
+                    resolver.ok_or_else(|| crate::error::DiscoveryError::DnsResolutionFailed {
+                        host: host.clone(),
+                        reason: "DNS resolver required for dynamic DNS mode".into(),
+                    })?;
+                Ok(Self::new_dns_eager(host, port, refresh_interval, res).await)
+            }
+        }
+    }
+
+    /// Creates a dynamic DNS discovery instance initialized with optional explicit seed endpoints.
+    ///
+    /// Preserves Last-Known-Good (LKG) endpoint state on transient DNS errors.
+    pub fn new_dns_with_initial<S: DnsServerProvider, T: DnsTransport>(
+        host: String,
+        port: u16,
+        refresh_interval: Duration,
+        resolver: Arc<DnsResolverProvider<S, T>>,
+        initial_endpoints: Vec<Endpoint>,
+    ) -> Arc<Self> {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let mut published: Vec<SocketAddr> =
+            initial_endpoints.iter().map(|ep| ep.address).collect();
+        published.sort_unstable();
+
+        let initial_set = if initial_endpoints.is_empty() {
+            EndpointSet::empty()
+        } else {
+            EndpointSet::new(initial_endpoints, 1)
+        };
+
+        let discovery = Arc::new(Self {
+            current: ArcSwap::from_pointee(initial_set),
+            shutdown_tx,
+        });
+
+        let disc_clone = Arc::clone(&discovery);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                // Floor keeps a TTL of ~0 from turning into a busy re-resolve loop.
+                let min_wait = refresh_interval.min(Duration::from_secs(1));
+                let mut current_gen = if published.is_empty() { 0 } else { 1 };
+
+                loop {
+                    match resolver.resolve(&host, port).await {
+                        Ok(endpoints) => {
+                            let mut addrs: Vec<SocketAddr> =
+                                endpoints.iter().map(|ep| ep.address).collect();
+                            addrs.sort_unstable();
+                            if addrs != published {
+                                current_gen += 1;
+                                disc_clone.update_endpoints(endpoints, current_gen);
+                                published = addrs;
+                            }
+                        }
+
+                        Err(e) => {
+                            tracing::warn!(
+                                host = %host,
+                                error = %e,
+                                "Background DNS discovery refresh failed; retaining Last-Known-Good endpoints"
+                            );
+                        }
+                    }
+
+                    // Wake when the cache entry expires; the small margin avoids waking a
+                    // hair early, hitting the still-valid entry, and then sleeping a full floor.
+                    let wait = resolver
+                        .cache()
+                        .ttl_remaining(&host)
+                        .map_or(refresh_interval, |t| {
+                            (t + Duration::from_millis(5)).clamp(min_wait, refresh_interval)
+                        });
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        res = shutdown_rx.changed() => {
+                            if res.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            tracing::warn!(
+                host = %host,
+                "No active Tokio runtime handle; DNS background refresh task not spawned"
+            );
+        }
+
+        discovery
+    }
+
     /// Creates a dynamic DNS discovery instance and spawns a background refresh task.
     ///
     /// Preserves Last-Known-Good (LKG) endpoint state on transient DNS errors.
+    ///
+    /// `refresh_interval` is the longest the published set may go without a re-check.
+    /// The task wakes earlier when the cached answer expires (record TTL, or the
+    /// negative TTL after a failure), and only publishes a new generation when the
+    /// set of addresses actually changed.
     pub fn new_dns<S: DnsServerProvider, T: DnsTransport>(
         host: String,
         port: u16,
         refresh_interval: Duration,
         resolver: Arc<DnsResolverProvider<S, T>>,
     ) -> Arc<Self> {
+        Self::new_dns_with_initial(host, port, refresh_interval, resolver, Vec::new())
+    }
+
+    /// Asynchronously creates a dynamic DNS discovery instance, resolving the initial
+    /// endpoint snapshot eagerly to eliminate cold-start 503 gaps before returning.
+    pub async fn new_dns_eager<S: DnsServerProvider, T: DnsTransport>(
+        host: String,
+        port: u16,
+        refresh_interval: Duration,
+        resolver: Arc<DnsResolverProvider<S, T>>,
+    ) -> Arc<Self> {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let initial_set = EndpointSet::empty();
+        let mut initial_gen = 0;
+        let mut published = Vec::new();
+
+        let initial_set = match resolver.resolve(&host, port).await {
+            Ok(endpoints) => {
+                let mut addrs: Vec<SocketAddr> = endpoints.iter().map(|ep| ep.address).collect();
+                addrs.sort_unstable();
+                published = addrs;
+                initial_gen = 1;
+                EndpointSet::new(endpoints, initial_gen)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host = %host,
+                    error = %e,
+                    "Initial eager DNS discovery resolution failed; starting with empty set"
+                );
+                EndpointSet::empty()
+            }
+        };
 
         let discovery = Arc::new(Self {
             current: ArcSwap::from_pointee(initial_set),
@@ -83,29 +226,57 @@ impl Discovery {
 
         let disc_clone = Arc::clone(&discovery);
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(refresh_interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let min_wait = refresh_interval.min(Duration::from_secs(1));
+            let mut current_gen = initial_gen;
 
-            let mut current_gen = 0;
+            // Wait until the initial cache entry expires before starting the background refresh loop
+            let initial_wait = resolver
+                .cache()
+                .ttl_remaining(&host)
+                .map_or(refresh_interval, |t| {
+                    (t + Duration::from_millis(5)).clamp(min_wait, refresh_interval)
+                });
+
+            tokio::select! {
+                _ = tokio::time::sleep(initial_wait) => {}
+                res = shutdown_rx.changed() => {
+                    if res.is_err() || *shutdown_rx.borrow() {
+                        return;
+                    }
+                }
+            }
 
             loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        match resolver.resolve(&host, port).await {
-                            Ok(endpoints) => {
-                                current_gen += 1;
-                                disc_clone.update_endpoints(endpoints, current_gen);
-                            }
-
-                            Err(e) => {
-                                tracing::warn!(
-                                    host = %host,
-                                    error = %e,
-                                    "Background DNS discovery refresh failed; retaining Last-Known-Good endpoints"
-                                );
-                            }
+                match resolver.resolve(&host, port).await {
+                    Ok(endpoints) => {
+                        let mut addrs: Vec<SocketAddr> =
+                            endpoints.iter().map(|ep| ep.address).collect();
+                        addrs.sort_unstable();
+                        if addrs != published {
+                            current_gen += 1;
+                            disc_clone.update_endpoints(endpoints, current_gen);
+                            published = addrs;
                         }
                     }
+
+                    Err(e) => {
+                        tracing::warn!(
+                            host = %host,
+                            error = %e,
+                            "Background DNS discovery refresh failed; retaining Last-Known-Good endpoints"
+                        );
+                    }
+                }
+
+                let wait = resolver
+                    .cache()
+                    .ttl_remaining(&host)
+                    .map_or(refresh_interval, |t| {
+                        (t + Duration::from_millis(5)).clamp(min_wait, refresh_interval)
+                    });
+
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
                     res = shutdown_rx.changed() => {
                         if res.is_err() || *shutdown_rx.borrow() {
                             break;

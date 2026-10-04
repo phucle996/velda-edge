@@ -20,7 +20,7 @@ use crate::error::{DiscoveryError, Result};
 /// Trait contract for providing upstream DNS nameservers.
 pub trait DnsServerProvider: Send + Sync + 'static {
     /// Returns the ordered list of upstream DNS nameservers to query.
-    fn servers(&self) -> Vec<SocketAddr>;
+    fn servers(&self) -> &[SocketAddr];
 }
 
 /// Representation of a DNS server target prior to address resolution.
@@ -72,7 +72,8 @@ impl DnsServerTarget {
                 // 1. Check local static hosts file first
                 let key = host.to_lowercase();
                 if let Some(hosts_source) = hosts
-                    && let Some(ip) = hosts_source.lookup(&key)
+                    && let Some(ips) = hosts_source.lookup(&key)
+                    && let Some(&ip) = ips.first()
                 {
                     return Ok(SocketAddr::new(ip, *port));
                 }
@@ -101,7 +102,7 @@ impl DnsServerTarget {
 
     /// Resolves this target into a concrete [`SocketAddr`] asynchronously.
     ///
-    /// FIX (Blocker 2 - Async Thread Blocking): Uses `tokio::net::lookup_host` for public
+    /// Uses `tokio::net::lookup_host` for public
     /// domain resolution to prevent blocking Tokio executor worker threads.
     pub async fn resolve_async(&self, hosts: Option<&HostsFileSource>) -> Result<SocketAddr> {
         match self {
@@ -113,7 +114,8 @@ impl DnsServerTarget {
 
                 let key = host.to_lowercase();
                 if let Some(hosts_source) = hosts
-                    && let Some(ip) = hosts_source.lookup(&key)
+                    && let Some(ips) = hosts_source.lookup(&key)
+                    && let Some(&ip) = ips.first()
                 {
                     return Ok(SocketAddr::new(ip, *port));
                 }
@@ -253,7 +255,7 @@ impl DnsServer {
 
     /// Resolves a target asynchronously against the provided `/etc/hosts` and creates a `DnsServer`.
     ///
-    /// FIX (Blocker 2 - Async Thread Blocking): Non-blocking asynchronous constructor.
+    /// Async constructor; name resolution must not block a Tokio worker.
     pub async fn new_async(
         target: DnsServerTarget,
         hosts: Option<&HostsFileSource>,
@@ -350,7 +352,7 @@ impl StaticServerProvider {
 
     /// Constructs a provider asynchronously by resolving multiple targets with an optional `/etc/hosts` table.
     ///
-    /// FIX (Blocker 2 - Async Thread Blocking): Resolves targets without blocking Tokio worker threads.
+    /// Async variant; resolves targets without blocking Tokio worker threads.
     pub async fn from_targets_async(
         targets: &[DnsServerTarget],
         hosts: Option<&HostsFileSource>,
@@ -370,31 +372,31 @@ impl StaticServerProvider {
 }
 
 impl DnsServerProvider for StaticServerProvider {
-    fn servers(&self) -> Vec<SocketAddr> {
-        self.cached_addrs.clone()
+    fn servers(&self) -> &[SocketAddr] {
+        &self.cached_addrs
     }
 }
 
 impl DnsServerProvider for Vec<SocketAddr> {
-    fn servers(&self) -> Vec<SocketAddr> {
-        self.clone()
+    fn servers(&self) -> &[SocketAddr] {
+        self.as_slice()
     }
 }
 
-impl DnsServerProvider for Vec<DnsServer> {
-    fn servers(&self) -> Vec<SocketAddr> {
-        self.iter().map(|s| s.address()).collect()
+impl DnsServerProvider for [SocketAddr] {
+    fn servers(&self) -> &[SocketAddr] {
+        self
     }
 }
 
 impl DnsServerProvider for DnsServer {
-    fn servers(&self) -> Vec<SocketAddr> {
-        vec![self.address()]
+    fn servers(&self) -> &[SocketAddr] {
+        std::slice::from_ref(&self.address)
     }
 }
 
 impl<P: DnsServerProvider + ?Sized> DnsServerProvider for std::sync::Arc<P> {
-    fn servers(&self) -> Vec<SocketAddr> {
+    fn servers(&self) -> &[SocketAddr] {
         (**self).servers()
     }
 }

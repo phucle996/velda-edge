@@ -86,8 +86,8 @@ impl SniResolver {
     pub fn lookup(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
         let trimmed = sni.trim();
 
-        // 🚀 Zero-Allocation Fast-Path: 99.9% of SNIs in TLS ClientHello are already lowercase ASCII.
-        // By checking bytes on CPU registers and borrowing the slice directly, we completely eliminate heap allocations!
+        // Zero-allocation fast-path: ClientHello SNIs are almost universally lowercase ASCII.
+        // Validating ASCII in-place directly on registers avoids allocating a String on the hot path.
         if !trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
             // 1. Exact match
             if let Some(key) = self.exact_matches.get(trimmed) {

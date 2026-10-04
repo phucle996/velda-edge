@@ -21,12 +21,19 @@ use crate::error::{DiscoveryError, Result};
 // ============================================================================
 
 /// Static hosts lookup source reading `/etc/hosts` or custom hosts table format.
+///
+/// Supports dual-stack mappings by storing all parsed IPv4 and IPv6 addresses for a domain.
 #[derive(Debug, Clone, Default)]
 pub struct HostsFileSource {
-    hosts_table: HashMap<String, IpAddr>,
+    hosts_table: HashMap<String, Vec<IpAddr>>,
 }
 
 impl HostsFileSource {
+    /// Loads static hosts definitions from `/etc/hosts` or falls back to an empty table.
+    pub fn load_system() -> Self {
+        Self::from_system().unwrap_or_default()
+    }
+
     /// Loads static hosts definitions from `/etc/hosts` if available on the system.
     pub fn from_system() -> Result<Self> {
         Self::from_file("/etc/hosts")
@@ -44,6 +51,8 @@ impl HostsFileSource {
     }
 
     /// Parses hosts file content string into an in-memory lookup table.
+    ///
+    /// Preserves both IPv4 and IPv6 entries per hostname in order of occurrence.
     pub fn from_content(content: &str) -> Self {
         let mut table = HashMap::new();
         for line in content.lines() {
@@ -57,8 +66,10 @@ impl HostsFileSource {
                 .and_then(|ip_str| ip_str.parse::<IpAddr>().ok())
             {
                 for hostname in parts {
-                    // Retain first occurrence to give precedence to primary IPv4 addresses
-                    table.entry(hostname.to_lowercase()).or_insert(ip);
+                    let entry: &mut Vec<IpAddr> = table.entry(hostname.to_lowercase()).or_default();
+                    if !entry.contains(&ip) {
+                        entry.push(ip);
+                    }
                 }
             }
         }
@@ -72,12 +83,14 @@ impl HostsFileSource {
         }
     }
 
-    /// Looks up a hostname in the local hosts table.
-    pub fn lookup(&self, host: &str) -> Option<IpAddr> {
+    /// Looks up a hostname in the local hosts table, returning all mapped addresses.
+    pub fn lookup(&self, host: &str) -> Option<&[IpAddr]> {
         if host.bytes().any(|b| b.is_ascii_uppercase()) {
-            self.hosts_table.get(&host.to_lowercase()).copied()
+            self.hosts_table
+                .get(&host.to_lowercase())
+                .map(|v| v.as_slice())
         } else {
-            self.hosts_table.get(host).copied()
+            self.hosts_table.get(host).map(|v| v.as_slice())
         }
     }
 
@@ -97,12 +110,17 @@ impl HostsFileSource {
 // ============================================================================
 
 /// Nameserver provider reading from `/etc/resolv.conf` or explicit configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResolvConfServerProvider {
     nameservers: Vec<SocketAddr>,
 }
 
 impl ResolvConfServerProvider {
+    /// Loads nameservers from `/etc/resolv.conf` or falls back to loopback `127.0.0.1:53`.
+    pub fn load_system() -> Self {
+        Self::from_system().unwrap_or_else(|_| Self::from_content("nameserver 127.0.0.1"))
+    }
+
     /// Reads nameservers from the host system `/etc/resolv.conf`.
     pub fn from_system() -> Result<Self> {
         Self::from_file("/etc/resolv.conf")
@@ -150,9 +168,15 @@ impl ResolvConfServerProvider {
     }
 }
 
+impl Default for ResolvConfServerProvider {
+    fn default() -> Self {
+        Self::load_system()
+    }
+}
+
 impl DnsServerProvider for ResolvConfServerProvider {
-    fn servers(&self) -> Vec<SocketAddr> {
-        self.nameservers.clone()
+    fn servers(&self) -> &[SocketAddr] {
+        &self.nameservers
     }
 }
 
@@ -172,15 +196,15 @@ mod tests {
         let hosts = HostsFileSource::from_content(sample);
         assert_eq!(
             hosts.lookup("localhost"),
-            Some("127.0.0.1".parse().unwrap())
+            Some(&["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()][..])
         );
         assert_eq!(
             hosts.lookup("api.internal"),
-            Some("10.0.0.42".parse().unwrap())
+            Some(&["10.0.0.42".parse().unwrap()][..])
         );
         assert_eq!(
             hosts.lookup("user.service"),
-            Some("10.0.0.42".parse().unwrap())
+            Some(&["10.0.0.42".parse().unwrap()][..])
         );
         assert_eq!(hosts.lookup("unknown.host"), None);
     }

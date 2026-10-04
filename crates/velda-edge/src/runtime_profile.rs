@@ -35,10 +35,15 @@ pub struct HardwareProfile {
 pub struct DiscoveryRuntimeConfig {
     pub max_dns_cache_capacity: usize,
     pub max_lkg_capacity: usize,
-    pub dns_max_packet_size: usize,
+    #[serde(default = "default_max_negative_ttl_secs")]
+    pub max_negative_ttl_secs: u64,
     pub query_timeout_ms: u64,
     pub negative_ttl_secs: u64,
     pub positive_ttl_secs: u64,
+}
+
+const fn default_max_negative_ttl_secs() -> u64 {
+    60
 }
 
 const fn default_reuseport() -> bool {
@@ -172,7 +177,7 @@ impl RuntimeProfile {
             discovery: DiscoveryRuntimeConfig {
                 max_dns_cache_capacity: dns_config.cache_capacity,
                 max_lkg_capacity: dns_config.lkg_capacity,
-                dns_max_packet_size: dns_config.max_packet_size,
+                max_negative_ttl_secs: dns_config.max_negative_ttl.as_secs(),
                 query_timeout_ms: dns_config.query_timeout.as_millis() as u64,
                 negative_ttl_secs: dns_config.negative_ttl.as_secs(),
                 positive_ttl_secs: dns_config.positive_ttl.as_secs(),
@@ -220,7 +225,7 @@ impl RuntimeProfile {
             query_timeout: std::time::Duration::from_millis(self.discovery.query_timeout_ms),
             cache_capacity: self.discovery.max_dns_cache_capacity,
             lkg_capacity: self.discovery.max_lkg_capacity,
-            max_packet_size: self.discovery.dns_max_packet_size,
+            max_negative_ttl: std::time::Duration::from_secs(self.discovery.max_negative_ttl_secs),
         }
     }
 
@@ -272,6 +277,23 @@ impl RuntimeProfile {
         self.tls.to_tls_server_params()
     }
 
+    /// Returns the effective memory tier, respecting operator override or fallback to probed hardware.
+    pub fn memory_tier(&self) -> velda_core::MemoryTier {
+        self.hardware
+            .memory_tier
+            .parse::<velda_core::MemoryTier>()
+            .or_else(|_| self.hardware.tier.parse::<velda_core::MemoryTier>())
+            .unwrap_or_else(|_| velda_core::hardware::global_hardware_topology().memory_tier())
+    }
+
+    /// Returns the effective CPU tier, respecting operator override or fallback to probed hardware.
+    pub fn cpu_tier(&self) -> velda_core::CpuTier {
+        self.hardware
+            .cpu_tier
+            .parse::<velda_core::CpuTier>()
+            .unwrap_or_else(|_| velda_core::hardware::global_hardware_topology().cpu_tier())
+    }
+
     /// Deep merges partial operator overrides into this runtime profile.
     fn merge_partial(&mut self, partial: PartialRuntimeProfile) {
         if let Some(v) = partial.version {
@@ -304,8 +326,8 @@ impl RuntimeProfile {
             if let Some(l) = disc.max_lkg_capacity {
                 self.discovery.max_lkg_capacity = l;
             }
-            if let Some(p) = disc.dns_max_packet_size {
-                self.discovery.dns_max_packet_size = p;
+            if let Some(m) = disc.max_negative_ttl_secs {
+                self.discovery.max_negative_ttl_secs = m;
             }
             if let Some(t) = disc.query_timeout_ms {
                 self.discovery.query_timeout_ms = t;
@@ -416,7 +438,7 @@ struct PartialHardwareProfile {
 struct PartialDiscoveryConfig {
     max_dns_cache_capacity: Option<usize>,
     max_lkg_capacity: Option<usize>,
-    dns_max_packet_size: Option<usize>,
+    max_negative_ttl_secs: Option<u64>,
     query_timeout_ms: Option<u64>,
     negative_ttl_secs: Option<u64>,
     positive_ttl_secs: Option<u64>,
@@ -635,7 +657,7 @@ mod tests {
             "discovery": {
                 "max_dns_cache_capacity": 42000,
                 "max_lkg_capacity": 7777,
-                "dns_max_packet_size": 2048,
+                "max_negative_ttl_secs": 120,
                 "query_timeout_ms": 1500,
                 "negative_ttl_secs": 25,
                 "positive_ttl_secs": 45
@@ -654,7 +676,7 @@ mod tests {
         assert_eq!(resolved.hardware.tier, "custom");
         assert_eq!(resolved.discovery.max_dns_cache_capacity, 42_000);
         assert_eq!(resolved.discovery.max_lkg_capacity, 7_777);
-        assert_eq!(resolved.discovery.dns_max_packet_size, 2048);
+        assert_eq!(resolved.discovery.max_negative_ttl_secs, 120);
         assert_eq!(resolved.transport.io_workers, 8);
     }
 
@@ -704,7 +726,7 @@ mod tests {
         // All missing fields MUST cleanly fallback to Medium tier defaults!
         assert_eq!(resolved.hardware.tier, "medium");
         assert_eq!(resolved.discovery.max_lkg_capacity, 10_000);
-        assert_eq!(resolved.discovery.dns_max_packet_size, 1024);
+        assert_eq!(resolved.discovery.max_negative_ttl_secs, 60);
         assert_eq!(resolved.discovery.query_timeout_ms, 2000);
         assert_eq!(resolved.transport.io_workers, 2); // 4 cores = small cpu tier (2 workers)
         assert_eq!(resolved.transport.max_active_connections, 200_000);
@@ -796,5 +818,30 @@ mod tests {
         assert_eq!(profile.transport.io_workers, 4);
         assert_eq!(profile.tls.session_cache_capacity, 8192);
         assert_eq!(profile.tls.send_tls13_tickets, 4);
+        assert_eq!(profile.memory_tier(), velda_core::MemoryTier::Medium);
+        assert_eq!(profile.cpu_tier(), velda_core::CpuTier::Medium);
+    }
+
+    #[test]
+    fn test_runtime_profile_effective_tier_override() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let runtime_json_path = temp_dir.path().join("runtime.json");
+
+        // Machine hardware is small (1GB RAM, 2 cores), but operator sets tier to ultra
+        let json = r#"{
+            "version": 1,
+            "hardware": {
+                "tier": "ultra",
+                "memory_tier": "ultra",
+                "cpu_tier": "ultra"
+            }
+        }"#;
+
+        fs::write(&runtime_json_path, json).unwrap();
+        let hardware = HardwareTopology::with_workers_and_memory(2, 1024 * 1024 * 1024);
+        let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
+
+        assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Ultra);
+        assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Ultra);
     }
 }

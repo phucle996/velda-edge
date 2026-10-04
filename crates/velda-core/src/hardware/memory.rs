@@ -60,6 +60,25 @@ impl MemoryTier {
     }
 }
 
+impl std::str::FromStr for MemoryTier {
+    type Err = super::ParseTierError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "constrained" => Ok(Self::Constrained),
+            "small" => Ok(Self::Small),
+            "medium" => Ok(Self::Medium),
+            "large" => Ok(Self::Large),
+            "xlarge" => Ok(Self::XLarge),
+            "2xlarge" | "twoxlarge" => Ok(Self::TwoXLarge),
+            "ultra" => Ok(Self::Ultra),
+            other => Err(super::ParseTierError(format!(
+                "unknown memory tier: '{other}'"
+            ))),
+        }
+    }
+}
+
 /// Discovered memory capacity and allocation profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryProfile {
@@ -166,5 +185,27 @@ mod tests {
         let mem = probe_memory();
         assert!(mem.total_bytes >= 1024 * 1024);
         assert!(!mem.source.is_empty());
+    }
+
+    #[test]
+    fn test_memory_tier_from_str() {
+        assert_eq!(
+            "constrained".parse::<MemoryTier>().unwrap(),
+            MemoryTier::Constrained
+        );
+        assert_eq!("small".parse::<MemoryTier>().unwrap(), MemoryTier::Small);
+        assert_eq!("medium".parse::<MemoryTier>().unwrap(), MemoryTier::Medium);
+        assert_eq!("large".parse::<MemoryTier>().unwrap(), MemoryTier::Large);
+        assert_eq!("xlarge".parse::<MemoryTier>().unwrap(), MemoryTier::XLarge);
+        assert_eq!(
+            "2xlarge".parse::<MemoryTier>().unwrap(),
+            MemoryTier::TwoXLarge
+        );
+        assert_eq!(
+            "twoxlarge".parse::<MemoryTier>().unwrap(),
+            MemoryTier::TwoXLarge
+        );
+        assert_eq!("ultra".parse::<MemoryTier>().unwrap(), MemoryTier::Ultra);
+        assert!("invalid".parse::<MemoryTier>().is_err());
     }
 }

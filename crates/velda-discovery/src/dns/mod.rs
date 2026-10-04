@@ -55,7 +55,7 @@ pub mod transport;
 // Re-exports organized by phase
 pub use bootstrap::{HostsFileSource, ResolvConfServerProvider};
 pub use cache::{CacheLookup, DnsCache};
-pub use resolver::{DnsResolverConfig, DnsResolverProvider, DnsTransport};
+pub use resolver::{DnsAnswer, DnsResolverConfig, DnsResolverProvider, DnsTransport};
 pub use server::{DnsServer, DnsServerProvider, DnsServerTarget, StaticServerProvider};
 pub use transport::{
     DEFAULT_DNS_PACKET_BUFFER_SIZE, SystemDnsTransport, UdpDnsTransport, build_query_packet,

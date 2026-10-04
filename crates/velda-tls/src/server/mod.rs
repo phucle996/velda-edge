@@ -1,4 +1,4 @@
-//! Downstream TLS termination module (for Ingress / Composer).
+//! Downstream TLS termination module for traffic ingress.
 //!
 //! Provides stateless TLS termination functions and in-memory SNI resolving.
 

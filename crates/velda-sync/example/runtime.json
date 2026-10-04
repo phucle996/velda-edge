@@ -11,7 +11,7 @@
   "discovery": {
     "max_dns_cache_capacity": 50000,
     "max_lkg_capacity": 10000,
-    "dns_max_packet_size": 1024,
+    "max_negative_ttl_secs": 60,
     "query_timeout_ms": 2000,
     "negative_ttl_secs": 10,
     "positive_ttl_secs": 300

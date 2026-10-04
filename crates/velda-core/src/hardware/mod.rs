@@ -25,6 +25,18 @@ pub use cpu::{CpuProfile, CpuTier, probe_cpu};
 pub use kernel::{AccelerationTier, KernelProfile, KernelVersion, probe_kernel};
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
 
+/// Error returned when a hardware tier string fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseTierError(pub String);
+
+impl std::fmt::Display for ParseTierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ParseTierError {}
+
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardwareTopology {

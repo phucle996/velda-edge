@@ -58,6 +58,25 @@ impl CpuTier {
     }
 }
 
+impl std::str::FromStr for CpuTier {
+    type Err = super::ParseTierError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "constrained" => Ok(Self::Constrained),
+            "small" => Ok(Self::Small),
+            "medium" => Ok(Self::Medium),
+            "large" => Ok(Self::Large),
+            "xlarge" => Ok(Self::XLarge),
+            "2xlarge" | "twoxlarge" => Ok(Self::TwoXLarge),
+            "ultra" => Ok(Self::Ultra),
+            other => Err(super::ParseTierError(format!(
+                "unknown cpu tier: '{other}'"
+            ))),
+        }
+    }
+}
+
 /// Discovered CPU concurrency and execution profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuProfile {
@@ -164,5 +183,21 @@ mod tests {
         let cpu = probe_cpu();
         assert!(cpu.available_cores >= 1);
         assert!(!cpu.source.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_tier_from_str() {
+        assert_eq!(
+            "constrained".parse::<CpuTier>().unwrap(),
+            CpuTier::Constrained
+        );
+        assert_eq!("small".parse::<CpuTier>().unwrap(), CpuTier::Small);
+        assert_eq!("medium".parse::<CpuTier>().unwrap(), CpuTier::Medium);
+        assert_eq!("large".parse::<CpuTier>().unwrap(), CpuTier::Large);
+        assert_eq!("xlarge".parse::<CpuTier>().unwrap(), CpuTier::XLarge);
+        assert_eq!("2xlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
+        assert_eq!("twoxlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
+        assert_eq!("ultra".parse::<CpuTier>().unwrap(), CpuTier::Ultra);
+        assert!("invalid".parse::<CpuTier>().is_err());
     }
 }

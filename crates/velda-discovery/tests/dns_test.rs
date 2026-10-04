@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use velda_discovery::{
     CacheLookup, DiscoveryError, DnsResolverConfig, DnsResolverProvider, HostsFileSource,
-    ResolvConfServerProvider, UdpDnsTransport,
+    ResolvConfServerProvider, StaticServerProvider, UdpDnsTransport,
 };
 
 // ============================================================================
@@ -44,6 +44,7 @@ impl TestUdpDnsServer {
                 }
 
                 let req_id = u16::from_be_bytes([buf[0], buf[1]]);
+                let len = question_end(&buf, len);
                 let qtype = u16::from_be_bytes([buf[len - 4], buf[len - 3]]);
                 let mut resp = Vec::with_capacity(64);
                 resp.extend_from_slice(&req_id.to_be_bytes());
@@ -454,4 +455,97 @@ async fn test_bounded_lkg_capacity_eviction() {
     // domain3 was inserted last, so it's guaranteed to be in LKG
     let res3 = resolver.resolve_ips("domain3.local").await;
     assert!(res3.is_ok(), "Most recent domain must be retained in LKG");
+}
+
+#[tokio::test]
+async fn test_authoritative_nxdomain_does_not_fallback_to_lkg() {
+    let server = TestUdpDnsServer::spawn(Some(Ipv4Addr::new(10, 0, 0, 99)), None, false).await;
+    let servers = StaticServerProvider::from_addresses(vec![server.addr]);
+    let hosts = HostsFileSource::empty();
+    let transport = UdpDnsTransport::new();
+
+    let config = DnsResolverConfig {
+        positive_ttl: Duration::from_millis(5),
+        query_timeout: Duration::from_millis(500),
+        ..Default::default()
+    };
+    let resolver = DnsResolverProvider::with_hosts_and_config(servers, hosts, transport, config);
+
+    // 1. Prime cache and LKG with valid address
+    let ips = resolver
+        .resolve_ips("decommissioned.service")
+        .await
+        .unwrap();
+    assert_eq!(ips, Arc::from([IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99))]));
+
+    // Expire positive cache
+    tokio::time::sleep(Duration::from_millis(15)).await;
+
+    // 2. Shut down first server and spin up authoritative NXDOMAIN server at same port or failover
+    server.set_active(false);
+    let nx_server = TestUdpDnsServer::spawn(None, None, true).await;
+
+    // Prime LKG on fallback_resolver with initial valid query
+    let dummy_server =
+        TestUdpDnsServer::spawn(Some(Ipv4Addr::new(10, 0, 0, 99)), None, false).await;
+    let fallback_resolver = DnsResolverProvider::with_hosts_and_config(
+        StaticServerProvider::from_addresses(vec![dummy_server.addr, nx_server.addr]),
+        HostsFileSource::empty(),
+        UdpDnsTransport::new(),
+        config,
+    );
+    let res_initial = fallback_resolver
+        .resolve_ips("decommissioned.service")
+        .await
+        .unwrap();
+    assert_eq!(
+        res_initial,
+        Arc::from([IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99))])
+    );
+
+    // Expire cache
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    dummy_server.set_active(false); // First server down, second server returns NXDOMAIN!
+
+    // Invariant: Resolver must NOT fall back to LKG when encountering authoritative NXDOMAIN (NameNotFound)
+    let res = fallback_resolver
+        .resolve_ips("decommissioned.service")
+        .await;
+    assert!(
+        matches!(res, Err(DiscoveryError::NameNotFound { ref host, .. }) if host == "decommissioned.service"),
+        "NXDOMAIN must fail with NameNotFound and refuse to serve stale LKG, got: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_hosts_dual_stack_ipv4_and_ipv6_resolution() {
+    let hosts_content = "192.168.1.100 dual.internal\n2001:db8::1 dual.internal\n";
+    let hosts = HostsFileSource::from_content(hosts_content);
+    let resolver_with_hosts = DnsResolverProvider::with_hosts(
+        StaticServerProvider::from_addresses(vec![]),
+        hosts,
+        UdpDnsTransport::new(),
+    );
+
+    let ips = resolver_with_hosts
+        .resolve_ips("dual.internal")
+        .await
+        .unwrap();
+    assert_eq!(
+        ips.len(),
+        2,
+        "Both IPv4 and IPv6 must be loaded from hosts file"
+    );
+    assert!(ips.contains(&"192.168.1.100".parse().unwrap()));
+    assert!(ips.contains(&"2001:db8::1".parse().unwrap()));
+}
+
+/// Offset just past the (single) question section, so mock servers echo the
+/// question without the EDNS0 OPT record appended by the client.
+fn question_end(buf: &[u8], len: usize) -> usize {
+    let mut p = 12;
+    while buf[p] != 0 {
+        p += 1 + buf[p] as usize;
+    }
+    (p + 5).min(len)
 }

@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_edge::runtime::{PipelineTable, Runtime, RuntimeConfig, build_router, build_upstreams};
+use velda_edge::runtime::{
+    PipelineTable, Runtime, RuntimeConfig, build_router, build_upstreams_default,
+};
 use velda_sync::post_sync::listener::{
     ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     compile_listeners_to_binary,
@@ -308,7 +310,7 @@ pub fn build_mock_runtime(
 
     let router = build_router(&routes, &upstreams, &listeners).unwrap();
     let pipelines = PipelineTable::build(&listeners).unwrap();
-    let upstreams_table = build_upstreams(&upstreams, None);
+    let upstreams_table = build_upstreams_default(&upstreams, None);
 
     let config = RuntimeConfig {
         listeners,

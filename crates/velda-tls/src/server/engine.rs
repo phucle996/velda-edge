@@ -23,7 +23,7 @@ where
         .map_err(|e| TlsError::HandshakeFailed(e.to_string()))
 }
 
-/// Downstream TLS server engine wrapper holding a compiled `Arc<ServerConfig>` and runtime parameters.
+/// Downstream TLS server engine holding compiled [`ServerConfig`] state and runtime parameters.
 #[derive(Clone)]
 pub struct TlsServerEngine {
     config: Arc<ServerConfig>,

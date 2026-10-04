@@ -158,14 +158,22 @@ pub struct PipelineTable {
 }
 
 impl PipelineTable {
-    /// Compiles a pipeline table from listener configurations.
+    /// Compiles a pipeline table from listener configurations using default hardware topology memory tier.
+    pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
+        let tier = velda_core::global_hardware_topology().memory_tier();
+        Self::build_with_tier(listeners, tier)
+    }
+
+    /// Compiles a pipeline table from listener configurations using the explicit memory tier.
     ///
     /// Resolves protocol limits from the configuration or falls back deterministically
-    /// by host hardware [`MemoryTier`].
-    pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
+    /// by the provided [`MemoryTier`].
+    pub fn build_with_tier(
+        listeners: &[ListenerConfig],
+        tier: MemoryTier,
+    ) -> Result<Self, EdgeError> {
         let mut tcp = FxHashMap::default();
         let mut udp = FxHashMap::default();
-        let tier = velda_core::global_hardware_topology().memory_tier();
 
         for listener in listeners {
             let app = listener.application.protocol.to_ascii_lowercase();
@@ -494,5 +502,17 @@ mod tests {
     fn test_http3_on_tcp_fails() {
         let listeners = vec![cfg("bad-h3", "tcp", "http3", None, false)];
         assert!(PipelineTable::build(&listeners).is_err());
+    }
+
+    #[test]
+    fn test_build_pipeline_table_with_explicit_tier() {
+        let listeners = vec![
+            cfg("h1", "tcp", "http1", None, false),
+            cfg("h2", "tcp", "http2", None, false),
+        ];
+
+        let table = PipelineTable::build_with_tier(&listeners, MemoryTier::Ultra).unwrap();
+        assert!(table.tcp_pipeline("h1").is_some());
+        assert!(table.tcp_pipeline("h2").is_some());
     }
 }
