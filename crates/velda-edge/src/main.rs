@@ -1,10 +1,13 @@
 //! Velda Edge binary entrypoint.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::watch;
-use velda_edge::{EdgeConfig, EdgeSupervisor};
+use velda_edge::{
+    EdgeConfig, EdgeSupervisor, HardwareTopology, ThreadPinner, resolve_runtime_profile,
+};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -14,7 +17,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     tracing::info!("Initializing Velda Edge Data Plane supervisor...");
+
+    // Discover hardware topology and runtime profile to size Tokio runtime
     let config = EdgeConfig::default();
+    let hardware = HardwareTopology::probe();
+    let runtime_profile = resolve_runtime_profile(&config.runtime_dir(), &hardware);
+    let worker_threads = runtime_profile.transport.io_workers.max(1);
+    let cpu_pinning = runtime_profile.transport.cpu_pinning;
+
+    tracing::info!(
+        cores = hardware.available_cores,
+        workers = worker_threads,
+        cpu_pinning,
+        "Configuring multi-threaded Tokio runtime"
+    );
+
+    // Build Tokio runtime with CPU core pinning and designated thread names
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(worker_threads);
+    builder.thread_name_fn(|| {
+        static WORKER_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        format!("velda-worker-{id}")
+    });
+
+    if cpu_pinning {
+        let pinner = Arc::new(ThreadPinner::new());
+        builder.on_thread_start(move || {
+            pinner.pin_current_worker();
+        });
+    }
+
+    builder.enable_all();
+    let runtime = builder.build()?;
+
+    // Execute edge gateway within custom runtime
+    runtime.block_on(async_main(config))
+}
+
+async fn async_main(config: EdgeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = EdgeSupervisor::bootstrap(config)?;
 
     // Trap OS signals (Ctrl+C / SIGINT and SIGTERM) for graceful shutdown

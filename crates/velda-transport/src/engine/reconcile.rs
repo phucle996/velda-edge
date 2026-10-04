@@ -64,23 +64,26 @@ pub fn reconcile_active_listeners<L4H, L7H, UdpL4H, UdpL7H, FutL4, FutL7, FutUdp
     for (id, binding) in desired_map {
         if let Entry::Vacant(e) = active.entry(id.clone()) {
             if binding.is_udp() {
-                match UdpSocket::bind(binding.addr, binding.udp_config.clone()) {
-                    Ok(socket) => {
+                match UdpSocket::bind_shards(binding.addr, binding.udp_config.clone()) {
+                    Ok(sockets) => {
                         tracing::info!(
                             listener_id = %id,
                             addr = %binding.addr,
                             path = %binding.path,
-                            "Declarative Reconcile: Bound new UDP socket"
+                            shards = sockets.len(),
+                            "Declarative Reconcile: Bound new UDP socket shards"
                         );
                         let (tx, rx) = watch::channel(false);
-                        UdpSocket::spawn_receive_loop(
-                            Arc::new(socket),
-                            binding.clone(),
-                            tasks,
-                            rx,
-                            udp_l4_handler.clone(),
-                            udp_l7_handler.clone(),
-                        );
+                        for socket in sockets {
+                            UdpSocket::spawn_receive_loop(
+                                Arc::new(socket),
+                                binding.clone(),
+                                tasks,
+                                rx.clone(),
+                                udp_l4_handler.clone(),
+                                udp_l7_handler.clone(),
+                            );
+                        }
                         e.insert((binding, tx));
                     }
                     Err(err) => {

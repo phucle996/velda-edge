@@ -41,6 +41,18 @@ pub struct DiscoveryRuntimeConfig {
     pub positive_ttl_secs: u64,
 }
 
+const fn default_reuseport() -> bool {
+    cfg!(unix)
+}
+
+const fn default_concurrency_shards() -> usize {
+    1
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 /// TCP-specific runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TcpRuntimeConfig {
@@ -53,6 +65,14 @@ pub struct TcpRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_buffer_size: Option<usize>,
     pub copy_buffer_size: usize,
+    #[serde(default = "default_reuseport")]
+    pub reuseport: bool,
+    #[serde(default = "default_concurrency_shards")]
+    pub concurrency_shards: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quickack: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_accept_secs: Option<u32>,
 }
 
 /// UDP-specific runtime configuration.
@@ -62,6 +82,10 @@ pub struct UdpRuntimeConfig {
     pub recv_buffer_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_buffer_size: Option<usize>,
+    #[serde(default = "default_reuseport")]
+    pub reuseport: bool,
+    #[serde(default = "default_concurrency_shards")]
+    pub concurrency_shards: usize,
 }
 
 /// Transport subsystem tuning parameters.
@@ -73,6 +97,9 @@ pub struct TransportRuntimeConfig {
     pub max_active_connections: usize,
     /// Depth of the administrative reconciliation command channel.
     pub reconcile_channel_capacity: usize,
+    /// Enforce CPU core pinning for Tokio network worker threads.
+    #[serde(default = "default_true")]
+    pub cpu_pinning: bool,
     /// TCP socket options and buffer sizing.
     pub tcp: TcpRuntimeConfig,
     /// UDP socket options and buffer sizing.
@@ -146,6 +173,7 @@ impl RuntimeProfile {
                 io_workers: engine_config.io_workers,
                 max_active_connections: engine_config.max_active_connections,
                 reconcile_channel_capacity: engine_config.reconcile_channel_capacity,
+                cpu_pinning: true,
                 tcp: TcpRuntimeConfig {
                     backlog: engine_config.tcp.backlog,
                     nodelay: engine_config.tcp.nodelay,
@@ -153,10 +181,16 @@ impl RuntimeProfile {
                     recv_buffer_size: engine_config.tcp.recv_buffer_size,
                     send_buffer_size: engine_config.tcp.send_buffer_size,
                     copy_buffer_size: engine_config.tcp.copy_buffer_size,
+                    reuseport: engine_config.tcp.reuseport,
+                    concurrency_shards: engine_config.tcp.concurrency_shards,
+                    quickack: Some(engine_config.tcp.quickack),
+                    defer_accept_secs: engine_config.tcp.defer_accept_secs,
                 },
                 udp: UdpRuntimeConfig {
                     recv_buffer_size: engine_config.udp.recv_buffer_size,
                     send_buffer_size: engine_config.udp.send_buffer_size,
+                    reuseport: engine_config.udp.reuseport,
+                    concurrency_shards: engine_config.udp.concurrency_shards,
                 },
             },
             tls: TlsRuntimeConfig {
@@ -187,6 +221,8 @@ impl RuntimeProfile {
             .with_backlog(self.transport.tcp.backlog)
             .with_nodelay(self.transport.tcp.nodelay)
             .with_copy_buffer_size(self.transport.tcp.copy_buffer_size)
+            .with_reuseport(self.transport.tcp.reuseport)
+            .with_concurrency_shards(self.transport.tcp.concurrency_shards)
             .with_keepalive(
                 self.transport
                     .tcp
@@ -199,12 +235,20 @@ impl RuntimeProfile {
         if let Some(s) = self.transport.tcp.send_buffer_size {
             cfg = cfg.with_send_buffer_size(s);
         }
+        if let Some(q) = self.transport.tcp.quickack {
+            cfg = cfg.with_quickack(q);
+        }
+        if let Some(d) = self.transport.tcp.defer_accept_secs {
+            cfg = cfg.with_defer_accept(Some(d));
+        }
         cfg
     }
 
     /// Converts the transport section into a strongly-typed [`UdpSocketConfig`].
     pub fn to_udp_socket_config(&self) -> UdpSocketConfig {
-        let mut cfg = UdpSocketConfig::new();
+        let mut cfg = UdpSocketConfig::new()
+            .with_reuseport(self.transport.udp.reuseport)
+            .with_concurrency_shards(self.transport.udp.concurrency_shards);
         if let Some(r) = self.transport.udp.recv_buffer_size {
             cfg = cfg.with_recv_buffer_size(r);
         }
@@ -274,6 +318,9 @@ impl RuntimeProfile {
             if let Some(rc) = tr.reconcile_channel_capacity {
                 self.transport.reconcile_channel_capacity = rc;
             }
+            if let Some(cp) = tr.cpu_pinning {
+                self.transport.cpu_pinning = cp;
+            }
 
             // Grouped TCP overrides
             if let Some(tcp) = tr.tcp {
@@ -295,6 +342,18 @@ impl RuntimeProfile {
                 if let Some(c) = tcp.copy_buffer_size {
                     self.transport.tcp.copy_buffer_size = c;
                 }
+                if let Some(rp) = tcp.reuseport {
+                    self.transport.tcp.reuseport = rp;
+                }
+                if let Some(cs) = tcp.concurrency_shards {
+                    self.transport.tcp.concurrency_shards = cs;
+                }
+                if let Some(q) = tcp.quickack {
+                    self.transport.tcp.quickack = Some(q);
+                }
+                if let Some(d) = tcp.defer_accept_secs {
+                    self.transport.tcp.defer_accept_secs = Some(d);
+                }
             }
 
             // Grouped UDP overrides
@@ -304,6 +363,12 @@ impl RuntimeProfile {
                 }
                 if let Some(s) = udp.send_buffer_size {
                     self.transport.udp.send_buffer_size = Some(s);
+                }
+                if let Some(rp) = udp.reuseport {
+                    self.transport.udp.reuseport = rp;
+                }
+                if let Some(cs) = udp.concurrency_shards {
+                    self.transport.udp.concurrency_shards = cs;
                 }
             }
         }
@@ -353,12 +418,18 @@ struct PartialTcpConfig {
     recv_buffer_size: Option<usize>,
     send_buffer_size: Option<usize>,
     copy_buffer_size: Option<usize>,
+    reuseport: Option<bool>,
+    concurrency_shards: Option<usize>,
+    quickack: Option<bool>,
+    defer_accept_secs: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct PartialUdpConfig {
     recv_buffer_size: Option<usize>,
     send_buffer_size: Option<usize>,
+    reuseport: Option<bool>,
+    concurrency_shards: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -366,6 +437,7 @@ struct PartialTransportConfig {
     io_workers: Option<usize>,
     max_active_connections: Option<usize>,
     reconcile_channel_capacity: Option<usize>,
+    cpu_pinning: Option<bool>,
     tcp: Option<PartialTcpConfig>,
     udp: Option<PartialUdpConfig>,
 }

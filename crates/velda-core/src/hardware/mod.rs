@@ -16,11 +16,13 @@
 //!   NOT hardcoded here.
 
 pub mod cpu;
+pub mod kernel;
 pub mod memory;
 
 use std::sync::OnceLock;
 
 pub use cpu::{CpuProfile, CpuTier, probe_cpu};
+pub use kernel::{AccelerationTier, KernelProfile, KernelVersion, probe_kernel};
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
 
 /// Hardware topology profile probed once and cached in RAM.
@@ -30,6 +32,8 @@ pub struct HardwareTopology {
     pub cpu: CpuProfile,
     /// Fine-grained memory topology and RAM capacity profile.
     pub memory: MemoryProfile,
+    /// Kernel release and hardware I/O acceleration capabilities.
+    pub kernel: KernelProfile,
     /// Number of logical CPU cores available to the process (respects container cgroups limits).
     pub available_cores: usize,
     /// Number of worker threads allocated for traffic processing.
@@ -45,10 +49,12 @@ impl HardwareTopology {
     pub fn probe() -> Self {
         let cpu = probe_cpu();
         let memory = probe_memory();
+        let kernel = probe_kernel();
 
         Self {
             cpu,
             memory,
+            kernel,
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
@@ -58,13 +64,22 @@ impl HardwareTopology {
     /// Creates a hardware topology profile from explicit CPU and Memory profiles.
     #[inline]
     pub fn new(cpu: CpuProfile, memory: MemoryProfile) -> Self {
+        let kernel = probe_kernel();
         Self {
             cpu,
             memory,
+            kernel,
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
         }
+    }
+
+    /// Attaches an explicit [`KernelProfile`] to this hardware topology (useful for testing acceleration tiers).
+    #[inline]
+    pub fn with_kernel(mut self, kernel: KernelProfile) -> Self {
+        self.kernel = kernel;
+        self
     }
 
     /// Creates a hardware topology profile with an explicit worker thread count and default 1GB memory.
@@ -111,6 +126,18 @@ impl HardwareTopology {
     #[inline]
     pub fn memory_tier(&self) -> MemoryTier {
         self.memory.tier
+    }
+
+    /// Returns the classified hardware I/O acceleration tier.
+    #[inline]
+    pub fn acceleration_tier(&self) -> AccelerationTier {
+        self.kernel.acceleration
+    }
+
+    /// Returns `true` if kernel acceleration fast-path is enabled.
+    #[inline]
+    pub fn is_accelerated(&self) -> bool {
+        self.kernel.acceleration.is_accelerated()
     }
 }
 

@@ -1,12 +1,27 @@
 //! UDP socket configuration.
 
 /// Configuration parameters for UDP sockets.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpSocketConfig {
     /// Receive buffer size hint.
     pub recv_buffer_size: Option<usize>,
     /// Send buffer size hint.
     pub send_buffer_size: Option<usize>,
+    /// Enable `SO_REUSEPORT` for multi-socket kernel datagram hashing.
+    pub reuseport: bool,
+    /// Number of socket shards bound to the same port via `SO_REUSEPORT`.
+    pub concurrency_shards: usize,
+}
+
+impl Default for UdpSocketConfig {
+    fn default() -> Self {
+        Self {
+            recv_buffer_size: None,
+            send_buffer_size: None,
+            reuseport: cfg!(unix),
+            concurrency_shards: 1,
+        }
+    }
 }
 
 impl UdpSocketConfig {
@@ -27,6 +42,18 @@ impl UdpSocketConfig {
         self
     }
 
+    /// Sets whether to enable `SO_REUSEPORT`.
+    pub fn with_reuseport(mut self, reuseport: bool) -> Self {
+        self.reuseport = reuseport;
+        self
+    }
+
+    /// Sets the number of socket shards bound via `SO_REUSEPORT`.
+    pub fn with_concurrency_shards(mut self, shards: usize) -> Self {
+        self.concurrency_shards = shards.max(1);
+        self
+    }
+
     /// Creates a UDP socket configuration sized appropriately for the host's [`velda_core::MemoryTier`].
     pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
         const KB: usize = 1024;
@@ -35,32 +62,61 @@ impl UdpSocketConfig {
             velda_core::MemoryTier::Constrained => Self {
                 recv_buffer_size: Some(256 * KB),
                 send_buffer_size: Some(256 * KB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::Small => Self {
                 recv_buffer_size: Some(512 * KB),
                 send_buffer_size: Some(512 * KB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::Medium => Self {
                 recv_buffer_size: Some(MB),
                 send_buffer_size: Some(MB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::Large => Self {
                 recv_buffer_size: Some(2 * MB),
                 send_buffer_size: Some(2 * MB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::XLarge => Self {
                 recv_buffer_size: Some(4 * MB),
                 send_buffer_size: Some(4 * MB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::TwoXLarge => Self {
                 recv_buffer_size: Some(8 * MB),
                 send_buffer_size: Some(8 * MB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
             velda_core::MemoryTier::Ultra => Self {
                 recv_buffer_size: Some(16 * MB),
                 send_buffer_size: Some(16 * MB),
+                reuseport: cfg!(unix),
+                concurrency_shards: 1,
             },
         }
+    }
+
+    /// Creates a UDP socket configuration combining CPU-driven concurrency and Memory-driven buffers.
+    pub fn for_tiers(cpu: velda_core::CpuTier, mem: velda_core::MemoryTier) -> Self {
+        let mut cfg = Self::for_tier(mem);
+        cfg.concurrency_shards = match cpu {
+            velda_core::CpuTier::Constrained => 1,
+            velda_core::CpuTier::Small => 2,
+            velda_core::CpuTier::Medium => 4,
+            velda_core::CpuTier::Large => 8,
+            velda_core::CpuTier::XLarge => 16,
+            velda_core::CpuTier::TwoXLarge => 32,
+            velda_core::CpuTier::Ultra => 64,
+        };
+        cfg
     }
 }
 

@@ -125,21 +125,30 @@ impl IngressBinding {
 /// Ingress listener managing client connection arrival according to user configuration.
 #[derive(Debug)]
 pub struct IngressListener {
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
     binding: IngressBinding,
 }
 
 impl IngressListener {
     /// Binds an ingress listener to the address configured in its binding.
+    ///
+    /// If `tcp_config.concurrency_shards > 1` and `tcp_config.reuseport` is enabled,
+    /// binds multiple socket shards to the same address using `SO_REUSEPORT`.
     pub fn bind(binding: IngressBinding) -> Result<Self> {
-        let listener = TcpListener::bind(binding.addr, binding.tcp_config.clone())?;
-        Ok(Self { listener, binding })
+        let listeners = TcpListener::bind_shards(binding.addr, binding.tcp_config.clone())?;
+        Ok(Self { listeners, binding })
     }
 
     /// Returns the bound local socket address.
     #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.listener.local_addr()
+    pub fn local_addr(&self) -> SocketAddr {
+        self.listeners[0].local_addr()
+    }
+
+    /// Returns the number of listener shards currently bound.
+    #[inline]
+    pub fn shard_count(&self) -> usize {
+        self.listeners.len()
     }
 
     /// Returns a reference to the binding configuration.
@@ -160,13 +169,13 @@ impl IngressListener {
         self.binding.path
     }
 
-    /// Accepts an incoming connection and returns its strictly declared traffic path.
+    /// Accepts an incoming connection from the first shard and returns its strictly declared traffic path.
     pub async fn accept(&self) -> Result<(Connection, PathKind)> {
-        let conn = self.listener.accept().await?;
+        let conn = self.listeners[0].accept().await?;
         Ok((conn, self.binding.path))
     }
 
-    /// Spawns an ingress accept loop on the provided `JoinSet`.
+    /// Spawns an ingress accept loop for each listener shard on the provided `JoinSet`.
     pub fn spawn_accept_loop<L4H, L7H, FutL4, FutL7>(
         ingress: std::sync::Arc<Self>,
         tasks: &mut tokio::task::JoinSet<()>,
@@ -179,14 +188,28 @@ impl IngressListener {
         L7H: Fn(crate::handoff::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
         FutL7: std::future::Future<Output = ()> + Send + 'static,
     {
-        tasks.spawn(async move {
-            Self::run_tcp_accept_loop(ingress, shutdown, l4_fn, l7_fn).await;
-        });
+        for shard_idx in 0..ingress.listeners.len() {
+            let ingress_clone = std::sync::Arc::clone(&ingress);
+            let shutdown_clone = shutdown.clone();
+            let l4_clone = l4_fn.clone();
+            let l7_clone = l7_fn.clone();
+            tasks.spawn(async move {
+                Self::run_shard_accept_loop(
+                    ingress_clone,
+                    shard_idx,
+                    shutdown_clone,
+                    l4_clone,
+                    l7_clone,
+                )
+                .await;
+            });
+        }
     }
 
-    /// Internal accept loop driving connection ingress and dispatch.
-    pub async fn run_tcp_accept_loop<L4H, L7H, FutL4, FutL7>(
+    /// Internal accept loop driving connection ingress and dispatch for a specific listener shard.
+    pub async fn run_shard_accept_loop<L4H, L7H, FutL4, FutL7>(
         ingress: std::sync::Arc<Self>,
+        shard_idx: usize,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
         l4_fn: L4H,
         l7_fn: L7H,
@@ -198,67 +221,81 @@ impl IngressListener {
     {
         let local_addr = ingress.local_addr();
         let listener_id = ingress.binding().id.clone();
-        tokio::spawn(async move {
-            tracing::info!(
-                listener_id = %ingress.id(),
-                listen_addr = %local_addr,
-                path = %ingress.path(),
-                "TCP ingress listener bound and serving"
-            );
+        let total_shards = ingress.listeners.len();
+        tracing::info!(
+            listener_id = %ingress.id(),
+            listen_addr = %local_addr,
+            shard = shard_idx,
+            total_shards,
+            path = %ingress.path(),
+            "TCP ingress listener shard bound and serving"
+        );
 
-            loop {
-                if *shutdown.borrow() {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+
+            match ingress.listeners[shard_idx]
+                .accept_with_shutdown(&mut shutdown)
+                .await
+            {
+                Ok(Some(conn)) => {
+                    tracing::debug!(
+                        listener_id = %ingress.id(),
+                        conn_id = %conn.id(),
+                        shard = shard_idx,
+                        path = %ingress.path(),
+                        peer = %conn.peer(),
+                        "Ingress accepted connection"
+                    );
+                    match ingress.path() {
+                        PathKind::L4Direct => {
+                            let conn = conn.with_listener_id(listener_id.clone());
+                            tokio::spawn(l4_fn(conn));
+                        }
+                        PathKind::L7Handoff => {
+                            let handoff =
+                                crate::handoff::TcpL7Handoff::new(conn, listener_id.clone());
+                            tokio::spawn(l7_fn(handoff));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        listener_id = %ingress.id(),
+                        listen_addr = %local_addr,
+                        shard = shard_idx,
+                        "TCP ingress loop shutting down"
+                    );
                     break;
                 }
-
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            tracing::info!(
-                                listener_id = %ingress.id(),
-                                listen_addr = %local_addr,
-                                "TCP ingress loop shutting down"
-                            );
-                            break;
-                        }
-                    }
-                    res = ingress.accept() => {
-                        match res {
-                            Ok((conn, path)) => {
-                                tracing::debug!(
-                                    listener_id = %ingress.id(),
-                                    conn_id = %conn.id(),
-                                    path = %path,
-                                    peer = %conn.peer(),
-                                    "Ingress accepted connection"
-                                );
-                                match path {
-                                    PathKind::L4Direct => {
-                                        let conn = conn.with_listener_id(listener_id.clone());
-                                        tokio::spawn(l4_fn(conn));
-                                    }
-                                    PathKind::L7Handoff => {
-                                        let handoff = crate::handoff::TcpL7Handoff::new(
-                                            conn,
-                                            listener_id.clone(),
-                                        );
-                                        tokio::spawn(l7_fn(handoff));
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    listener_id = %ingress.id(),
-                                    listen_addr = %local_addr,
-                                    error = %err,
-                                    "TCP accept error"
-                                );
-                            }
-                        }
-                    }
+                Err(err) => {
+                    tracing::error!(
+                        listener_id = %ingress.id(),
+                        listen_addr = %local_addr,
+                        shard = shard_idx,
+                        error = %err,
+                        "TCP accept error"
+                    );
                 }
             }
-        });
+        }
+    }
+
+    /// Internal accept loop driving connection ingress and dispatch (runs shard 0).
+    pub async fn run_tcp_accept_loop<L4H, L7H, FutL4, FutL7>(
+        ingress: std::sync::Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        l4_fn: L4H,
+        l7_fn: L7H,
+    ) where
+        L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
+        FutL4: std::future::Future<Output = ()> + Send + 'static,
+        L7H: Fn(crate::handoff::TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
+        FutL7: std::future::Future<Output = ()> + Send + 'static,
+    {
+        Self::run_shard_accept_loop(ingress, 0, shutdown, l4_fn, l7_fn).await;
     }
 }
 

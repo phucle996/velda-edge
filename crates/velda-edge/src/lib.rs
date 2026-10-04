@@ -12,6 +12,7 @@
 //! `velda-edge` does NOT process network requests directly; request handling
 //! is owned by `velda-transport` and downstream protocol crates.
 
+pub mod affinity;
 pub mod bootstrap;
 pub mod config;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod pre_compile;
 pub mod reload;
 pub mod runtime_profile;
 
+pub use affinity::{ThreadPinner, get_allowed_cores, pin_current_thread_to_core};
 pub use bootstrap::{EdgeSupervisor, bootstrap};
 pub use config::EdgeConfig;
 pub use error::EdgeError;

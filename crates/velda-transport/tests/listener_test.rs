@@ -118,3 +118,96 @@ async fn test_tcp_listener_serve_loop() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_tcp_listener_reuseport_shards() {
+    let config = TcpListenerConfig::new()
+        .with_reuseport(true)
+        .with_concurrency_shards(4)
+        .with_quickack(true);
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let shards = TcpListener::bind_shards(addr, config).unwrap();
+
+    #[cfg(unix)]
+    assert_eq!(shards.len(), 4);
+    #[cfg(not(unix))]
+    assert!(!shards.is_empty());
+
+    let port = shards[0].local_addr().port();
+    assert_ne!(port, 0);
+
+    for s in &shards {
+        assert_eq!(s.local_addr().port(), port);
+    }
+}
+
+#[tokio::test]
+async fn test_ingress_listener_multi_shard_accept_loop() {
+    use velda_transport::{IngressBinding, IngressListener, PathKind};
+
+    let tcp_config = TcpListenerConfig::new()
+        .with_reuseport(true)
+        .with_concurrency_shards(4);
+
+    let binding = IngressBinding::new(
+        "sharded-test",
+        "127.0.0.1:0".parse().unwrap(),
+        "tcp",
+        PathKind::L4Direct,
+        false,
+    )
+    .unwrap()
+    .with_tcp_config(tcp_config);
+
+    let ingress = Arc::new(IngressListener::bind(binding).unwrap());
+    #[cfg(unix)]
+    assert_eq!(ingress.shard_count(), 4);
+
+    let bound_addr = ingress.local_addr();
+    let mut tasks = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let counter = Arc::new(AtomicU32::new(0));
+
+    let counter_clone = Arc::clone(&counter);
+    IngressListener::spawn_accept_loop(
+        ingress,
+        &mut tasks,
+        shutdown_rx,
+        move |mut conn| {
+            let cnt = Arc::clone(&counter_clone);
+            async move {
+                let mut buf = [0u8; 8];
+                if matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    let _ = conn.write_all(b"sharded-ack").await;
+                }
+            }
+        },
+        |_handoff| async {},
+    );
+
+    // Concurrently connect 16 clients across the 4 listener shards
+    let mut client_handles = Vec::new();
+    for _ in 0..16 {
+        let handle = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(bound_addr).await.unwrap();
+            stream.write_all(b"test-req").await.unwrap();
+            let mut ack = [0u8; 11];
+            stream.read_exact(&mut ack).await.unwrap();
+            assert_eq!(&ack, b"sharded-ack");
+        });
+        client_handles.push(handle);
+    }
+
+    for h in client_handles {
+        h.await.unwrap();
+    }
+
+    assert_eq!(counter.load(Ordering::SeqCst), 16);
+
+    // Shutdown
+    shutdown_tx.send(true).unwrap();
+    while let Some(res) = tasks.join_next().await {
+        res.unwrap();
+    }
+}

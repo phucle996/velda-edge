@@ -17,6 +17,14 @@ pub struct TcpListenerConfig {
     pub send_buffer_size: Option<usize>,
     /// Chunk buffer size for bidirectional L4 byte proxying.
     pub copy_buffer_size: usize,
+    /// Enable `SO_REUSEPORT` on the listening socket for multi-shard kernel load balancing.
+    pub reuseport: bool,
+    /// Number of listener socket shards bound to the same port via `SO_REUSEPORT`.
+    pub concurrency_shards: usize,
+    /// Enable `TCP_QUICKACK` on accepted connections to disable delayed ACKs (Linux).
+    pub quickack: bool,
+    /// Enable `TCP_DEFER_ACCEPT` on listening sockets to postpone wakeups until initial payload data arrives (Linux).
+    pub defer_accept_secs: Option<u32>,
 }
 
 impl Default for TcpListenerConfig {
@@ -28,6 +36,10 @@ impl Default for TcpListenerConfig {
             recv_buffer_size: None,
             send_buffer_size: None,
             copy_buffer_size: 16 * 1024,
+            reuseport: cfg!(unix),
+            concurrency_shards: 1,
+            quickack: false,
+            defer_accept_secs: None,
         }
     }
 }
@@ -56,6 +68,30 @@ impl TcpListenerConfig {
         self
     }
 
+    /// Sets whether to enable `SO_REUSEPORT`.
+    pub fn with_reuseport(mut self, reuseport: bool) -> Self {
+        self.reuseport = reuseport;
+        self
+    }
+
+    /// Sets the number of listener shards bound via `SO_REUSEPORT`.
+    pub fn with_concurrency_shards(mut self, shards: usize) -> Self {
+        self.concurrency_shards = shards.max(1);
+        self
+    }
+
+    /// Sets whether to enable `TCP_QUICKACK` (Linux).
+    pub fn with_quickack(mut self, quickack: bool) -> Self {
+        self.quickack = quickack;
+        self
+    }
+
+    /// Sets the `TCP_DEFER_ACCEPT` seconds timeout (Linux).
+    pub fn with_defer_accept(mut self, secs: Option<u32>) -> Self {
+        self.defer_accept_secs = secs;
+        self
+    }
+
     /// Sets the TCP keepalive duration.
     pub fn with_keepalive(mut self, keepalive: Option<Duration>) -> Self {
         self.keepalive = keepalive;
@@ -78,64 +114,52 @@ impl TcpListenerConfig {
     pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
         const KB: usize = 1024;
         const MB: usize = 1024 * KB;
+        let mut cfg = Self::default();
         match tier {
-            velda_core::MemoryTier::Constrained => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 512,
-                recv_buffer_size: None,
-                send_buffer_size: None,
-                copy_buffer_size: 8 * KB,
-            },
-            velda_core::MemoryTier::Small => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 1024,
-                recv_buffer_size: Some(128 * KB),
-                send_buffer_size: Some(128 * KB),
-                copy_buffer_size: 16 * KB,
-            },
-            velda_core::MemoryTier::Medium => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 2048,
-                recv_buffer_size: Some(256 * KB),
-                send_buffer_size: Some(256 * KB),
-                copy_buffer_size: 16 * KB,
-            },
-            velda_core::MemoryTier::Large => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 4096,
-                recv_buffer_size: Some(512 * KB),
-                send_buffer_size: Some(512 * KB),
-                copy_buffer_size: 32 * KB,
-            },
-            velda_core::MemoryTier::XLarge => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 8192,
-                recv_buffer_size: Some(MB),
-                send_buffer_size: Some(MB),
-                copy_buffer_size: 32 * KB,
-            },
-            velda_core::MemoryTier::TwoXLarge => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 16384,
-                recv_buffer_size: Some(2 * MB),
-                send_buffer_size: Some(2 * MB),
-                copy_buffer_size: 64 * KB,
-            },
-            velda_core::MemoryTier::Ultra => Self {
-                nodelay: true,
-                keepalive: Some(Duration::from_secs(60)),
-                backlog: 32768,
-                recv_buffer_size: Some(4 * MB),
-                send_buffer_size: Some(4 * MB),
-                copy_buffer_size: 64 * KB,
-            },
+            velda_core::MemoryTier::Constrained => {
+                cfg.backlog = 512;
+                cfg.recv_buffer_size = None;
+                cfg.send_buffer_size = None;
+                cfg.copy_buffer_size = 8 * KB;
+            }
+            velda_core::MemoryTier::Small => {
+                cfg.backlog = 1024;
+                cfg.recv_buffer_size = Some(128 * KB);
+                cfg.send_buffer_size = Some(128 * KB);
+                cfg.copy_buffer_size = 16 * KB;
+            }
+            velda_core::MemoryTier::Medium => {
+                cfg.backlog = 2048;
+                cfg.recv_buffer_size = Some(256 * KB);
+                cfg.send_buffer_size = Some(256 * KB);
+                cfg.copy_buffer_size = 16 * KB;
+            }
+            velda_core::MemoryTier::Large => {
+                cfg.backlog = 4096;
+                cfg.recv_buffer_size = Some(512 * KB);
+                cfg.send_buffer_size = Some(512 * KB);
+                cfg.copy_buffer_size = 32 * KB;
+            }
+            velda_core::MemoryTier::XLarge => {
+                cfg.backlog = 8192;
+                cfg.recv_buffer_size = Some(MB);
+                cfg.send_buffer_size = Some(MB);
+                cfg.copy_buffer_size = 32 * KB;
+            }
+            velda_core::MemoryTier::TwoXLarge => {
+                cfg.backlog = 16384;
+                cfg.recv_buffer_size = Some(2 * MB);
+                cfg.send_buffer_size = Some(2 * MB);
+                cfg.copy_buffer_size = 64 * KB;
+            }
+            velda_core::MemoryTier::Ultra => {
+                cfg.backlog = 32768;
+                cfg.recv_buffer_size = Some(4 * MB);
+                cfg.send_buffer_size = Some(4 * MB);
+                cfg.copy_buffer_size = 64 * KB;
+            }
         }
+        cfg
     }
 
     /// Returns the recommended L4 copy buffer size for a given [`velda_core::CpuTier`].
@@ -152,10 +176,24 @@ impl TcpListenerConfig {
         }
     }
 
+    /// Returns the recommended listener shard count for a given [`velda_core::CpuTier`].
+    pub fn concurrency_shards_for_cpu_tier(tier: velda_core::CpuTier) -> usize {
+        match tier {
+            velda_core::CpuTier::Constrained => 1,
+            velda_core::CpuTier::Small => 2,
+            velda_core::CpuTier::Medium => 4,
+            velda_core::CpuTier::Large => 8,
+            velda_core::CpuTier::XLarge => 16,
+            velda_core::CpuTier::TwoXLarge => 32,
+            velda_core::CpuTier::Ultra => 64,
+        }
+    }
+
     /// Creates a TCP listener configuration combining CPU-driven and Memory-driven tiers.
     pub fn for_tiers(cpu: velda_core::CpuTier, mem: velda_core::MemoryTier) -> Self {
         let mut cfg = Self::for_tier(mem);
         cfg.copy_buffer_size = Self::copy_buffer_size_for_cpu_tier(cpu);
+        cfg.concurrency_shards = Self::concurrency_shards_for_cpu_tier(cpu);
         cfg
     }
 }
@@ -260,5 +298,39 @@ mod tests {
         assert_eq!(cfg.copy_buffer_size, 64 * 1024); // from Ultra CPU
         assert_eq!(cfg.backlog, 1024); // from Small Memory
         assert_eq!(cfg.recv_buffer_size, Some(128 * 1024)); // from Small Memory
+        assert_eq!(cfg.concurrency_shards, 64); // from Ultra CPU
+        assert_eq!(cfg.reuseport, cfg!(unix));
+    }
+
+    #[test]
+    fn test_concurrency_shards_for_cpu_tier() {
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Constrained),
+            1
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Small),
+            2
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Medium),
+            4
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Large),
+            8
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::XLarge),
+            16
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::TwoXLarge),
+            32
+        );
+        assert_eq!(
+            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Ultra),
+            64
+        );
     }
 }

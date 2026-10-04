@@ -257,3 +257,25 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
     assert_eq!(&buf[..n], b"HTTP/3-Ack");
     assert_eq!(from, server.local_addr());
 }
+
+#[tokio::test]
+async fn test_udp_socket_reuseport_shards() {
+    let config = UdpSocketConfig::new()
+        .with_reuseport(true)
+        .with_concurrency_shards(4);
+
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let shards = UdpSocket::bind_shards(addr, config).unwrap();
+
+    #[cfg(unix)]
+    assert_eq!(shards.len(), 4);
+    #[cfg(not(unix))]
+    assert!(!shards.is_empty());
+
+    let port = shards[0].local_addr().port();
+    assert_ne!(port, 0);
+
+    for s in &shards {
+        assert_eq!(s.local_addr().port(), port);
+    }
+}

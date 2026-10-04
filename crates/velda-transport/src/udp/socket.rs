@@ -47,6 +47,25 @@ impl UdpSocket {
         // Allow immediate address reuse for quick daemon restarts
         sock.set_reuse_address(true).map_err(TransportError::Io)?;
 
+        #[cfg(unix)]
+        if config.reuseport {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            let val: libc::c_int = 1;
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEPORT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                return Err(TransportError::Io(std::io::Error::last_os_error()));
+            }
+        }
+
         if let Some(recv_buf) = config.recv_buffer_size {
             let _ = sock.set_recv_buffer_size(recv_buf);
         }
@@ -74,6 +93,45 @@ impl UdpSocket {
             bytes_received: CacheAlignedAtomicU64::new(0),
             bytes_sent: CacheAlignedAtomicU64::new(0),
         })
+    }
+
+    /// Binds multiple UDP socket shards to the specified address with `SO_REUSEPORT`.
+    ///
+    /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
+    /// `config.concurrency_shards` sockets to the same port.
+    /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
+    pub fn bind_shards(addr: SocketAddr, config: UdpSocketConfig) -> Result<Vec<Self>> {
+        let first = Self::bind(addr, config.clone())?;
+        let actual_addr = first.local_addr();
+        let target_shards = if config.reuseport {
+            config.concurrency_shards.max(1)
+        } else {
+            1
+        };
+
+        if target_shards <= 1 {
+            return Ok(vec![first]);
+        }
+
+        let mut shards = Vec::with_capacity(target_shards);
+        shards.push(first);
+
+        for shard_idx in 1..target_shards {
+            match Self::bind(actual_addr, config.clone()) {
+                Ok(shard) => shards.push(shard),
+                Err(err) => {
+                    tracing::warn!(
+                        shard = shard_idx,
+                        listen_addr = %actual_addr,
+                        error = %err,
+                        "Failed to bind SO_REUSEPORT UDP socket shard; continuing with existing shards"
+                    );
+                    break;
+                }
+            }
+        }
+
+        Ok(shards)
     }
 
     /// Wraps an existing Tokio [`TokioUdpSocket`] with the given configuration.

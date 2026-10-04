@@ -180,3 +180,54 @@ async fn test_forward_connection_with_custom_buffer_size() {
     assert_eq!(stats.client_to_server_bytes, 11);
     assert_eq!(stats.server_to_client_bytes, 11);
 }
+
+#[tokio::test]
+async fn test_splice_bidirectional_large_stream() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let size = 1024 * 1024; // 1 MB
+    let upstream_task = tokio::spawn(async move {
+        let (mut socket, _) = upstream_listener.accept().await.unwrap();
+        let mut buf = vec![0u8; size];
+        socket.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], 0xAA);
+        assert_eq!(buf[size - 1], 0xAA);
+
+        let response = vec![0xBBu8; size / 2];
+        socket.write_all(&response).await.unwrap();
+        socket.shutdown().await.unwrap();
+    });
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let proxy_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        let conn = Connection::from_stream(stream).unwrap();
+        let upstream = TcpStream::connect(upstream_addr).await.unwrap();
+        velda_transport::forward_connection(conn, upstream)
+            .await
+            .unwrap()
+    });
+
+    let client_task = tokio::spawn(async move {
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let payload = vec![0xAAu8; size];
+        client.write_all(&payload).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut buf = Vec::new();
+        client.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf.len(), size / 2);
+        assert_eq!(buf[0], 0xBB);
+    });
+
+    client_task.await.unwrap();
+    let stats = proxy_task.await.unwrap();
+    upstream_task.await.unwrap();
+
+    assert_eq!(stats.client_to_server_bytes, size as u64);
+    assert_eq!(stats.server_to_client_bytes, (size / 2) as u64);
+    assert_eq!(stats.total_bytes(), size as u64 + (size / 2) as u64);
+}

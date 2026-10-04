@@ -129,6 +129,13 @@ impl Connection {
         self.bytes_written
     }
 
+    /// Increments the transferred byte counters after zero-copy or direct forwarding.
+    #[inline]
+    pub fn add_bytes_transferred(&mut self, read: u64, written: u64) {
+        self.bytes_read += read;
+        self.bytes_written += written;
+    }
+
     /// Returns a reference to the underlying [`TcpStream`].
     #[inline]
     pub fn stream(&self) -> &TcpStream {

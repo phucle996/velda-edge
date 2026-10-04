@@ -28,6 +28,27 @@ impl TcpListener {
         // Enable SO_REUSEADDR for rapid port recycling on restarts
         socket.set_reuseaddr(true).map_err(TransportError::Io)?;
 
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        if config.reuseport {
+            socket.set_reuseport(true).map_err(TransportError::Io)?;
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(secs) = config.defer_accept_secs {
+            use std::os::fd::AsRawFd;
+            let fd = socket.as_raw_fd();
+            let val: libc::c_int = secs as libc::c_int;
+            unsafe {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_DEFER_ACCEPT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+            }
+        }
+
         if let Some(recv_buf) = config.recv_buffer_size {
             let _ = socket.set_recv_buffer_size(recv_buf as u32);
         }
@@ -52,6 +73,45 @@ impl TcpListener {
             local_addr,
             config,
         })
+    }
+
+    /// Binds multiple TCP listener shards to the specified address with `SO_REUSEPORT`.
+    ///
+    /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
+    /// `config.concurrency_shards` sockets to the same port.
+    /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
+    pub fn bind_shards(addr: SocketAddr, config: TcpListenerConfig) -> Result<Vec<Self>> {
+        let first = Self::bind(addr, config.clone())?;
+        let actual_addr = first.local_addr();
+        let target_shards = if config.reuseport {
+            config.concurrency_shards.max(1)
+        } else {
+            1
+        };
+
+        if target_shards <= 1 {
+            return Ok(vec![first]);
+        }
+
+        let mut shards = Vec::with_capacity(target_shards);
+        shards.push(first);
+
+        for shard_idx in 1..target_shards {
+            match Self::bind(actual_addr, config.clone()) {
+                Ok(shard) => shards.push(shard),
+                Err(err) => {
+                    tracing::warn!(
+                        shard = shard_idx,
+                        listen_addr = %actual_addr,
+                        error = %err,
+                        "Failed to bind SO_REUSEPORT listener shard; continuing with existing shards"
+                    );
+                    break;
+                }
+            }
+        }
+
+        Ok(shards)
     }
 
     /// Wraps an existing Tokio [`TokioTcpListener`] with configuration.
@@ -86,6 +146,22 @@ impl TcpListener {
 
         if self.config.nodelay {
             let _ = stream.set_nodelay(true);
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.config.quickack {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let val: libc::c_int = 1;
+            unsafe {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_QUICKACK,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+            }
         }
 
         let local_addr = stream.local_addr().unwrap_or(self.local_addr);

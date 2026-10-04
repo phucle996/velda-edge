@@ -10,6 +10,7 @@ tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros", "tim
 thiserror = "2.0"
 tracing = "0.1"
 socket2 = "0.5"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }

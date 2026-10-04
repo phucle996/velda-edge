@@ -60,7 +60,7 @@ impl EngineConfig {
             max_active_connections,
             reconcile_channel_capacity,
             tcp: TcpListenerConfig::for_tiers(cpu, mem),
-            udp: UdpSocketConfig::for_tier(mem),
+            udp: UdpSocketConfig::for_tiers(cpu, mem),
         }
     }
 }
