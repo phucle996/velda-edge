@@ -86,6 +86,8 @@ pub struct TcpRuntimeConfig {
     pub fastopen_backlog: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_poll_us: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming_cpu: Option<bool>,
 }
 
 /// UDP-specific runtime configuration.
@@ -159,11 +161,13 @@ pub struct RuntimeProfile {
 }
 
 impl RuntimeProfile {
-    /// Generates a default runtime profile from the probed hardware topology.
-    pub fn from_hardware(hardware: &HardwareTopology) -> Self {
-        let cpu_tier = hardware.cpu_tier();
-        let memory_tier = hardware.memory_tier();
-
+    /// Generates a runtime profile using explicit CPU and memory tiers,
+    /// while retaining physical hardware topology details (detected RAM, detected cores, kernel support).
+    pub fn for_tiers(
+        hardware: &HardwareTopology,
+        cpu_tier: velda_core::CpuTier,
+        memory_tier: velda_core::MemoryTier,
+    ) -> Self {
         let dns_config = DnsResolverConfig::for_tier(memory_tier);
         let mut engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
         engine_config.tcp = TcpListenerConfig::for_topology(hardware);
@@ -205,6 +209,7 @@ impl RuntimeProfile {
                     defer_accept_secs: engine_config.tcp.defer_accept_secs,
                     fastopen_backlog: engine_config.tcp.fastopen_backlog,
                     busy_poll_us: engine_config.tcp.busy_poll_us,
+                    incoming_cpu: Some(engine_config.tcp.incoming_cpu),
                 },
                 udp: UdpRuntimeConfig {
                     recv_buffer_size: engine_config.udp.recv_buffer_size,
@@ -221,6 +226,11 @@ impl RuntimeProfile {
                 handshake_timeout_secs: tls_params.handshake_timeout.as_secs(),
             },
         }
+    }
+
+    /// Generates a default runtime profile from the probed hardware topology.
+    pub fn from_hardware(hardware: &HardwareTopology) -> Self {
+        Self::for_tiers(hardware, hardware.cpu_tier(), hardware.memory_tier())
     }
 
     /// Converts the discovery section into a strongly-typed [`DnsResolverConfig`].
@@ -268,6 +278,9 @@ impl RuntimeProfile {
         if let Some(bp) = self.transport.tcp.busy_poll_us {
             cfg = cfg.with_busy_poll(Some(bp));
         }
+        if let Some(ic) = self.transport.tcp.incoming_cpu {
+            cfg = cfg.with_incoming_cpu(ic);
+        }
         cfg
     }
 
@@ -306,213 +319,20 @@ impl RuntimeProfile {
             .parse::<velda_core::CpuTier>()
             .unwrap_or_else(|_| velda_core::hardware::global_hardware_topology().cpu_tier())
     }
+}
 
-    /// Deep merges partial operator overrides into this runtime profile.
-    fn merge_partial(&mut self, partial: PartialRuntimeProfile) {
-        if let Some(v) = partial.version {
-            self.version = v;
-        }
-        if let Some(hw) = partial.hardware {
-            if let Some(r) = hw.detected_ram_bytes {
-                self.hardware.detected_ram_bytes = r;
-            }
-            if let Some(c) = hw.detected_cores {
-                self.hardware.detected_cores = c;
-            }
-            if let Some(w) = hw.worker_threads {
-                self.hardware.worker_threads = w;
-            }
-            if let Some(ct) = hw.cpu_tier {
-                self.hardware.cpu_tier = ct;
-            }
-            if let Some(mt) = hw.memory_tier {
-                self.hardware.memory_tier = mt;
-            }
-            if let Some(t) = hw.tier {
-                self.hardware.tier = t;
+/// Recursively merges sparse operator overrides on top of hardware baseline values.
+fn merge_json_values(base: &mut serde_json::Value, overrides: serde_json::Value) {
+    match (base, overrides) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(override_map)) => {
+            for (key, val) in override_map {
+                merge_json_values(base_map.entry(key).or_insert(serde_json::Value::Null), val);
             }
         }
-        if let Some(disc) = partial.discovery {
-            if let Some(c) = disc.max_dns_cache_capacity {
-                self.discovery.max_dns_cache_capacity = c;
-            }
-            if let Some(l) = disc.max_lkg_capacity {
-                self.discovery.max_lkg_capacity = l;
-            }
-            if let Some(m) = disc.max_negative_ttl_secs {
-                self.discovery.max_negative_ttl_secs = m;
-            }
-            if let Some(t) = disc.query_timeout_ms {
-                self.discovery.query_timeout_ms = t;
-            }
-            if let Some(n) = disc.negative_ttl_secs {
-                self.discovery.negative_ttl_secs = n;
-            }
-            if let Some(pos) = disc.positive_ttl_secs {
-                self.discovery.positive_ttl_secs = pos;
-            }
-        }
-        if let Some(tr) = partial.transport {
-            if let Some(w) = tr.io_workers {
-                self.transport.io_workers = w;
-            }
-            if let Some(m) = tr.max_active_connections {
-                self.transport.max_active_connections = m;
-            }
-            if let Some(rc) = tr.reconcile_channel_capacity {
-                self.transport.reconcile_channel_capacity = rc;
-            }
-            if let Some(cp) = tr.cpu_pinning {
-                self.transport.cpu_pinning = cp;
-            }
-
-            // Grouped TCP overrides
-            if let Some(tcp) = tr.tcp {
-                if let Some(b) = tcp.backlog {
-                    self.transport.tcp.backlog = b;
-                }
-                if let Some(n) = tcp.nodelay {
-                    self.transport.tcp.nodelay = n;
-                }
-                if let Some(k) = tcp.keepalive_secs {
-                    self.transport.tcp.keepalive_secs = Some(k);
-                }
-                if let Some(r) = tcp.recv_buffer_size {
-                    self.transport.tcp.recv_buffer_size = Some(r);
-                }
-                if let Some(s) = tcp.send_buffer_size {
-                    self.transport.tcp.send_buffer_size = Some(s);
-                }
-                if let Some(c) = tcp.copy_buffer_size {
-                    self.transport.tcp.copy_buffer_size = c;
-                }
-                if let Some(rp) = tcp.reuseport {
-                    self.transport.tcp.reuseport = rp;
-                }
-                if let Some(cs) = tcp.concurrency_shards {
-                    self.transport.tcp.concurrency_shards = cs;
-                }
-                if let Some(q) = tcp.quickack {
-                    self.transport.tcp.quickack = Some(q);
-                }
-                if let Some(d) = tcp.defer_accept_secs {
-                    self.transport.tcp.defer_accept_secs = Some(d);
-                }
-                if let Some(fb) = tcp.fastopen_backlog {
-                    self.transport.tcp.fastopen_backlog = Some(fb);
-                }
-                if let Some(bp) = tcp.busy_poll_us {
-                    self.transport.tcp.busy_poll_us = Some(bp);
-                }
-            }
-
-            // Grouped UDP overrides
-            if let Some(udp) = tr.udp {
-                if let Some(r) = udp.recv_buffer_size {
-                    self.transport.udp.recv_buffer_size = Some(r);
-                }
-                if let Some(s) = udp.send_buffer_size {
-                    self.transport.udp.send_buffer_size = Some(s);
-                }
-                if let Some(rp) = udp.reuseport {
-                    self.transport.udp.reuseport = rp;
-                }
-                if let Some(cs) = udp.concurrency_shards {
-                    self.transport.udp.concurrency_shards = cs;
-                }
-            }
-        }
-        if let Some(tls) = partial.tls {
-            if let Some(c) = tls.session_cache_capacity {
-                self.tls.session_cache_capacity = c;
-            }
-            if let Some(s) = tls.session_shards {
-                self.tls.session_shards = s;
-            }
-            if let Some(e) = tls.max_early_data_size {
-                self.tls.max_early_data_size = e;
-            }
-            if let Some(t) = tls.send_tls13_tickets {
-                self.tls.send_tls13_tickets = t;
-            }
-            if let Some(h) = tls.handshake_timeout_secs {
-                self.tls.handshake_timeout_secs = h;
-            }
+        (base, override_val) => {
+            *base = override_val;
         }
     }
-}
-
-/// Helper deserializer for partial/sparse user configurations in `runtime.json`.
-#[derive(Debug, Deserialize, Default)]
-struct PartialHardwareProfile {
-    detected_ram_bytes: Option<usize>,
-    detected_cores: Option<usize>,
-    worker_threads: Option<usize>,
-    cpu_tier: Option<String>,
-    memory_tier: Option<String>,
-    tier: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialDiscoveryConfig {
-    max_dns_cache_capacity: Option<usize>,
-    max_lkg_capacity: Option<usize>,
-    max_negative_ttl_secs: Option<u64>,
-    query_timeout_ms: Option<u64>,
-    negative_ttl_secs: Option<u64>,
-    positive_ttl_secs: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialTcpConfig {
-    backlog: Option<u32>,
-    nodelay: Option<bool>,
-    keepalive_secs: Option<u64>,
-    recv_buffer_size: Option<usize>,
-    send_buffer_size: Option<usize>,
-    copy_buffer_size: Option<usize>,
-    reuseport: Option<bool>,
-    concurrency_shards: Option<usize>,
-    quickack: Option<bool>,
-    defer_accept_secs: Option<u32>,
-    fastopen_backlog: Option<u32>,
-    busy_poll_us: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialUdpConfig {
-    recv_buffer_size: Option<usize>,
-    send_buffer_size: Option<usize>,
-    reuseport: Option<bool>,
-    concurrency_shards: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialTransportConfig {
-    io_workers: Option<usize>,
-    max_active_connections: Option<usize>,
-    reconcile_channel_capacity: Option<usize>,
-    cpu_pinning: Option<bool>,
-    tcp: Option<PartialTcpConfig>,
-    udp: Option<PartialUdpConfig>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialTlsConfig {
-    session_cache_capacity: Option<usize>,
-    session_shards: Option<usize>,
-    max_early_data_size: Option<u32>,
-    send_tls13_tickets: Option<usize>,
-    handshake_timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct PartialRuntimeProfile {
-    version: Option<u32>,
-    hardware: Option<PartialHardwareProfile>,
-    discovery: Option<PartialDiscoveryConfig>,
-    transport: Option<PartialTransportConfig>,
-    tls: Option<PartialTlsConfig>,
 }
 
 /// Resolves the runtime profile for the edge process:
@@ -528,17 +348,69 @@ pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) 
     if profile_path.exists()
         && let Ok(content) = fs::read_to_string(&profile_path)
     {
-        match serde_json::from_str::<PartialRuntimeProfile>(&content) {
-            Ok(partial) => {
-                profile.merge_partial(partial);
-                loaded_from_file = true;
-                tracing::info!(
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(mut override_val) if override_val.is_object() => {
+                let mut target_cpu_tier = hardware.cpu_tier();
+                let mut target_mem_tier = hardware.memory_tier();
+
+                // Harmonize legacy 'tier' with 'memory_tier' if specified
+                if let Some(hw) = override_val
+                    .get_mut("hardware")
+                    .and_then(|h| h.as_object_mut())
+                {
+                    if let Some(t) = hw.get("tier").cloned()
+                        && !hw.contains_key("memory_tier")
+                    {
+                        hw.insert("memory_tier".to_string(), t);
+                    } else if let Some(mt) = hw.get("memory_tier").cloned()
+                        && !hw.contains_key("tier")
+                    {
+                        hw.insert("tier".to_string(), mt);
+                    }
+
+                    if let Some(c) = hw.get("cpu_tier").and_then(|v| v.as_str())
+                        && let Ok(tier) = c.parse::<velda_core::CpuTier>()
+                    {
+                        target_cpu_tier = tier;
+                    }
+                    if let Some(m) = hw.get("memory_tier").and_then(|v| v.as_str())
+                        && let Ok(tier) = m.parse::<velda_core::MemoryTier>()
+                    {
+                        target_mem_tier = tier;
+                    }
+                }
+
+                let base_profile =
+                    RuntimeProfile::for_tiers(hardware, target_cpu_tier, target_mem_tier);
+                if let Ok(mut base_val) = serde_json::to_value(&base_profile) {
+                    merge_json_values(&mut base_val, override_val);
+                    match serde_json::from_value::<RuntimeProfile>(base_val) {
+                        Ok(merged_profile) => {
+                            profile = merged_profile;
+                            loaded_from_file = true;
+                            tracing::info!(
+                                path = %profile_path.display(),
+                                cpu_tier = %profile.hardware.cpu_tier,
+                                memory_tier = %profile.hardware.memory_tier,
+                                io_workers = profile.transport.io_workers,
+                                max_conns = profile.transport.max_active_connections,
+                                "Loaded runtime profile from runtime.json with operator overrides"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %profile_path.display(),
+                                error = %e,
+                                "Failed to deserialize merged runtime profile; falling back to hardware-probed defaults"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(
                     path = %profile_path.display(),
-                    cpu_tier = %profile.hardware.cpu_tier,
-                    memory_tier = %profile.hardware.memory_tier,
-                    io_workers = profile.transport.io_workers,
-                    max_conns = profile.transport.max_active_connections,
-                    "Loaded runtime profile from runtime.json with operator overrides"
+                    "runtime.json is not a valid JSON object; falling back to hardware-probed defaults"
                 );
             }
             Err(e) => {
@@ -864,5 +736,8 @@ mod tests {
 
         assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Ultra);
         assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Ultra);
+        assert_eq!(resolved.transport.max_active_connections, 4_000_000);
+        assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
+        assert_eq!(resolved.tls.session_cache_capacity, 131_072);
     }
 }

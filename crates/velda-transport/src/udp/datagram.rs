@@ -6,9 +6,9 @@ use velda_core::{ConnectionId, L4Request, TransportProtocol};
 /// An individual UDP datagram with network endpoint metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Datagram {
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    data: Vec<u8>,
+    pub peer: SocketAddr,
+    pub local_addr: SocketAddr,
+    pub data: Vec<u8>,
 }
 
 impl Datagram {

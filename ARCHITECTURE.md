@@ -132,11 +132,11 @@ RuntimeSnapshot (Gen N, Revision: u64)
 │
 ├── 1. INGRESS & PIPELINES ───────────────────────────── [Instant Protocol Classification]
 │   │
-│   ├── [PathKind::L4Direct] (Bypass L7 Pipeline)
+│   ├── [no pipeline for listener] (Bypass L7 Pipeline)
 │   │   ├── Raw TCP Listener ──────────────────> Direct Handoff ──> rt.router.l4 ──> rt.upstreams.tcp
 │   │   └── Raw UDP Listener ──────────────────> Direct Handoff ──> rt.router.l4 ──> rt.upstreams.udp
 │   │
-│   └── [PathKind::L7Handoff] (rt.pipelines: PipelineTable)
+│   └── [pipeline present] (rt.pipelines: PipelineTable)
 │       ├── tcp: HashMap<ListenerId, TcpPipeline>
 │       │   ├── Http1 ── { tls_enabled, streaming, config: Http1Config }
 │       │   ├── Http2 ── { tls_enabled, streaming, config: Http2Config }
@@ -205,7 +205,7 @@ RuntimeSnapshot (Gen N, Revision: u64)
 - **Lock-Sharded Pools vs Multiplexed Pools**:
   - **HTTP/1.1**: Uses dedicated `PoolManager<SocketAddr, Http1ClientResource>` with LIFO checkout and non-blocking `try_read` health validation to prevent stale socket reuse.
   - **HTTP/2, HTTP/3, gRPC**: Use dedicated `MultiplexedPool` with thread-sharded active connection slots to multiplex concurrent streams without connection churn.
-- **L4 Direct Bypass vs L7 Handoff**: Raw listeners bypass L7 decoders and pipeline tables completely (`PathKind::L4Direct`), dispatching straight to `rt.router.l4`.
+- **L4 Direct Bypass vs L7 Pipeline**: Raw listeners have no pipeline entry and bypass L7 decoders completely, dispatching straight to `rt.router.l4`.
 - **Pre-Compiled Route Plugins**: Plugin hook chains (`Vec<PluginId>`) are pre-bound to each Route record for zero dynamic resolution during routing.
 - **Zero Protocol Sniffing**: `rt.pipelines` resolves the wire protocol directly from `listener_id` in $O(1)$. No inspecting payloads or sniffing `Content-Type: application/grpc`.
 - **Strict Protocol Isolation**: `rt.router` isolates HTTP and gRPC tables into disjoint memory areas. HTTP traffic never touches or iterates over gRPC route rules.

@@ -1,7 +1,7 @@
 //! HTTP/3 packet-driven server engine based on pure quinn-proto state machine (RFC 9114).
 //!
 //! Operates in a pure packet-in / packet-out manner without owning OS sockets,
-//! matching `velda-transport`'s [`UdpL7Handoff`] model with zero I/O on hot paths.
+//! matching `velda-transport`'s `(listener_id, socket, Datagram)` handler model with zero I/O on hot paths.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};

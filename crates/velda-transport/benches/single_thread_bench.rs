@@ -1,27 +1,22 @@
 //! Velda Transport — Single-Thread Latency, Allocation & Lifecycle Benchmark Suite.
 //!
 //! Evaluates core transport primitives under single-threaded execution:
-//! 1. Declarative Path Classification & Ingress Binding Resolution
-//! 2. Ingress Binding Validation & Boundary Verification
+//! 1. Ingress Binding Resolution & Validation (`IngressBinding::from_transport`)
+//! 2. Thread-Local Batched Connection ID Generation (`next_connection_id`)
 //! 3. Connection Context Lifecycle & Stream Decomposition (`Connection`, `split`, `to_core_connection_context`)
-//! 4. UDP Datagram Lifecycle & Zero-Alloc Handoff (`Datagram`, `UdpL7Handoff::into_parts`)
-//! 5. Thread-Local Batched Connection ID Generation (`next_connection_id`)
+//! 4. UDP Datagram Lifecycle (`Datagram`)
 
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
 use common::CountingAllocator;
 use tokio::net::{TcpListener, TcpStream};
 use velda_core::ConnectionId;
-use velda_transport::ingress::classifier::PathKind;
-use velda_transport::ingress::listener::IngressBinding;
+use velda_transport::ingress::IngressBinding;
 use velda_transport::udp::datagram::Datagram;
-use velda_transport::{
-    Connection, TcpL7Handoff, UdpL7Handoff, UdpSocket, UdpSocketConfig, next_connection_id,
-};
+use velda_transport::{Connection, next_connection_id};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -32,7 +27,6 @@ async fn main() {
     println!("  VELDA-TRANSPORT: SINGLE-THREAD PERFORMANCE & LATENCY BENCHMARK SUITE");
     println!("================================================================================\n");
 
-    bench_path_kind_classification();
     bench_binding_resolution();
     bench_connection_id_allocation();
     bench_connection_lifecycle().await;
@@ -42,111 +36,33 @@ async fn main() {
 }
 
 // ============================================================================
-// Stage 1: PathKind Classification & Predicates
-// ============================================================================
-
-fn bench_path_kind_classification() {
-    println!("### 1. Declared PathKind Resolution & Predicate Evaluation\n");
-    println!("| Target Path | Invariant Verified | Latency / op | Allocs / op | Throughput |");
-    println!("| :--- | :--- | :--- | :--- | :--- |");
-
-    let iters = 10_000_000;
-
-    let scenarios = [
-        ("PathKind::L4Direct", PathKind::L4Direct, true, false),
-        ("PathKind::L7Handoff", PathKind::L7Handoff, false, true),
-    ];
-
-    for (name, path, expect_l4, expect_l7) in scenarios {
-        ALLOCATOR.reset();
-        let start = Instant::now();
-
-        for _ in 0..iters {
-            let l4 = path.is_l4();
-            let l7 = path.is_l7();
-            let _ = std::hint::black_box((l4, l7));
-        }
-
-        let elapsed = start.elapsed();
-        let (allocs, _) = ALLOCATOR.snapshot();
-        let ns_op = elapsed.as_nanos() as f64 / iters as f64;
-        let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
-
-        assert_eq!(path.is_l4(), expect_l4);
-        assert_eq!(path.is_l7(), expect_l7);
-
-        println!(
-            "| **{:<20}** | is_l4={}, is_l7={} | **{:.2} ns** | **{:.2}** | {} ops/s |",
-            name,
-            expect_l4,
-            expect_l7,
-            ns_op,
-            allocs as f64 / iters as f64,
-            ops_sec,
-        );
-    }
-    println!();
-}
-
-// ============================================================================
-// Stage 2: Ingress Binding Resolution
+// Stage 1: Ingress Binding Resolution
 // ============================================================================
 
 fn bench_binding_resolution() {
-    println!(
-        "### 2. Ingress Binding Compilation & Validation (`IngressBinding::from_protocols`)\n"
-    );
-    println!(
-        "| Binding Mode | Config Dimensions | Latency / op | Allocs / op | Throughput | Status |"
-    );
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
+    println!("### 1. Ingress Binding Compilation (`IngressBinding::from_transport`)\n");
+    println!("| Binding Mode | Config Dimensions | Latency / op | Allocs / op | Throughput |");
+    println!("| :--- | :--- | :--- | :--- | :--- |");
 
     let iters = 1_000_000;
     let dummy_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
     let scenarios = [
-        ("L4 Direct TCP", "tcp", "raw", false, PathKind::L4Direct),
-        (
-            "L7 HTTP TCP Cleartext",
-            "tcp",
-            "http",
-            false,
-            PathKind::L7Handoff,
-        ),
-        (
-            "L7 HTTPS TCP over TLS",
-            "tcp",
-            "http",
-            true,
-            PathKind::L7Handoff,
-        ),
-        ("L4 Direct UDP", "udp", "raw", false, PathKind::L4Direct),
-        (
-            "L7 HTTP/3 UDP Handoff",
-            "udp",
-            "http3",
-            true,
-            PathKind::L7Handoff,
-        ),
-        (
-            "L7 gRPC Ingress Pipeline",
-            "tcp",
-            "grpc",
-            true,
-            PathKind::L7Handoff,
-        ),
+        ("TCP Cleartext", "tcp", false),
+        ("TCP over TLS", "tcp", true),
+        ("UDP Cleartext", "udp", false),
+        ("UDP (QUIC) TLS", "udp", true),
     ];
 
-    for (name, transport_proto, app_proto, tls, expected_path) in scenarios {
+    for (name, transport_proto, tls) in scenarios {
         ALLOCATOR.reset();
         let start = Instant::now();
 
         for _ in 0..iters {
-            let binding = IngressBinding::from_protocols(
+            let binding = IngressBinding::from_transport(
                 "listener-prod-01",
                 dummy_addr,
                 transport_proto,
-                app_proto,
                 tls,
             )
             .unwrap();
@@ -158,18 +74,16 @@ fn bench_binding_resolution() {
         let ns_op = elapsed.as_nanos() as f64 / iters as f64;
         let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
 
-        assert_eq!(
-            IngressBinding::from_protocols("t", dummy_addr, transport_proto, app_proto, tls)
-                .unwrap()
-                .path,
-            expected_path
-        );
+        let binding =
+            IngressBinding::from_transport("t", dummy_addr, transport_proto, tls).unwrap();
+        assert_eq!(binding.is_tcp(), transport_proto == "tcp");
+        assert_eq!(binding.is_udp(), transport_proto == "udp");
+        assert_eq!(binding.tls_enabled(), tls);
 
         println!(
-            "| **{:<24}** | transport={}, app={}, tls={} | **{:.2} ns** | **{:.2}** | {} ops/s | PASS |",
+            "| **{:<16}** | transport={}, tls={} | **{:.2} ns** | **{:.2}** | {} ops/s |",
             name,
             transport_proto,
-            app_proto,
             tls,
             ns_op,
             allocs as f64 / iters as f64,
@@ -245,22 +159,21 @@ async fn bench_connection_lifecycle() {
         ns_op, ops_sec,
     );
 
-    // 2. TcpL7Handoff::new + into_parts
+    // 2. Listener-id tagging on the accepted connection
     let conn = Connection::new(ConnectionId::new(42), server_stream, peer, addr);
+    let listener_id = "listener-http1-01".to_string();
     ALLOCATOR.reset();
     let start = Instant::now();
     let mut curr_conn = conn;
     for _ in 0..iters {
-        let handoff = TcpL7Handoff::new(curr_conn, "listener-http1-01");
-        let (c, _id) = handoff.into_parts();
-        curr_conn = c;
+        curr_conn = curr_conn.with_listener_id(listener_id.clone());
     }
     let elapsed = start.elapsed();
     let (allocs, _) = ALLOCATOR.snapshot();
     let ns_op = elapsed.as_nanos() as f64 / iters as f64;
     let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
     println!(
-        "| **TcpL7Handoff Recycle** | new + into_parts decomposition | **{:.2} ns** | **{:.2}** | {} ops/s |",
+        "| **Connection::with_listener_id** | listener tag (String clone) | **{:.2} ns** | **{:.2}** | {} ops/s |",
         ns_op,
         allocs as f64 / iters as f64,
         ops_sec,
@@ -281,9 +194,6 @@ async fn bench_udp_datagram_handoff() {
     let peer: SocketAddr = "10.0.0.1:44321".parse().unwrap();
     let local: SocketAddr = "127.0.0.1:443".parse().unwrap();
     let payload = vec![0xABu8; 1200]; // 1200 bytes QUIC initial datagram
-    let socket = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
 
     // 1. Datagram::new with pre-allocated buffer
     ALLOCATOR.reset();
@@ -303,25 +213,5 @@ async fn bench_udp_datagram_handoff() {
         ops_sec,
     );
 
-    // 2. UdpL7Handoff::new + into_parts
-    let dgram = Datagram::new(peer, local, payload);
-    ALLOCATOR.reset();
-    let start = Instant::now();
-    let mut curr_dgram = dgram;
-    for _ in 0..iters {
-        let handoff = UdpL7Handoff::new(curr_dgram, Arc::clone(&socket), "udp-h3-01");
-        let (d, _s, _id) = handoff.into_parts();
-        curr_dgram = d;
-    }
-    let elapsed = start.elapsed();
-    let (allocs, _) = ALLOCATOR.snapshot();
-    let ns_op = elapsed.as_nanos() as f64 / iters as f64;
-    let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
-    println!(
-        "| **UdpL7Handoff Cycle** | new + into_parts decomposition | **{:.2} ns** | **{:.2}** | {} ops/s |",
-        ns_op,
-        allocs as f64 / iters as f64,
-        ops_sec,
-    );
     println!();
 }

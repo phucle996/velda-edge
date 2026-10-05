@@ -18,34 +18,32 @@ pub use http3::{
 pub use tcp::handle_l4_tcp;
 pub use udp::{UdpSessionKey, UdpSessionTable, get_udp_session_table, handle_l4_udp};
 
-use velda_transport::{TcpL7Handoff, UdpL7Handoff};
+use std::sync::Arc;
+
+use velda_transport::{Connection, Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
 use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 
-/// Routes an accepted TCP L7 handoff to its protocol-specific stream worker.
-pub async fn handle_tcp_l7(handoff: TcpL7Handoff, runtime: &SharedRuntime) {
+/// Dispatches an accepted TCP connection to its compiled pipeline:
+/// L7 (HTTP/1, HTTP/2, gRPC) when the listener has one, otherwise raw L4 forwarding.
+pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
     let rt = runtime.load();
-    let listener_id = handoff.listener_id();
-
-    let Some(pipeline) = rt.pipelines.tcp_pipeline(listener_id).cloned() else {
-        tracing::error!(
-            listener = %listener_id,
-            "No compiled TCP pipeline for listener; dropping connection"
-        );
+    let Some(listener_id) = connection.listener_id().map(str::to_owned) else {
+        tracing::warn!(peer = %connection.peer(), "Accepted TCP connection without listener_id; dropping");
         return;
     };
 
-    let conn_id = handoff.id();
-    let peer = handoff.peer();
-    let local_addr = handoff.local_addr();
-    let (connection, owned_listener_id) = handoff.into_parts();
+    let Some(pipeline) = rt.pipelines.tcp_pipeline(&listener_id).cloned() else {
+        handle_l4_tcp(connection, runtime).await;
+        return;
+    };
 
     let context = IngressContext::new_tcp(
-        conn_id,
-        owned_listener_id,
-        peer,
-        local_addr,
+        connection.id(),
+        listener_id,
+        connection.peer(),
+        connection.local_addr(),
         pipeline.tls_enabled(),
         pipeline.streaming(),
     );
@@ -63,27 +61,25 @@ pub async fn handle_tcp_l7(handoff: TcpL7Handoff, runtime: &SharedRuntime) {
     }
 }
 
-/// Routes an accepted UDP L7 handoff to its protocol-specific handler.
-pub async fn handle_udp_l7(handoff: UdpL7Handoff, runtime: &SharedRuntime) {
+/// Dispatches a received UDP datagram to its compiled pipeline:
+/// L7 (HTTP/3, gRPC over QUIC) when the listener has one, otherwise raw L4 forwarding.
+pub async fn handle_udp(
+    listener_id: String,
+    socket: Arc<UdpSocket>,
+    datagram: Datagram,
+    runtime: &SharedRuntime,
+) {
     let rt = runtime.load();
-    let listener_id = handoff.listener_id();
 
-    let Some(pipeline) = rt.pipelines.udp_pipeline(listener_id).cloned() else {
-        tracing::error!(
-            listener = %listener_id,
-            peer = %handoff.peer(),
-            "No compiled UDP pipeline for listener; dropping datagram"
-        );
+    let Some(pipeline) = rt.pipelines.udp_pipeline(&listener_id).cloned() else {
+        handle_l4_udp(listener_id, socket, datagram, runtime).await;
         return;
     };
 
-    let peer = handoff.peer();
-    let local_addr = handoff.local_addr();
-    let (datagram, socket, owned_listener_id) = handoff.into_parts();
     let context = IngressContext::new_udp(
-        owned_listener_id,
-        peer,
-        local_addr,
+        listener_id,
+        datagram.peer(),
+        datagram.local_addr(),
         pipeline.tls_enabled(),
         pipeline.streaming(),
     );

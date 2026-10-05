@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use velda_sync::post_sync::listener::ListenerConfig;
-use velda_transport::{IngressBinding, TcpListenerConfig, UdpSocketConfig};
+use velda_transport::{IngressBinding, TcpBinding, TcpListenerConfig, UdpBinding, UdpSocketConfig};
 
 use crate::error::EdgeError;
 
@@ -19,20 +19,18 @@ pub(super) fn active_bindings_with_configs(
 ) -> Result<Vec<IngressBinding>, EdgeError> {
     let mut bindings = Vec::with_capacity(listeners.len());
     for cfg in listeners {
-        let mut binding = listener_to_binding(cfg)?;
-        if let Some(tcp) = tcp_config {
-            binding = binding.with_tcp_config(tcp.clone());
-        }
-        if let Some(udp) = udp_config {
-            binding = binding.with_udp_config(udp.clone());
-        }
+        let binding = listener_to_binding(cfg, tcp_config, udp_config)?;
         bindings.push(binding);
     }
     Ok(bindings)
 }
 
 /// Converts a declarative `ListenerConfig` into a `velda-transport` `IngressBinding`.
-fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, EdgeError> {
+fn listener_to_binding(
+    config: &ListenerConfig,
+    tcp_config: Option<&TcpListenerConfig>,
+    udp_config: Option<&UdpSocketConfig>,
+) -> Result<IngressBinding, EdgeError> {
     let addr: SocketAddr = config
         .address
         .parse()
@@ -42,15 +40,26 @@ fn listener_to_binding(config: &ListenerConfig) -> Result<IngressBinding, EdgeEr
             reason: format!("{e}"),
         })?;
 
-    let binding = IngressBinding::from_protocols(
-        &config.id,
-        addr,
-        &config.transport.protocol,
-        &config.application.protocol,
-        config.tls.enabled,
-    )?;
-
-    Ok(binding)
+    if config.transport.protocol.eq_ignore_ascii_case("tcp") {
+        let mut tcp = TcpBinding::new(&config.id, addr, config.tls.enabled);
+        if let Some(cfg) = tcp_config {
+            tcp.config = cfg.clone();
+        }
+        Ok(IngressBinding::Tcp(tcp))
+    } else if config.transport.protocol.eq_ignore_ascii_case("udp") {
+        let mut udp = UdpBinding::new(&config.id, addr, config.tls.enabled);
+        if let Some(cfg) = udp_config {
+            udp.config = cfg.clone();
+        }
+        Ok(IngressBinding::Udp(udp))
+    } else {
+        Err(EdgeError::InvalidConfig {
+            detail: format!(
+                "unsupported transport protocol '{}' for listener '{}' (must be 'tcp' or 'udp')",
+                config.transport.protocol, config.id
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -59,11 +68,10 @@ mod tests {
     use velda_sync::post_sync::listener::{
         ListenerApplicationConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
-    use velda_transport::PathKind;
 
     #[test]
     fn test_listener_to_binding_mapping() {
-        // Raw TCP -> L4Direct
+        // Raw TCP -> TcpBinding
         let raw_tcp = ListenerConfig {
             id: "tcp-raw".into(),
             address: "127.0.0.1:9000".into(),
@@ -82,11 +90,11 @@ mod tests {
             http3: None,
             raw: None,
         };
-        let binding = listener_to_binding(&raw_tcp).unwrap();
-        assert_eq!(binding.protocol, "tcp");
-        assert_eq!(binding.path, PathKind::L4Direct);
+        let binding = listener_to_binding(&raw_tcp, None, None).unwrap();
+        assert!(binding.is_tcp());
+        assert_eq!(binding.id(), "tcp-raw");
 
-        // HTTP/1.1 over TCP -> L7Handoff
+        // HTTP/1.1 over TCP -> TcpBinding
         let http1 = ListenerConfig {
             id: "http".into(),
             address: "127.0.0.1:80".into(),
@@ -105,11 +113,11 @@ mod tests {
             http3: None,
             raw: None,
         };
-        let binding = listener_to_binding(&http1).unwrap();
-        assert_eq!(binding.protocol, "tcp");
-        assert_eq!(binding.path, PathKind::L7Handoff);
+        let binding = listener_to_binding(&http1, None, None).unwrap();
+        assert!(binding.is_tcp());
+        assert_eq!(binding.id(), "http");
 
-        // HTTP/2 over TCP -> L7Handoff
+        // HTTP/2 over TCP -> TcpBinding
         let http2 = ListenerConfig {
             id: "http2".into(),
             address: "127.0.0.1:8080".into(),
@@ -128,11 +136,10 @@ mod tests {
             http3: None,
             raw: None,
         };
-        let binding = listener_to_binding(&http2).unwrap();
-        assert_eq!(binding.protocol, "tcp");
-        assert_eq!(binding.path, PathKind::L7Handoff);
+        let binding = listener_to_binding(&http2, None, None).unwrap();
+        assert!(binding.is_tcp());
 
-        // HTTP over UDP -> L7Handoff
+        // HTTP over UDP -> UdpBinding
         let http3 = ListenerConfig {
             id: "http3".into(),
             address: "127.0.0.1:443".into(),
@@ -151,9 +158,9 @@ mod tests {
             http3: None,
             raw: None,
         };
-        let binding = listener_to_binding(&http3).unwrap();
-        assert_eq!(binding.protocol, "udp");
-        assert_eq!(binding.path, PathKind::L7Handoff);
-        assert!(binding.tls_enabled);
+        let binding = listener_to_binding(&http3, None, None).unwrap();
+        assert!(binding.is_udp());
+        assert_eq!(binding.id(), "http3");
+        assert!(binding.tls_enabled());
     }
 }

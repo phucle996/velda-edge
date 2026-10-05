@@ -1,8 +1,8 @@
 //! Velda Transport — Adversarial, Fault-Tolerance & Stress Verification Suite.
 //!
 //! Tests transport layer resilience against hostile payloads and edge conditions:
-//! 1. Hostile Transport Protocol String Injection (`IngressBinding::new`)
-//! 2. Adversarial Protocol Dimension Fuzzing (`IngressBinding::from_protocols`)
+//! 1. Hostile Transport Protocol String Injection (`IngressBinding::from_transport`)
+//! 2. Adversarial Transport Protocol Fuzzing (`IngressBinding::from_transport`)
 //! 3. High-Frequency Declarative Binding Flapping & Mutation Stress
 //! 4. Extreme Datagram Payload Boundary Stress (0B .. 65,507B)
 
@@ -13,8 +13,7 @@ use std::time::Instant;
 
 use common::{CountingAllocator, format_duration};
 use velda_transport::TrafficEngine;
-use velda_transport::ingress::classifier::PathKind;
-use velda_transport::ingress::listener::IngressBinding;
+use velda_transport::ingress::IngressBinding;
 use velda_transport::udp::datagram::Datagram;
 
 #[global_allocator]
@@ -38,7 +37,9 @@ fn main() {
 // ============================================================================
 
 fn bench_hostile_protocol_injection() {
-    println!("### 1. Hostile Transport Protocol String Injection (`IngressBinding::new`)\n");
+    println!(
+        "### 1. Hostile Transport Protocol String Injection (`IngressBinding::from_transport`)\n"
+    );
     println!("> Evaluating resistance against malformed, oversized, and injection protocols...\n");
     println!("| Attack Vector | Transport Payload Snippet | Outcome | Latency / op | Target |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
@@ -63,7 +64,7 @@ fn bench_hostile_protocol_injection() {
         let start = Instant::now();
 
         for _ in 0..iters {
-            let res = IngressBinding::new("test", dummy_addr, payload, PathKind::L4Direct, false);
+            let res = IngressBinding::from_transport("test", dummy_addr, payload, false);
             let _ = std::hint::black_box(res);
         }
 
@@ -98,7 +99,7 @@ fn bench_hostile_protocol_injection() {
 // ============================================================================
 
 fn bench_adversarial_protocol_dimension_fuzzing() {
-    println!("### 2. Adversarial Protocol Dimension Fuzzing (`IngressBinding::from_protocols`)\n");
+    println!("### 2. Adversarial Transport Protocol Fuzzing (`IngressBinding::from_transport`)\n");
     println!("> Fuzzing 1,000,000 malformed, mixed-case, and boundary protocol combinations...\n");
 
     let iters = 1_000_000;
@@ -122,7 +123,8 @@ fn bench_adversarial_protocol_dimension_fuzzing() {
 
     for i in 0..iters {
         let (tp, ap, expected_ok) = fuzz_cases[i % fuzz_cases.len()];
-        let res = IngressBinding::from_protocols("fuzz_listener", dummy_addr, tp, ap, false);
+        let res = IngressBinding::from_transport("fuzz_listener", dummy_addr, tp, false);
+        let _ = ap;
         let is_ok = res.is_ok();
         debug_assert_eq!(is_ok, expected_ok);
         let _ = std::hint::black_box(res);
@@ -165,11 +167,10 @@ fn bench_rapid_binding_flapping() {
     let start = Instant::now();
 
     for i in 0..iters {
-        let binding = IngressBinding::from_protocols(
+        let binding = IngressBinding::from_transport(
             format!("flapping_listener_{:03}", i % 50),
             dummy_addr,
             if i % 2 == 0 { "tcp" } else { "udp" },
-            if i % 3 == 0 { "raw" } else { "http" },
             i % 4 == 0,
         )
         .unwrap();

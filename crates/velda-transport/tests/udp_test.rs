@@ -156,39 +156,38 @@ async fn test_forward_udp_flow() {
 }
 
 #[tokio::test]
-async fn test_udp_l7_handoff_for_http3_quic() {
-    use velda_transport::{IngressBinding, PathKind, TrafficEngine, UdpL7Handoff};
+async fn test_udp_ingress_delivers_datagram_with_listener_id() {
+    use velda_transport::{IngressBinding, TrafficEngine, UdpBinding};
 
     let free_addr: SocketAddr = {
         let l = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap()
     };
 
-    let binding =
-        IngressBinding::from_protocols("h3-ingress", free_addr, "udp", "quic", true).unwrap();
-    assert_eq!(binding.path, PathKind::L7Handoff);
+    let binding = IngressBinding::udp(UdpBinding::new("h3-ingress", free_addr, true));
     assert!(binding.is_udp());
 
     let mut engine = TrafficEngine::new();
     engine.add_binding(binding).unwrap();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (l7_received_tx, mut l7_received_rx) = tokio::sync::mpsc::channel(1);
+    let (received_tx, mut received_rx) = tokio::sync::mpsc::channel(1);
 
     let engine_task = tokio::spawn(async move {
         engine
-            .run_all(
+            .run(
                 shutdown_rx,
                 |_conn| async move {},
-                |_handoff| async move {},
-                |_id, _socket, _dgram| async move {},
-                move |handoff: UdpL7Handoff| {
-                    let tx = l7_received_tx.clone();
+                move |listener_id: String, socket: Arc<UdpSocket>, dgram: Datagram| {
+                    let tx = received_tx.clone();
                     async move {
-                        assert_eq!(handoff.listener_id(), "h3-ingress");
-                        assert_eq!(handoff.data(), b"QUIC-Client-Hello");
+                        assert_eq!(listener_id, "h3-ingress");
+                        assert_eq!(dgram.data(), b"QUIC-Client-Hello");
 
-                        handoff.send_response(b"QUIC-Server-Hello").await.unwrap();
+                        socket
+                            .send_to(b"QUIC-Server-Hello", dgram.peer())
+                            .await
+                            .unwrap();
                         let _ = tx.send(()).await;
                     }
                 },
@@ -212,17 +211,15 @@ async fn test_udp_l7_handoff_for_http3_quic() {
     assert_eq!(&buf[..n], b"QUIC-Server-Hello");
     assert_eq!(from, free_addr);
 
-    l7_received_rx.recv().await.unwrap();
+    received_rx.recv().await.unwrap();
 
     shutdown_tx.send(true).unwrap();
     let _ = engine_task.await;
 }
 
 #[tokio::test]
-async fn test_udp_l7_handoff_for_http3_named_binding() {
-    use velda_transport::{
-        Datagram, IngressBinding, PathKind, UdpL7Handoff, UdpSocket, UdpSocketConfig,
-    };
+async fn test_udp_binding_and_datagram_response_roundtrip() {
+    use velda_transport::UdpBinding;
 
     let client =
         UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
@@ -230,13 +227,9 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
         UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
     );
 
-    let h3_binding =
-        IngressBinding::from_protocols("h3-listener", server.local_addr(), "udp", "http3", true)
-            .unwrap();
-
-    assert_eq!(h3_binding.path, PathKind::L7Handoff);
-    assert!(h3_binding.is_udp());
-    assert!(!h3_binding.is_tcp());
+    let h3_binding = UdpBinding::new("h3-listener", server.local_addr(), true);
+    assert_eq!(h3_binding.id, "h3-listener");
+    assert!(h3_binding.tls_enabled);
 
     let dgram = Datagram::new(
         client.local_addr(),
@@ -244,13 +237,10 @@ async fn test_udp_l7_handoff_for_http3_named_binding() {
         b"HTTP/3-Initial-Packet".to_vec(),
     );
 
-    let handoff = UdpL7Handoff::new(dgram, Arc::clone(&server), h3_binding.id.clone());
+    assert_eq!(dgram.peer(), client.local_addr());
+    assert_eq!(dgram.data(), b"HTTP/3-Initial-Packet");
 
-    assert_eq!(handoff.listener_id(), "h3-listener");
-    assert_eq!(handoff.peer(), client.local_addr());
-    assert_eq!(handoff.data(), b"HTTP/3-Initial-Packet");
-
-    handoff.send_response(b"HTTP/3-Ack").await.unwrap();
+    server.send_to(b"HTTP/3-Ack", dgram.peer()).await.unwrap();
 
     let mut buf = [0u8; 64];
     let (n, from) = client.recv_from(&mut buf).await.unwrap();

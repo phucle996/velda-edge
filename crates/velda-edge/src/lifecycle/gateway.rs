@@ -1,12 +1,12 @@
 //! End-to-end gateway execution and traffic serving coordination.
 
 use tokio::sync::watch;
-use velda_transport::{Connection, Datagram, TcpL7Handoff, TrafficEngine, UdpL7Handoff};
+use velda_transport::{Connection, Datagram, TrafficEngine};
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
 use crate::lifecycle::ipc::run_ipc_server;
-use crate::pipeline::{handle_l4_tcp, handle_l4_udp, handle_tcp_l7, handle_udp_l7};
+use crate::pipeline::{handle_tcp, handle_udp};
 use crate::runtime::SharedRuntime;
 
 /// Coordinates the end-to-end gateway execution:
@@ -41,47 +41,23 @@ pub async fn run_gateway(
     });
 
     // 2. Drive TrafficEngine accept and pipeline dispatch loops directly
-    let rt_l4 = shared_runtime.clone();
-    let l4_handler = move |conn: Connection| {
-        let rt = rt_l4.clone();
+    let rt_tcp = shared_runtime.clone();
+    let tcp_handler = move |conn: Connection| {
+        let rt = rt_tcp.clone();
         async move {
-            handle_l4_tcp(conn, &rt).await;
+            handle_tcp(conn, &rt).await;
         }
     };
 
-    let rt_l7 = shared_runtime.clone();
-    let l7_handler = move |handoff: TcpL7Handoff| {
-        let rt = rt_l7.clone();
+    let rt_udp = shared_runtime.clone();
+    let udp_handler = move |id: String, socket, dgram: Datagram| {
+        let rt = rt_udp.clone();
         async move {
-            handle_tcp_l7(handoff, &rt).await;
+            handle_udp(id, socket, dgram, &rt).await;
         }
     };
 
-    let rt_udp_l4 = shared_runtime.clone();
-    let udp_l4_handler = move |id, socket, dgram: Datagram| {
-        let rt = rt_udp_l4.clone();
-        async move {
-            handle_l4_udp(id, socket, dgram, &rt).await;
-        }
-    };
-
-    let rt_udp_l7 = shared_runtime.clone();
-    let udp_l7_handler = move |handoff: UdpL7Handoff| {
-        let rt = rt_udp_l7.clone();
-        async move {
-            handle_udp_l7(handoff, &rt).await;
-        }
-    };
-
-    let engine_result = engine
-        .run_all(
-            shutdown,
-            l4_handler,
-            l7_handler,
-            udp_l4_handler,
-            udp_l7_handler,
-        )
-        .await;
+    let engine_result = engine.run(shutdown, tcp_handler, udp_handler).await;
 
     // 3. Await background IPC task termination
     let _ = ipc_task.await;

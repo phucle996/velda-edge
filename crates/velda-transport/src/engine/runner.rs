@@ -5,21 +5,40 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
-use super::handle::EngineHandle;
 use super::reconcile::reconcile_active_listeners;
 use crate::connection::Connection;
-use crate::error::Result;
-use crate::handoff::{TcpL7Handoff, UdpL7Handoff};
-use crate::ingress::classifier::PathKind;
-use crate::ingress::listener::{IngressBinding, IngressListener};
+use crate::error::{Result, TransportError};
+use crate::ingress::{IngressBinding, TcpIngress, UdpIngress};
 use crate::udp::datagram::Datagram;
 use crate::udp::socket::UdpSocket;
 
-/// High-performance edge traffic engine coordinating multi-port ingress bindings,
-/// classification, and execution dispatching across any number of TCP and UDP ports.
+/// Controller handle allowing supervisors to submit declarative listener reconciliations
+/// to the running [`TrafficEngine`]. Keeps the internal channel type out of the public API.
+#[derive(Clone, Debug)]
+pub struct EngineHandle {
+    reconcile_tx: mpsc::Sender<Vec<IngressBinding>>,
+}
+
+impl EngineHandle {
+    /// Submits a declarative list of desired ingress bindings to the running traffic engine.
+    ///
+    /// The engine automatically compares desired bindings against live sockets, binding new
+    /// ports, gracefully closing removed ports, and leaving identical listeners untouched.
+    pub async fn reconcile(&self, desired: Vec<IngressBinding>) -> Result<()> {
+        self.reconcile_tx.send(desired).await.map_err(|_| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "TrafficEngine has terminated",
+            ))
+        })
+    }
+}
+
+/// High-performance edge traffic engine coordinating multi-port ingress bindings
+/// and execution dispatching across any number of stateful TCP and stateless UDP ports.
 pub struct TrafficEngine {
-    initial_tcp: Vec<IngressListener>,
-    initial_udp: Vec<(String, Arc<UdpSocket>, IngressBinding)>,
+    initial_tcp: Vec<TcpIngress>,
+    initial_udp: Vec<UdpIngress>,
     initial_bindings: Vec<IngressBinding>,
     reconcile_tx: mpsc::Sender<Vec<IngressBinding>>,
     reconcile_rx: mpsc::Receiver<Vec<IngressBinding>>,
@@ -65,30 +84,19 @@ impl TrafficEngine {
         }
     }
 
-    /// Registers a TCP ingress listener directly.
-    pub fn add_tcp_listener(&mut self, listener: IngressListener) -> &mut Self {
-        self.initial_tcp.push(listener);
+    /// Registers a pre-bound TCP ingress listener directly.
+    pub fn add_tcp_ingress(&mut self, ingress: TcpIngress) -> &mut Self {
+        self.initial_tcp.push(ingress);
         self
     }
 
-    /// Registers a UDP socket directly with a listener identifier.
-    pub fn add_udp_socket(&mut self, id: impl Into<String>, socket: UdpSocket) -> &mut Self {
-        let id_str = id.into();
-        let addr = socket.local_addr();
-        let binding = IngressBinding {
-            id: id_str.clone(),
-            addr,
-            protocol: "udp".into(),
-            tls_enabled: false,
-            path: PathKind::L4Direct,
-            tcp_config: Default::default(),
-            udp_config: socket.config().clone(),
-        };
-        self.initial_udp.push((id_str, Arc::new(socket), binding));
+    /// Registers a pre-bound UDP ingress listener directly.
+    pub fn add_udp_ingress(&mut self, ingress: UdpIngress) -> &mut Self {
+        self.initial_udp.push(ingress);
         self
     }
 
-    /// Binds and registers an [`IngressBinding`].
+    /// Registers an [`IngressBinding`].
     pub fn add_binding(&mut self, binding: IngressBinding) -> Result<()> {
         self.initial_bindings.push(binding);
         Ok(())
@@ -106,75 +114,20 @@ impl TrafficEngine {
         self.initial_udp.len() + self.initial_bindings.iter().filter(|b| b.is_udp()).count()
     }
 
-    /// Starts all ingress listener accept loops (TCP) and dispatches incoming traffic
-    /// to either the L4 fast path or L7 protocol handoff until shutdown is signaled.
-    pub async fn run<L4H, L7H, FutL4, FutL7>(
-        self,
-        shutdown: watch::Receiver<bool>,
-        l4_handler: L4H,
-        l7_handler: L7H,
-    ) -> Result<()>
-    where
-        L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
-        FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
-        FutL7: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.run_with_udp(
-            shutdown,
-            l4_handler,
-            l7_handler,
-            |_id: String, _sock: Arc<UdpSocket>, _dgram: Datagram| async {},
-        )
-        .await
-    }
-
-    /// Starts all ingress loops across all configured TCP and UDP ports concurrently,
-    /// forwarding raw UDP traffic to `udp_handler`.
-    pub async fn run_with_udp<L4H, L7H, UdpH, FutL4, FutL7, FutUdp>(
-        self,
-        shutdown: watch::Receiver<bool>,
-        l4_handler: L4H,
-        l7_handler: L7H,
+    /// Starts all ingress listener loops across all configured TCP and UDP ports concurrently,
+    /// dispatching stateful TCP connections to `tcp_handler` and stateless UDP datagrams to `udp_handler`
+    /// until shutdown is signaled.
+    pub async fn run<TcpH, UdpH, FutTcp, FutUdp>(
+        mut self,
+        mut shutdown: watch::Receiver<bool>,
+        tcp_handler: TcpH,
         udp_handler: UdpH,
     ) -> Result<()>
     where
-        L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
-        FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
-        FutL7: std::future::Future<Output = ()> + Send + 'static,
+        TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
+        FutTcp: std::future::Future<Output = ()> + Send + 'static,
         UdpH: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
         FutUdp: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.run_all(
-            shutdown,
-            l4_handler,
-            l7_handler,
-            udp_handler,
-            |_handoff: UdpL7Handoff| async {},
-        )
-        .await
-    }
-
-    /// Starts all ingress loops across all configured TCP and UDP ports concurrently,
-    /// with dedicated handlers for TCP L4, TCP L7, UDP L4, and UDP L7 (HTTP/3 / QUIC).
-    pub async fn run_all<L4H, L7H, UdpL4H, UdpL7H, FutL4, FutL7, FutUdpL4, FutUdpL7>(
-        mut self,
-        mut shutdown: watch::Receiver<bool>,
-        l4_handler: L4H,
-        l7_handler: L7H,
-        udp_l4_handler: UdpL4H,
-        udp_l7_handler: UdpL7H,
-    ) -> Result<()>
-    where
-        L4H: Fn(Connection) -> FutL4 + Send + Sync + Clone + 'static,
-        FutL4: std::future::Future<Output = ()> + Send + 'static,
-        L7H: Fn(TcpL7Handoff) -> FutL7 + Send + Sync + Clone + 'static,
-        FutL7: std::future::Future<Output = ()> + Send + 'static,
-        UdpL4H: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdpL4 + Send + Sync + Clone + 'static,
-        FutUdpL4: std::future::Future<Output = ()> + Send + 'static,
-        UdpL7H: Fn(UdpL7Handoff) -> FutUdpL7 + Send + Sync + Clone + 'static,
-        FutUdpL7: std::future::Future<Output = ()> + Send + 'static,
     {
         tracing::info!(
             tcp_listeners = self.initial_tcp.len(),
@@ -189,31 +142,20 @@ impl TrafficEngine {
 
         // 1. Spawn initial pre-bound TCP listeners
         for ingress in self.initial_tcp {
-            let binding = ingress.binding().clone();
-            let id = binding.id.clone();
+            let binding = IngressBinding::Tcp(ingress.binding().clone());
+            let id = binding.id().to_string();
             let (tx, rx) = watch::channel(false);
-            IngressListener::spawn_accept_loop(
-                Arc::new(ingress),
-                &mut tasks,
-                rx,
-                l4_handler.clone(),
-                l7_handler.clone(),
-            );
+            TcpIngress::spawn_accept_loop(Arc::new(ingress), &mut tasks, rx, tcp_handler.clone());
             active_listeners.insert(id, (binding, tx));
         }
 
         // 2. Spawn initial pre-bound UDP listeners
-        for (_id, socket, binding) in self.initial_udp {
+        for ingress in self.initial_udp {
+            let binding = IngressBinding::Udp(ingress.binding().clone());
+            let id = binding.id().to_string();
             let (tx, rx) = watch::channel(false);
-            UdpSocket::spawn_receive_loop(
-                socket,
-                binding.clone(),
-                &mut tasks,
-                rx,
-                udp_l4_handler.clone(),
-                udp_l7_handler.clone(),
-            );
-            active_listeners.insert(binding.id.clone(), (binding, tx));
+            UdpIngress::spawn_receive_loop(Arc::new(ingress), &mut tasks, rx, udp_handler.clone());
+            active_listeners.insert(id, (binding, tx));
         }
 
         // 3. Reconcile any declared un-bound initial bindings
@@ -222,10 +164,8 @@ impl TrafficEngine {
                 &mut active_listeners,
                 self.initial_bindings,
                 &mut tasks,
-                l4_handler.clone(),
-                l7_handler.clone(),
-                udp_l4_handler.clone(),
-                udp_l7_handler.clone(),
+                tcp_handler.clone(),
+                udp_handler.clone(),
             );
         }
 
@@ -246,10 +186,8 @@ impl TrafficEngine {
                         &mut active_listeners,
                         desired,
                         &mut tasks,
-                        l4_handler.clone(),
-                        l7_handler.clone(),
-                        udp_l4_handler.clone(),
-                        udp_l7_handler.clone(),
+                        tcp_handler.clone(),
+                        udp_handler.clone(),
                     );
                 }
                 Some(res) = tasks.join_next() => {

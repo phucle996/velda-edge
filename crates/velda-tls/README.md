@@ -23,7 +23,7 @@ In high-performance edge gateways, **TLS is computationally the most expensive a
 ```text
 [ Client ] ──────────────( TCP / TLS )──────────────> [ velda-transport ]
                                                              │
-                                                             ▼ (TcpL7Handoff)
+                                                             ▼ (Connection)
                                                        [ velda-composer ]
                                                              │
                                                              ▼ accept(stream)

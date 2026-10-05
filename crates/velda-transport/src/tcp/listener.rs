@@ -97,6 +97,39 @@ impl TcpListener {
         })
     }
 
+    /// Affines the listener socket queue to a specific CPU core (`SO_INCOMING_CPU`) on Linux.
+    ///
+    /// If the kernel does not support `SO_INCOMING_CPU` or running under a restrictive
+    /// container seccomp filter, fails silently with a trace log and preserves normal socket operation.
+    pub fn apply_incoming_cpu(&self, cpu: usize) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.listener.as_raw_fd();
+            let val: libc::c_int = cpu as libc::c_int;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_INCOMING_CPU,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        cpu,
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_INCOMING_CPU socket option skipped or unsupported by kernel"
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = cpu;
+        }
+    }
+
     /// Binds multiple TCP listener shards to the specified address with `SO_REUSEPORT`.
     ///
     /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
@@ -111,6 +144,14 @@ impl TcpListener {
             1
         };
 
+        let available_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        if config.incoming_cpu {
+            first.apply_incoming_cpu(0);
+        }
+
         if target_shards <= 1 {
             return Ok(vec![first]);
         }
@@ -120,7 +161,12 @@ impl TcpListener {
 
         for shard_idx in 1..target_shards {
             match Self::bind(actual_addr, config.clone()) {
-                Ok(shard) => shards.push(shard),
+                Ok(shard) => {
+                    if config.incoming_cpu {
+                        shard.apply_incoming_cpu(shard_idx % available_cpus);
+                    }
+                    shards.push(shard);
+                }
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,

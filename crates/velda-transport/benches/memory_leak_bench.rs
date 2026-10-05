@@ -14,9 +14,9 @@ use std::thread;
 use std::time::Instant;
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
-use velda_transport::ingress::listener::IngressBinding;
+use velda_transport::ingress::IngressBinding;
 use velda_transport::udp::datagram::Datagram;
-use velda_transport::{UdpL7Handoff, UdpSocket, UdpSocketConfig, next_connection_id};
+use velda_transport::{UdpSocket, UdpSocketConfig, next_connection_id};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -108,13 +108,10 @@ fn bench_datagram_handoff_reclamation() {
     for i in 0..iters {
         let payload = vec![0x33u8; 1200];
         let dgram = Datagram::new(peer, local, payload);
-        let handoff = UdpL7Handoff::new(
-            dgram,
-            Arc::clone(&socket),
-            format!("listener_{:03}", i % 100),
-        );
-        let (d, _s, _id) = handoff.into_parts();
-        let _ = std::hint::black_box(d);
+        // Mirrors the UDP ingress dispatch arguments: (listener_id, socket, datagram)
+        let listener_id = format!("listener_{:03}", i % 100);
+        let args = (listener_id, Arc::clone(&socket), dgram);
+        let _ = std::hint::black_box(args);
     }
 
     let elapsed = start.elapsed();
@@ -192,13 +189,9 @@ fn bench_multithread_storm_reclamation() {
                 let id = next_connection_id();
                 let payload = vec![0x55u8; 256];
                 let dgram = Datagram::new(peer, local, payload);
-                let handoff = UdpL7Handoff::new(
-                    dgram,
-                    Arc::clone(&sock),
-                    format!("worker_listener_{:02}", w_idx),
-                );
-                let (d, _s, _id) = handoff.into_parts();
-                let _ = std::hint::black_box((id, d));
+                let listener_id = format!("worker_listener_{:02}", w_idx);
+                let args = (listener_id, Arc::clone(&sock), dgram);
+                let _ = std::hint::black_box((id, args));
             }
         }));
     }
@@ -267,7 +260,7 @@ fn bench_adversarial_zero_retention() {
         // 1. Adversarial IngressBinding attempt
         let is_tcp = i % 2 == 0;
         let proto = if is_tcp { "tcp" } else { "sctp_invalid" };
-        let _ = IngressBinding::from_protocols("fuzz", dummy_addr, proto, "raw", false);
+        let _ = IngressBinding::from_transport("fuzz", dummy_addr, proto, false);
 
         // 2. Dynamic datagram allocation & immediate release
         let payload = &hostile_payloads[i % hostile_payloads.len()];

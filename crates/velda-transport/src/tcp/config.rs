@@ -35,6 +35,9 @@ pub struct TcpListenerConfig {
     /// Polls NIC ring buffers directly in kernel space (`SO_BUSY_POLL`) for up to N microseconds,
     /// bypassing thread sleep/wake epoll context switches on latency-critical tiers.
     pub busy_poll_us: Option<u32>,
+    /// Affines listener socket queues to specific CPU cores (`SO_INCOMING_CPU`) to steer
+    /// packet processing directly to the worker thread's local CPU, maximizing L1/L2 cache locality.
+    pub incoming_cpu: bool,
 }
 
 impl Default for TcpListenerConfig {
@@ -52,6 +55,7 @@ impl Default for TcpListenerConfig {
             defer_accept_secs: None,
             fastopen_backlog: None,
             busy_poll_us: None,
+            incoming_cpu: false,
         }
     }
 }
@@ -113,6 +117,12 @@ impl TcpListenerConfig {
     /// Sets `SO_BUSY_POLL` duration in microseconds on accepted sockets (Linux).
     pub fn with_busy_poll(mut self, busy_poll_us: Option<u32>) -> Self {
         self.busy_poll_us = busy_poll_us;
+        self
+    }
+
+    /// Sets whether to enable `SO_INCOMING_CPU` affinity on listener shards (Linux).
+    pub fn with_incoming_cpu(mut self, enabled: bool) -> Self {
+        self.incoming_cpu = enabled;
         self
     }
 
@@ -237,6 +247,9 @@ impl TcpListenerConfig {
             )
         {
             cfg.busy_poll_us = Some(50);
+        }
+        if topo.kernel.supports_incoming_cpu() {
+            cfg.incoming_cpu = true;
         }
         cfg
     }
@@ -376,5 +389,11 @@ mod tests {
             TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Ultra),
             64
         );
+    }
+
+    #[test]
+    fn test_incoming_cpu_builder() {
+        let cfg = TcpListenerConfig::new().with_incoming_cpu(true);
+        assert!(cfg.incoming_cpu);
     }
 }

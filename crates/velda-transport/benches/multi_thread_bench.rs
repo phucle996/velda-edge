@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use common::format_duration;
-use velda_transport::ingress::listener::IngressBinding;
+use velda_transport::ingress::IngressBinding;
 use velda_transport::{TrafficEngine, UdpSocket, UdpSocketConfig, next_connection_id};
 
 #[tokio::main]
@@ -342,7 +342,9 @@ async fn bench_reconciler_channel_contention() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let engine_task = tokio::spawn(async move {
-        let _ = engine.run(shutdown_rx, |_c| async {}, |_h| async {}).await;
+        let _ = engine
+            .run(shutdown_rx, |_c| async {}, |_id, _s, _d| async {})
+            .await;
     });
 
     let num_producers = 16;
@@ -354,7 +356,7 @@ async fn bench_reconciler_channel_contention() {
 
     let dummy_addr = "127.0.0.1:0".parse().unwrap();
     let template_binding =
-        IngressBinding::from_protocols("reconcile-test", dummy_addr, "tcp", "http", false).unwrap();
+        IngressBinding::from_transport("reconcile-test", dummy_addr, "tcp", false).unwrap();
 
     for _ in 0..num_producers {
         let h = handle.clone();

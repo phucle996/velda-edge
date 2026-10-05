@@ -285,7 +285,7 @@ pub async fn connect_and_forward(
 
     let _ = server.set_nodelay(true);
 
-    forward_connection(client, server).await
+    forward_connection_with_size(client, server, 65536).await
 }
 
 #[cfg(test)]

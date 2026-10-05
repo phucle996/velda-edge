@@ -20,13 +20,13 @@ use crate::error::{Result, TransportError};
 /// update automatically.
 #[derive(Debug)]
 pub struct Connection {
-    id: ConnectionId,
+    pub id: ConnectionId,
     stream: TcpStream,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    bytes_read: u64,
-    bytes_written: u64,
-    listener_id: Option<String>,
+    pub peer: SocketAddr,
+    pub local_addr: SocketAddr,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub listener_id: Option<String>,
 }
 
 use std::cell::Cell;

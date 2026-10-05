@@ -73,7 +73,7 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
   - HTTP routes / API paths (use `Route`, `Path`, or `Prefix`).
 
 ### 2.7 Explicit Ingress Protocol & Pipeline Isolation Invariant (HTTP vs gRPC)
-- **Declared Protocol Over Dynamic Sniffing**: Listeners must declare their application protocol explicitly (`raw` $\to$ `PathKind::L4Direct`, `http` $\to$ HTTP pipeline, `grpc` $\to$ dedicated gRPC pipeline).
+- **Declared Protocol Over Dynamic Sniffing**: Listeners must declare their application protocol explicitly (`raw` $\to$ L4 direct forward, `http` $\to$ HTTP pipeline, `grpc` $\to$ dedicated gRPC pipeline).
 - **Zero Dynamic Sniffing on Hot Path**: The request serving hot path must **never** inspect payloads or sniff HTTP headers (such as `Content-Type: application/grpc`) to dynamically branch between protocols.
 - **Strict Workflow Isolation**:
   - `http` listeners strictly serve HTTP Web/REST traffic through `HttpRouter` and `handle_http_stream`. They do NOT evaluate gRPC routes or fall back into gRPC semantics.

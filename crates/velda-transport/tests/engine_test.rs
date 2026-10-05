@@ -5,114 +5,83 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use velda_transport::{IngressBinding, IngressListener, PathKind, TrafficEngine};
+use velda_transport::{
+    IngressBinding, TcpBinding, TcpIngress, TrafficEngine, UdpSocket, UdpSocketConfig,
+};
+
+fn tcp_binding(id: &str, addr: SocketAddr) -> IngressBinding {
+    IngressBinding::from_transport(id, addr, "tcp", false).unwrap()
+}
+
+fn udp_binding(id: &str, addr: SocketAddr, tls: bool) -> IngressBinding {
+    IngressBinding::from_transport(id, addr, "udp", tls).unwrap()
+}
 
 #[tokio::test]
-async fn test_traffic_engine_configured_from_listeners_json_schema() {
+async fn test_traffic_engine_pre_bound_tcp_ingress_carries_listener_id() {
     let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    // 1. Mirror listeners.json "http" listener:
-    let http_binding =
-        IngressBinding::from_protocols("http", dummy_ephemeral, "tcp", "http1", false).unwrap();
-    let http_listener = IngressListener::bind(http_binding).unwrap();
-    let http_addr = http_listener.local_addr();
-
-    // 2. Mirror listeners.json "https" listener:
-    let https_binding =
-        IngressBinding::from_protocols("https", dummy_ephemeral, "tcp", "http2", true).unwrap();
-    let https_listener = IngressListener::bind(https_binding).unwrap();
-    let https_addr = https_listener.local_addr();
-
-    // 3. Mirror listeners.json "tcp-ingress" listener:
-    let tcp_binding =
-        IngressBinding::from_protocols("tcp-ingress", dummy_ephemeral, "tcp", "raw", false)
-            .unwrap();
-    let tcp_listener = IngressListener::bind(tcp_binding).unwrap();
-    let tcp_addr = tcp_listener.local_addr();
+    let http = TcpIngress::bind(TcpBinding::new("http", dummy_ephemeral, false)).unwrap();
+    let http_addr = http.local_addr();
+    let https = TcpIngress::bind(TcpBinding::new("https", dummy_ephemeral, true)).unwrap();
+    let https_addr = https.local_addr();
+    let raw = TcpIngress::bind(TcpBinding::new("tcp-ingress", dummy_ephemeral, false)).unwrap();
+    let raw_addr = raw.local_addr();
 
     let mut engine = TrafficEngine::new();
-    engine.add_tcp_listener(http_listener);
-    engine.add_tcp_listener(https_listener);
-    engine.add_tcp_listener(tcp_listener);
+    engine.add_tcp_ingress(http);
+    engine.add_tcp_ingress(https);
+    engine.add_tcp_ingress(raw);
     assert_eq!(engine.tcp_listener_count(), 3);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let l4_count = Arc::new(AtomicU32::new(0));
-    let l7_count = Arc::new(AtomicU32::new(0));
-
-    let l4_clone = Arc::clone(&l4_count);
-    let l7_clone = Arc::clone(&l7_count);
+    let web_count = Arc::new(AtomicU32::new(0));
+    let raw_count = Arc::new(AtomicU32::new(0));
+    let web_clone = Arc::clone(&web_count);
+    let raw_clone = Arc::clone(&raw_count);
 
     let engine_task = tokio::spawn(async move {
         engine
             .run(
                 shutdown_rx,
                 move |mut conn| {
-                    let cnt = Arc::clone(&l4_clone);
+                    let web = Arc::clone(&web_clone);
+                    let raw = Arc::clone(&raw_clone);
                     async move {
-                        let mut buf = [0u8; 16];
-                        if matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {
-                            cnt.fetch_add(1, Ordering::SeqCst);
-                            let _ = conn.write_all(b"l4-ok").await;
+                        let listener_id = conn.listener_id().unwrap().to_string();
+                        let mut buf = [0u8; 32];
+                        let _ = conn.read(&mut buf).await;
+                        if listener_id == "http" || listener_id == "https" {
+                            web.fetch_add(1, Ordering::SeqCst);
+                            let _ = conn.write_all(b"web-ok").await;
+                        } else {
+                            assert_eq!(listener_id, "tcp-ingress");
+                            raw.fetch_add(1, Ordering::SeqCst);
+                            let _ = conn.write_all(b"raw-ok").await;
                         }
                     }
                 },
-                move |handoff| {
-                    let cnt = Arc::clone(&l7_clone);
-                    async move {
-                        // Verify listener metadata attached to handoff
-                        assert!(
-                            handoff.listener_id() == "http" || handoff.listener_id() == "https"
-                        );
-
-                        cnt.fetch_add(1, Ordering::SeqCst);
-                        let mut conn = handoff.into_connection();
-                        let _ = conn.write_all(b"l7-ok").await;
-                    }
-                },
+                |_id, _socket, _dgram| async move {},
             )
             .await
     });
 
-    // Client 1: Connects to HTTP listener (port 80)
-    let client1 = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(http_addr).await.unwrap();
-        stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
-
-        let mut buf = [0u8; 5];
+    for (addr, payload, expect) in [
+        (http_addr, &b"GET / HTTP/1.1\r\n\r\n"[..], b"web-ok"),
+        (https_addr, &b"TLS ClientHello payload"[..], b"web-ok"),
+        (raw_addr, &b"raw tcp bytes"[..], b"raw-ok"),
+    ] {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(payload).await.unwrap();
+        let mut buf = [0u8; 6];
         stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"l7-ok");
-    });
+        assert_eq!(&buf, expect);
+    }
 
-    // Client 2: Connects to HTTPS listener (port 443)
-    let client2 = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(https_addr).await.unwrap();
-        stream.write_all(b"TLS ClientHello payload").await.unwrap();
+    assert_eq!(web_count.load(Ordering::SeqCst), 2);
+    assert_eq!(raw_count.load(Ordering::SeqCst), 1);
 
-        let mut buf = [0u8; 5];
-        stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"l7-ok");
-    });
-
-    // Client 3: Connects to TCP ingress listener (port 9000)
-    let client3 = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(tcp_addr).await.unwrap();
-        stream.write_all(b"raw tcp bytes").await.unwrap();
-
-        let mut buf = [0u8; 5];
-        stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"l4-ok");
-    });
-
-    client1.await.unwrap();
-    client2.await.unwrap();
-    client3.await.unwrap();
-
-    assert_eq!(l7_count.load(Ordering::SeqCst), 2);
-    assert_eq!(l4_count.load(Ordering::SeqCst), 1);
-
-    // Signal graceful shutdown
     shutdown_tx.send(true).unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), engine_task)
@@ -128,47 +97,16 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
 
     let mut engine = TrafficEngine::new();
 
-    // 2 HTTP listeners on different ports
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("http-public", dummy_ephemeral, "tcp", "http1", false)
-                .unwrap(),
-        )
-        .unwrap();
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("http-internal", dummy_ephemeral, "tcp", "http1", false)
-                .unwrap(),
-        )
-        .unwrap();
-
-    // 2 TCP listeners on different ports
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("tcp-db-pg", dummy_ephemeral, "tcp", "raw", false)
-                .unwrap(),
-        )
-        .unwrap();
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("tcp-redis", dummy_ephemeral, "tcp", "raw", false)
-                .unwrap(),
-        )
-        .unwrap();
-
-    // 2 UDP listeners on different ports
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("udp-dns", dummy_ephemeral, "udp", "raw", false)
-                .unwrap(),
-        )
-        .unwrap();
-    engine
-        .add_binding(
-            IngressBinding::from_protocols("udp-metrics", dummy_ephemeral, "udp", "raw", false)
-                .unwrap(),
-        )
-        .unwrap();
+    for id in ["http-public", "http-internal", "tcp-db-pg", "tcp-redis"] {
+        engine
+            .add_binding(tcp_binding(id, dummy_ephemeral))
+            .unwrap();
+    }
+    for id in ["udp-dns", "udp-metrics"] {
+        engine
+            .add_binding(udp_binding(id, dummy_ephemeral, false))
+            .unwrap();
+    }
 
     assert_eq!(engine.tcp_listener_count(), 4);
     assert_eq!(engine.udp_listener_count(), 2);
@@ -177,20 +115,12 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
 
     let engine_task = tokio::spawn(async move {
         engine
-            .run_with_udp(
+            .run(
                 shutdown_rx,
                 |mut conn| async move {
                     let mut buf = [0u8; 32];
                     if let Ok(n) = conn.read(&mut buf).await {
                         let resp = format!("ack-tcp-{}", String::from_utf8_lossy(&buf[..n]));
-                        let _ = conn.write_all(resp.as_bytes()).await;
-                    }
-                },
-                |handoff| async move {
-                    let mut conn = handoff.into_connection();
-                    let mut buf = [0u8; 32];
-                    if let Ok(n) = conn.read(&mut buf).await {
-                        let resp = format!("ack-http-{}", String::from_utf8_lossy(&buf[..n]));
                         let _ = conn.write_all(resp.as_bytes()).await;
                     }
                 },
@@ -231,9 +161,9 @@ async fn test_traffic_engine_declarative_reconciliation() {
     let handle = engine.handle();
 
     // Initial binding: port 1 only
-    let binding1 =
-        IngressBinding::from_protocols("listener-1", free_addr1, "tcp", "raw", false).unwrap();
-    engine.add_binding(binding1).unwrap();
+    engine
+        .add_binding(tcp_binding("listener-1", free_addr1))
+        .unwrap();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -248,7 +178,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
                         let _ = conn.write_all(msg.as_bytes()).await;
                     }
                 },
-                |_handoff| async move {},
+                |_id, _socket, _dgram| async move {},
             )
             .await
     });
@@ -267,10 +197,8 @@ async fn test_traffic_engine_declarative_reconciliation() {
     }
 
     // 2. Reconcile: remove listener 1, add listener 2
-    let binding2 =
-        IngressBinding::from_protocols("listener-2", free_addr2, "tcp", "raw", false).unwrap();
     handle
-        .reconcile(vec![binding2])
+        .reconcile(vec![tcp_binding("listener-2", free_addr2)])
         .await
         .expect("reconcile should succeed");
 
@@ -302,9 +230,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
 }
 
 #[tokio::test]
-async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
-    use velda_transport::{UdpL7Handoff, UdpSocket, UdpSocketConfig};
-
+async fn test_multi_protocol_engine_tcp_udp_dispatch_by_listener_id() {
     let l_tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let free_tcp = l_tcp.local_addr().unwrap();
     let l_h1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -322,23 +248,16 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
     drop(s_udp);
     drop(s_h3);
 
-    let tcp_bind = IngressBinding::from_protocols("tcp", free_tcp, "tcp", "raw", false).unwrap();
-    let h1_bind = IngressBinding::from_protocols("h1", free_h1, "tcp", "http1", false).unwrap();
-    let h2_bind = IngressBinding::from_protocols("h2", free_h2, "tcp", "http2", false).unwrap();
-    let udp_bind = IngressBinding::from_protocols("udp", free_udp, "udp", "raw", false).unwrap();
-    let h3_bind = IngressBinding::from_protocols("h3", free_h3, "udp", "http3", true).unwrap();
+    let tcp_bind = tcp_binding("tcp", free_tcp);
+    let h1_bind = tcp_binding("h1", free_h1);
+    let h2_bind = tcp_binding("h2", free_h2);
+    let udp_bind = udp_binding("udp", free_udp, false);
+    let h3_bind = udp_binding("h3", free_h3, true);
 
-    assert_eq!(tcp_bind.path, PathKind::L4Direct);
-    assert_eq!(h1_bind.path, PathKind::L7Handoff);
-    assert_eq!(h2_bind.path, PathKind::L7Handoff);
-    assert_eq!(udp_bind.path, PathKind::L4Direct);
-    assert_eq!(h3_bind.path, PathKind::L7Handoff);
-
-    assert!(tcp_bind.is_tcp());
-    assert!(h1_bind.is_tcp());
-    assert!(h2_bind.is_tcp());
-    assert!(udp_bind.is_udp());
-    assert!(h3_bind.is_udp());
+    assert!(tcp_bind.is_tcp() && h1_bind.is_tcp() && h2_bind.is_tcp());
+    assert!(udp_bind.is_udp() && h3_bind.is_udp());
+    assert!(h3_bind.tls_enabled());
+    assert!(!tcp_bind.tls_enabled());
 
     let mut engine = TrafficEngine::new();
     engine.add_binding(tcp_bind).unwrap();
@@ -351,28 +270,21 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
 
     let engine_task = tokio::spawn(async move {
         engine
-            .run_all(
+            .run(
                 shutdown_rx,
                 |mut conn| async move {
-                    let mut buf = [0u8; 8];
+                    let mut buf = [0u8; 32];
                     let _ = conn.read(&mut buf).await;
-                    let _ = conn.write_all(b"tcp-ack").await;
+                    let reply: &[u8] = match conn.listener_id() {
+                        Some("h1") => b"h1-ack",
+                        Some("h2") => b"h2-ack",
+                        _ => b"tcp-ack",
+                    };
+                    let _ = conn.write_all(reply).await;
                 },
-                |handoff| async move {
-                    if handoff.listener_id() == "h1" {
-                        let mut conn = handoff.into_connection();
-                        let _ = conn.write_all(b"h1-ack").await;
-                    } else if handoff.listener_id() == "h2" {
-                        let mut conn = handoff.into_connection();
-                        let _ = conn.write_all(b"h2-ack").await;
-                    }
-                },
-                |_id, sock, dgram| async move {
-                    let _ = sock.send_to(b"udp-ack", dgram.peer()).await;
-                },
-                |handoff: UdpL7Handoff| async move {
-                    assert_eq!(handoff.listener_id(), "h3");
-                    let _ = handoff.send_response(b"h3-ack").await;
+                |id, sock, dgram| async move {
+                    let reply: &[u8] = if id == "h3" { b"h3-ack" } else { b"udp-ack" };
+                    let _ = sock.send_to(reply, dgram.peer()).await;
                 },
             )
             .await
@@ -380,53 +292,32 @@ async fn test_multi_protocol_engine_http1_http2_tcp_udp_http3() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Test TCP
-    {
-        let mut s = TcpStream::connect(free_tcp).await.unwrap();
-        s.write_all(b"hello").await.unwrap();
-        let mut buf = [0u8; 7];
+    for (addr, payload, expect) in [
+        (free_tcp, &b"hello"[..], &b"tcp-ack"[..]),
+        (free_h1, &b"GET / HTTP/1.1\r\n\r\n"[..], &b"h1-ack"[..]),
+        (
+            free_h2,
+            &b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"[..],
+            &b"h2-ack"[..],
+        ),
+    ] {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(payload).await.unwrap();
+        let mut buf = vec![0u8; expect.len()];
         s.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"tcp-ack");
+        assert_eq!(buf, expect);
     }
 
-    // 2. Test HTTP/1
-    {
-        let mut s = TcpStream::connect(free_h1).await.unwrap();
-        s.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
-        let mut buf = [0u8; 6];
-        s.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"h1-ack");
-    }
-
-    // 3. Test HTTP/2
-    {
-        let mut s = TcpStream::connect(free_h2).await.unwrap();
-        s.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = [0u8; 6];
-        s.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"h2-ack");
-    }
-
-    // 4. Test UDP
-    {
+    for (addr, payload, expect) in [
+        (free_udp, &b"ping"[..], &b"udp-ack"[..]),
+        (free_h3, &b"quic-data"[..], &b"h3-ack"[..]),
+    ] {
         let client =
             UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
-        client.send_to(b"ping", free_udp).await.unwrap();
-        let mut buf = [0u8; 7];
+        client.send_to(payload, addr).await.unwrap();
+        let mut buf = [0u8; 16];
         let (n, _) = client.recv_from(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"udp-ack");
-    }
-
-    // 5. Test HTTP/3 over UDP
-    {
-        let client =
-            UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
-        client.send_to(b"quic-data", free_h3).await.unwrap();
-        let mut buf = [0u8; 6];
-        let (n, _) = client.recv_from(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"h3-ack");
+        assert_eq!(&buf[..n], expect);
     }
 
     shutdown_tx.send(true).unwrap();
