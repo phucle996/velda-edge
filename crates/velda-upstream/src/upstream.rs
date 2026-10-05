@@ -68,7 +68,7 @@ impl UpstreamTimeouts {
 
 /// Represents an active logical upstream managing backend discovery, health, and load balancing.
 pub struct Upstream<LB: LoadBalancer = RoundRobin> {
-    id: String,
+    id: Arc<str>,
     protocol: Arc<str>,
     discovery: Arc<Discovery>,
     health: Arc<HealthTracker>,
@@ -80,14 +80,14 @@ pub struct Upstream<LB: LoadBalancer = RoundRobin> {
 impl<LB: LoadBalancer> Upstream<LB> {
     /// Primary constructor for a fully configured upstream entity.
     pub fn new(
-        id: impl Into<String>,
+        id: impl AsRef<str>,
         protocol: impl Into<Arc<str>>,
         discovery: Arc<Discovery>,
         balancer: LB,
         timeouts: UpstreamTimeouts,
     ) -> Self {
         Self {
-            id: id.into(),
+            id: Arc::from(id.as_ref()),
             protocol: protocol.into(),
             discovery,
             health: Arc::new(HealthTracker::new(HealthConfig::default())),
@@ -186,7 +186,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let endpoints = self.discovery.current_endpoints();
         let all_eps = endpoints.all_endpoints();
         if all_eps.is_empty() {
-            return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+            return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
 
         let cached_degraded;
@@ -197,7 +197,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
             let current_epoch = self.health.epoch();
             cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
             if cached_degraded.is_empty() {
-                return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+                return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
             &cached_degraded[..]
         };
@@ -205,7 +205,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let selected = self
             .balancer
             .select(usable, &SelectionContext::NONE)
-            .ok_or_else(|| UpstreamError::NoEndpointsAvailable(self.id.clone()))?;
+            .ok_or_else(|| UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)))?;
 
         Ok(selected.address)
     }
@@ -223,7 +223,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let endpoints = self.discovery.current_endpoints();
         let all_eps = endpoints.all_endpoints();
         if all_eps.is_empty() {
-            return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+            return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
 
         let cached_degraded;
@@ -234,7 +234,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
             let current_epoch = self.health.epoch();
             cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
             if cached_degraded.is_empty() {
-                return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
+                return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
             &cached_degraded[..]
         };

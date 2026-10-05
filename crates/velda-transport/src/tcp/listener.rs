@@ -254,7 +254,12 @@ impl TcpListener {
             }
         }
 
-        let local_addr = stream.local_addr().unwrap_or(self.local_addr);
+        // Avoid a getsockname() syscall if the bound address is already specific (non-unspecified).
+        let local_addr = if self.local_addr.ip().is_unspecified() {
+            stream.local_addr().unwrap_or(self.local_addr)
+        } else {
+            self.local_addr
+        };
         let id = crate::connection::next_connection_id();
 
         Ok(Connection::new(id, stream, peer_addr, local_addr))

@@ -9,6 +9,7 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use common::CountingAllocator;
@@ -159,21 +160,21 @@ async fn bench_connection_lifecycle() {
         ns_op, ops_sec,
     );
 
-    // 2. Listener-id tagging on the accepted connection
+    // 2. Listener-id tagging on the accepted connection (Arc<str> refcount clone)
     let conn = Connection::new(ConnectionId::new(42), server_stream, peer, addr);
-    let listener_id = "listener-http1-01".to_string();
+    let listener_id: Arc<str> = Arc::from("listener-http1-01");
     ALLOCATOR.reset();
     let start = Instant::now();
     let mut curr_conn = conn;
     for _ in 0..iters {
-        curr_conn = curr_conn.with_listener_id(listener_id.clone());
+        curr_conn = curr_conn.with_listener_id(Arc::clone(&listener_id));
     }
     let elapsed = start.elapsed();
     let (allocs, _) = ALLOCATOR.snapshot();
     let ns_op = elapsed.as_nanos() as f64 / iters as f64;
     let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
     println!(
-        "| **Connection::with_listener_id** | listener tag (String clone) | **{:.2} ns** | **{:.2}** | {} ops/s |",
+        "| **Connection::with_listener_id** | listener tag (Arc<str> clone) | **{:.2} ns** | **{:.2}** | {} ops/s |",
         ns_op,
         allocs as f64 / iters as f64,
         ops_sec,

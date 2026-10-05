@@ -3,6 +3,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x509_parser::extensions::{GeneralName, ParsedExtension};
@@ -146,8 +148,7 @@ fn is_valid_domain_sni(s: &str) -> bool {
 /// Extracts all valid DNS Subject Alternative Names (SAN) or Common Names (CN) from a PEM certificate chain.
 /// Returns error if the certificate is invalid, malformed, or contains NO DNS SAN / CN.
 pub fn extract_cert_snis(cert_pem: &str) -> Result<Vec<String>, SyncError> {
-    let mut reader = cert_pem.as_bytes();
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| SyncError::Validation {
             domain: "tls".into(),
@@ -213,27 +214,17 @@ pub fn extract_cert_snis(cert_pem: &str) -> Result<Vec<String>, SyncError> {
 
 /// Validates private key PEM format (PKCS#1, PKCS#8, or SEC1).
 pub fn validate_private_key_pem(key_pem: &str) -> Result<(), SyncError> {
-    let mut reader = key_pem.as_bytes();
-    let key = rustls_pemfile::private_key(&mut reader).map_err(|e| SyncError::Validation {
+    PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| SyncError::Validation {
         domain: "tls".into(),
         reason: format!("Failed to parse private key PEM: {e}"),
     })?;
-
-    if key.is_none() {
-        return Err(SyncError::Validation {
-            domain: "tls".into(),
-            reason: "Private key PEM contains no recognized private key (PKCS#1, PKCS#8, or SEC1)"
-                .into(),
-        });
-    }
 
     Ok(())
 }
 
 /// Validates CA bundle PEM format.
 pub fn validate_ca_bundle_pem(ca_pem: &str) -> Result<(), SyncError> {
-    let mut reader = ca_pem.as_bytes();
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(ca_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| SyncError::Validation {
             domain: "tls".into(),

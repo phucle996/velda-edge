@@ -28,21 +28,24 @@ use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 /// Dispatches an accepted TCP connection to its compiled pipeline:
 /// L7 (HTTP/1, HTTP/2, gRPC) when the listener has one, otherwise raw L4 forwarding.
 pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
-    // One snapshot for the whole dispatch decision (pipeline lookup and L4 routing agree).
-    let rt = runtime.load_full();
     let Some(listener_id) = connection.listener_id.clone() else {
         tracing::warn!(peer = %connection.peer(), "Accepted TCP connection without listener_id; dropping");
         return;
     };
 
+    // Fast-path: use zero-atomic RCU read guard to check if an L7 pipeline is compiled.
+    let pipeline = {
+        let rt = runtime.load();
+        rt.pipelines.tcp_pipeline(&listener_id).cloned()
+    };
+
     // Pipeline configs are `Copy`, so this is a plain memcpy, not a heap clone.
-    let Some(pipeline) = rt.pipelines.tcp_pipeline(&listener_id).cloned() else {
-        // Raw L4 forwarding keeps the snapshot for the connection's lifetime.
+    let Some(pipeline) = pipeline else {
+        // Raw L4 forwarding keeps an owned snapshot for the connection's lifetime.
+        let rt = runtime.load_full();
         handle_l4_tcp(connection, listener_id, &rt).await;
         return;
     };
-    // L7 handlers load their own snapshots; do not pin this one for the connection lifetime.
-    drop(rt);
 
     let context = IngressContext::new_tcp(
         connection.id(),
@@ -74,13 +77,17 @@ pub async fn handle_udp(
     datagram: Datagram,
     runtime: &SharedRuntime,
 ) {
-    let rt = runtime.load_full();
+    // Fast-path: use zero-atomic RCU read guard to check if an L7 pipeline is compiled.
+    let pipeline = {
+        let rt = runtime.load();
+        rt.pipelines.udp_pipeline(&listener_id).cloned()
+    };
 
-    let Some(pipeline) = rt.pipelines.udp_pipeline(&listener_id).cloned() else {
+    let Some(pipeline) = pipeline else {
+        let rt = runtime.load();
         handle_l4_udp(listener_id, socket, datagram, &rt).await;
         return;
     };
-    drop(rt);
 
     let context = IngressContext::new_udp(
         listener_id,

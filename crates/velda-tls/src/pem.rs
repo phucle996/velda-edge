@@ -1,14 +1,13 @@
 //! In-memory PEM to DER parser and RootCertStore builder.
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, private_key};
 
 use crate::error::TlsError;
 
 /// Parses a certificate chain from a PEM-encoded string into DER certificates.
 pub fn parse_certs_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>, TlsError> {
-    let mut reader = pem.as_bytes();
-    let cert_list: Vec<CertificateDer<'static>> = certs(&mut reader)
+    let cert_list: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             TlsError::InvalidCertificate(format!("Failed to parse certificate PEM: {e}"))
@@ -25,14 +24,9 @@ pub fn parse_certs_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>, TlsErr
 
 /// Parses a private key from a PEM-encoded string (PKCS#1, PKCS#8, or SEC1).
 pub fn parse_private_key_pem(pem: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
-    let mut reader = pem.as_bytes();
-    let key = private_key(&mut reader)
-        .map_err(|e| TlsError::InvalidPrivateKey(format!("Failed to parse private key PEM: {e}")))?
-        .ok_or_else(|| {
-            TlsError::InvalidPrivateKey(
-                "No recognized private key found in PEM (must be PKCS#1, PKCS#8, or SEC1)".into(),
-            )
-        })?;
+    let key = PrivateKeyDer::from_pem_slice(pem.as_bytes()).map_err(|e| {
+        TlsError::InvalidPrivateKey(format!("Failed to parse private key PEM: {e}"))
+    })?;
 
     Ok(key)
 }

@@ -1,6 +1,7 @@
 //! Error taxonomy for the `velda-upstream` subsystem.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Result alias for upstream operations.
@@ -11,7 +12,7 @@ pub type Result<T> = std::result::Result<T, UpstreamError>;
 pub enum UpstreamError {
     /// No endpoints in the upstream are currently active or healthy.
     #[error("no usable endpoints available for upstream '{0}'")]
-    NoEndpointsAvailable(String),
+    NoEndpointsAvailable(Arc<str>),
 
     /// Failed to connect to a backend endpoint.
     #[error("failed to connect to backend endpoint '{endpoint}': {reason}")]

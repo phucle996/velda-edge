@@ -220,22 +220,26 @@ pub async fn handle_l4_udp(
 
     let session_table = get_udp_session_table();
 
+    let client_addr = datagram.peer();
+
     // Atomically acquire existing session or register fresh session. The backend is chosen
     // only for a new session, so existing flows neither pay for nor perturb the balancer.
-    let mut rx = match session_table.get_or_create(&key) {
+    // Use `datagram.into_data()` to move the existing payload buffer into the channel without
+    // any duplicate heap allocations or memcpy.
+    let (mut rx, initial_data) = match session_table.get_or_create(&key) {
         SessionAcquisition::Existing(sender) => {
             if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                sender.try_send(datagram.data().to_vec())
+                sender.try_send(datagram.into_data())
             {
                 tracing::warn!(
                     listener = %listener_id,
-                    peer = %datagram.peer(),
+                    peer = %client_addr,
                     "UDP session buffer full; dropping datagram"
                 );
             }
             return;
         }
-        SessionAcquisition::Created { sender: _, rx } => rx,
+        SessionAcquisition::Created { sender: _, rx } => (rx, datagram.into_data()),
     };
 
     let Some(target_addr) = up.select_target() else {
@@ -243,15 +247,13 @@ pub async fn handle_l4_udp(
             listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
-            peer = %datagram.peer(),
+            peer = %client_addr,
             "No backend endpoints available for L4 UDP upstream; dropping datagram"
         );
         session_table.remove(&key);
         return;
     };
 
-    let client_addr = datagram.peer();
-    let initial_data = datagram.data().to_vec();
     let downstream_socket = socket.clone();
     let session_key = key.clone();
 

@@ -9,7 +9,7 @@ velda-core = { path = "../velda-core" }
 tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros", "time", "rt"] }
 thiserror = "2.0"
 tracing = "0.1"
-socket2 = "0.5"
+socket2 = "0.6"
 libc = "0.2"
 
 [dev-dependencies]
