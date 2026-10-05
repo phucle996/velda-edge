@@ -35,6 +35,7 @@ pnpm-debug.log*
 /postgres-data/
 /postgres-dev-data/
 /postgres-prod-data/
+/storage/
 
 # ── Logs & Telemetry ─────────────────────────────────────────────────
 *.log

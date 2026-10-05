@@ -3,7 +3,7 @@
   "listeners": [
     {
       "id": "http-in",
-      "address": "0.0.0.0:80",
+      "address": "127.0.0.1:61080",
       "transport": {
         "protocol": "tcp"
       },
@@ -25,7 +25,7 @@
     },
     {
       "id": "web-in",
-      "address": "0.0.0.0:443",
+      "address": "127.0.0.1:61443",
       "transport": {
         "protocol": "tcp"
       },
@@ -51,7 +51,7 @@
     },
     {
       "id": "grpc-in",
-      "address": "0.0.0.0:50051",
+      "address": "127.0.0.1:61051",
       "transport": {
         "protocol": "tcp"
       },
@@ -78,7 +78,7 @@
     },
     {
       "id": "h3-in",
-      "address": "0.0.0.0:8443",
+      "address": "127.0.0.1:61444",
       "transport": {
         "protocol": "udp"
       },
@@ -101,7 +101,7 @@
     },
     {
       "id": "tcp-ingress",
-      "address": "0.0.0.0:9000",
+      "address": "127.0.0.1:61900",
       "transport": {
         "protocol": "tcp"
       },

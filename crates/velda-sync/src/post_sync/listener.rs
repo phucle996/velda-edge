@@ -356,9 +356,29 @@ fn probe_socket_conflict(addr: std::net::SocketAddr, proto: L4Protocol) -> bool 
 /// 4. Internal port collisions among configured listeners (preventing overlapping bindings).
 /// 5. Host OS port conflict detection (verifying port availability against host services).
 pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncError> {
+    validate_listeners_with_lkg(listeners, &[])
+}
+
+/// Validates listener rules, skipping host OS port conflict checks for ports already
+/// legitimately bound by the edge data plane as declared in the current LKG artifact.
+pub fn validate_listeners_with_lkg(
+    listeners: &mut [ListenerConfig],
+    current_lkg: &[ListenerConfig],
+) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(listeners.len());
     let mut parsed_bindings: Vec<(&str, L4Protocol, std::net::SocketAddr)> =
         Vec::with_capacity(listeners.len());
+
+    let mut lkg_bindings = HashSet::new();
+    for l in current_lkg {
+        if let Ok(addr) = l.address.parse::<std::net::SocketAddr>() {
+            let proto = match l.transport.protocol.to_ascii_lowercase().as_str() {
+                "udp" => L4Protocol::Udp,
+                _ => L4Protocol::Tcp,
+            };
+            lkg_bindings.insert((proto, addr.port()));
+        }
+    }
 
     for listener in listeners.iter_mut() {
         trim_in_place(&mut listener.id);
@@ -821,6 +841,11 @@ pub fn validate_listeners(listeners: &mut [ListenerConfig]) -> Result<(), SyncEr
     }
 
     for &(id, proto, socket_addr) in &parsed_bindings {
+        // Skip host OS port conflict check if this port is already held by the running edge gateway in LKG
+        if lkg_bindings.contains(&(proto, socket_addr.port())) {
+            continue;
+        }
+
         let mut in_use = false;
 
         if has_proc_data {

@@ -25,6 +25,7 @@ pub mod hardware;
 pub mod l4;
 pub mod l7;
 pub mod lifecycle;
+pub mod provenance;
 pub mod streaming;
 pub mod types;
 
@@ -72,4 +73,5 @@ pub use hardware::{
     MemoryProfile, MemoryTier, ParseTierError, global_hardware_topology, init_hardware_topology,
     probe_cpu, probe_kernel, probe_memory,
 };
+pub use provenance::Provenance;
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

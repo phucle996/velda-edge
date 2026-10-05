@@ -61,6 +61,30 @@ impl Http2Responder {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
+    /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.
+    pub fn send_response_and_cancel_upload(
+        mut self,
+        response: &L7Response,
+    ) -> Result<(), Http2Error> {
+        let has_body = !response.body.is_empty();
+        let http_response = build_h2_response(response.status, &response.headers)?;
+        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
+
+        if let Body::Bytes(b) = &response.body
+            && !b.is_empty()
+        {
+            let _ = send_stream.send_data(b.clone(), true);
+        }
+        send_stream.send_reset(h2::Reason::NO_ERROR);
+        Ok(())
+    }
+
+    /// Aborts the stream immediately with an HTTP/2 RST_STREAM frame.
+    #[inline]
+    pub fn send_reset(&mut self, reason: h2::Reason) {
+        self.respond.send_reset(reason);
+    }
+
     /// Sends a response using the protocol-owned [`Http2Response`] type.
     pub fn send_h2_response(self, response: &Http2Response) -> Result<(), Http2Error> {
         self.send_parts(response.head.status, &response.head.headers, &response.body)

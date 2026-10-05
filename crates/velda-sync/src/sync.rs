@@ -155,7 +155,22 @@ impl SyncComposition {
                 match file_entry.name.as_str() {
                     "listeners" => {
                         let mut listeners = post_sync::listener::parse_listeners(&content)?;
-                        post_sync::listener::validate_listeners(&mut listeners)?;
+                        let lkg_path = self.storage_dir.join("runtime/listeners.bin");
+                        let current_lkg = if lkg_path.exists() {
+                            std::fs::read(&lkg_path)
+                                .ok()
+                                .and_then(|bytes| {
+                                    post_sync::listener::unpack_listeners_from_binary(&bytes).ok()
+                                })
+                                .map(|(_, list)| list)
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        post_sync::listener::validate_listeners_with_lkg(
+                            &mut listeners,
+                            &current_lkg,
+                        )?;
                         let bin = post_sync::listener::compile_listeners_to_binary(
                             &listeners, domain_rev, checksum,
                         )?;

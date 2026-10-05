@@ -165,18 +165,99 @@ pub async fn run_http2_loop<IO>(
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let timeout_duration = std::time::Duration::from_millis(config.idle_timeout_ms);
+    let mut consecutive_not_founds: u32 = 0;
+    const MAX_CONSECUTIVE_NOT_FOUNDS: u32 = 100;
+
     match Http2ServerConnection::handshake(stream, config).await {
         Ok(mut conn) => loop {
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
                 Ok(Ok(Some((head, receiver, responder)))) => {
+                    let mut host_buf = [0u8; 128];
+                    let mut host_len = 0;
+                    let mut heap_host = None;
+                    if let Some(h) = head.host() {
+                        if h.len() <= host_buf.len() {
+                            host_buf[..h.len()].copy_from_slice(h.as_bytes());
+                            host_len = h.len();
+                        } else {
+                            heap_host = Some(h.to_string());
+                        }
+                    }
+                    let host_str: Option<&str> = if host_len > 0 {
+                        std::str::from_utf8(&host_buf[..host_len]).ok()
+                    } else {
+                        heap_host.as_deref()
+                    };
+
+                    let mut http_req = Http2RouteRequest::new(head.path());
+                    if let Some(h) = host_str {
+                        http_req = http_req.with_host(h);
+                    }
+                    http_req = http_req.with_method(head.method.as_str());
+
+                    let rt = runtime.load();
+                    let matched_route = rt
+                        .router
+                        .route_http2(&context.listener_id, &http_req)
+                        .cloned();
+
+                    // ========================================================
+                    // FAST-PATH 404 EVALUATION (Zero Tokio Task Allocation)
+                    //
+                    // Non-matching routes (including misdirected gRPC requests
+                    // or scanner path-fuzzing) are rejected immediately in-place
+                    // without spawning a new task or allocating heap futures.
+                    // ========================================================
+                    let Some(route) = matched_route else {
+                        consecutive_not_founds += 1;
+                        if consecutive_not_founds > MAX_CONSECUTIVE_NOT_FOUNDS {
+                            tracing::warn!(
+                                listener = %context.listener_id,
+                                peer = %context.peer,
+                                consecutive = consecutive_not_founds,
+                                "Aborting HTTP/2 connection: excessive consecutive non-matching routes (possible scan/flood)"
+                            );
+                            break;
+                        }
+
+                        let is_grpc = head
+                            .headers
+                            .get(CONTENT_TYPE)
+                            .is_some_and(|ct| ct.as_bytes().starts_with(b"application/grpc"));
+
+                        let body_text = if is_grpc {
+                            b"404 Not Found: no matching HTTP/2 route (this listener serves HTTP/2 web traffic, not gRPC)\n".as_slice()
+                        } else {
+                            b"404 Not Found: no matching route\n".as_slice()
+                        };
+
+                        let not_found =
+                            L7Response::from_bytes(StatusCode::NOT_FOUND, body_text.to_vec())
+                                .with_header(
+                                    CONTENT_TYPE,
+                                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                                );
+
+                        // If peer has not finished transmitting the request body,
+                        // immediately issue RST_STREAM to terminate peer upload and
+                        // free socket buffers instantly.
+                        if !receiver.is_end_stream() {
+                            let _ = responder.send_response_and_cancel_upload(&not_found);
+                        } else {
+                            let _ = responder.send_response(&not_found);
+                        }
+                        continue;
+                    };
+
+                    consecutive_not_founds = 0;
                     let ctx_clone = context.clone();
                     let rt_clone = runtime.clone();
                     let cfg_clone = config;
                     tokio::spawn(async move {
                         serve_http2_stream(
-                            head, receiver, responder, ctx_clone, cfg_clone, rt_clone,
+                            head, receiver, responder, ctx_clone, cfg_clone, rt_clone, route,
                         )
                         .await;
                     });
@@ -204,57 +285,15 @@ pub async fn run_http2_loop<IO>(
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
 async fn serve_http2_stream(
-    head: Http2RequestHead,
+    mut head: Http2RequestHead,
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
     context: IngressContext,
     config: Http2Config,
     runtime: SharedRuntime,
+    route: velda_router::Http2Route,
 ) {
-    let mut host_buf = [0u8; 128];
-    let mut host_len = 0;
-    let mut heap_host = None;
-    if let Some(h) = head.host() {
-        if h.len() <= host_buf.len() {
-            host_buf[..h.len()].copy_from_slice(h.as_bytes());
-            host_len = h.len();
-        } else {
-            heap_host = Some(h.to_string());
-        }
-    }
-    let host_str: Option<&str> = if host_len > 0 {
-        std::str::from_utf8(&host_buf[..host_len]).ok()
-    } else {
-        heap_host.as_deref()
-    };
-
-    let mut http_req = Http2RouteRequest::new(head.path());
-    if let Some(h) = host_str {
-        http_req = http_req.with_host(h);
-    }
-    http_req = http_req.with_method(head.method.as_str());
-
     let rt = runtime.load();
-    let Some(route) = rt.router.route_http2(&context.listener_id, &http_req) else {
-        tracing::debug!(
-            listener = %context.listener_id,
-            path = %head.path(),
-            host = ?host_str,
-            method = %head.method,
-            "No HTTP/2 route matched"
-        );
-        let not_found = L7Response::from_bytes(
-            StatusCode::NOT_FOUND,
-            b"404 Not Found: no matching route\n".to_vec(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        let _ = responder.send_response(&not_found);
-        return;
-    };
-
     let Some(upstream) = rt.upstreams.http2.get(&route.upstream_name) else {
         tracing::error!(
             listener = %context.listener_id,
@@ -270,12 +309,28 @@ async fn serve_http2_stream(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
-        let _ = responder.send_response(&no_backend);
+        if !receiver.is_end_stream() {
+            let _ = responder.send_response_and_cancel_upload(&no_backend);
+        } else {
+            let _ = responder.send_response(&no_backend);
+        }
         return;
     };
 
     let strategy = upstream.strategy;
-    let mut head = head;
+    let mut host_buf = [0u8; 128];
+    let host_len = if let Some(h) = head.host() {
+        let len = h.len().min(host_buf.len());
+        host_buf[..len].copy_from_slice(&h.as_bytes()[..len]);
+        len
+    } else {
+        0
+    };
+    let host_str = if host_len > 0 {
+        std::str::from_utf8(&host_buf[..host_len]).ok()
+    } else {
+        None
+    };
     enrich_forwarded_headers(&mut head.headers, &context, host_str);
 
     // HTTP/2 Pipeline Invariant (RFC 9113):

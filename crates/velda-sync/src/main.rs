@@ -18,6 +18,30 @@ use velda_sync::{SyncComposition, SyncOutcome};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Check CLI arguments first before daemon bootstrap
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 {
+        let first = args[1].as_str();
+        if matches!(first, "-v" | "--version" | "version") {
+            let prov = velda_core::Provenance::current();
+            println!("{}", prov.banner("velda-sync"));
+            return Ok(());
+        }
+        if matches!(first, "-h" | "--help" | "help") {
+            println!(
+                "velda-sync — Configuration Synchronizer & Reconciler Daemon\n\n\
+                 USAGE:\n    velda-sync [OPTIONS]\n\n\
+                 OPTIONS:\n    -v, --version, version    Print version and build provenance information\n    -h, --help, help          Print help information\n\n\
+                 ENVIRONMENT:\n    VELDA_SYNC_MODE           Synchronization mode (standalone, control_plane)\n    VELDA_STORAGE_DIR         Storage directory for LKG configurations\n    VELDA_SOCKET_PATH         Unix domain socket path for notifications\n    VELDA_POLL_INTERVAL_MS    Reconciliation polling interval in ms\n"
+            );
+            return Ok(());
+        }
+    }
+
+    // Force link retention for watermark in .rodata
+    let _ = velda_core::provenance::watermark();
+    let prov = velda_core::Provenance::current();
+
     // Initialize pure non-blocking logging provider (reads VELDA_SYNC_LOG_LEVEL and VELDA_SYNC_LOG_FORMAT)
     // WorkerGuard keeps the background worker thread alive and flushes on drop.
     let _log_guard = init_logger();
@@ -85,6 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!(
+        version = prov.version,
+        git_hash = prov.git_hash,
+        author = prov.author,
         mode = %mode_desc,
         storage = %storage_dir.display(),
         socket = %socket_path.display(),

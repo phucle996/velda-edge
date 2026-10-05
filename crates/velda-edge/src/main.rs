@@ -8,6 +8,30 @@ use velda_edge::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Check CLI arguments first before runtime bootstrap
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        let first = args[1].as_str();
+        if matches!(first, "-v" | "--version" | "version") {
+            let prov = velda_core::Provenance::current();
+            println!("{}", prov.banner("velda-edge"));
+            return Ok(());
+        }
+        if matches!(first, "-h" | "--help" | "help") {
+            println!(
+                "Velda Edge — High-Performance Edge Traffic Engine\n\n\
+                 USAGE:\n    velda-edge [OPTIONS]\n\n\
+                 OPTIONS:\n    -v, --version, version    Print version and build provenance information\n    -h, --help, help          Print help information\n\n\
+                 ENVIRONMENT:\n    VELDA_RUNTIME_DIR         Directory containing compiled runtime profiles and configurations\n"
+            );
+            return Ok(());
+        }
+    }
+
+    // Force link retention for watermark in .rodata
+    let _ = velda_core::provenance::watermark();
+    let prov = velda_core::Provenance::current();
+
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -16,7 +40,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    tracing::info!("Initializing Velda Edge Data Plane supervisor...");
+    tracing::info!(
+        version = prov.version,
+        git_hash = prov.git_hash,
+        author = prov.author,
+        target = prov.target_triple,
+        "Initializing Velda Edge Data Plane supervisor..."
+    );
 
     // Discover hardware topology and runtime profile to size Tokio runtime
     let config = EdgeConfig::default();

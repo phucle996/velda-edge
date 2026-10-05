@@ -63,6 +63,9 @@ impl TlsClientEngine {
 
             for sni in &upstream.sni {
                 let trimmed = sni.trim().to_ascii_lowercase();
+                if trimmed.starts_with('*') {
+                    continue;
+                }
                 let server_name = ServerName::try_from(trimmed.clone()).map_err(|_| {
                     TlsError::SniNotFound(format!("Invalid DNS name for upstream SNI: {sni}"))
                 })?;
