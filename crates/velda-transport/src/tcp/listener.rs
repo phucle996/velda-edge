@@ -302,9 +302,13 @@ impl TcpListener {
     {
         tracing::info!(listen_addr = %self.local_addr, "TCP listener started serving");
 
+        // Exponential backoff on accept errors (e.g. EMFILE) to avoid a CPU-spinning error loop.
+        let mut backoff = std::time::Duration::from_millis(5);
+
         loop {
             match self.accept_with_shutdown(&mut shutdown).await {
                 Ok(Some(conn)) => {
+                    backoff = std::time::Duration::from_millis(5);
                     tracing::debug!(
                         connection_id = %conn.id(),
                         peer = %conn.peer(),
@@ -318,6 +322,11 @@ impl TcpListener {
                 }
                 Err(err) => {
                     tracing::error!(listen_addr = %self.local_addr, error = %err, "Accept loop error encountered");
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = shutdown.changed() => {}
+                    }
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(1));
                 }
             }
         }

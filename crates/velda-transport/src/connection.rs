@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
@@ -26,7 +27,8 @@ pub struct Connection {
     pub local_addr: SocketAddr,
     pub bytes_read: u64,
     pub bytes_written: u64,
-    pub listener_id: Option<String>,
+    /// Listener identifier shared across all connections of a listener (refcount clone, no alloc).
+    pub listener_id: Option<Arc<str>>,
 }
 
 use std::cell::Cell;
@@ -106,7 +108,7 @@ impl Connection {
 
     /// Attaches an ingress listener identifier to this connection.
     #[inline]
-    pub fn with_listener_id(mut self, id: impl Into<String>) -> Self {
+    pub fn with_listener_id(mut self, id: impl Into<Arc<str>>) -> Self {
         self.listener_id = Some(id.into());
         self
     }

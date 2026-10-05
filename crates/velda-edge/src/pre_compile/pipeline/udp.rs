@@ -12,7 +12,7 @@ use std::time::Duration;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use velda_transport::{Datagram, UdpSocket};
 
-use crate::runtime::SharedRuntime;
+use crate::runtime::Runtime;
 
 use std::hash::{BuildHasher, Hash};
 
@@ -20,7 +20,7 @@ use std::hash::{BuildHasher, Hash};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UdpSessionKey {
     /// Ingress listener identifier accepting the client flow.
-    pub listener_id: String,
+    pub listener_id: Arc<str>,
     /// Client remote socket address.
     pub client_addr: SocketAddr,
 }
@@ -155,12 +155,11 @@ pub fn get_udp_session_table() -> &'static UdpSessionTable {
 
 /// Handles raw UDP L4 datagrams with support for both unidirectional and bidirectional flows.
 pub async fn handle_l4_udp(
-    listener_id: String,
+    listener_id: Arc<str>,
     socket: Arc<UdpSocket>,
     datagram: Datagram,
-    runtime: &SharedRuntime,
+    rt: &Runtime,
 ) {
-    let rt = runtime.load();
     let Some(route) = rt.router.route_udp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,
@@ -181,19 +180,18 @@ pub async fn handle_l4_udp(
         return;
     };
 
-    let Some(target_addr) = up.select_target() else {
-        tracing::error!(
-            listener = %listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            peer = %datagram.peer(),
-            "No backend endpoints available for L4 UDP upstream; dropping datagram"
-        );
-        return;
-    };
-
-    // 1. Unidirectional Mode (1 chiều)
+    // 1. Unidirectional Mode (1 chiều): every datagram is balanced independently.
     if route.is_unidirectional() {
+        let Some(target_addr) = up.select_target() else {
+            tracing::error!(
+                listener = %listener_id,
+                route = %route.id,
+                upstream = %route.upstream_name,
+                peer = %datagram.peer(),
+                "No backend endpoints available for L4 UDP upstream; dropping datagram"
+            );
+            return;
+        };
         tracing::debug!(
             listener = %listener_id,
             target = %target_addr,
@@ -216,13 +214,14 @@ pub async fn handle_l4_udp(
     let idle_timeout = route.udp_idle_timeout.unwrap_or(Duration::from_secs(30));
 
     let key = UdpSessionKey {
-        listener_id: listener_id.clone(),
+        listener_id: Arc::clone(&listener_id),
         client_addr: datagram.peer(),
     };
 
     let session_table = get_udp_session_table();
 
-    // Atomically acquire existing session or register fresh session
+    // Atomically acquire existing session or register fresh session. The backend is chosen
+    // only for a new session, so existing flows neither pay for nor perturb the balancer.
     let mut rx = match session_table.get_or_create(&key) {
         SessionAcquisition::Existing(sender) => {
             if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
@@ -237,6 +236,18 @@ pub async fn handle_l4_udp(
             return;
         }
         SessionAcquisition::Created { sender: _, rx } => rx,
+    };
+
+    let Some(target_addr) = up.select_target() else {
+        tracing::error!(
+            listener = %listener_id,
+            route = %route.id,
+            upstream = %route.upstream_name,
+            peer = %datagram.peer(),
+            "No backend endpoints available for L4 UDP upstream; dropping datagram"
+        );
+        session_table.remove(&key);
+        return;
     };
 
     let client_addr = datagram.peer();

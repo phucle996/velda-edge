@@ -1,5 +1,6 @@
 //! End-to-end gateway execution and traffic serving coordination.
 
+use std::sync::Arc;
 use tokio::sync::watch;
 use velda_transport::{Connection, Datagram, TrafficEngine};
 
@@ -50,7 +51,7 @@ pub async fn run_gateway(
     };
 
     let rt_udp = shared_runtime.clone();
-    let udp_handler = move |id: String, socket, dgram: Datagram| {
+    let udp_handler = move |id: Arc<str>, socket, dgram: Datagram| {
         let rt = rt_udp.clone();
         async move {
             handle_udp(id, socket, dgram, &rt).await;

@@ -3,19 +3,18 @@
 //! Direct byte-level proxying between downstream client and upstream backend
 //! via `velda_transport::forward_connection`. Pure raw TCP with zero TLS termination.
 
+use std::sync::Arc;
+
 use velda_transport::Connection;
 
-use crate::runtime::SharedRuntime;
+use crate::runtime::Runtime;
 
 /// Handles a raw L4 TCP connection: evaluates route, acquires backend stream, and pumps bytes.
-pub async fn handle_l4_tcp(conn: Connection, runtime: &SharedRuntime) {
+///
+/// `rt` is the snapshot chosen by the dispatcher, so the pipeline decision and the L4 route
+/// lookup always come from the same generation.
+pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime) {
     let peer = conn.peer();
-    let Some(listener_id) = conn.listener_id().map(|s| s.to_string()) else {
-        tracing::warn!(peer = %peer, "Received L4 connection without listener_id; dropping");
-        return;
-    };
-
-    let rt = runtime.load();
     let Some(route) = rt.router.route_tcp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,

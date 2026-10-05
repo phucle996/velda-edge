@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -10,6 +11,9 @@ use crate::connection::Connection;
 use crate::error::Result;
 use crate::tcp::config::TcpListenerConfig;
 use crate::tcp::listener::TcpListener;
+
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(5);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 
 /// Ingress binding configuration for stateful TCP listeners.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,13 +51,20 @@ impl TcpBinding {
 pub struct TcpIngress {
     listeners: Vec<TcpListener>,
     binding: TcpBinding,
+    /// Shared listener id stamped onto every accepted connection (refcount clone per accept).
+    listener_id: Arc<str>,
 }
 
 impl TcpIngress {
     /// Binds a TCP ingress listener to the address configured in its binding.
     pub fn bind(binding: TcpBinding) -> Result<Self> {
         let listeners = TcpListener::bind_shards(binding.addr, binding.config.clone())?;
-        Ok(Self { listeners, binding })
+        let listener_id = Arc::from(binding.id.as_str());
+        Ok(Self {
+            listeners,
+            binding,
+            listener_id,
+        })
     }
 
     /// Returns the bound local socket address.
@@ -83,7 +94,7 @@ impl TcpIngress {
     /// Accepts an incoming connection from the first shard, tagged with this listener's id.
     pub async fn accept(&self) -> Result<Connection> {
         let conn = self.listeners[0].accept().await?;
-        Ok(conn.with_listener_id(self.binding.id.clone()))
+        Ok(conn.with_listener_id(Arc::clone(&self.listener_id)))
     }
 
     /// Spawns an ingress accept loop for each listener shard on the provided `JoinSet`.
@@ -123,7 +134,7 @@ impl TcpIngress {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let local_addr = ingress.local_addr();
-        let listener_id = ingress.binding.id.clone();
+        let listener_id = Arc::clone(&ingress.listener_id);
         let total_shards = ingress.listeners.len();
         tracing::info!(
             listener_id = %listener_id,
@@ -132,6 +143,10 @@ impl TcpIngress {
             total_shards,
             "TCP ingress listener shard bound and serving"
         );
+
+        // Exponential backoff on accept errors (e.g. EMFILE) so a persistent failure
+        // cannot spin the CPU or flood logs.
+        let mut backoff = ACCEPT_BACKOFF_MIN;
 
         loop {
             if *shutdown.borrow() {
@@ -143,6 +158,7 @@ impl TcpIngress {
                 .await
             {
                 Ok(Some(conn)) => {
+                    backoff = ACCEPT_BACKOFF_MIN;
                     tracing::debug!(
                         listener_id = %listener_id,
                         conn_id = %conn.id(),
@@ -150,7 +166,7 @@ impl TcpIngress {
                         peer = %conn.peer(),
                         "TCP ingress accepted connection"
                     );
-                    tokio::spawn(handler(conn.with_listener_id(listener_id.clone())));
+                    tokio::spawn(handler(conn.with_listener_id(Arc::clone(&listener_id))));
                 }
                 Ok(None) => {
                     tracing::info!(
@@ -167,8 +183,14 @@ impl TcpIngress {
                         listen_addr = %local_addr,
                         shard = shard_idx,
                         error = %err,
+                        backoff_ms = backoff.as_millis() as u64,
                         "TCP accept error"
                     );
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = shutdown.changed() => {}
+                    }
+                    backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
                 }
             }
         }

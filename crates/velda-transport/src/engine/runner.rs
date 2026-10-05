@@ -126,7 +126,7 @@ impl TrafficEngine {
     where
         TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
         FutTcp: std::future::Future<Output = ()> + Send + 'static,
-        UdpH: Fn(String, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
+        UdpH: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
         FutUdp: std::future::Future<Output = ()> + Send + 'static,
     {
         tracing::info!(

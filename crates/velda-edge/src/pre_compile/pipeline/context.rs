@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use velda_core::{ConnectionContext, ConnectionId, L4Request, StreamingMode};
@@ -53,7 +54,7 @@ pub struct IngressContext {
     /// Transport protocol (TCP or UDP).
     pub transport: velda_core::TransportProtocol,
     /// Identifier of the listener that accepted this connection.
-    pub listener_id: String,
+    pub listener_id: Arc<str>,
     /// Remote client socket address.
     pub peer: SocketAddr,
     /// Local server socket address.
@@ -72,7 +73,7 @@ impl IngressContext {
     /// Creates a new ingress context for a TCP connection handoff.
     pub fn new_tcp(
         connection_id: ConnectionId,
-        listener_id: impl Into<String>,
+        listener_id: impl Into<Arc<str>>,
         peer: SocketAddr,
         local_addr: SocketAddr,
         tls_enabled: bool,
@@ -96,7 +97,7 @@ impl IngressContext {
     /// UDP is connectionless, so a fresh [`ConnectionId`] is generated
     /// from the global monotonic counter for tracing and observability.
     pub fn new_udp(
-        listener_id: impl Into<String>,
+        listener_id: impl Into<Arc<str>>,
         peer: SocketAddr,
         local_addr: SocketAddr,
         tls_enabled: bool,
@@ -150,7 +151,7 @@ impl IngressContext {
             Ok(())
         } else {
             Err(EdgeError::AlpnMismatch {
-                listener_id: self.listener_id.clone(),
+                listener_id: self.listener_id.to_string(),
                 expected: expected_token.to_string(),
                 actual: alpn.to_string(),
             })
@@ -187,7 +188,7 @@ mod tests {
         );
 
         assert_eq!(ctx.connection_id, ConnectionId::new(42));
-        assert_eq!(ctx.listener_id, "http-listener");
+        assert_eq!(&*ctx.listener_id, "http-listener");
         assert_eq!(ctx.peer, addr);
         assert_eq!(ctx.local_addr, addr);
         assert!(!ctx.tls_enabled);
@@ -200,7 +201,7 @@ mod tests {
         let ctx =
             IngressContext::new_udp("udp-listener", addr, addr, false, StreamingMode::DISABLED);
 
-        assert_eq!(ctx.listener_id, "udp-listener");
+        assert_eq!(&*ctx.listener_id, "udp-listener");
         assert_eq!(ctx.peer, addr);
         assert!(!ctx.tls_enabled);
         assert!(ctx.tls.is_none());

@@ -47,6 +47,8 @@ impl UdpBinding {
 pub struct UdpIngress {
     sockets: Vec<Arc<UdpSocket>>,
     binding: UdpBinding,
+    /// Shared listener id handed to every datagram handler call (refcount clone, no alloc).
+    listener_id: Arc<str>,
 }
 
 impl UdpIngress {
@@ -56,7 +58,12 @@ impl UdpIngress {
             .into_iter()
             .map(Arc::new)
             .collect();
-        Ok(Self { sockets, binding })
+        let listener_id = Arc::from(binding.id.as_str());
+        Ok(Self {
+            sockets,
+            binding,
+            listener_id,
+        })
     }
 
     /// Returns the bound local socket address.
@@ -90,7 +97,7 @@ impl UdpIngress {
         shutdown: watch::Receiver<bool>,
         handler: H,
     ) where
-        H: Fn(String, Arc<UdpSocket>, Datagram) -> Fut + Send + Sync + Clone + 'static,
+        H: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         for shard_idx in 0..ingress.sockets.len() {
@@ -116,12 +123,12 @@ impl UdpIngress {
         mut shutdown: watch::Receiver<bool>,
         handler: H,
     ) where
-        H: Fn(String, Arc<UdpSocket>, Datagram) -> Fut + Send + Sync + Clone + 'static,
+        H: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let socket = Arc::clone(&ingress.sockets[shard_idx]);
         let local_addr = ingress.local_addr();
-        let listener_id = ingress.binding.id.clone();
+        let listener_id = Arc::clone(&ingress.listener_id);
         let total_shards = ingress.sockets.len();
         tracing::info!(
             listener_id = %listener_id,
@@ -153,7 +160,11 @@ impl UdpIngress {
                     match res {
                         Ok((n, peer)) => {
                             let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
-                            tokio::spawn(handler(listener_id.clone(), Arc::clone(&socket), dgram));
+                            // Handlers run inline, not in a task per datagram: this keeps packets
+                            // of one flow ordered (SO_REUSEPORT pins a 4-tuple to one shard) and
+                            // avoids a task spawn per packet. Handlers must stay short; long work
+                            // (e.g. HTTP/3 request processing, L4 session pumps) is spawned by them.
+                            handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
                         }
                         Err(err) => {
                             tracing::error!(

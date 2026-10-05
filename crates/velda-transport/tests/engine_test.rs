@@ -283,7 +283,7 @@ async fn test_multi_protocol_engine_tcp_udp_dispatch_by_listener_id() {
                     let _ = conn.write_all(reply).await;
                 },
                 |id, sock, dgram| async move {
-                    let reply: &[u8] = if id == "h3" { b"h3-ack" } else { b"udp-ack" };
+                    let reply: &[u8] = if &*id == "h3" { b"h3-ack" } else { b"udp-ack" };
                     let _ = sock.send_to(reply, dgram.peer()).await;
                 },
             )

@@ -178,10 +178,10 @@ async fn test_udp_ingress_delivers_datagram_with_listener_id() {
             .run(
                 shutdown_rx,
                 |_conn| async move {},
-                move |listener_id: String, socket: Arc<UdpSocket>, dgram: Datagram| {
+                move |listener_id: Arc<str>, socket: Arc<UdpSocket>, dgram: Datagram| {
                     let tx = received_tx.clone();
                     async move {
-                        assert_eq!(listener_id, "h3-ingress");
+                        assert_eq!(&*listener_id, "h3-ingress");
                         assert_eq!(dgram.data(), b"QUIC-Client-Hello");
 
                         socket
