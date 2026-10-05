@@ -200,15 +200,19 @@ pub async fn splice_bidirectional(
     let (c2s_res, s2c_res) = tokio::join!(
         async {
             let res = splice_stream_to_stream(client, server, &pipe_c2s, chunk_size).await;
-            unsafe {
-                libc::shutdown(server_fd, libc::SHUT_WR);
+            if res.is_ok() {
+                unsafe {
+                    libc::shutdown(server_fd, libc::SHUT_WR);
+                }
             }
             res
         },
         async {
             let res = splice_stream_to_stream(server, client, &pipe_s2c, chunk_size).await;
-            unsafe {
-                libc::shutdown(client_fd, libc::SHUT_WR);
+            if res.is_ok() {
+                unsafe {
+                    libc::shutdown(client_fd, libc::SHUT_WR);
+                }
             }
             res
         }

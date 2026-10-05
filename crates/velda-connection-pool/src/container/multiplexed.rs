@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::container::hasher::FastBuildHasher;
 use crate::container::probed_shard_count;
 use crate::lease::StreamLease;
 use crate::resource::PoolableResource;
@@ -211,14 +212,15 @@ impl<R: PoolableResource> Drop for MultiplexedConnection<R> {
 ///
 /// Cache-line aligned (64 bytes) to eliminate false sharing between CPU cores.
 #[repr(align(64))]
+#[allow(clippy::type_complexity)]
 pub struct MuxShard<K, R: PoolableResource> {
-    table: Mutex<HashMap<K, Vec<Arc<MultiplexedConnection<R>>>>>,
+    table: Mutex<HashMap<K, Vec<Arc<MultiplexedConnection<R>>>, FastBuildHasher>>,
 }
 
 impl<K, R: PoolableResource> Default for MuxShard<K, R> {
     fn default() -> Self {
         Self {
-            table: Mutex::new(HashMap::new()),
+            table: Mutex::new(HashMap::with_hasher(FastBuildHasher)),
         }
     }
 }
@@ -227,7 +229,7 @@ impl<K, R: PoolableResource> Default for MuxShard<K, R> {
 ///
 /// Distributes keys across cache-friendly, independent 64-byte aligned mutex shards
 /// with power-of-two bitmask indexing for minimal lock contention.
-pub struct MultiplexedPool<K, R, S = std::collections::hash_map::RandomState>
+pub struct MultiplexedPool<K, R, S = FastBuildHasher>
 where
     K: Eq + Hash + Clone,
     R: PoolableResource,
@@ -237,7 +239,7 @@ where
     mask: usize,
 }
 
-impl<K, R> Default for MultiplexedPool<K, R>
+impl<K, R> Default for MultiplexedPool<K, R, FastBuildHasher>
 where
     K: Eq + Hash + Clone,
     R: PoolableResource,
@@ -247,7 +249,7 @@ where
     }
 }
 
-impl<K, R> MultiplexedPool<K, R>
+impl<K, R> MultiplexedPool<K, R, FastBuildHasher>
 where
     K: Eq + Hash + Clone,
     R: PoolableResource,
@@ -259,6 +261,18 @@ where
 
     /// Creates a new multiplexed pool with the specified shard count (clamped to power of 2, min 1).
     pub fn with_shards(shard_count: usize) -> Self {
+        Self::with_hasher(shard_count, FastBuildHasher)
+    }
+}
+
+impl<K, R, S> MultiplexedPool<K, R, S>
+where
+    K: Eq + Hash + Clone,
+    R: PoolableResource,
+    S: BuildHasher,
+{
+    /// Creates a new multiplexed pool with custom shard count and custom hash builder.
+    pub fn with_hasher(shard_count: usize, hash_builder: S) -> Self {
         let count = shard_count.max(1).next_power_of_two();
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
@@ -267,7 +281,7 @@ where
 
         Self {
             shards: shards.into_boxed_slice(),
-            hash_builder: std::collections::hash_map::RandomState::new(),
+            hash_builder,
             mask: count - 1,
         }
     }
@@ -282,23 +296,53 @@ where
     ///
     /// Returns `Some(StreamLease)` if an existing connection has spare capacity.
     /// Returns `None` (MISS) if no connection exists or all are saturated.
-    /// Proactively prunes dead or goaway connections with 0 active streams encountered along the way.
+    /// Fast-path checks connections with early break, pruning dead connections only on demand.
     pub fn acquire_stream(&self, key: &K) -> Option<StreamLease<R>> {
         let shard = self.shard_for(key);
+
+        // Fast-path: quickly scan and clone candidate Arc under minimal lock hold time (< 10 ns)
+        let candidate = {
+            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let conns = guard.get(key)?;
+            let mut found = None;
+            for conn in conns.iter() {
+                if !conn.is_goaway() && !conn.is_exhausted() {
+                    found = Some(Arc::clone(conn));
+                    break;
+                }
+            }
+            found
+        };
+
+        // Try acquire stream lock-free OUTSIDE the shard mutex lock
+        if let Some(conn) = candidate
+            && let Some(lease) = conn.try_acquire_stream()
+        {
+            return Some(lease);
+        }
+
+        // Slow-path fallback: If candidate was saturated in race or dead connections exist
         let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
         let conns = guard.get_mut(key)?;
 
         let mut acquired = None;
-        conns.retain(|conn| {
-            if acquired.is_none()
-                && let Some(lease) = conn.try_acquire_stream()
-            {
-                acquired = Some(lease);
-                return true;
+        let mut has_dead = false;
+
+        for conn in conns.iter() {
+            if !conn.is_goaway() && !conn.is_exhausted() {
+                if let Some(lease) = conn.try_acquire_stream() {
+                    acquired = Some(lease);
+                    break;
+                }
+            } else if conn.is_idle() && (!conn.is_healthy() || conn.is_goaway()) {
+                has_dead = true;
             }
-            // Retain connection unless it's dead/goaway with 0 active streams
-            !(conn.is_idle() && (!conn.is_healthy() || conn.is_goaway()))
-        });
+        }
+
+        // Only prune dead connections if one was encountered
+        if has_dead {
+            conns.retain(|conn| !(conn.is_idle() && (!conn.is_healthy() || conn.is_goaway())));
+        }
 
         acquired
     }

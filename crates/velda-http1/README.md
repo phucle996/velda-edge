@@ -137,7 +137,8 @@ src/
 │   ├── response.rs         Http1Response, Http1ResponseHead (Ingress entity)
 │   ├── encode.rs           encode_request_line, encode_request_head, encode_request
 │   ├── decode.rs           Wire parsing (RFC 9112) and stream decoding (&mut BytesMut)
-│   └── connector.rs        forward_request, read_response_head, read_next_chunk
+│   ├── connector.rs        forward_request, read_response_head, read_next_chunk
+│   └── stream.rs           UpstreamHttp1Stream (Plain/TLS), is_healthy(), connect_stream
 │
 └── pipe/                   Bidirectional stream pipes & hop-by-hop sanitization
     ├── mod.rs              Pipe strategy resolution & header filter

@@ -22,20 +22,9 @@ pub struct Http1ClientResource {
     pub last_used_at: Instant,
 }
 
-impl Http1ClientResource {
-    pub fn new(stream: UpstreamHttp1Stream) -> Self {
-        let now = Instant::now();
-        Self {
-            stream,
-            created_at: now,
-            last_used_at: now,
-        }
-    }
-}
-
 impl PoolableResource for Http1ClientResource {
     fn is_healthy(&self) -> bool {
-        true
+        self.stream.is_healthy()
     }
 
     fn close(&mut self) {}
@@ -63,7 +52,7 @@ impl PoolableResource for Http1ClientResource {
 /// or closes them if marked as non-reusable (e.g. after stream errors or `Connection: close`).
 pub struct Http1Lease {
     stream: Option<UpstreamHttp1Stream>,
-    endpoint: SocketAddr,
+    pub endpoint: SocketAddr,
     pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
     reusable: bool,
     created_at: Instant,
@@ -74,12 +63,6 @@ impl Http1Lease {
     #[inline]
     pub fn mark_closed(&mut self) {
         self.reusable = false;
-    }
-
-    /// Returns the target endpoint address of this connection.
-    #[inline]
-    pub fn endpoint(&self) -> SocketAddr {
-        self.endpoint
     }
 }
 
@@ -144,7 +127,7 @@ impl std::fmt::Debug for Http1Upstream {
         f.debug_struct("Http1Upstream")
             .field("id", &self.inner.id())
             .field("target_sni", &self.target_sni)
-            .field("is_tls", &self.is_tls())
+            .field("is_tls", &self.tls_engine.is_some())
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
             .field("acceleration", &self.acceleration)
@@ -185,18 +168,6 @@ impl Http1Upstream {
         self.inner.id()
     }
 
-    /// Returns the configured SNI DNS name, if any.
-    #[inline]
-    pub fn target_sni(&self) -> Option<&str> {
-        self.target_sni.as_deref()
-    }
-
-    /// Returns whether this upstream target requires TLS encryption.
-    #[inline]
-    pub fn is_tls(&self) -> bool {
-        self.tls_engine.is_some()
-    }
-
     /// Acquires a pooled or fresh HTTP/1.1 upstream stream wrapped in an RAII [`Http1Lease`].
     ///
     /// Manages single-round Load Balancer selection, idle connection reuse (HIT),
@@ -219,8 +190,11 @@ impl Http1Upstream {
             .execute(|endpoint| {
                 let pool = Arc::clone(&pool);
                 async move {
-                    if let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
-                        return Ok::<_, String>((res.stream, endpoint, res.created_at));
+                    while let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None)
+                    {
+                        if res.is_healthy() {
+                            return Ok::<_, String>((res.stream, endpoint, res.created_at));
+                        }
                     }
 
                     let stream = velda_http1::client::connect_stream(

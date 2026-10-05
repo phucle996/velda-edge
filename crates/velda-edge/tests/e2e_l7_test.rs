@@ -1310,7 +1310,17 @@ async fn test_end_to_end_l7_http1_chunked_upload_rejected_on_non_streaming_liste
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Client connects and attempts chunked upload on a non-streaming listener
-    let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+    let mut client = {
+        let mut conn = None;
+        for _ in 0..20 {
+            if let Ok(c) = TcpStream::connect(gateway_addr).await {
+                conn = Some(c);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        conn.expect("failed to connect to gateway_addr")
+    };
     let chunked_req = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     client.write_all(chunked_req).await.unwrap();
 

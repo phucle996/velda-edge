@@ -23,10 +23,10 @@ pub struct SelectionContext<'a> {
     /// Optional reference to the dynamic metrics table for state-aware balancers.
     pub metrics_map: Option<&'a HashMap<SocketAddr, EndpointMetrics>>,
 
-    // OPTIMIZATION: Contiguous metrics slice eliminates SipHash lookup overhead in HashMap.
+    /// Contiguous metrics slice eliminates SipHash lookup overhead in HashMap.
     pub metrics_slice: Option<&'a [EndpointMetrics]>,
 
-    // OPTIMIZATION: Upstream topology version check eliminates O(N) FNV1a hashing on hot path.
+    /// Upstream topology version check eliminates O(N) FNV1a hashing on hot path.
     pub topology_version: Option<u64>,
 }
 
@@ -87,14 +87,14 @@ impl<'a> SelectionContext<'a> {
         self
     }
 
-    // OPTIMIZATION: Attaches contiguous metrics slice for direct O(1) array index access without hashing.
+    /// Attaches contiguous metrics slice for direct O(1) array index access without hashing.
     #[inline]
     pub fn with_metrics_slice(mut self, metrics_slice: &'a [EndpointMetrics]) -> Self {
         self.metrics_slice = Some(metrics_slice);
         self
     }
 
-    // OPTIMIZATION: Attaches upstream revision version for instant O(1) version check on Maglev/RingHash.
+    /// Attaches upstream revision version for instant O(1) version check on Maglev/RingHash.
     #[inline]
     pub const fn with_topology_version(mut self, version: u64) -> Self {
         self.topology_version = Some(version);

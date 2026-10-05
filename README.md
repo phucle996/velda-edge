@@ -43,7 +43,7 @@ Velda Edge is engineered as a unified polyglot monorepo:
 
 ```text
 velda-edge/
-├── crates/             # High-Performance Rust 2024 Data Plane (15 bounded crates)
+├── crates/             # High-Performance Rust 2024 Data Plane (16 bounded crates)
 │   ├── velda-core      # Primitive vocabulary (Endpoint, L7Request, L7Response)
 │   ├── velda-transport # Edge Traffic Engine, accept loops, L4 byte pump
 │   ├── velda-tls       # TLS termination & client engine (rustls, zero unsafe)
@@ -52,8 +52,12 @@ velda-edge/
 │   ├── velda-http3     # RFC 9114 QUIC datagram state machine & engine shards
 │   ├── velda-grpc      # Length-prefixed gRPC proxying & stream lifecycle
 │   ├── velda-router    # O(1) route lookup tables
-│   ├── velda-upstream  # Logical backend management, circuit breaker, pool
+│   ├── velda-discovery # Dynamic backend topology discovery & DNS cache
+│   ├── velda-upstream  # Logical backend management, endpoint lifecycle & health tracking
 │   ├── velda-lb        # Pure in-memory load balancing algorithms
+│   ├── velda-connection-pool # Generic lock-sharded connection pooling engine
+│   ├── velda-plugin    # In-memory hook registration & execution ordering
+│   ├── velda-observability # Zero-allocation metrics, tracing & logging
 │   ├── velda-sync      # LKG binary artifact staging & compiler
 │   └── velda-edge      # Composition root, supervisor, pipeline handoff
 ├── control-plane/      # Go 1.27 Clean Architecture Control Plane (PostgreSQL + pgx/v5)
@@ -78,14 +82,14 @@ Downstream Wire
 2. Pipeline Layer (Handoff & Frame Decode)
    ├── Decode wire frames (HTTP/1, HTTP/2, HTTP/3, gRPC)
    ├── O(1) Route evaluation ──> resolves upstream_name
-   └── Single-line handoff: upstream.dispatch_pipe(...)
+   └── Contiguous handoff to protocol upstream processor
       │
       ▼
-3. Upstream Layer (Upstream Execution Core)
-   ├── Filter unhealthy endpoints via atomic circuit breaker
-   ├── Single-round load balancing (LbAlgorithm)
-   ├── Connection acquisition (Pool reuse HIT or socket connect MISS)
-   ├── Stream pipe execution according to pre-compiled strategy
+3. Upstream Stage (Logical Upstream & Connection Pool)
+   ├── Filter unhealthy endpoints via passive health tracker (velda-upstream)
+   ├── Single-round load balancing (velda-lb: RR, WRR, LeastConn, Maglev, P2C)
+   ├── Connection acquisition (Pool reuse HIT or socket connect MISS via velda-connection-pool)
+   ├── Stream pipe execution according to pre-compiled strategy (velda-http1/http2/grpc)
    └── RAII connection release & health metric updates
       │
       ▼

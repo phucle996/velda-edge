@@ -3,7 +3,7 @@
 //! Mitigates herd behavior inherent in classic Least Connections by sampling 2 random
 //! candidates and picking the least loaded. Proven $O(1)$ constant time performance.
 
-use super::random::fast_random_u64;
+use super::random::fast_random_pair;
 use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
@@ -29,26 +29,20 @@ impl LoadBalancer for PowerOfTwoChoices {
             return Some(0);
         }
 
-        // Pick two distinct random indices
-        let r1 = (fast_random_u64() as usize) % n;
-        let mut r2 = (fast_random_u64() as usize) % (n - 1);
-        if r2 >= r1 {
-            r2 += 1;
-        }
+        // Extracts two distinct random candidate indices in 0..n from a single 64-bit PRNG invocation.
+        let (r1, r2) = fast_random_pair(n);
 
-        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
         // Direct array indexing eliminates SipHash computation in HashMap.
         if let Some(metrics) = ctx.metrics_slice {
-            let load_at = |idx: usize| -> f64 {
-                if let Some(m) = metrics.get(idx) {
-                    let load = m.active_connections() + m.inflight_requests();
-                    load as f64 / endpoints[idx].weight.max(1) as f64
-                } else {
-                    0.0
-                }
-            };
+            let load1 = metrics.get(r1).map_or(0, |m| m.total_load() as u64);
+            let load2 = metrics.get(r2).map_or(0, |m| m.total_load() as u64);
 
-            return if load_at(r1) <= load_at(r2) {
+            let w1 = endpoints[r1].weight.max(1) as u64;
+            let w2 = endpoints[r2].weight.max(1) as u64;
+
+            // Comparing (load1 / w1) <= (load2 / w2) using integer cross-multiplication.
+            // Completely eliminates floating-point conversions (cvtsi2sd) and divisions (divsd).
+            return if load1 * w2 <= load2 * w1 {
                 Some(r1)
             } else {
                 Some(r2)
@@ -62,16 +56,17 @@ impl LoadBalancer for PowerOfTwoChoices {
         let ep1 = &endpoints[r1];
         let ep2 = &endpoints[r2];
 
-        let load_of = |ep: &Endpoint| -> f64 {
-            if let Some(m) = metrics_map.get(&ep.address) {
-                let load = m.active_connections() + m.inflight_requests();
-                load as f64 / ep.weight.max(1) as f64
-            } else {
-                0.0
-            }
-        };
+        let load1 = metrics_map
+            .get(&ep1.address)
+            .map_or(0, |m| m.total_load() as u64);
+        let load2 = metrics_map
+            .get(&ep2.address)
+            .map_or(0, |m| m.total_load() as u64);
 
-        if load_of(ep1) <= load_of(ep2) {
+        let w1 = ep1.weight.max(1) as u64;
+        let w2 = ep2.weight.max(1) as u64;
+
+        if load1 * w2 <= load2 * w1 {
             Some(r1)
         } else {
             Some(r2)

@@ -17,14 +17,24 @@ pub struct TcpListenerConfig {
     pub send_buffer_size: Option<usize>,
     /// Chunk buffer size for bidirectional L4 byte proxying.
     pub copy_buffer_size: usize,
-    /// Enable `SO_REUSEPORT` on the listening socket for multi-shard kernel load balancing.
+    /// Distributes incoming SYN packets across independent worker threads directly in the Linux
+    /// kernel via 4-tuple hashing (`SO_REUSEPORT`), eliminating single-acceptor lock bottlenecks.
     pub reuseport: bool,
-    /// Number of listener socket shards bound to the same port via `SO_REUSEPORT`.
+    /// Scales listener socket count to match hardware CPU concurrency, preventing worker threads
+    /// from contending on a single kernel listen queue.
     pub concurrency_shards: usize,
-    /// Enable `TCP_QUICKACK` on accepted connections to disable delayed ACKs (Linux).
+    /// Immediately acknowledges request headers/preambles (`TCP_QUICKACK`) to avoid 40ms delayed-ACK
+    /// penalties with clients running Nagle's algorithm.
     pub quickack: bool,
-    /// Enable `TCP_DEFER_ACCEPT` on listening sockets to postpone wakeups until initial payload data arrives (Linux).
+    /// Postpones epoll wakeups (`TCP_DEFER_ACCEPT`) until the client transmits the initial payload
+    /// (HTTP request / TLS ClientHello), eliminating wake-up thrashing on empty TCP handshakes.
     pub defer_accept_secs: Option<u32>,
+    /// Enables server-side Fast Open cookie validation (`TCP_FASTOPEN`) so returning clients
+    /// can send initial data in the SYN packet, cutting 1 RTT of downstream connection latency.
+    pub fastopen_backlog: Option<u32>,
+    /// Polls NIC ring buffers directly in kernel space (`SO_BUSY_POLL`) for up to N microseconds,
+    /// bypassing thread sleep/wake epoll context switches on latency-critical tiers.
+    pub busy_poll_us: Option<u32>,
 }
 
 impl Default for TcpListenerConfig {
@@ -40,6 +50,8 @@ impl Default for TcpListenerConfig {
             concurrency_shards: 1,
             quickack: false,
             defer_accept_secs: None,
+            fastopen_backlog: None,
+            busy_poll_us: None,
         }
     }
 }
@@ -89,6 +101,18 @@ impl TcpListenerConfig {
     /// Sets the `TCP_DEFER_ACCEPT` seconds timeout (Linux).
     pub fn with_defer_accept(mut self, secs: Option<u32>) -> Self {
         self.defer_accept_secs = secs;
+        self
+    }
+
+    /// Sets server-side `TCP_FASTOPEN` listen backlog depth (Linux).
+    pub fn with_fastopen_backlog(mut self, backlog: Option<u32>) -> Self {
+        self.fastopen_backlog = backlog;
+        self
+    }
+
+    /// Sets `SO_BUSY_POLL` duration in microseconds on accepted sockets (Linux).
+    pub fn with_busy_poll(mut self, busy_poll_us: Option<u32>) -> Self {
+        self.busy_poll_us = busy_poll_us;
         self
     }
 
@@ -194,6 +218,26 @@ impl TcpListenerConfig {
         let mut cfg = Self::for_tier(mem);
         cfg.copy_buffer_size = Self::copy_buffer_size_for_cpu_tier(cpu);
         cfg.concurrency_shards = Self::concurrency_shards_for_cpu_tier(cpu);
+        cfg
+    }
+
+    /// Pre-compiles TCP listener acceleration settings from probed hardware topology.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        let mut cfg = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
+        if topo.kernel.supports_tcp_fastopen_server() {
+            cfg.fastopen_backlog = Some((cfg.backlog / 4).max(256));
+        }
+        if topo.kernel.supports_busy_poll()
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            )
+        {
+            cfg.busy_poll_us = Some(50);
+        }
         cfg
     }
 }

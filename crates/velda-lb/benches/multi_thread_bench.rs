@@ -93,7 +93,7 @@ fn bench_worker_scaling() {
 
 /// Helper macro to benchmark concurrent algorithms
 macro_rules! run_concurrency_comparison {
-    ($workers:expr, $ops_per_worker:expr, $endpoints:expr, $metrics_map:expr) => {{
+    ($workers:expr, $ops_per_worker:expr, $endpoints:expr, $metrics_map:expr, $metrics_slice:expr) => {{
         let total_ops = ($workers * $ops_per_worker) as f64;
 
         macro_rules! bench_item {
@@ -160,13 +160,17 @@ macro_rules! run_concurrency_comparison {
         bench_item!(
             "PowerOfTwoChoices",
             PowerOfTwoChoices::new(),
-            |_| SelectionContext::NONE.with_metrics($metrics_map),
+            |_| SelectionContext::NONE
+                .with_metrics($metrics_map)
+                .with_metrics_slice($metrics_slice),
             "PRNG + Atomic Read"
         );
         bench_item!(
             "PeakEwma",
             PeakEwma::new(),
-            |_| SelectionContext::NONE.with_metrics($metrics_map),
+            |_| SelectionContext::NONE
+                .with_metrics($metrics_map)
+                .with_metrics_slice($metrics_slice),
             "PRNG + Atomic Read"
         );
         bench_item!(
@@ -191,15 +195,23 @@ fn bench_algorithm_contention_tiers() {
     let endpoints = Arc::new(make_endpoints(10));
 
     let mut metrics_map = HashMap::new();
+    let mut metrics_slice = Vec::new();
     for (i, ep) in endpoints.iter().enumerate() {
         let m = EndpointMetrics::new();
         m.set_active_connections((i as u32) + 1);
         m.set_inflight_requests((i as u32) + 2);
         m.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
         metrics_map.insert(ep.address, m);
+
+        let ms = EndpointMetrics::new();
+        ms.set_active_connections((i as u32) + 1);
+        ms.set_inflight_requests((i as u32) + 2);
+        ms.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
+        metrics_slice.push(ms);
     }
     let metrics_map: &'static HashMap<SocketAddr, EndpointMetrics> =
         Box::leak(Box::new(metrics_map));
+    let metrics_slice: &'static [EndpointMetrics] = Box::leak(metrics_slice.into_boxed_slice());
 
     for &tier in &[12, 64, 128] {
         println!("#### Tier: {} Concurrent Workers\n", tier);
@@ -207,7 +219,7 @@ fn bench_algorithm_contention_tiers() {
             "| Algorithm | Total Operations | Workers | Aggregate Throughput | Avg Latency / op | Concurrency Model |"
         );
         println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
-        run_concurrency_comparison!(tier, 100_000, endpoints, metrics_map);
+        run_concurrency_comparison!(tier, 100_000, endpoints, metrics_map, metrics_slice);
         println!();
     }
 }
@@ -279,7 +291,7 @@ fn bench_simulated_hardware_profiles() {
             let eps = Arc::clone(&endpoints);
             let ops = p.ops_per_worker;
             handles.push(std::thread::spawn(move || {
-                // OPTIMIZATION: Passes topology_version for instant O(1) version check on hot path
+                // Passes topology_version for instant O(1) version check on hot path
                 let ctx = SelectionContext::with_hash(w as u64).with_topology_version(version);
                 for _ in 0..ops {
                     let ep = lb.select(&eps, &ctx);

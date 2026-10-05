@@ -59,9 +59,9 @@ impl TcpUpstream {
                 };
 
                 #[cfg(target_os = "linux")]
-                if socket_accel.fastopen {
+                {
                     use std::os::unix::io::AsRawFd;
-                    apply_tcp_fastopen(socket.as_raw_fd());
+                    socket_accel.apply_pre_connect(socket.as_raw_fd());
                 }
 
                 let connect_fut = socket.connect(endpoint);
@@ -74,7 +74,7 @@ impl TcpUpstream {
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    apply_post_connect_acceleration(stream.as_raw_fd(), &socket_accel);
+                    socket_accel.apply_post_connect(stream.as_raw_fd());
                 }
 
                 Ok::<_, String>(stream)
@@ -85,69 +85,5 @@ impl TcpUpstream {
         pipe(stream).await.map_err(|e| {
             EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
         })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn apply_tcp_fastopen(fd: std::os::unix::io::RawFd) {
-    let val: libc::c_int = 1;
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_FASTOPEN_CONNECT,
-            &val as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&val) as libc::socklen_t,
-        );
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn apply_post_connect_acceleration(
-    fd: std::os::unix::io::RawFd,
-    accel: &velda_upstream::SocketAccelerationPath,
-) {
-    unsafe {
-        if let Some(lowat) = accel.notsent_lowat {
-            let val = lowat as libc::c_uint;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_NOTSENT_LOWAT,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-
-        if let Some(user_timeout) = accel.user_timeout {
-            let val = user_timeout.as_millis() as libc::c_uint;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_USER_TIMEOUT,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-
-        if let Some(keepalive) = accel.keepalive {
-            let val: libc::c_int = 1;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_KEEPALIVE,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-
-            let idle_secs = keepalive.as_secs().max(1) as libc::c_int;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_KEEPIDLE,
-                &idle_secs as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&idle_secs) as libc::socklen_t,
-            );
-        }
     }
 }

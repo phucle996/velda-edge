@@ -376,10 +376,10 @@ pub fn build_upstreams(
                     )),
                 );
             }
-            "raw" if transport == "udp" => {
+            "raw" | "udp" if transport == "udp" => {
                 udp_map.insert(config.id.clone(), Arc::new(UdpUpstream::new(inner)));
             }
-            "raw" => {
+            "raw" | "tcp" => {
                 let tcp_acceleration = velda_upstream::SocketAccelerationPath::for_topology(
                     topology, &timeouts, is_tls,
                 );
@@ -457,17 +457,31 @@ mod tests {
 
     #[test]
     fn test_build_upstreams_explicit_endpoints() {
+        let mut u_udp = make_test_upstream("u_udp", "raw", "endpoints");
+        u_udp.protocol.transport = "udp".to_string();
+
+        let u_tcp = make_test_upstream("u_tcp", "raw", "endpoints");
+
+        let mut u_h3 = make_test_upstream("u_h3", "http3", "endpoints");
+        u_h3.protocol.transport = "quic".to_string();
+
         let configs = vec![
             make_test_upstream("u1", "http1", "endpoints"),
             make_test_upstream("u2", "http2", "endpoints"),
             make_test_upstream("u3", "grpc", "endpoints"),
+            u_udp,
+            u_tcp,
+            u_h3,
         ];
 
         let table = build_upstreams_default(&configs, None);
-        assert_eq!(table.len(), 3);
+        assert_eq!(table.len(), 6);
         assert!(table.http1.get("u1").is_some());
         assert!(table.http2.get("u2").is_some());
         assert!(table.grpc.get("u3").is_some());
+        assert!(table.udp.get("u_udp").is_some());
+        assert!(table.tcp.get("u_tcp").is_some());
+        assert!(table.http3.get("u_h3").is_some());
     }
 
     #[tokio::test]

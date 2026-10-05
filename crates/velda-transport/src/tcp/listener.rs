@@ -49,6 +49,28 @@ impl TcpListener {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some(backlog) = config.fastopen_backlog {
+            use std::os::fd::AsRawFd;
+            let fd = socket.as_raw_fd();
+            let val: libc::c_int = backlog as libc::c_int;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_FASTOPEN,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_FASTOPEN server backlog skipped"
+                    );
+                }
+            }
+        }
+
         if let Some(recv_buf) = config.recv_buffer_size {
             let _ = socket.set_recv_buffer_size(recv_buf as u32);
         }
@@ -161,6 +183,28 @@ impl TcpListener {
                     &val as *const _ as *const libc::c_void,
                     std::mem::size_of_val(&val) as libc::socklen_t,
                 );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(busy_poll) = self.config.busy_poll_us {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let val: libc::c_int = busy_poll as libc::c_int;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_BUSY_POLL skipped on accepted socket"
+                    );
+                }
             }
         }
 

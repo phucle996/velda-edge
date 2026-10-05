@@ -1,5 +1,6 @@
 //! Standard Round-Robin load balancing.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::LoadBalancer;
@@ -8,13 +9,24 @@ use velda_core::Endpoint;
 
 thread_local! {
     /// Worker thread monotonic identifier for shard routing.
-    static RR_SHARD_ID: usize = {
-        static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
-        NEXT_SHARD.fetch_add(1, Ordering::Relaxed)
-    };
+    /// Const-initialized TLS compiles to a single %fs:[offset] read without runtime init guards.
+    static RR_SHARD_ID: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
-// OPTIMIZATION: 64-byte CPU cache alignment ensures each counter shard sits on its own cache line,
+#[inline(always)]
+fn get_rr_shard_id() -> usize {
+    RR_SHARD_ID.with(|cell| {
+        let mut id = cell.get();
+        if id == usize::MAX {
+            static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+            id = NEXT_SHARD.fetch_add(1, Ordering::Relaxed);
+            cell.set(id);
+        }
+        id
+    })
+}
+
+// 64-byte CPU cache alignment ensures each counter shard sits on its own cache line,
 // completely eliminating inter-core Cache Line Bouncing and false sharing across worker threads.
 #[repr(align(64))]
 #[derive(Debug, Default)]
@@ -47,7 +59,7 @@ impl RoundRobin {
     /// Creates a new sharded round-robin load balancer configured with explicit worker count
     /// probed by the composition root (`velda-edge`).
     ///
-    /// OPTIMIZATION: Because RoundRobin has zero read-sum overhead, shard count scales 1:1 with
+    /// Because RoundRobin has zero read-sum overhead, shard count scales 1:1 with
     /// worker concurrency to completely eliminate multi-core cache invalidation.
     pub fn with_workers(workers: usize) -> Self {
         let count = workers.max(1).next_power_of_two();
@@ -63,15 +75,26 @@ impl RoundRobin {
 
 impl LoadBalancer for RoundRobin {
     fn select_index(&self, endpoints: &[Endpoint], _ctx: &SelectionContext<'_>) -> Option<usize> {
-        if endpoints.is_empty() {
+        let n = endpoints.len();
+        if n == 0 {
             return None;
         }
+        if n == 1 {
+            return Some(0);
+        }
 
-        // OPTIMIZATION: Retrieve thread-dedicated counter shard.
-        // Each worker core accesses its own independent cache line, avoiding CPU bus locks.
-        let shard_idx = RR_SHARD_ID.with(|id| *id) % self.shards.len();
+        // Shard count is guaranteed to be a power of two, enabling a 1-cycle bitmask
+        // to replace 64-bit hardware integer division (`idivq`).
+        let shard_idx = get_rr_shard_id() & (self.shards.len() - 1);
         let idx = self.shards[shard_idx].index.fetch_add(1, Ordering::Relaxed);
-        Some(idx % endpoints.len())
+
+        // When endpoint count is a power of two (common in edge clusters: 2, 4, 8, 16),
+        // bitmasking achieves zero-division round-robin distribution.
+        if n & (n - 1) == 0 {
+            Some(idx & (n - 1))
+        } else {
+            Some(idx % n)
+        }
     }
 }
 

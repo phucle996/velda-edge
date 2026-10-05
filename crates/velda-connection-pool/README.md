@@ -53,7 +53,7 @@ Generic, protocol-agnostic, sharded connection pooling provider for the Velda Ed
      [HIT]                             [MISS]
         │                                 │
         ▼                                 ▼
-   pop_back() (253 ns, 0 allocs)      Upstream.connect(target_addr)
+   pop_back() (253 ns, 0 allocs)      Connect backend (target_addr)
         │                                 │
         └────────────────┬────────────────┘
                          ▼

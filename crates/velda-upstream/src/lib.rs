@@ -29,7 +29,7 @@ pub use velda_lb::{
 };
 
 // Re-exports for clean, ergonomic usage within upstream
-pub use connection::{SocketAccelerationPath, SocketAccelerationPathExt};
+pub use connection::SocketAccelerationPath;
 pub use error::{Result, UpstreamError};
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
 pub use upstream::{Upstream, UpstreamTimeouts};

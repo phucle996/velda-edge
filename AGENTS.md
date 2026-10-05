@@ -13,7 +13,7 @@ Velda Edge is a performance-oriented, polyglot edge platform built around:
 - **In-memory hot paths** (Zero JSON parsing, zero disk I/O, zero RPC calls in request serving)
 - **Autonomous Data Plane** (Operates independently from persisted LKG even if Control Plane is offline)
 - **Unified Polyglot Monorepo**:
-  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (12 bounded crates).
+  - `crates/`: High-performance Rust 1.98 / Edition 2024 Data Plane (16 bounded crates).
   - `control-plane/`: Go 1.27 Clean Architecture Control Plane (PostgreSQL / `pgx/v5`).
   - `ui/`: Modern React 19.3 + TypeScript + Vite 8.3 + Tailwind CSS v4 + Shadcn UI Console.
 
@@ -96,6 +96,7 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
 - `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).
 - `velda-upstream`: [Stage 2] Logical backends, endpoint lifecycle, passive health tracking, and eligible candidate management.
+- `velda-lb`: [Stage 3] Pure in-memory load balancing algorithms (RoundRobin, WRR, LeastConn, Maglev, RingHash, P2C, Random, Hash). Zero allocations on hot path.
 - `velda-connection-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.

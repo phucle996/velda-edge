@@ -121,9 +121,9 @@ where
 {
     fn drop(&mut self) {
         if let Some(res) = self.resource.take() {
-            let is_healthy = res.is_healthy();
-            self.pool
-                .release(&self.key, res, is_healthy, self.is_draining);
+            // Note: self.pool.release performs the health check and closes if unhealthy.
+            // Avoid duplicate kernel syscalls by passing reusable=true directly.
+            self.pool.release(&self.key, res, true, self.is_draining);
         }
     }
 }
@@ -282,17 +282,17 @@ where
     R: PoolableResource,
 {
     fn drop(&mut self) {
-        if let Some(mut res) = self.resource.take() {
+        if let Some(res) = self.resource.take() {
             if !self.auto_close
                 && !self.is_draining
-                && res.is_healthy()
                 && let ExclusiveReturnTarget::Pool(pool) =
                     std::mem::replace(&mut self.return_target, ExclusiveReturnTarget::None)
             {
                 pool.release(&self.key, res, true, false);
                 return;
             }
-            res.close();
+            let mut r = res;
+            r.close();
         }
     }
 }

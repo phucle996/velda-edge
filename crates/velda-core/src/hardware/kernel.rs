@@ -122,22 +122,142 @@ impl KernelProfile {
         }
     }
 
-    /// Returns `true` if the kernel release supports TCP Fast Open Connect (`TCP_FASTOPEN_CONNECT`, Linux >= 4.11).
+    // =========================================================================
+    // Kernel Capability Queries (Ordered by minimum required Linux version)
+    // =========================================================================
+
+    // --- Linux 2.4 ---
+
+    /// Evaluates if the kernel supports `TCP_DEFER_ACCEPT` (Linux >= 2.4).
+    ///
+    /// Postpones accept wakeups until the client actually sends initial payload bytes,
+    /// eliminating useless thread wakeups on empty TCP handshakes.
     #[inline]
-    pub const fn supports_tcp_fastopen_connect(&self) -> bool {
-        self.version.is_at_least(4, 11)
+    pub const fn supports_defer_accept(&self) -> bool {
+        self.version.is_at_least(2, 4)
     }
 
-    /// Returns `true` if the kernel release supports `TCP_NOTSENT_LOWAT` (Linux >= 3.12).
+    /// Evaluates if the kernel supports `TCP_QUICKACK` (Linux >= 2.4).
+    ///
+    /// Immediately acknowledges incoming data to prevent 40ms delayed-ACK deadlocks
+    /// with peers employing Nagle's algorithm.
+    #[inline]
+    pub const fn supports_quickack(&self) -> bool {
+        self.version.is_at_least(2, 4)
+    }
+
+    /// Evaluates if the kernel supports `TCP_SYNCNT` (Linux >= 2.4).
+    ///
+    /// Limits SYN retransmission retries to fail fast and trigger failover
+    /// rather than stalling workers for 60-120 seconds on partitioned backends.
+    #[inline]
+    pub const fn supports_tcp_syncnt(&self) -> bool {
+        self.version.is_at_least(2, 4)
+    }
+
+    /// Evaluates if the kernel supports fine-grained TCP keepalive tuning (Linux >= 2.4).
+    ///
+    /// Enables configuring `TCP_KEEPINTVL` and `TCP_KEEPCNT` alongside `TCP_KEEPIDLE`.
+    #[inline]
+    pub const fn supports_tcp_keepalive_tuning(&self) -> bool {
+        self.version.is_at_least(2, 4)
+    }
+
+    // --- Linux 2.6 ---
+
+    /// Evaluates if the kernel supports `TCP_USER_TIMEOUT` (Linux >= 2.6.37).
+    ///
+    /// Allows setting an explicit deadline for unacknowledged transmitted data (RFC 5482),
+    /// aborting hung connections when cloud NAT gateways or firewalls silently drop packets.
+    #[inline]
+    pub const fn supports_tcp_user_timeout(&self) -> bool {
+        self.version.is_at_least(2, 6)
+    }
+
+    // --- Linux 3.x ---
+
+    /// Evaluates if the kernel supports server-side `TCP_FASTOPEN` (Linux >= 3.7).
+    ///
+    /// Linux 3.7 introduced the `TCP_FASTOPEN` listener option, enabling the kernel to generate
+    /// and validate Fast Open cookies for incoming SYN packets.
+    #[inline]
+    pub const fn supports_tcp_fastopen_server(&self) -> bool {
+        self.version.is_at_least(3, 7)
+    }
+
+    /// Evaluates if the kernel supports low-latency `SO_BUSY_POLL` (Linux >= 3.11).
+    ///
+    /// Linux 3.11 introduced socket-level busy polling, allowing high-throughput workers
+    /// to poll device driver receive rings directly and bypass epoll context-switch latency spikes.
+    #[inline]
+    pub const fn supports_busy_poll(&self) -> bool {
+        self.version.is_at_least(3, 11)
+    }
+
+    /// Evaluates if the kernel supports `TCP_NOTSENT_LOWAT` (Linux >= 3.12).
+    ///
+    /// Linux 3.12 added `TCP_NOTSENT_LOWAT` to combat bufferbloat by capping unsent bytes
+    /// in the write queue, enabling responsive multiplexed stream prioritization (HTTP/2, gRPC).
     #[inline]
     pub const fn supports_tcp_notsent_lowat(&self) -> bool {
         self.version.is_at_least(3, 12)
     }
 
-    /// Returns `true` if the kernel release supports `TCP_USER_TIMEOUT` (Linux >= 2.6).
+    /// Evaluates if the kernel supports `SO_INCOMING_CPU` (Linux >= 3.19).
+    ///
+    /// Enables inspecting or steering socket processing to the exact CPU core
+    /// that received the network packet, optimizing L1/L2 cache locality.
     #[inline]
-    pub const fn supports_tcp_user_timeout(&self) -> bool {
-        self.version.is_at_least(2, 6)
+    pub const fn supports_incoming_cpu(&self) -> bool {
+        self.version.is_at_least(3, 19)
+    }
+
+    // --- Linux 4.x ---
+
+    /// Evaluates if the kernel supports BBR congestion control (Linux >= 4.9).
+    #[inline]
+    pub const fn supports_bbr(&self) -> bool {
+        self.version.is_at_least(4, 9)
+    }
+
+    /// Evaluates if the kernel supports `TCP_FASTOPEN_CONNECT` (Linux >= 4.11).
+    ///
+    /// Linux 4.11 introduced `TCP_FASTOPEN_CONNECT`, allowing transparent client Fast Open
+    /// via standard non-blocking `connect(2)` rather than requiring complex `sendto(2)` with `MSG_FASTOPEN`.
+    #[inline]
+    pub const fn supports_tcp_fastopen_connect(&self) -> bool {
+        self.version.is_at_least(4, 11)
+    }
+
+    // --- Linux 5.x ---
+
+    /// Evaluates if the kernel version satisfies the minimum requirement for `io_uring`
+    /// multishot networking and stable ring buffers (Linux >= 5.19).
+    #[inline]
+    pub const fn supports_io_uring(&self) -> bool {
+        self.version.is_at_least(5, 19)
+    }
+
+    /// Detects if the process is running inside a containerized environment (Docker, Podman, K8s).
+    ///
+    /// Container runtimes enforce default seccomp profiles that block specific socket syscalls
+    /// (`EPERM` / `ENOPROTOOPT`). Knowing this allows socket acceleration paths to downgrade
+    /// to trace-level warnings rather than assuming a broken host configuration.
+    pub fn is_containerized(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::path::Path::new("/.dockerenv").exists()
+                || std::path::Path::new("/run/.containerenv").exists()
+                || std::fs::read_to_string("/proc/1/cgroup")
+                    .map(|s| {
+                        s.contains("docker") || s.contains("kubepods") || s.contains("containerd")
+                    })
+                    .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 }
 

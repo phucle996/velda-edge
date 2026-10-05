@@ -5,12 +5,14 @@
 //! - [`multiplexed::MultiplexedPool`]: Sharded table for concurrent multi-stream connections (HTTP/2, HTTP/3).
 //! - [`shard::ShardTable`]: Cache-line aligned (`#[repr(align(64))]`) partitioned concurrency infrastructure.
 
+pub mod hasher;
 pub mod multiplexed;
 pub mod shard;
 pub mod subpool;
 
+pub use hasher::{FastBuildHasher, FastHasher};
 pub use multiplexed::{MultiplexedConnection, MultiplexedPool, MuxShard};
-pub use shard::{PoolShard, ShardTable};
+pub use shard::{PoolShard, ShardMetrics, ShardTable, current_thread_lane};
 pub use subpool::SubPool;
 
 use velda_core::hardware::{CpuTier, MemoryTier};

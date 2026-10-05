@@ -3,7 +3,9 @@
 //! Implements Nginx's smooth weighted round-robin selection algorithm,
 //! ensuring proportional distribution without clustering requests onto the highest-weight backend.
 
+use std::cell::Cell;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::LoadBalancer;
 use crate::context::SelectionContext;
@@ -11,19 +13,34 @@ use velda_core::Endpoint;
 
 thread_local! {
     /// Worker thread monotonic identifier for SWRR shard routing.
-    static WORKER_SHARD_ID: usize = {
-        static NEXT_SHARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        NEXT_SHARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    };
+    static WORKER_SHARD_ID: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[inline(always)]
+fn get_worker_shard_id() -> usize {
+    WORKER_SHARD_ID.with(|cell| {
+        let mut id = cell.get();
+        if id == usize::MAX {
+            static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+            id = NEXT_SHARD.fetch_add(1, Ordering::Relaxed);
+            cell.set(id);
+        }
+        id
+    })
+}
+
+#[repr(align(64))]
+struct SwrrShard {
+    mutex: Mutex<SwrrState>,
 }
 
 /// Smooth Weighted Round Robin balancer with sharded state.
 ///
 /// Weight ranges from 1 to 100 per endpoint.
 pub struct WeightedRoundRobin {
-    // OPTIMIZATION: Thread-sharded Mutex array eliminates lock contention across worker threads.
-    // Each worker thread maps to a dedicated shard, achieving near-zero contention similar to Nginx's per-worker model.
-    shards: Box<[Mutex<SwrrState>]>,
+    // Thread-sharded Mutex array padded to 64-byte cache lines completely eliminates
+    // cross-core false sharing and lock contention across worker threads.
+    shards: Box<[SwrrShard]>,
 }
 
 #[derive(Default)]
@@ -45,12 +62,12 @@ impl WeightedRoundRobin {
 
     /// Creates a new weighted round-robin balancer with explicit worker count
     /// injected by the caller (`velda-edge` supervisor).
-    ///
-    /// OPTIMIZATION: Shard count scales 1:1 with worker concurrency to eliminate Mutex lock contention.
     pub fn with_workers(workers: usize) -> Self {
         let count = workers.max(1).next_power_of_two();
         let shards = (0..count)
-            .map(|_| Mutex::new(SwrrState::default()))
+            .map(|_| SwrrShard {
+                mutex: Mutex::new(SwrrState::default()),
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self { shards }
@@ -66,16 +83,16 @@ impl LoadBalancer for WeightedRoundRobin {
             return Some(0);
         }
 
-        // OPTIMIZATION: Retrieve thread-dedicated shard to avoid cross-thread lock contention.
-        let shard_idx = WORKER_SHARD_ID.with(|id| *id) % self.shards.len();
+        // Shard count is guaranteed to be a power of two, enabling a 1-cycle bitmask.
+        let shard_idx = get_worker_shard_id() & (self.shards.len() - 1);
 
-        // BLOCKER FIX: Prevent poisoned mutex cascade panic. If another worker thread panics
-        // while holding this lock, recover the inner state instead of panicking on all subsequent requests.
         let mut lock = self.shards[shard_idx]
+            .mutex
             .lock()
             .unwrap_or_else(|poison_err| poison_err.into_inner());
         if lock.current_weights.len() != endpoints.len() {
-            lock.current_weights = vec![0; endpoints.len()];
+            lock.current_weights.clear();
+            lock.current_weights.resize(endpoints.len(), 0);
         }
 
         let total_weight: i64 = endpoints.iter().map(|e| e.weight as i64).sum();
@@ -150,7 +167,7 @@ mod tests {
         // Deliberately poison all shards in another thread
         let _ = std::thread::spawn(move || {
             for s in &b_clone.shards {
-                let _lock = s.lock().unwrap();
+                let _lock = s.mutex.lock().unwrap();
             }
             panic!("Intentional worker panic to poison the mutexes");
         })

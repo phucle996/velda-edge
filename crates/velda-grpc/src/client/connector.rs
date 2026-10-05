@@ -14,19 +14,31 @@ use velda_core::{Body, L7Request, L7Response};
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 
-/// Upstream gRPC socket acceleration path.
+/// Pre-compiled Linux socket acceleration path for gRPC backend client streams.
+///
+/// Pre-computed at bootstrap to keep connection establishment on a branchless hot path
+/// without repeated hardware or kernel capability checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrpcAccelerationPath {
-    /// Disable Nagle's algorithm (`TCP_NODELAY`). Defaults to `true`.
+    /// Disables Nagle's algorithm (`TCP_NODELAY`) to eliminate 40ms delayed-ACK packet coalescing delays.
     pub nodelay: bool,
-    /// Enable TCP Fast Open Connect (`TCP_FASTOPEN_CONNECT`).
+    /// Sends ClientHello directly in SYN packet (`TCP_FASTOPEN_CONNECT`), shaving 1 full RTT
+    /// off TLS handshakes. Only enabled for TLS where replay protection is cryptographic.
     pub fastopen: bool,
-    /// Sndbuf low-watermark threshold (`TCP_NOTSENT_LOWAT`) in bytes.
+    /// Caps unsent bytes in the socket write queue (`TCP_NOTSENT_LOWAT`).
+    ///
+    /// In gRPC, multiple RPC streams multiplex over a single HTTP/2 connection. Capping unsent
+    /// bytes ensures kernel buffers do not inflate, preserving user-space RPC deadline and priority ordering.
     pub notsent_lowat: Option<u32>,
-    /// Maximum time that transmitted data may remain unacknowledged (`TCP_USER_TIMEOUT`).
+    /// Aborts stuck TCP streams (`TCP_USER_TIMEOUT`) when cloud NAT gateways or firewalls silently
+    /// drop packets, replacing the default 15-minute OS retransmit timeout with upstream deadline.
     pub user_timeout: Option<std::time::Duration>,
-    /// TCP Keep-Alive interval (`SO_KEEPALIVE` + `TCP_KEEPIDLE`).
+    /// Periodically probes idle connections (`SO_KEEPALIVE` + `TCP_KEEPIDLE`) to keep stateful
+    /// middlebox / NAT table entries warm and detect silent peer reboots.
     pub keepalive: Option<std::time::Duration>,
+    /// Low-latency socket polling in kernel space (`SO_BUSY_POLL`) to bypass epoll sleep/wake
+    /// context-switch latency spikes on high-core server tiers.
+    pub busy_poll_us: Option<u32>,
 }
 
 impl Default for GrpcAccelerationPath {
@@ -37,12 +49,16 @@ impl Default for GrpcAccelerationPath {
             notsent_lowat: None,
             user_timeout: None,
             keepalive: None,
+            busy_poll_us: None,
         }
     }
 }
 
 impl GrpcAccelerationPath {
     /// Pre-compiles gRPC socket acceleration path from hardware topology, timeouts, and TLS status.
+    ///
+    /// Fast Open is only enabled for TLS endpoints because raw HTTP requests (like POST) are not
+    /// idempotent and could suffer from TCP retransmission replays.
     pub fn for_topology(
         topo: &velda_core::HardwareTopology,
         connect_timeout: std::time::Duration,
@@ -67,17 +83,143 @@ impl GrpcAccelerationPath {
 
         let keepalive = Some(idle_timeout / 2);
 
+        // Enable SO_BUSY_POLL only on large multi-core hardware tiers where dedicated core polling
+        // yields sub-millisecond tail latency wins without starving small-tier CPU budgets.
+        let busy_poll_us = if topo.kernel.supports_busy_poll()
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            ) {
+            Some(50)
+        } else {
+            None
+        };
+
         Self {
             nodelay: true,
             fastopen,
             notsent_lowat,
             user_timeout,
             keepalive,
+            busy_poll_us,
         }
+    }
+
+    /// Applies pre-connect socket acceleration options (e.g. `TCP_FASTOPEN_CONNECT`).
+    ///
+    /// Unprivileged containers (Docker default seccomp, K8s unprivileged pods) often block
+    /// Fast Open with `EPERM` or `ENOPROTOOPT`. Logging at trace level and proceeding ensures
+    /// traffic still flows without hard connection failures.
+    pub fn apply_pre_connect(&self, fd: std::os::unix::io::RawFd) {
+        #[cfg(target_os = "linux")]
+        if self.fastopen {
+            let val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_FASTOPEN_CONNECT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_FASTOPEN_CONNECT not supported by kernel or denied in container; skipping"
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = fd;
+    }
+
+    /// Applies post-connect socket acceleration options (`TCP_NODELAY`, `TCP_NOTSENT_LOWAT`,
+    /// `TCP_USER_TIMEOUT`, `SO_KEEPALIVE`, `TCP_KEEPIDLE`, `SO_BUSY_POLL`).
+    ///
+    /// Invoked immediately after connection handshake. Any option rejected by host seccomp
+    /// or legacy kernel is skipped at trace level rather than dropping an established backend stream.
+    pub fn apply_post_connect(&self, fd: std::os::unix::io::RawFd) {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            if let Some(lowat) = self.notsent_lowat {
+                let val = lowat as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_NOTSENT_LOWAT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_NOTSENT_LOWAT skipped");
+                }
+            }
+
+            if let Some(user_timeout) = self.user_timeout {
+                let val = user_timeout.as_millis() as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_USER_TIMEOUT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_USER_TIMEOUT skipped");
+                }
+            }
+
+            if let Some(keepalive) = self.keepalive {
+                let val: libc::c_int = 1;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_KEEPALIVE,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+
+                let idle_secs = keepalive.as_secs().max(1) as libc::c_int;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPIDLE,
+                    &idle_secs as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&idle_secs) as libc::socklen_t,
+                );
+            }
+
+            if let Some(busy_poll) = self.busy_poll_us {
+                let val = busy_poll as libc::c_int;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "SO_BUSY_POLL skipped (unprivileged container)");
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = fd;
     }
 }
 
-const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
+/// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
+///
+/// Thresholds are scaled to memory tier with a 16KB minimum:
+/// - Setting the threshold too low (< 16KB) starves NIC TCP Segmentation Offload (TSO) and
+///   causes epoll to wake on almost every single packet, degrading CPU cache locality.
+/// - Setting it too high (> 128KB) causes bufferbloat in the kernel socket buffer and defeats
+///   multiplexed stream prioritization.
+pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
     use velda_core::MemoryTier;
     const KB: u32 = 1024;
     match tier {
@@ -85,67 +227,6 @@ const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
         MemoryTier::Medium => 32 * KB,
         MemoryTier::Large | MemoryTier::XLarge => 64 * KB,
         MemoryTier::TwoXLarge | MemoryTier::Ultra => 128 * KB,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn apply_tcp_fastopen(fd: std::os::unix::io::RawFd) {
-    let val: libc::c_int = 1;
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_FASTOPEN_CONNECT,
-            &val as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&val) as libc::socklen_t,
-        );
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn apply_post_connect_options(fd: std::os::unix::io::RawFd, accel: &GrpcAccelerationPath) {
-    unsafe {
-        if let Some(lowat) = accel.notsent_lowat {
-            let val = lowat as libc::c_uint;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_NOTSENT_LOWAT,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-
-        if let Some(user_timeout) = accel.user_timeout {
-            let val = user_timeout.as_millis() as libc::c_uint;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_USER_TIMEOUT,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-
-        if let Some(keepalive) = accel.keepalive {
-            let val: libc::c_int = 1;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_KEEPALIVE,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-
-            let idle_secs = keepalive.as_secs().max(1) as libc::c_int;
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_KEEPIDLE,
-                &idle_secs as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&idle_secs) as libc::socklen_t,
-            );
-        }
     }
 }
 
@@ -167,6 +248,7 @@ impl GrpcUpstreamConnector {
         self.send_request = ready_send;
         Ok(())
     }
+
     /// Establishes a new HTTP/2 connection to the upstream target backend endpoint
     /// applying limits from [`GrpcConfig`], optional socket acceleration path, and connection timeout.
     pub async fn connect(
@@ -182,9 +264,9 @@ impl GrpcUpstreamConnector {
         };
 
         #[cfg(target_os = "linux")]
-        if acceleration.is_some_and(|accel| accel.fastopen) {
+        if let Some(accel) = acceleration {
             use std::os::unix::io::AsRawFd;
-            apply_tcp_fastopen(socket.as_raw_fd());
+            accel.apply_pre_connect(socket.as_raw_fd());
         }
 
         let connect_fut = socket.connect(target);
@@ -205,7 +287,7 @@ impl GrpcUpstreamConnector {
             #[cfg(target_os = "linux")]
             {
                 use std::os::unix::io::AsRawFd;
-                apply_post_connect_options(stream.as_raw_fd(), accel);
+                accel.apply_post_connect(stream.as_raw_fd());
             }
         } else {
             let _ = stream.set_nodelay(true);
@@ -322,5 +404,42 @@ impl GrpcUpstreamConnector {
             headers,
             body,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_notsent_lowat_scaling() {
+        use velda_core::MemoryTier;
+        assert_eq!(
+            notsent_lowat_for_mem_tier(MemoryTier::Constrained),
+            16 * 1024
+        );
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Medium), 32 * 1024);
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Large), 64 * 1024);
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Ultra), 128 * 1024);
+    }
+
+    #[test]
+    fn test_grpc_acceleration_path_for_topology() {
+        let topo = velda_core::global_hardware_topology();
+        let connect_to = std::time::Duration::from_millis(500);
+        let idle_to = std::time::Duration::from_secs(30);
+
+        let accel_plain = GrpcAccelerationPath::for_topology(topo, connect_to, idle_to, false);
+        assert!(accel_plain.nodelay);
+        assert!(!accel_plain.fastopen);
+
+        let accel_tls = GrpcAccelerationPath::for_topology(topo, connect_to, idle_to, true);
+        assert!(accel_tls.nodelay);
+        #[cfg(target_os = "linux")]
+        {
+            if topo.kernel.supports_tcp_fastopen_connect() {
+                assert!(accel_tls.fastopen);
+            }
+        }
     }
 }

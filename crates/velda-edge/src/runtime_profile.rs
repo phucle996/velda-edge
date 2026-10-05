@@ -82,6 +82,10 @@ pub struct TcpRuntimeConfig {
     pub quickack: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_accept_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastopen_backlog: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_poll_us: Option<u32>,
 }
 
 /// UDP-specific runtime configuration.
@@ -161,7 +165,8 @@ impl RuntimeProfile {
         let memory_tier = hardware.memory_tier();
 
         let dns_config = DnsResolverConfig::for_tier(memory_tier);
-        let engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
+        let mut engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
+        engine_config.tcp = TcpListenerConfig::for_topology(hardware);
         let tls_params = velda_tls::TlsServerParams::for_tiers(cpu_tier, memory_tier);
 
         Self {
@@ -198,6 +203,8 @@ impl RuntimeProfile {
                     concurrency_shards: engine_config.tcp.concurrency_shards,
                     quickack: Some(engine_config.tcp.quickack),
                     defer_accept_secs: engine_config.tcp.defer_accept_secs,
+                    fastopen_backlog: engine_config.tcp.fastopen_backlog,
+                    busy_poll_us: engine_config.tcp.busy_poll_us,
                 },
                 udp: UdpRuntimeConfig {
                     recv_buffer_size: engine_config.udp.recv_buffer_size,
@@ -254,6 +261,12 @@ impl RuntimeProfile {
         }
         if let Some(d) = self.transport.tcp.defer_accept_secs {
             cfg = cfg.with_defer_accept(Some(d));
+        }
+        if let Some(fb) = self.transport.tcp.fastopen_backlog {
+            cfg = cfg.with_fastopen_backlog(Some(fb));
+        }
+        if let Some(bp) = self.transport.tcp.busy_poll_us {
+            cfg = cfg.with_busy_poll(Some(bp));
         }
         cfg
     }
@@ -385,6 +398,12 @@ impl RuntimeProfile {
                 if let Some(d) = tcp.defer_accept_secs {
                     self.transport.tcp.defer_accept_secs = Some(d);
                 }
+                if let Some(fb) = tcp.fastopen_backlog {
+                    self.transport.tcp.fastopen_backlog = Some(fb);
+                }
+                if let Some(bp) = tcp.busy_poll_us {
+                    self.transport.tcp.busy_poll_us = Some(bp);
+                }
             }
 
             // Grouped UDP overrides
@@ -456,6 +475,8 @@ struct PartialTcpConfig {
     concurrency_shards: Option<usize>,
     quickack: Option<bool>,
     defer_accept_secs: Option<u32>,
+    fastopen_backlog: Option<u32>,
+    busy_poll_us: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]

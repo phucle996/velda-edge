@@ -34,10 +34,11 @@ pub mod manager {
 // Flat canonical exports at crate root
 pub use config::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_LIFETIME, PoolConfig, PoolStats};
 pub use container::{
-    MAX_IDLE_PER_KEY, MAX_SHARDS, MIN_IDLE_PER_KEY, MIN_SHARDS, MultiplexedConnection,
-    MultiplexedPool, MuxShard, PoolShard, ShardTable, SubPool, concurrency_shards_for_cpu_tier,
-    max_concurrent_streams_for_mem_tier, max_idle_per_key_for_mem_tier, optimal_max_idle_per_key,
-    optimal_shard_count, probed_max_idle_per_key, probed_shard_count,
+    FastBuildHasher, FastHasher, MAX_IDLE_PER_KEY, MAX_SHARDS, MIN_IDLE_PER_KEY, MIN_SHARDS,
+    MultiplexedConnection, MultiplexedPool, MuxShard, PoolShard, ShardTable, SubPool,
+    concurrency_shards_for_cpu_tier, max_concurrent_streams_for_mem_tier,
+    max_idle_per_key_for_mem_tier, optimal_max_idle_per_key, optimal_shard_count,
+    probed_max_idle_per_key, probed_shard_count,
 };
 pub use key::ConnectionKey;
 pub use lease::{

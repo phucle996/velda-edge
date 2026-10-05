@@ -160,36 +160,36 @@ RuntimeSnapshot (Gen N, Revision: u64)
 │   │
 │   ├── tcp:   upstream_name ──> TcpUpstream
 │   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│   │   └── pool: Arc<ConnectionPool> ─────────> Dedicated L4 TCP Connection Pool (Idle Keep-Alive)
+│   │   └── acceleration ──────────────────────> SocketAccelerationPath (Zero-Copy Kernel Options & Sndbuf Tuning)
 │   │
 │   ├── udp:   upstream_name ──> UdpUpstream
-│   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│   │   └── socket: Arc<UdpSocket> ────────────> Dedicated Non-Blocking UDP Datagram Socket
+│   │   └── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
 │   │
 │   ├── http1: upstream_name ──> Http1Upstream
 │   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│   │   ├── pool: Arc<ConnectionPool> ─────────> Dedicated HTTP/1.1 Keep-Alive Connection Pool
+│   │   ├── pool: Arc<PoolManager> ────────────> Lock-Sharded Sequential Keep-Alive Connection Pool
 │   │   ├── [PRE-COMPILED] tls_engine ─────────> Option<Arc<TlsClientEngine>> (Pre-baked Root CAs + mTLS)
 │   │   ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved Target SNI Hostname)
-│   │   └── [PRE-COMPILED] strategy ───────────> Http1PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
+│   │   ├── [PRE-COMPILED] strategy ───────────> Http1PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
+│   │   └── [PRE-COMPILED] acceleration ───────> Http1AccelerationPath (Kernel TCP tuning & FastOpen)
 │   │
 │   ├── http2: upstream_name ──> Http2Upstream
 │   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│   │   ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved Target SNI for HTTPS/2)
-│   │   ├── client_cache: RwLock<HashMap> ─────> Dedicated Multiplexed H2 Client Conns (RFC 9113)
-│   │   └── [PRE-COMPILED] strategy ───────────> Http2PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
+│   │   ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed H2 Client Connection Pool (RFC 9113)
+│   │   ├── [PRE-COMPILED] strategy ───────────> Http2PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
+│   │   └── [PRE-COMPILED] acceleration ───────> Http2AccelerationPath (Kernel TCP tuning & FastOpen)
 │   │
 │   ├── http3: upstream_name ──> Http3Upstream
 │   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
+│   │   ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed QUIC Client Session Pool (RFC 9114)
 │   │   ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved QUIC TLS 1.3 SNI)
-│   │   ├── client_cache: RwLock<HashMap> ─────> Dedicated Persistent QUIC Client Conns (RFC 9114)
 │   │   └── [PRE-COMPILED] strategy ───────────> Http3PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
 │   │
 │   └── grpc:  upstream_name ──> GrpcUpstream
 │       ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│       ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved Target SNI for gRPCS)
-│       ├── [PRE-COMPILED] streaming ──────────> StreamingMode
-│       └── [PRE-COMPILED] strategy ───────────> GrpcPipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
+│       ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed gRPC Client Connection Pool
+│       ├── [PRE-COMPILED] strategy ───────────> GrpcPipeStrategy (Unary | ClientStream | ServerStream | Duplex)
+│       └── [PRE-COMPILED] acceleration ───────> GrpcAccelerationPath (Kernel TCP tuning & FastOpen)
 │
 └── 4. rt.tls (TLS Engines) ──────────────────────────── [Pre-Compiled Cryptographic Contexts]
     │
@@ -199,21 +199,21 @@ RuntimeSnapshot (Gen N, Revision: u64)
 
 ### Key Hot-Path Invariants in the State Tree
 
-- **Per-Upstream Pool & Cache Isolation**: Pools are **never** shared globally. Every single Upstream instance (`TcpUpstream`, `Http1Upstream`, `Http2Upstream`, etc.) owns its private, dedicated connection pool or multiplexed client cache.
+- **Per-Upstream Pool & Cache Isolation**: Pools are **never** shared globally across upstreams. Every single Upstream instance (`Http1Upstream`, `Http2Upstream`, `Http3Upstream`, `GrpcUpstream`) owns its private, dedicated lock-sharded connection pool.
 - **Dedicated Per-Upstream Load Balancers & Timeouts**: Every Upstream owns its private `LbAlgorithm` enum variant (RR, WRR, LeastConn, Random, IpHash, P2C) and `UpstreamTimeouts { connect, idle, request }`. Rotation counters and connection states are completely isolated between backends.
 - **Physical Endpoint Topology in Discovery**: Backend endpoints are pre-resolved into canonical `Vec<Endpoint>` (`address: SocketAddr`, `weight: u32`) avoiding dynamic DNS lookups during request execution.
-- **Multiplexed Cache vs Single-Request Pool**:
-  - **TCP & HTTP/1.1**: Use dedicated `ConnectionPool` because sockets serve 1 request at a time (Head-of-Line blocking).
-  - **HTTP/2, HTTP/3, gRPC**: Use dedicated `client_cache` to multiplex hundreds of concurrent streams over persistent established pipes, eliminating connection churn.
+- **Lock-Sharded Pools vs Multiplexed Pools**:
+  - **HTTP/1.1**: Uses dedicated `PoolManager<SocketAddr, Http1ClientResource>` with LIFO checkout and non-blocking `try_read` health validation to prevent stale socket reuse.
+  - **HTTP/2, HTTP/3, gRPC**: Use dedicated `MultiplexedPool` with thread-sharded active connection slots to multiplex concurrent streams without connection churn.
 - **L4 Direct Bypass vs L7 Handoff**: Raw listeners bypass L7 decoders and pipeline tables completely (`PathKind::L4Direct`), dispatching straight to `rt.router.l4`.
 - **Pre-Compiled Route Plugins**: Plugin hook chains (`Vec<PluginId>`) are pre-bound to each Route record for zero dynamic resolution during routing.
 - **Zero Protocol Sniffing**: `rt.pipelines` resolves the wire protocol directly from `listener_id` in $O(1)$. No inspecting payloads or sniffing `Content-Type: application/grpc`.
 - **Strict Protocol Isolation**: `rt.router` isolates HTTP and gRPC tables into disjoint memory areas. HTTP traffic never touches or iterates over gRPC route rules.
 - **Pre-Baked Upstream TLS**: Outbound TLS engines, target SNIs, and root stores are compiled directly into the upstream struct at snapshot build time, eliminating runtime certificate lookups.
-- **Single-Line Upstream Handoff**: The L7 pipeline executes dispatch via a direct one-line handoff:
+- **Contiguous Pipeline Handoff**: The L7 pipeline acquires upstream lease and executes wire pipe top-to-bottom within self-contained strategy modules:
   ```rust
-  let upstream = rt.upstreams.http1.get(&route.upstream_name)?;
-  upstream.dispatch_pipe(client_req, downstream_stream).await;
+  let mut upstream_lease = upstream.acquire_stream(host_str).await?;
+  pipe_buffered(&mut conn, head, framing, &mut *upstream_lease, &cfg).await?;
   ```
 
 

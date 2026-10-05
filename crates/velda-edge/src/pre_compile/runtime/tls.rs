@@ -12,16 +12,11 @@ use crate::error::EdgeError;
 
 /// Compiles a slice of declarative [`TlsConfig`] definitions into an in-memory [`TlsServerEngine`].
 ///
-/// ### Why Pre-compilation is Required (Zero-IO Hot-Path Invariant):
-/// - Parsing X.509 certificate chains and private keys from PEM format, initialising
-///   cryptographic providers, and constructing the [`SniResolver`] certificate tree
-///   are computationally expensive operations involving disk-format decoding and heap allocations.
-/// - Performing these operations on every incoming connection would introduce severe latency spikes
-///   (several milliseconds per request) and exhaust CPU resources.
-/// - Therefore, this function pre-compiles all certificates, keys, ALPN protocols, and SNI lookup
-///   tables once during bootstrap or atomic hot-reload into RAM.
-/// - On the request serving hot path, [`TlsServerEngine`] resolves SNI and terminates TLS handshakes
-///   in $O(1)$ lock-free time without any dynamic allocation or PEM re-parsing.
+/// Pre-compiles all certificates, keys, ALPN protocols, and SNI lookup tables once during bootstrap
+/// or atomic hot-reload into RAM. Parsing X.509 certificate chains and private keys from PEM format
+/// on every incoming connection would introduce multi-millisecond latency spikes and exhaust CPU resources.
+/// Pre-compilation allows [`TlsServerEngine`] to resolve SNI and terminate handshakes in $O(1)$ lock-free time
+/// on the request serving hot path without dynamic allocation or PEM decoding.
 ///
 /// Returns `Ok(None)` if no TLS configurations are provided.
 pub fn compile_tls_server(

@@ -126,16 +126,25 @@ fn bench_algorithm_latencies() {
         ops_sec
     );
 
-    // Setup metrics map for state-aware algorithms
+    // Setup metrics container for state-aware algorithms
     let mut metrics_map = HashMap::new();
+    let mut metrics_slice = Vec::new();
     for (i, ep) in endpoints.iter().enumerate() {
         let m = EndpointMetrics::new();
         m.set_active_connections((i as u32) + 1);
         m.set_inflight_requests((i as u32) + 2);
         m.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
         metrics_map.insert(ep.address, m);
+
+        let ms = EndpointMetrics::new();
+        ms.set_active_connections((i as u32) + 1);
+        ms.set_inflight_requests((i as u32) + 2);
+        ms.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
+        metrics_slice.push(ms);
     }
-    let ctx_metrics = SelectionContext::NONE.with_metrics(&metrics_map);
+    let ctx_metrics = SelectionContext::NONE
+        .with_metrics(&metrics_map)
+        .with_metrics_slice(&metrics_slice);
 
     // 5. Power of Two Choices (P2C)
     let p2c = PowerOfTwoChoices::new();

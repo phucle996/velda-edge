@@ -21,8 +21,7 @@ impl LoadBalancer for LeastConnections {
             return None;
         }
 
-        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
-        // Direct array indexing eliminates SipHash computation and pointer chasing in HashMap.
+        // Contiguous metrics slice path: direct array indexing eliminates SipHash computation.
         if let Some(metrics) = ctx.metrics_slice {
             let limit = endpoints.len().min(metrics.len());
             if limit == 0 {
@@ -83,7 +82,7 @@ impl LoadBalancer for LeastRequests {
             return None;
         }
 
-        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
+        // Contiguous metrics slice path: direct array indexing eliminates SipHash computation.
         if let Some(metrics) = ctx.metrics_slice {
             let limit = endpoints.len().min(metrics.len());
             if limit == 0 {
@@ -144,20 +143,24 @@ impl LoadBalancer for WeightedLeastRequests {
             return None;
         }
 
-        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
+        // Direct array indexing eliminates SipHash computation and pointer chasing in HashMap.
         if let Some(metrics) = ctx.metrics_slice {
             let limit = endpoints.len().min(metrics.len());
             if limit == 0 {
                 return Some(0);
             }
             let mut best_idx = 0;
-            let mut min_weighted_load =
-                metrics[0].inflight_requests() as f64 / endpoints[0].weight.max(1) as f64;
+            let mut min_inflight = metrics[0].inflight_requests() as u64;
+            let mut min_weight = endpoints[0].weight.max(1) as u64;
+
             for i in 1..limit {
-                let w_load =
-                    metrics[i].inflight_requests() as f64 / endpoints[i].weight.max(1) as f64;
-                if w_load < min_weighted_load {
-                    min_weighted_load = w_load;
+                let inflight = metrics[i].inflight_requests() as u64;
+                let weight = endpoints[i].weight.max(1) as u64;
+                // Comparing (inflight / weight) < (min_inflight / min_weight) using integer cross-multiplication.
+                // Eliminates floating-point conversion (cvtsi2sd) and division (divsd) instructions.
+                if inflight * min_weight < min_inflight * weight {
+                    min_inflight = inflight;
+                    min_weight = weight;
                     best_idx = i;
                 }
             }
@@ -169,20 +172,19 @@ impl LoadBalancer for WeightedLeastRequests {
         };
 
         let mut best_idx = 0;
-        let load_of = |ep: &Endpoint| -> f64 {
-            let inflight = metrics_map
-                .get(&ep.address)
-                .map(|m| m.inflight_requests())
-                .unwrap_or(0);
-            inflight as f64 / ep.weight.max(1) as f64
-        };
-
-        let mut min_weighted_load = load_of(&endpoints[0]);
+        let mut min_inflight = metrics_map
+            .get(&endpoints[0].address)
+            .map_or(0, |m| m.inflight_requests()) as u64;
+        let mut min_weight = endpoints[0].weight.max(1) as u64;
 
         for (i, ep) in endpoints.iter().enumerate().skip(1) {
-            let w_load = load_of(ep);
-            if w_load < min_weighted_load {
-                min_weighted_load = w_load;
+            let inflight = metrics_map
+                .get(&ep.address)
+                .map_or(0, |m| m.inflight_requests()) as u64;
+            let weight = ep.weight.max(1) as u64;
+            if inflight * min_weight < min_inflight * weight {
+                min_inflight = inflight;
+                min_weight = weight;
                 best_idx = i;
             }
         }

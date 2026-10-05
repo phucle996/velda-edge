@@ -38,8 +38,12 @@ impl IpHash {
 
 impl LoadBalancer for IpHash {
     fn select_index(&self, endpoints: &[Endpoint], ctx: &SelectionContext<'_>) -> Option<usize> {
-        if endpoints.is_empty() {
+        let n = endpoints.len();
+        if n == 0 {
             return None;
+        }
+        if n == 1 {
+            return Some(0);
         }
 
         let hash_val = if let Some(key) = ctx.hash_key {
@@ -52,7 +56,11 @@ impl LoadBalancer for IpHash {
             0
         };
 
-        Some((hash_val as usize) % endpoints.len())
+        if n & (n - 1) == 0 {
+            Some((hash_val as usize) & (n - 1))
+        } else {
+            Some(super::random::fast_reduce(hash_val, n))
+        }
     }
 }
 
@@ -69,8 +77,12 @@ impl GenericHash {
 
 impl LoadBalancer for GenericHash {
     fn select_index(&self, endpoints: &[Endpoint], ctx: &SelectionContext<'_>) -> Option<usize> {
-        if endpoints.is_empty() {
+        let n = endpoints.len();
+        if n == 0 {
             return None;
+        }
+        if n == 1 {
+            return Some(0);
         }
 
         let hash_val = if let Some(key) = ctx.hash_key {
@@ -81,7 +93,11 @@ impl LoadBalancer for GenericHash {
             0
         };
 
-        Some((hash_val as usize) % endpoints.len())
+        if n & (n - 1) == 0 {
+            Some((hash_val as usize) & (n - 1))
+        } else {
+            Some(super::random::fast_reduce(hash_val, n))
+        }
     }
 }
 

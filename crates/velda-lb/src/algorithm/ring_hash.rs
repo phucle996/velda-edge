@@ -26,6 +26,8 @@ struct Vnode {
 struct RingState {
     ring: Vec<Vnode>,
     fingerprint: u64,
+    endpoints_ptr: usize,
+    endpoints_len: usize,
 }
 
 /// Consistent Hash Ring balancer.
@@ -102,36 +104,38 @@ impl RingHash {
 
 impl LoadBalancer for RingHash {
     fn select_index(&self, endpoints: &[Endpoint], ctx: &SelectionContext<'_>) -> Option<usize> {
-        if endpoints.is_empty() {
+        let n = endpoints.len();
+        if n == 0 {
             return None;
         }
-        if endpoints.len() == 1 {
+        if n == 1 {
             return Some(0);
         }
 
-        // OPTIMIZATION: Ultra-fast O(log V) path. If caller provides upstream topology_version,
-        // we compare it directly against the compiled state, completely bypassing O(N) FNV1a hashing.
-        if let Some(version) = ctx.topology_version {
-            let current = self.state.load();
-            if current.fingerprint == version && !current.ring.is_empty() {
-                let key = ctx.hash_key.unwrap_or(0);
-                let idx = match current.ring.binary_search_by_key(&key, |v| v.hash) {
-                    Ok(i) => i,
-                    Err(i) => {
-                        if i >= current.ring.len() {
-                            0
-                        } else {
-                            i
-                        }
+        let current = self.state.load();
+        let ptr = endpoints.as_ptr() as usize;
+
+        // Ultra-fast path: same slice pointer/len or matching topology version.
+        // Completely bypasses FNV1a hashing, executing pure O(log V) binary search.
+        if ((current.endpoints_ptr == ptr && current.endpoints_len == n)
+            || ctx
+                .topology_version
+                .is_some_and(|v| v == current.fingerprint))
+            && !current.ring.is_empty()
+        {
+            let key = ctx.hash_key.unwrap_or(0);
+            let idx = match current.ring.binary_search_by_key(&key, |v| v.hash) {
+                Ok(i) => i,
+                Err(i) => {
+                    if i >= current.ring.len() {
+                        0
+                    } else {
+                        i
                     }
-                };
-                let ep_idx = current.ring[idx].endpoint_idx;
-                return if ep_idx < endpoints.len() {
-                    Some(ep_idx)
-                } else {
-                    Some(0)
-                };
-            }
+                }
+            };
+            let ep_idx = current.ring[idx].endpoint_idx;
+            return if ep_idx < n { Some(ep_idx) } else { Some(0) };
         }
 
         // Fallback: compute FNV1a fingerprint over endpoints slice
@@ -140,31 +144,23 @@ impl LoadBalancer for RingHash {
             .unwrap_or_else(|| Self::compute_fingerprint(endpoints));
 
         // Fast path: lock-free binary search on ring
-        {
-            let current = self.state.load();
-            if current.fingerprint == fp && !current.ring.is_empty() {
-                let key = ctx.hash_key.unwrap_or(0);
-                let idx = match current.ring.binary_search_by_key(&key, |v| v.hash) {
-                    Ok(i) => i,
-                    Err(i) => {
-                        if i >= current.ring.len() {
-                            0
-                        } else {
-                            i
-                        }
+        if current.fingerprint == fp && !current.ring.is_empty() {
+            let key = ctx.hash_key.unwrap_or(0);
+            let idx = match current.ring.binary_search_by_key(&key, |v| v.hash) {
+                Ok(i) => i,
+                Err(i) => {
+                    if i >= current.ring.len() {
+                        0
+                    } else {
+                        i
                     }
-                };
-                let ep_idx = current.ring[idx].endpoint_idx;
-                return if ep_idx < endpoints.len() {
-                    Some(ep_idx)
-                } else {
-                    Some(0)
-                };
-            }
+                }
+            };
+            let ep_idx = current.ring[idx].endpoint_idx;
+            return if ep_idx < n { Some(ep_idx) } else { Some(0) };
         }
 
-        // BLOCKER FIX: Prevent poisoned mutex cascade panic on ring rebuild.
-        // If a thread panics during ring construction, recover the lock guard instead of taking down the upstream.
+        // Recover lock guard if another thread panics during ring construction
         let _guard = self
             .rebuild_lock
             .lock()
@@ -184,17 +180,15 @@ impl LoadBalancer for RingHash {
                 }
             };
             let ep_idx = current.ring[idx].endpoint_idx;
-            return if ep_idx < endpoints.len() {
-                Some(ep_idx)
-            } else {
-                Some(0)
-            };
+            return if ep_idx < n { Some(ep_idx) } else { Some(0) };
         }
 
         let new_ring = Self::rebuild_ring(endpoints);
         let new_state = RingState {
             ring: new_ring,
             fingerprint: fp,
+            endpoints_ptr: ptr,
+            endpoints_len: n,
         };
 
         let key = ctx.hash_key.unwrap_or(0);
@@ -211,12 +205,7 @@ impl LoadBalancer for RingHash {
         let ep_idx = new_state.ring[idx].endpoint_idx;
 
         self.state.store(Arc::new(new_state));
-
-        if ep_idx < endpoints.len() {
-            Some(ep_idx)
-        } else {
-            Some(0)
-        }
+        if ep_idx < n { Some(ep_idx) } else { Some(0) }
     }
 }
 

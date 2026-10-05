@@ -3,7 +3,7 @@
 //! Uses Exponentially Weighted Moving Average (EWMA) of observed response latency,
 //! multiplied by the in-flight penalty, to route to the lowest latency backend.
 
-use super::random::fast_random_u64;
+use super::random::fast_random_pair;
 use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
@@ -29,28 +29,29 @@ impl LoadBalancer for PeakEwma {
             return Some(0);
         }
 
-        // P2C sampling for O(1) performance
-        let r1 = (fast_random_u64() as usize) % n;
-        let mut r2 = (fast_random_u64() as usize) % (n - 1);
-        if r2 >= r1 {
-            r2 += 1;
-        }
+        // Extracts two distinct random candidate indices in 0..n from a single 64-bit PRNG invocation.
+        let (r1, r2) = fast_random_pair(n);
 
-        // OPTIMIZATION: Ultra-fast path when contiguous metrics slice is provided.
         // Direct array indexing eliminates SipHash computation in HashMap.
         if let Some(metrics) = ctx.metrics_slice {
-            let cost_at = |idx: usize| -> f64 {
+            let cost_at = |idx: usize| -> (u64, u64) {
+                let w = endpoints[idx].weight.max(1) as u64;
                 if let Some(m) = metrics.get(idx) {
                     let latency = m.latency_ewma_nanos().max(1_000);
                     let inflight = m.inflight_requests() as u64;
                     let cost = latency.saturating_mul(inflight.saturating_add(1));
-                    cost as f64 / endpoints[idx].weight.max(1) as f64
+                    (cost, w)
                 } else {
-                    1_000.0 / endpoints[idx].weight.max(1) as f64
+                    (1_000, w)
                 }
             };
 
-            return if cost_at(r1) <= cost_at(r2) {
+            let (cost1, w1) = cost_at(r1);
+            let (cost2, w2) = cost_at(r2);
+
+            // Comparing (cost1 / w1) <= (cost2 / w2) using 128-bit integer cross-multiplication.
+            // Avoids floating-point conversions (cvtsi2sd) and divisions (divsd).
+            return if (cost1 as u128) * (w2 as u128) <= (cost2 as u128) * (w1 as u128) {
                 Some(r1)
             } else {
                 Some(r2)
@@ -64,21 +65,22 @@ impl LoadBalancer for PeakEwma {
         let ep1 = &endpoints[r1];
         let ep2 = &endpoints[r2];
 
-        let cost_of = |ep: &Endpoint| -> f64 {
+        let cost_of = |ep: &Endpoint| -> (u64, u64) {
+            let w = ep.weight.max(1) as u64;
             if let Some(m) = metrics_map.get(&ep.address) {
-                let latency = m.latency_ewma_nanos().max(1_000); // minimum 1µs baseline
+                let latency = m.latency_ewma_nanos().max(1_000);
                 let inflight = m.inflight_requests() as u64;
-                // BLOCKER FIX: Prevent integer overflow panic under degraded backend conditions.
-                // High latency (in nanos) * high inflight count can exceed u64::MAX.
-                // Use saturating arithmetic to safely cap at u64::MAX.
                 let cost = latency.saturating_mul(inflight.saturating_add(1));
-                cost as f64 / ep.weight.max(1) as f64
+                (cost, w)
             } else {
-                1_000.0 / ep.weight.max(1) as f64
+                (1_000, w)
             }
         };
 
-        if cost_of(ep1) <= cost_of(ep2) {
+        let (cost1, w1) = cost_of(ep1);
+        let (cost2, w2) = cost_of(ep2);
+
+        if (cost1 as u128) * (w2 as u128) <= (cost2 as u128) * (w1 as u128) {
             Some(r1)
         } else {
             Some(r2)

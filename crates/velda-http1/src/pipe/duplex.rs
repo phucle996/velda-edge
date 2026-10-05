@@ -86,9 +86,10 @@ where
         Http1BodyFraming::Empty => {}
     }
 
-    if !client_disconnected {
-        let _ = conn.send_chunked_end().await;
+    if client_disconnected {
+        return Err(Http1Error::ConnectionClosed);
     }
 
+    let _ = conn.send_chunked_end().await;
     Ok(())
 }
