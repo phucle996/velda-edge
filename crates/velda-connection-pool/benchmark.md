@@ -8,38 +8,38 @@ This document records the official performance characteristics, Big-O complexity
 
 | Dimension | Measured Performance | Invariant Guarantee |
 | :--- | :--- | :--- |
-| **Pool HIT (Reused Conn)** | **192 ns** (5.20M ops/sec) | **0 bytes / 0 allocations** on hot path |
-| **Pool MISS (State 1 & 2)** | **92 ns** (10.79M ops/sec) | Container lazy-created; 0 allocations |
+| **Pool HIT (Reused Conn)** | **186 ns** (5.36M ops/sec) | **0 bytes / 0 allocations** on hot path |
+| **Pool MISS (Zero-Alloc)** | **38 ns** (25.75M ops/sec) | Zero-alloc, table unpolluted; 0 allocations |
 | **Steady-State Reuse Ratio** | **100.0%** (199,999 handshakes saved) | 1 physical socket serves entire request volume |
 | **Connection Multiplier** | **~5,000x per socket** | Maximizes connection recycling, zero socket churn |
-| **Queue Depth Scaling (LIFO)** | **178 - 207 ns** (flat from N=10 to 10,000) | Strictly **$\mathcal{O}(1)$** constant time |
-| **Peak Multicore Concurrency** | **17.32M ops/sec** (128 workers, 57 ns avg latency) | Striped cache-line aligned metrics; zero false sharing |
-| **Realistic Gateway Throughput** | **14.84M ops/sec** (32 workers + background sweeps) | 44.6M checkouts, **100.0% reuse**, 44.6M handshakes saved |
-| **Chaos Resilience Under Draining**| **13.85M ops/sec** (50% endpoints drained every 2ms) | **99.57% reuse ratio**, 41.4M handshakes saved |
-| **Idle Eviction Sweep** | **23 - 59 ns / connection** | Background non-blocking sweep |
-| **Drain Invalidation** | **248 µs** (drains 2,490 connections across shards) | Selective predicate filtering + container pruning |
-| **RAII PoolLease Drop** | **212 ns** (auto-released on drop) | Zero overhead vs explicit release |
+| **Queue Depth Scaling (LIFO)** | **178 - 224 ns** (flat from N=10 to 10,000) | Strictly **$\mathcal{O}(1)$** constant time |
+| **Peak Multicore Concurrency** | **15.99M ops/sec** (256 workers, 62 ns avg latency) | Striped cache-line aligned metrics; zero false sharing |
+| **Realistic Gateway Throughput** | **12.47M ops/sec** (32 workers + background sweeps) | 37.5M checkouts, **100.0% reuse**, 37.5M handshakes saved |
+| **Chaos Resilience Under Draining**| **13.27M ops/sec** (50% endpoints drained every 2ms) | **99.56% reuse ratio**, 39.6M handshakes saved |
+| **Idle Eviction Sweep** | **27 - 67 ns / connection** | Background non-blocking sweep |
+| **Drain Invalidation** | **137 µs** (drains 2,490 connections across shards) | Selective predicate filtering + container pruning |
+| **RAII PoolLease Drop** | **222 ns** (auto-released on drop) | Zero overhead vs explicit release |
 
 ---
 
-## 2. 3-State Container-First Lifecycle Benchmark (`single_thread_bench`)
+## 2. Clean Container Lifecycle Benchmark (`single_thread_bench`)
 
 ```text
 Request
    ↓
 PoolManager.acquire(key)
    │
-   ├── State 1: Container not present → Lazy-create Pool[Key] container (0 allocs)
+   ├── Container not present → Return None (Zero-Alloc cache miss, 38 ns, 0 memory bloat)
    │
-   ├── State 2: Container present but empty → Return None (Upstream connects backend)
+   ├── Container present but empty → Return None (Upstream connects backend)
    │
-   └── State 3: Container has connection → Pop LIFO connection (0 allocs, 192 ns)
+   └── Container has connection → Pop LIFO connection (0 allocs, 186 ns)
 ```
 
 | Operation | Iterations | Latency / Op | Ops / Sec | Reuse Ratio | Handshakes Saved |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pool HIT (State 3: Reused)** | 200,000 | **192 ns** | **5,197,006** | **100.0%** | **199,999 handshakes** |
-| **Pool MISS (State 1/2: Container Ready)** | 200,000 | **92 ns** | **10,786,692** | **0.0%** | **0 (Cold start)** |
+| **Pool HIT (State 3: Reused)** | 200,000 | **186 ns** | **5,358,702** | **100.0%** | **199,999 handshakes** |
+| **Pool MISS (Zero-Alloc Fast Path)** | 200,000 | **38 ns** | **25,754,964** | **0.0%** | **0 (Cold start)** |
 
 ---
 
@@ -111,10 +111,10 @@ Evaluates pool resilience, throughput, latency, and reuse ratios under hostile o
 
 ### 6.1 100% Cache Miss Storm (Cold Start & Random Key Churn)
 - **Workload**: 480,000 requests targeting 480,000 distinct, previously unseen endpoints across 32 threads.
-- **Throughput**: **4.24 Million ops/s** under 100% miss rate.
-- **Lazy Container Creation Latency**: **235 ns** (zero disk I/O, zero JSON parsing).
+- **Throughput**: **15.72 Million ops/s** under 100% miss rate (4.2x speedup via zero-allocation fast path).
+- **Miss Fast-Path Latency**: **63 ns** (zero disk I/O, zero JSON parsing, zero empty container allocation).
 - **Reuse Efficiency**: **0.0%** (expected during cold start pod churn).
-- **Mass Prune Recovery**: Pruned all 480,000 empty containers in **103.7 ms**, completely reclaiming RAM.
+- **Zero Memory Bloat**: Leaves **0 empty containers** in RAM, eliminating memory exhaustion risks.
 
 ### 6.2 Worker Churn & Restart Storm (Thread Death & Rapid Spawning)
 - **Workload**: 800 short-lived worker threads spawned and joined across 50 generations, executing 4,000,000 checkouts.

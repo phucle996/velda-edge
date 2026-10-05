@@ -34,7 +34,7 @@ pub async fn pipe_client_stream(
 
     let workflow = async {
         // Step 1: Establish upstream connection applying config limits
-        let mut connector = match GrpcUpstreamConnector::connect(target, config).await {
+        let mut connector = match GrpcUpstreamConnector::connect(target, config, None, None).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(target = %target, error = %e, "Failed to connect to gRPC upstream");

@@ -121,6 +121,24 @@ impl KernelProfile {
             reason,
         }
     }
+
+    /// Returns `true` if the kernel release supports TCP Fast Open Connect (`TCP_FASTOPEN_CONNECT`, Linux >= 4.11).
+    #[inline]
+    pub const fn supports_tcp_fastopen_connect(&self) -> bool {
+        self.version.is_at_least(4, 11)
+    }
+
+    /// Returns `true` if the kernel release supports `TCP_NOTSENT_LOWAT` (Linux >= 3.12).
+    #[inline]
+    pub const fn supports_tcp_notsent_lowat(&self) -> bool {
+        self.version.is_at_least(3, 12)
+    }
+
+    /// Returns `true` if the kernel release supports `TCP_USER_TIMEOUT` (Linux >= 2.6).
+    #[inline]
+    pub const fn supports_tcp_user_timeout(&self) -> bool {
+        self.version.is_at_least(2, 6)
+    }
 }
 
 /// Parses raw kernel release bytes (e.g. b"6.8.0-45-generic") into a structured [`KernelVersion`].

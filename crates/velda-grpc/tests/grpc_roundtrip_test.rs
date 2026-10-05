@@ -44,7 +44,7 @@ async fn test_grpc_unary_one_way_roundtrip() {
     // 2. Client calls unary RPC using GrpcUpstreamConnector
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config)
+    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config, None, None)
         .await
         .unwrap();
 
@@ -104,7 +104,7 @@ async fn test_grpc_server_trailers_only_response() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config)
+    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config, None, None)
         .await
         .unwrap();
 
@@ -190,7 +190,7 @@ async fn test_grpc_streaming_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client connects to proxy and receives streaming messages
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
         .await
         .unwrap();
     let req = http::Request::builder()
@@ -283,7 +283,7 @@ async fn test_grpc_buffered_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client calls unary request via proxy
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
         .await
         .unwrap();
     let mut req_body = BytesMut::new();
@@ -352,7 +352,7 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Send a 100-byte payload which exceeds the 32-byte limit
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &restricted_config)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &restricted_config, None, None)
         .await
         .unwrap();
     let large_payload = vec![42u8; 100];
@@ -443,7 +443,7 @@ async fn test_grpc_server_stream_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client receives stream chunks
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
         .await
         .unwrap();
     let req = http::Request::builder()

@@ -23,4 +23,4 @@ pub use decode::{
 };
 pub use encode::{encode_headers, encode_request, encode_request_head, encode_request_line};
 pub use response::{Http1Response, Http1ResponseHead};
-pub use stream::{UpstreamHttp1Stream, connect_stream};
+pub use stream::{Http1AccelerationPath, UpstreamHttp1Stream, connect_stream};

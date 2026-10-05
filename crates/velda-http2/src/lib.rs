@@ -18,7 +18,9 @@ pub mod pipe;
 pub mod server;
 
 // Top-level public re-exports
-pub use client::{Http2Response, Http2ResponseHead, connect, connect_stream};
+pub use client::{
+    Http2AccelerationPath, Http2Response, Http2ResponseHead, connect, connect_stream,
+};
 pub use config::Http2Config;
 pub use error::Http2Error;
 pub use headers::{filter_h2_headers, sanitize_h2_headers};

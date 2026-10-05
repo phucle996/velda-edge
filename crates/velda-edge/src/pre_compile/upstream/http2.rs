@@ -3,17 +3,36 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use rustc_hash::FxHashMap;
-use tokio::sync::RwLock;
+use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
 use velda_http2::pipe::Http2PipeStrategy;
 
 use super::lb::EdgeUpstream;
 use crate::error::EdgeError;
 
+/// Pooled HTTP/2 client resource wrapping [`h2::client::SendRequest<Bytes>`].
+#[derive(Clone, Debug)]
+pub struct Http2ClientResource {
+    pub client: h2::client::SendRequest<Bytes>,
+}
+
+impl Http2ClientResource {
+    pub fn new(client: h2::client::SendRequest<Bytes>) -> Self {
+        Self { client }
+    }
+}
+
+impl PoolableResource for Http2ClientResource {
+    fn is_healthy(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {}
+}
+
 /// Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe handoff.
 ///
-/// Pre-compiled with static load balancer, wire pipe strategy, and persistent multiplexed client cache.
+/// Pre-compiled with static load balancer, wire pipe strategy, and sharded multiplexed client pool.
 pub struct Http2Upstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
@@ -23,9 +42,12 @@ pub struct Http2Upstream {
     /// [PRE-COMPILED]: Pre-computed wire forwarding strategy (`Http2PipeStrategy`) derived from
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: Http2PipeStrategy,
-    /// [PRE-COMPILED STATE]: Lock-free persistent HTTP/2 multiplexed client connection cache.
-    /// Reuses existing established H2 streams across hundreds of concurrent requests.
-    clients: RwLock<FxHashMap<SocketAddr, h2::client::SendRequest<Bytes>>>,
+    /// Lock-sharded persistent HTTP/2 multiplexed client connection pool.
+    pool: MultiplexedPool<SocketAddr, Http2ClientResource>,
+    /// Maximum concurrent streams per multiplexed connection.
+    pub max_concurrent_streams: u32,
+    /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
+    pub acceleration: velda_http2::Http2AccelerationPath,
 }
 
 impl std::fmt::Debug for Http2Upstream {
@@ -34,19 +56,29 @@ impl std::fmt::Debug for Http2Upstream {
             .field("id", &self.inner.id())
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
+            .field("max_concurrent_streams", &self.max_concurrent_streams)
+            .field("acceleration", &self.acceleration)
             .finish()
     }
 }
 
 impl Http2Upstream {
     /// Creates a new pre-compiled [`Http2Upstream`].
-    pub fn new(inner: EdgeUpstream, streaming: StreamingMode) -> Self {
+    pub fn new(
+        inner: EdgeUpstream,
+        streaming: StreamingMode,
+        shard_count: usize,
+        max_concurrent_streams: u32,
+        acceleration: velda_http2::Http2AccelerationPath,
+    ) -> Self {
         let strategy = Http2PipeStrategy::from_streaming(streaming);
         Self {
             inner,
             streaming,
             strategy,
-            clients: RwLock::new(FxHashMap::default()),
+            pool: MultiplexedPool::with_shards(shard_count),
+            max_concurrent_streams,
+            acceleration,
         }
     }
 
@@ -70,61 +102,50 @@ impl Http2Upstream {
         Fut: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        let pipe_cell = std::sync::Mutex::new(Some(pipe));
+        let max_streams = self.max_concurrent_streams;
+        let acceleration = self.acceleration;
+        let connect_timeout = self.inner.timeouts().connect;
 
-        self.inner
-            .execute(|endpoint| {
-                let cell = &pipe_cell;
-                async move {
-                    let existing_client = {
-                        let guard = self.clients.read().await;
-                        guard.get(&endpoint).cloned()
-                    };
-
-                    let client = match existing_client {
-                        Some(c) => match c.clone().ready().await {
-                            Ok(ready_client) => ready_client,
-                            Err(_) => {
-                                self.clients.write().await.remove(&endpoint);
-                                let fresh = velda_http2::client::connect(endpoint, config)
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                let ready_fresh = fresh.ready().await.map_err(|err| {
-                                    format!("Reconnected H2 client not ready: {err}")
-                                })?;
-                                self.clients
-                                    .write()
-                                    .await
-                                    .insert(endpoint, ready_fresh.clone());
-                                ready_fresh
-                            }
-                        },
-                        None => {
-                            let fresh = velda_http2::client::connect(endpoint, config)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            let ready_fresh = fresh
-                                .ready()
-                                .await
-                                .map_err(|err| format!("Fresh H2 client not ready: {err}"))?;
-                            self.clients
-                                .write()
-                                .await
-                                .insert(endpoint, ready_fresh.clone());
-                            ready_fresh
+        let client = self
+            .inner
+            .execute(|endpoint| async move {
+                if let Some(lease) = self.pool.acquire_stream(&endpoint) {
+                    let ready_client = lease.client.clone();
+                    match ready_client.ready().await {
+                        Ok(ready_client) => return Ok::<_, String>(ready_client),
+                        Err(_) => {
+                            lease.mark_goaway();
                         }
-                    };
-
-                    let pipe_fn = cell
-                        .lock()
-                        .unwrap()
-                        .take()
-                        .ok_or_else(|| "Pipe closure already consumed".to_string())?;
-
-                    pipe_fn(client).await.map_err(|e| e.to_string())
+                    }
                 }
+
+                let fresh = velda_http2::client::connect(
+                    endpoint,
+                    config,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                let ready_fresh = fresh
+                    .ready()
+                    .await
+                    .map_err(|err| format!("Reconnected H2 client not ready: {err}"))?;
+
+                let _ = self.pool.register(
+                    endpoint,
+                    Http2ClientResource::new(ready_fresh.clone()),
+                    max_streams,
+                );
+
+                Ok::<_, String>(ready_fresh)
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        pipe(client).await.map_err(|e| {
+            EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
+        })
     }
 }

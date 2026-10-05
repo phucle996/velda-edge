@@ -1,8 +1,9 @@
-//! Connection profile definition and reuse mode semantics.
+//! Connection profile definition and protocol reuse policies.
 //!
-//! Strict Invariant:
-//! - Explicit configuration only: All timeouts and concurrency limits MUST be explicitly
-//!   specified by the caller (Upstream setup). Zero silent or guessed fallbacks.
+//! # Strict Invariants
+//! - **Explicit Configuration Only**: Timeouts and concurrency limits MUST be explicitly
+//!   specified by the caller (Upstream / Protocol setup). Zero silent or guessed fallbacks.
+//! - **SRP Isolation**: Profiles declare intent and reuse policy; they do NOT own sockets or pool state.
 
 use std::fmt;
 use std::time::Duration;
@@ -164,12 +165,13 @@ mod tests {
         let seq = ConnectionProfile::sequential(key.clone(), timeout);
         assert_eq!(seq.reuse_mode, ReuseMode::Sequential);
         assert!(seq.is_sequential());
+        assert_eq!(seq.max_concurrent_streams, 1);
         assert_eq!(seq.idle_timeout, timeout);
 
-        let mux = ConnectionProfile::multiplexed(key, timeout, 128);
+        let mux = ConnectionProfile::multiplexed(key.clone(), timeout, 100);
         assert_eq!(mux.reuse_mode, ReuseMode::Multiplexed);
         assert!(mux.is_multiplexed());
-        assert_eq!(mux.max_concurrent_streams, 128);
+        assert_eq!(mux.max_concurrent_streams, 100);
         assert_eq!(mux.idle_timeout, timeout);
     }
 
@@ -178,7 +180,7 @@ mod tests {
     fn test_profile_rejects_zero_idle_timeout() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let key = ConnectionKey::tcp(addr);
-        ConnectionProfile::sequential(key, Duration::ZERO);
+        ConnectionProfile::new(key, ReuseMode::Sequential, Duration::ZERO, 1);
     }
 
     #[test]
@@ -186,7 +188,7 @@ mod tests {
     fn test_profile_rejects_zero_max_streams() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let key = ConnectionKey::tcp(addr);
-        ConnectionProfile::multiplexed(key, Duration::from_secs(30), 0);
+        ConnectionProfile::new(key, ReuseMode::Multiplexed, Duration::from_secs(30), 0);
     }
 
     #[test]

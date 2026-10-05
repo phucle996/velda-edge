@@ -102,7 +102,13 @@ Central reconciliation and orchestration engine (`SyncComposition`):
 Compiles and persists domain subsystems independently:
 - **`routes`**: L7 matching rules (hosts, path prefixes, headers), timeouts, upstream targets.
 - **`listeners`**: Socket binds, protocols (HTTP, HTTPS, TCP), TLS profile mappings.
-- **`upstreams`**: Backend pools, load-balancing algorithms, health checks, timeouts.
+- **`upstreams`**: Backend topology (DNS / static endpoints), load-balancing algorithms, health checks, timeouts, and connection pool tuning (`pool`).
+  - **Connection Pool Tuning (`pool`)**: Configured per upstream with operator override capability:
+    - `concurrency_shards`: Concurrency striping for lock distribution (falls back to hardware `CpuTier` if omitted).
+    - `max_idle_per_key`: Maximum idle connections retained per backend endpoint (falls back to `MemoryTier` if omitted).
+    - `max_concurrent_streams`: Multiplexing stream capacity for HTTP/2, HTTP/3, and gRPC (falls back to `MemoryTier` if omitted).
+    - `idle_timeout_ms`: Idle keepalive expiration before eviction (falls back to `timeouts.idle_ms` if omitted).
+    - `max_lifetime_ms`: Forced connection retirement to prevent keepalive RST races (defaults to 1 hour if omitted).
 - **`plugins`**: Request/response policy hooks (rate limiting, auth, WAF).
 - **`tls`**: TLS certificates, private keys, and SNI profile catalogs.
 

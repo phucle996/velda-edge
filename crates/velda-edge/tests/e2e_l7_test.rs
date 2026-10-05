@@ -105,6 +105,7 @@ async fn test_end_to_end_l7_http_routing_and_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -358,6 +359,7 @@ async fn test_end_to_end_l7_grpc_routing_and_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -533,6 +535,7 @@ async fn test_end_to_end_l7_grpc_server_streaming() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -707,6 +710,7 @@ async fn test_end_to_end_l7_grpc_unary_one_way() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -885,6 +889,7 @@ async fn test_end_to_end_l7_http1_hop_by_hop_and_forwarded_headers() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1019,6 +1024,7 @@ async fn test_end_to_end_l7_http1_progressive_server_streaming() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1162,6 +1168,7 @@ async fn test_end_to_end_l7_http1_downstream_cancellation() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1276,6 +1283,7 @@ async fn test_end_to_end_l7_http1_chunked_upload_rejected_on_non_streaming_liste
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1380,6 +1388,7 @@ async fn test_end_to_end_l7_http1_server_streaming_mismatch_rejected_at_bootstra
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1484,6 +1493,7 @@ async fn test_end_to_end_l7_http1_upstream_unexpected_chunked_response_returns_5
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1628,6 +1638,7 @@ async fn test_end_to_end_l7_http2_routing_and_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -1796,6 +1807,7 @@ async fn test_end_to_end_l7_http2_server_streaming_and_multiplexing() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();

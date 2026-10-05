@@ -67,6 +67,23 @@ pub struct UpstreamConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub tls: Option<UpstreamTlsConfig>,
+    #[serde(default)]
+    pub pool: Option<UpstreamPoolConfig>,
+}
+
+/// Upstream connection pool tuning options configured per-upstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpstreamPoolConfig {
+    #[serde(default)]
+    pub concurrency_shards: Option<usize>,
+    #[serde(default)]
+    pub max_idle_per_key: Option<usize>,
+    #[serde(default)]
+    pub max_concurrent_streams: Option<u32>,
+    #[serde(default)]
+    pub idle_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_lifetime_ms: Option<u64>,
 }
 
 /// Upstream TLS configuration for secure backend connections.
@@ -432,6 +449,55 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                     upstream.id
                 ),
             });
+        }
+
+        // Validation: pool options if configured
+        if let Some(ref pool) = upstream.pool {
+            if pool.concurrency_shards == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'pool.concurrency_shards' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if pool.max_idle_per_key == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'pool.max_idle_per_key' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if pool.max_concurrent_streams == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'pool.max_concurrent_streams' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if pool.idle_timeout_ms == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'pool.idle_timeout_ms' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if pool.max_lifetime_ms == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'pool.max_lifetime_ms' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
         }
 
         // Validation: health check options if configured
@@ -940,6 +1006,7 @@ mod tests {
             },
             health_check: None,
             tls: None,
+            pool: None,
         }
     }
 
@@ -1046,6 +1113,59 @@ mod tests {
             hc.active.as_ref().unwrap().path.as_deref(),
             Some("/healthz")
         );
+    }
+
+    #[test]
+    fn test_upstream_pool_config_validation_and_binary_roundtrip() {
+        let json = r#"{
+            "schema_version": 1,
+            "upstreams": [{
+                "id": "u_pool",
+                "mode": "endpoints",
+                "protocol": { "transport": "tcp", "application": "http2", "streaming": [] },
+                "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
+                "load_balancer": { "algorithm": "round_robin" },
+                "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
+                "pool": {
+                    "concurrency_shards": 8,
+                    "max_idle_per_key": 64,
+                    "max_concurrent_streams": 200,
+                    "idle_timeout_ms": 45000,
+                    "max_lifetime_ms": 1800000
+                }
+            }]
+        }"#;
+
+        let mut upstreams = parse_upstreams(json.as_bytes()).unwrap();
+        validate_upstreams(&mut upstreams).unwrap();
+        let pool = upstreams[0].pool.as_ref().unwrap();
+        assert_eq!(pool.concurrency_shards, Some(8));
+        assert_eq!(pool.max_idle_per_key, Some(64));
+        assert_eq!(pool.max_concurrent_streams, Some(200));
+        assert_eq!(pool.idle_timeout_ms, Some(45000));
+        assert_eq!(pool.max_lifetime_ms, Some(1800000));
+
+        let bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+        let (_, unpacked) = unpack_upstreams_from_binary(&bin).unwrap();
+        assert_eq!(unpacked, upstreams);
+
+        // Zero concurrency_shards should fail validation
+        let json_zero_shards = r#"{
+            "schema_version": 1,
+            "upstreams": [{
+                "id": "u_zero_shards",
+                "mode": "endpoints",
+                "protocol": { "transport": "tcp", "application": "http2", "streaming": [] },
+                "endpoints": [{ "address": "127.0.0.1:8080", "weight": 1 }],
+                "load_balancer": { "algorithm": "round_robin" },
+                "timeouts": { "connect_ms": 500, "idle_ms": 30000 },
+                "pool": {
+                    "concurrency_shards": 0
+                }
+            }]
+        }"#;
+        let mut u_zero = parse_upstreams(json_zero_shards.as_bytes()).unwrap();
+        assert!(validate_upstreams(&mut u_zero).is_err());
     }
 
     #[test]

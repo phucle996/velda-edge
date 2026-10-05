@@ -6,12 +6,13 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
-tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt", "net"] }
+tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt", "net", "time"] }
 bytes = "1.10"
 http = "1.2"
 h2 = "0.4"
 thiserror = "2.0"
 tracing = "0.1"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

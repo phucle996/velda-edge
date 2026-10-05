@@ -408,6 +408,7 @@ mod tests {
                 },
                 health_check: None,
                 tls: None,
+                pool: None,
             },
             UpstreamConfig {
                 id: "dns-backend".into(),
@@ -433,6 +434,7 @@ mod tests {
                 },
                 health_check: None,
                 tls: None,
+                pool: None,
             },
         ];
 

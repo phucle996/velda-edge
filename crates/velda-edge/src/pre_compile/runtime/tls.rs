@@ -159,6 +159,7 @@ mod tests {
                 sni: vec!["backend.internal".into()],
                 insecure_skip_verify: false,
             }),
+            pool: None,
         }];
 
         let engine = compile_tls_client(&upstreams)

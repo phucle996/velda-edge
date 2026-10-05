@@ -11,25 +11,30 @@ pub trait PoolableResource: Send + Sync + fmt::Debug + 'static {
     /// Checks if the resource is healthy and open for traffic.
     fn is_healthy(&self) -> bool;
 
-    /// Timestamp when this resource was established.
-    fn created_at(&self) -> Instant;
+    /// Closes the resource and releases underlying OS handles immediately.
+    fn close(&mut self);
 
-    /// Timestamp when this resource was last utilized.
-    fn last_used_at(&self) -> Instant;
+    /// Timestamp when this resource was established (default: Instant::now()).
+    #[inline]
+    fn created_at(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Timestamp when this resource was last utilized (default: Instant::now()).
+    #[inline]
+    fn last_used_at(&self) -> Instant {
+        Instant::now()
+    }
 
     /// Updates the last used timestamp to now.
-    fn touch(&mut self);
+    #[inline]
+    fn touch(&mut self) {}
 
     /// Updates the last used timestamp with a pre-sampled timestamp.
     ///
     /// Avoids redundant system clock / vDSO calls on high-frequency hot paths.
     #[inline]
-    fn touch_at(&mut self, _now: Instant) {
-        self.touch();
-    }
-
-    /// Closes the resource and releases underlying OS handles immediately.
-    fn close(&mut self);
+    fn touch_at(&mut self, _now: Instant) {}
 }
 
 // Blanket implementation for any boxed PoolableResource
@@ -65,10 +70,10 @@ impl<T: PoolableResource + ?Sized> PoolableResource for Box<T> {
     }
 }
 
-/// Transactional RAII lease alias for [`crate::connection::SequentialLease`].
+/// Transactional RAII lease alias for [`crate::lease::SequentialLease`].
 ///
 /// Automatically returns healthy sockets to the pool on drop and closes dirty sockets.
-pub type PoolLease<K, R> = crate::connection::SequentialLease<K, R>;
+pub type PoolLease<K, R> = crate::lease::SequentialLease<K, R>;
 
 #[cfg(test)]
 mod tests {
@@ -77,7 +82,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use crate::manager::PoolManager;
+    use crate::pool::PoolManager;
 
     #[derive(Debug)]
     struct MockResource {
@@ -139,8 +144,8 @@ mod tests {
         let res = MockResource::new();
         let mut lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), false);
 
-        assert_eq!(lease.key(), &key);
-        assert!(!lease.is_draining());
+        assert_eq!(&lease.key, &key);
+        assert!(!lease.is_draining);
         assert!(lease.is_healthy());
         lease.touch();
 

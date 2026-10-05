@@ -20,7 +20,7 @@ pub mod wire;
 pub use server::{GrpcResponder, GrpcServerConnection, GrpcServerStream};
 
 // Re-exports for upstream client
-pub use client::GrpcUpstreamConnector;
+pub use client::{GrpcAccelerationPath, GrpcUpstreamConnector};
 
 // Re-exports for streaming pipe and strategies
 pub use pipe::{

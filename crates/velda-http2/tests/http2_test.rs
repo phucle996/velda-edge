@@ -170,7 +170,9 @@ async fn test_http2_upstream_connector() {
 
     let config = TEST_CONFIG.with_max_concurrent_streams(512);
 
-    let mut client = client::connect(backend_addr, &config).await.unwrap();
+    let mut client = client::connect(backend_addr, &config, None, None)
+        .await
+        .unwrap();
     let http_req = http::Request::builder()
         .method("GET")
         .uri("http://localhost/health")

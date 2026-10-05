@@ -5,4 +5,4 @@
 
 pub mod connector;
 
-pub use connector::GrpcUpstreamConnector;
+pub use connector::{GrpcAccelerationPath, GrpcUpstreamConnector};

@@ -115,6 +115,7 @@ async fn test_end_to_end_tls_downstream_termination() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0x33u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -307,6 +308,7 @@ async fn test_end_to_end_tls_h2_downstream() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0x33u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -489,6 +491,7 @@ async fn test_end_to_end_tls_http1_upstream_forwarding() {
             sni: vec!["localhost".into()],
             insecure_skip_verify: false,
         }),
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();

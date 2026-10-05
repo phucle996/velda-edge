@@ -1,12 +1,9 @@
-//! Integration tests for Upstream traffic, lifecycle, pooling, protocol isolation, and health failover.
+//! Integration tests for Upstream traffic, lifecycle, discovery, and health failover.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use velda_upstream::{
-    AcquireTarget, Discovery, Endpoint, MockConnector, Upstream, UpstreamTimeouts,
-};
+use velda_upstream::{Discovery, Endpoint, Upstream, UpstreamTimeouts};
 
 #[tokio::test]
 async fn test_upstream_explicit_discovery_and_round_robin() {
@@ -20,41 +17,24 @@ async fn test_upstream_explicit_discovery_and_round_robin() {
         Endpoint::new("e3", ep3, 1),
     ];
 
-    let connector = Arc::new(MockConnector::new());
     let discovery = Discovery::new_explicit(endpoints);
-
     let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-    let upstream = Upstream::with_connector("explicit-svc", "tcp", discovery, timeouts, connector);
+    let upstream = Upstream::new(
+        "explicit-svc",
+        "tcp",
+        discovery,
+        velda_upstream::RoundRobin::new(),
+        timeouts,
+    );
 
-    // Acquire 3 times: should round-robin e1, e2, e3
-    let l1 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l1.endpoint(), ep1);
+    // Select 3 times: should round-robin e1, e2, e3
+    let s1 = upstream.select_endpoint().unwrap();
+    let s2 = upstream.select_endpoint().unwrap();
+    let s3 = upstream.select_endpoint().unwrap();
 
-    let l2 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l2.endpoint(), ep2);
-
-    let l3 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l3.endpoint(), ep3);
-
-    // Release all reusable
-    l1.release(true);
-    l2.release(true);
-    l3.release(true);
-
-    assert_eq!(upstream.pool_stats().misses, 3);
-    assert_eq!(upstream.pool_stats().releases, 3);
-
-    // Next 3 acquires should hit the pool!
-    let l4 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l4.endpoint(), ep1);
-
-    let l5 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l5.endpoint(), ep2);
-
-    let l6 = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l6.endpoint(), ep3);
-
-    assert_eq!(upstream.pool_stats().hits, 3);
+    assert_eq!(s1, ep1);
+    assert_eq!(s2, ep2);
+    assert_eq!(s3, ep3);
 }
 
 #[tokio::test]
@@ -62,82 +42,67 @@ async fn test_upstream_passive_health_and_failover() {
     let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
 
-    let connector = Arc::new(MockConnector::new());
     let discovery = Discovery::new_explicit(vec![
         Endpoint::new("e1", ep1, 1),
         Endpoint::new("e2", ep2, 1),
     ]);
 
     let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-    let upstream = Upstream::with_connector(
+    let upstream = Upstream::new(
         "failover-svc",
         "tcp",
         discovery,
+        velda_upstream::RoundRobin::new(),
         timeouts,
-        Arc::clone(&connector),
-    );
+    )
+    .with_health_config(velda_upstream::HealthConfig::passive_only(
+        1,
+        Duration::from_secs(10),
+    ));
 
-    // Mark ep1 as failing in network connector
-    connector.set_failing(ep1);
-
-    // Acquire should attempt ep1, fail, and succeed with ep2!
-    let l = upstream.acquire_protocol("tcp").await.unwrap();
-    assert_eq!(l.endpoint(), ep2);
-    l.release(true);
-}
-
-#[tokio::test]
-async fn test_upstream_lease_drop_guard_returns_to_pool() {
-    let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let discovery = Discovery::new_explicit(vec![Endpoint::new("e1", ep1, 1)]);
-    let connector = Arc::new(MockConnector::new());
-
-    let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-    let upstream = Upstream::with_connector("drop-svc", "tcp", discovery, timeouts, connector);
-
-    // Scope block to simulate caller forgetting to release lease
-    {
-        let lease = upstream.acquire().await.unwrap();
-        assert_eq!(lease.endpoint(), ep1);
-        assert_eq!(upstream.pool_stats().misses, 1);
-        // lease dropped here
-    }
-
-    // Drop guard safely returned healthy connection back to the pool
-    assert_eq!(upstream.pool_stats().releases, 1);
-
-    // Subsequent acquire hits the pool
-    let lease2 = upstream.acquire().await.unwrap();
-    assert_eq!(lease2.endpoint(), ep1);
-    assert_eq!(upstream.pool_stats().hits, 1);
-    lease2.release(true);
-}
-
-#[tokio::test]
-async fn test_upstream_protocol_isolation_in_pool() {
-    let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let discovery = Discovery::new_explicit(vec![Endpoint::new("e1", ep1, 1)]);
-    let connector = Arc::new(MockConnector::new());
-
-    let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-    let upstream = Upstream::with_connector("proto-svc", "http1", discovery, timeouts, connector);
-
-    // 1. Acquire with default "http1" -> Miss
-    let l1 = upstream.acquire().await.unwrap();
-    assert_eq!(upstream.pool_stats().misses, 1);
-    l1.release(true);
-
-    // 2. Acquire with target override "http2" on same endpoint -> Must be Miss (protocol isolated!)
-    let target_h2 = AcquireTarget::new("http2");
-    let l2 = upstream
-        .acquire_with_target(target_h2.clone())
+    // Execute with failure on ep1, should failover to ep2
+    let res = upstream
+        .execute(|ep| async move {
+            if ep == ep1 {
+                Err("simulated connection failure")
+            } else {
+                Ok(ep)
+            }
+        })
         .await
         .unwrap();
-    assert_eq!(upstream.pool_stats().misses, 2);
-    l2.release(true);
 
-    // 3. Re-acquire "http2" -> Hits the "http2" pooled connection
-    let l3 = upstream.acquire_with_target(target_h2).await.unwrap();
-    assert_eq!(upstream.pool_stats().hits, 1);
-    l3.release(true);
+    assert_eq!(res, ep2);
+    assert!(!upstream.health().is_healthy(&ep1));
+    assert!(upstream.health().is_healthy(&ep2));
+}
+
+#[tokio::test]
+async fn test_upstream_prune_retired_endpoints() {
+    let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let ep2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+    let discovery = Discovery::new_explicit(vec![
+        Endpoint::new("e1", ep1, 1),
+        Endpoint::new("e2", ep2, 1),
+    ]);
+
+    let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
+    let health_config = velda_upstream::HealthConfig::passive_only(1, Duration::from_secs(10));
+    let upstream = Upstream::new(
+        "prune-svc",
+        "tcp",
+        discovery.clone(),
+        velda_upstream::RoundRobin::new(),
+        timeouts,
+    )
+    .with_health_config(health_config);
+
+    // Record health failure for ep2
+    upstream.health().record_failure(&ep2);
+    assert!(upstream.health().has_record(&ep2));
+
+    // Update discovery removing ep2
+    discovery.update_endpoints(vec![Endpoint::new("e1", ep1, 1)], 2);
+    upstream.prune_retired_endpoints();
+    assert!(!upstream.health().has_record(&ep2));
 }

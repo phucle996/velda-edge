@@ -1,20 +1,43 @@
 //! Layer 7 HTTP/3 Upstream managing persistent QUIC client multiplexing (RFC 9114) and request handoff.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
-use tokio::sync::RwLock;
+use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::{L7Request, L7Response, StreamingMode};
 use velda_http3::pipe::Http3PipeStrategy;
 
 use super::lb::EdgeUpstream;
 use crate::error::EdgeError;
 
+/// Pooled HTTP/3 client resource wrapping [`velda_http3::Http3Client`].
+#[derive(Clone)]
+pub struct Http3ClientResource {
+    pub client: velda_http3::Http3Client,
+}
+
+impl Http3ClientResource {
+    pub fn new(client: velda_http3::Http3Client) -> Self {
+        Self { client }
+    }
+}
+
+impl std::fmt::Debug for Http3ClientResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http3ClientResource").finish()
+    }
+}
+
+impl PoolableResource for Http3ClientResource {
+    fn is_healthy(&self) -> bool {
+        !self.client.is_closed()
+    }
+
+    fn close(&mut self) {}
+}
+
 /// Layer 7 HTTP/3 Upstream managing persistent QUIC client multiplexing (RFC 9114) and request handoff.
 ///
-/// Pre-compiled with static load balancer, target SNI, streaming strategy, and persistent QUIC client connection cache.
+/// Pre-compiled with static load balancer, target SNI, streaming strategy, and sharded multiplexed client pool.
 pub struct Http3Upstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
@@ -26,9 +49,10 @@ pub struct Http3Upstream {
     /// [PRE-COMPILED]: Pre-computed wire forwarding strategy (`Http3PipeStrategy`) derived from
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: Http3PipeStrategy,
-    /// [PRE-COMPILED STATE]: Lock-free persistent HTTP/3 (QUIC) multiplexed client connection cache.
-    /// Manages persistent UDP datagram streams to eliminate handshake delays.
-    clients: RwLock<FxHashMap<SocketAddr, velda_http3::Http3Client>>,
+    /// Lock-sharded persistent HTTP/3 (QUIC) multiplexed client connection pool.
+    pool: MultiplexedPool<SocketAddr, Http3ClientResource>,
+    /// Maximum concurrent streams per multiplexed connection.
+    pub max_concurrent_streams: u32,
 }
 
 impl std::fmt::Debug for Http3Upstream {
@@ -38,20 +62,28 @@ impl std::fmt::Debug for Http3Upstream {
             .field("target_sni", &self.target_sni)
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
+            .field("max_concurrent_streams", &self.max_concurrent_streams)
             .finish()
     }
 }
 
 impl Http3Upstream {
     /// Creates a new pre-compiled [`Http3Upstream`].
-    pub fn new(inner: EdgeUpstream, target_sni: Option<String>, streaming: StreamingMode) -> Self {
+    pub fn new(
+        inner: EdgeUpstream,
+        target_sni: Option<String>,
+        streaming: StreamingMode,
+        shard_count: usize,
+        max_concurrent_streams: u32,
+    ) -> Self {
         let strategy = Http3PipeStrategy::from_streaming(streaming);
         Self {
             inner,
             target_sni,
             streaming,
             strategy,
-            clients: RwLock::new(FxHashMap::default()),
+            pool: MultiplexedPool::with_shards(shard_count),
+            max_concurrent_streams,
         }
     }
 
@@ -91,51 +123,50 @@ impl Http3Upstream {
         server_name: &str,
         config: &velda_http3::Http3Config,
     ) -> Result<L7Response, EdgeError> {
-        let req_cell = Arc::new(std::sync::Mutex::new(Some(req)));
+        let req_cell = std::sync::Mutex::new(Some(req));
+        let server_name_cloned = server_name.to_string();
+        let max_streams = self.max_concurrent_streams;
 
         self.inner
             .execute(|endpoint| {
-                let cell = Arc::clone(&req_cell);
+                let cell = &req_cell;
+                let server_name = server_name_cloned.clone();
                 async move {
-                    let existing_client = {
-                        let guard = self.clients.read().await;
-                        guard.get(&endpoint).cloned()
-                    };
-
-                    let client = match existing_client {
-                        Some(c) if !c.is_closed() => c,
-                        _ => {
-                            let fresh = velda_http3::connect(endpoint, server_name, config)
+                    let (client, _lease) = if let Some(lease) = self.pool.acquire_stream(&endpoint)
+                    {
+                        if !lease.client.is_closed() {
+                            (lease.client.clone(), Some(lease))
+                        } else {
+                            lease.mark_goaway();
+                            let fresh = velda_http3::connect(endpoint, &server_name, config)
                                 .await
                                 .map_err(|e| e.to_string())?;
-
-                            let mut guard = self.clients.write().await;
-                            if let Some(c) = guard.get(&endpoint)
-                                && !c.is_closed()
-                            {
-                                c.clone()
-                            } else {
-                                guard.insert(endpoint, fresh.clone());
-                                fresh
-                            }
+                            let stream_lease = self.pool.register(
+                                endpoint,
+                                Http3ClientResource::new(fresh.clone()),
+                                max_streams,
+                            );
+                            (fresh, Some(stream_lease))
                         }
+                    } else {
+                        let fresh = velda_http3::connect(endpoint, &server_name, config)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let stream_lease = self.pool.register(
+                            endpoint,
+                            Http3ClientResource::new(fresh.clone()),
+                            max_streams,
+                        );
+                        (fresh, Some(stream_lease))
                     };
 
                     let req = cell
                         .lock()
                         .unwrap()
-                        .as_ref()
-                        .cloned()
+                        .take()
                         .ok_or_else(|| "Request payload already consumed".to_string())?;
 
-                    match client.send_request(req).await {
-                        Ok(resp) => Ok(resp),
-                        Err(e) => {
-                            let mut guard = self.clients.write().await;
-                            guard.remove(&endpoint);
-                            Err(e.to_string())
-                        }
-                    }
+                    client.send_request(req).await.map_err(|e| e.to_string())
                 }
             })
             .await

@@ -62,16 +62,17 @@ fn test_pool_manager_acquire_miss_then_hit() {
     let pool = PoolManager::<String, MockConn>::new();
     let key = "backend_1".to_string();
 
-    // 1. Miss lazy-creates container
+    // 1. Miss does not pollute table with empty containers
     let miss = pool.acquire(&key, Duration::from_secs(30));
     assert!(miss.is_none());
-    assert!(pool.has_pool(&key));
+    assert!(!pool.has_pool(&key));
     assert_eq!(pool.stats().misses, 1);
     assert_eq!(pool.stats().hits, 0);
 
-    // 2. Release a connection
+    // 2. Release a connection creates container and stores idle conn
     let conn = MockConn(1, Instant::now(), AtomicBool::new(true));
     pool.release(&key, conn, true, false);
+    assert!(pool.has_pool(&key));
     assert_eq!(pool.total_idle_conns(), 1);
     assert_eq!(pool.stats().releases, 1);
 

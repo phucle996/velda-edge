@@ -253,6 +253,7 @@ pub fn build_mock_upstreams(count: usize) -> Vec<UpstreamConfig> {
             },
             health_check: None,
             tls: None,
+            pool: None,
         });
     }
 

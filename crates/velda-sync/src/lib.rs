@@ -31,7 +31,7 @@ pub use post_sync::tls::{DomainHeader as TlsDomainHeader, TlsConfig, TlsFile};
 pub use post_sync::upstream::{
     ActiveHealthConfig, DnsTarget, DomainHeader as UpstreamDomainHeader, EndpointConfig,
     HealthCheckConfig, LoadBalancerConfig, PassiveHealthConfig, ResolverConfig, UpstreamConfig,
-    UpstreamProtocolConfig, UpstreamTimeouts, UpstreamTlsConfig, UpstreamsFile,
+    UpstreamPoolConfig, UpstreamProtocolConfig, UpstreamTimeouts, UpstreamTlsConfig, UpstreamsFile,
 };
 pub use velda_core::StreamingMode;
 

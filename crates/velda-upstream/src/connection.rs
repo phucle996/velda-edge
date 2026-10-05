@@ -1,218 +1,213 @@
-//! Connection identity, backend connection abstraction, and connector contract.
+//! Upstream raw socket acceleration path and kernel tuning.
 
-use std::fmt;
-use std::net::SocketAddr;
-use std::time::Instant;
-use tokio::net::TcpStream;
+/// Socket acceleration path pre-compiled during bootstrap for backend connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketAccelerationPath {
+    /// Disable Nagle's algorithm (`TCP_NODELAY`). Defaults to `true`.
+    pub nodelay: bool,
+    /// Enable TCP Fast Open Connect (`TCP_FASTOPEN_CONNECT`).
+    pub fastopen: bool,
+    /// Sndbuf low-watermark threshold (`TCP_NOTSENT_LOWAT`) in bytes.
+    pub notsent_lowat: Option<u32>,
+    /// Maximum time in milliseconds that transmitted data may remain unacknowledged (`TCP_USER_TIMEOUT`).
+    pub user_timeout: Option<std::time::Duration>,
+    /// TCP Keep-Alive interval (`SO_KEEPALIVE` + `TCP_KEEPIDLE`).
+    pub keepalive: Option<std::time::Duration>,
+}
 
-pub use velda_connection_pool::{ConnectionKey, PoolableResource};
-
-use crate::error::{Result, UpstreamError};
-
-/// Abstract contract for an acquired backend connection.
-pub trait BackendConnection: PoolableResource + Send + Sync + fmt::Debug + 'static {
-    /// Remote socket address of this connection.
-    fn peer(&self) -> SocketAddr;
-
-    /// Consumes the boxed connection and returns the underlying raw [`TcpStream`] if available.
-    fn into_tcp_stream(self: Box<Self>) -> Option<TcpStream> {
-        None
+impl Default for SocketAccelerationPath {
+    fn default() -> Self {
+        Self {
+            nodelay: true,
+            fastopen: false,
+            notsent_lowat: None,
+            user_timeout: None,
+            keepalive: None,
+        }
     }
 }
 
-/// Generic factory capability for establishing new backend connections on pool miss.
-pub trait Connector: Send + Sync + 'static {
-    /// Establishes a new connection to `target`.
-    fn connect(
-        &self,
-        target: SocketAddr,
-    ) -> impl std::future::Future<Output = Result<Box<dyn BackendConnection>>> + Send;
-}
+impl SocketAccelerationPath {
+    /// Pre-compiles socket acceleration path based on host hardware/kernel topology,
+    /// upstream timeouts, and whether TLS encryption is active.
+    pub fn for_topology(
+        topo: &velda_core::HardwareTopology,
+        timeouts: &crate::upstream::UpstreamTimeouts,
+        is_tls: bool,
+    ) -> Self {
+        let fastopen = is_tls && topo.kernel.supports_tcp_fastopen_connect();
 
-/// Real TCP connector using Tokio's asynchronous TCP stream.
-#[derive(Debug, Default)]
-pub struct TcpConnector;
+        let notsent_lowat = if topo.kernel.supports_tcp_notsent_lowat() {
+            Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
+        } else {
+            None
+        };
 
-impl Connector for TcpConnector {
-    async fn connect(&self, target: SocketAddr) -> Result<Box<dyn BackendConnection>> {
-        let stream =
-            TcpStream::connect(target)
-                .await
-                .map_err(|e| UpstreamError::ConnectionFailed {
-                    endpoint: target,
-                    reason: e.to_string(),
-                })?;
+        let user_timeout = if topo.kernel.supports_tcp_user_timeout() {
+            let candidate = timeouts.connect.saturating_mul(3);
+            let cap = timeouts.idle.min(std::time::Duration::from_secs(30));
+            Some(candidate.max(cap).max(std::time::Duration::from_secs(10)))
+        } else {
+            None
+        };
 
-        // Fast-path acceleration: disable Nagle's algorithm to eliminate 40ms delayed ACKs on Linux
-        let _ = stream.set_nodelay(true);
+        let keepalive = Some(timeouts.idle / 2);
 
-        Ok(Box::new(RealTcpConnection {
-            stream: Some(stream),
-            peer: target,
-            created_at: Instant::now(),
-            last_used_at: Instant::now(),
-        }))
+        Self {
+            nodelay: true,
+            fastopen,
+            notsent_lowat,
+            user_timeout,
+            keepalive,
+        }
     }
 }
 
-/// Wrapper around a live Tokio [`TcpStream`].
-#[derive(Debug)]
-pub struct RealTcpConnection {
-    stream: Option<TcpStream>,
-    peer: SocketAddr,
-    created_at: Instant,
-    last_used_at: Instant,
+/// Extension trait for pre-compiling socket acceleration path from hardware topology and timeouts.
+pub trait SocketAccelerationPathExt {
+    /// Pre-compiles socket acceleration path based on host hardware/kernel topology,
+    /// upstream timeouts, and whether TLS encryption is active.
+    fn for_topology(
+        topo: &velda_core::HardwareTopology,
+        timeouts: &crate::upstream::UpstreamTimeouts,
+        is_tls: bool,
+    ) -> Self;
 }
 
-impl PoolableResource for RealTcpConnection {
-    fn is_healthy(&self) -> bool {
-        self.stream.is_some()
-    }
-
-    fn created_at(&self) -> Instant {
-        self.created_at
-    }
-
-    fn last_used_at(&self) -> Instant {
-        self.last_used_at
-    }
-
-    fn touch(&mut self) {
-        self.last_used_at = Instant::now();
-    }
-
-    fn touch_at(&mut self, now: Instant) {
-        self.last_used_at = now;
-    }
-
-    fn close(&mut self) {
-        self.stream = None;
-    }
-}
-
-impl BackendConnection for RealTcpConnection {
+impl SocketAccelerationPathExt for SocketAccelerationPath {
     #[inline]
-    fn peer(&self) -> SocketAddr {
-        self.peer
-    }
-
-    #[inline]
-    fn into_tcp_stream(mut self: Box<Self>) -> Option<TcpStream> {
-        self.stream.take()
+    fn for_topology(
+        topo: &velda_core::HardwareTopology,
+        timeouts: &crate::upstream::UpstreamTimeouts,
+        is_tls: bool,
+    ) -> Self {
+        Self::for_topology(topo, timeouts, is_tls)
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use mock::*;
+/// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
+///
+/// Upstream owns this sizing (hardware probing in `velda-core` stays policy-free).
+/// Keeps a 16KB floor (~11 MTU) so NIC TSO is not starved and epoll is not woken per packet.
+pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
+    use velda_core::MemoryTier;
+    const KB: u32 = 1024;
+    match tier {
+        MemoryTier::Constrained | MemoryTier::Small => 16 * KB,
+        MemoryTier::Medium => 32 * KB,
+        MemoryTier::Large | MemoryTier::XLarge => 64 * KB,
+        MemoryTier::TwoXLarge | MemoryTier::Ultra => 128 * KB,
+    }
+}
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod mock {
+#[cfg(target_os = "linux")]
+pub fn apply_tcp_fastopen(fd: std::os::unix::io::RawFd) {
+    let val: libc::c_int = 1;
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_FASTOPEN_CONNECT,
+            &val as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&val) as libc::socklen_t,
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_post_connect_acceleration(
+    fd: std::os::unix::io::RawFd,
+    accel: &SocketAccelerationPath,
+) {
+    unsafe {
+        if let Some(lowat) = accel.notsent_lowat {
+            let val = lowat as libc::c_uint;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_NOTSENT_LOWAT,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+        }
+
+        if let Some(user_timeout) = accel.user_timeout {
+            let val = user_timeout.as_millis() as libc::c_uint;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_USER_TIMEOUT,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+        }
+
+        if let Some(keepalive) = accel.keepalive {
+            let val: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+
+            let idle_secs = keepalive.as_secs().max(1) as libc::c_int;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPIDLE,
+                &idle_secs as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&idle_secs) as libc::socklen_t,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// In-memory mock connection for unit testing.
-    #[derive(Debug)]
-    pub struct MockConnection {
-        pub peer: SocketAddr,
-        pub created_at: Instant,
-        pub last_used_at: Instant,
-        pub healthy: Arc<AtomicBool>,
+    #[test]
+    fn test_notsent_lowat_scaling_and_floor() {
+        use velda_core::MemoryTier;
+        assert_eq!(
+            notsent_lowat_for_mem_tier(MemoryTier::Constrained),
+            16 * 1024
+        );
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Medium), 32 * 1024);
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Large), 64 * 1024);
+        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Ultra), 128 * 1024);
     }
 
-    impl MockConnection {
-        pub fn new(peer: SocketAddr) -> Self {
-            Self {
-                peer,
-                created_at: Instant::now(),
-                last_used_at: Instant::now(),
-                healthy: Arc::new(AtomicBool::new(true)),
+    #[test]
+    fn test_socket_acceleration_path_for_topology_resolution() {
+        let topo = velda_core::global_hardware_topology();
+        let timeouts = crate::upstream::UpstreamTimeouts::http(
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(5),
+        );
+
+        // Plain TCP (non-TLS)
+        let accel_plain = SocketAccelerationPath::for_topology(topo, &timeouts, false);
+        assert!(accel_plain.nodelay);
+        assert!(!accel_plain.fastopen, "Plain TCP must not enable fastopen");
+
+        // TLS
+        let accel_tls = SocketAccelerationPath::for_topology(topo, &timeouts, true);
+        assert!(accel_tls.nodelay);
+        #[cfg(target_os = "linux")]
+        {
+            if topo.kernel.supports_tcp_fastopen_connect() {
+                assert!(
+                    accel_tls.fastopen,
+                    "TLS on Linux >= 4.11 should enable fastopen"
+                );
+            }
+            if topo.kernel.supports_tcp_notsent_lowat() {
+                assert!(accel_tls.notsent_lowat.is_some());
             }
         }
-    }
-
-    impl PoolableResource for MockConnection {
-        fn is_healthy(&self) -> bool {
-            self.healthy.load(Ordering::Acquire)
-        }
-
-        fn created_at(&self) -> Instant {
-            self.created_at
-        }
-
-        fn last_used_at(&self) -> Instant {
-            self.last_used_at
-        }
-
-        fn touch(&mut self) {
-            self.last_used_at = Instant::now();
-        }
-
-        fn touch_at(&mut self, now: Instant) {
-            self.last_used_at = now;
-        }
-
-        fn close(&mut self) {
-            self.healthy.store(false, Ordering::Release);
-        }
-    }
-
-    impl BackendConnection for MockConnection {
-        #[inline]
-        fn peer(&self) -> SocketAddr {
-            self.peer
-        }
-    }
-
-    /// Mock connector for testing connection acquisition.
-    #[derive(Debug, Default)]
-    pub struct MockConnector {
-        fail_addrs: std::sync::RwLock<std::collections::HashSet<SocketAddr>>,
-    }
-
-    impl MockConnector {
-        pub fn new() -> Self {
-            Self {
-                fail_addrs: std::sync::RwLock::new(std::collections::HashSet::new()),
-            }
-        }
-
-        pub fn set_failing(&self, addr: SocketAddr) {
-            self.fail_addrs.write().unwrap().insert(addr);
-        }
-
-        pub fn clear_failing(&self, addr: &SocketAddr) {
-            self.fail_addrs.write().unwrap().remove(addr);
-        }
-
-        pub fn clear_all(&self) {
-            self.fail_addrs.write().unwrap().clear();
-        }
-    }
-
-    impl Connector for MockConnector {
-        async fn connect(&self, target: SocketAddr) -> Result<Box<dyn BackendConnection>> {
-            if self.fail_addrs.read().unwrap().contains(&target) {
-                return Err(UpstreamError::ConnectionFailed {
-                    endpoint: target,
-                    reason: "simulated connection refusal".into(),
-                });
-            }
-            Ok(Box::new(MockConnection::new(target)))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tcp_connector_nodelay() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let connector = TcpConnector;
-        let conn = connector.connect(addr).await.unwrap();
-        assert_eq!(conn.peer(), addr);
-        assert!(conn.is_healthy());
-
-        let raw_stream = conn.into_tcp_stream().unwrap();
-        assert!(raw_stream.nodelay().unwrap());
     }
 }

@@ -82,14 +82,15 @@ fn test_pool_end_to_end_acquire_and_lease_lifecycle() {
     let addr: SocketAddr = "10.0.0.10:8080".parse().unwrap();
     let key = ConnectionKey::tcp(addr);
 
-    // 1. Initial acquire misses and lazy-creates container
+    // 1. Initial acquire misses with zero container allocation
     assert!(pool.acquire(&key, Duration::from_secs(30)).is_none());
     assert_eq!(pool.stats().misses, 1);
-    assert_eq!(pool.total_pool_containers(), 1);
+    assert_eq!(pool.total_pool_containers(), 0);
     assert_eq!(pool.total_idle_conns(), 0);
 
     // 2. Upstream releases a newly established connection into the pool
     pool.release(&key, MockConnection::new(addr), true, false);
+    assert_eq!(pool.total_pool_containers(), 1);
     assert_eq!(pool.total_idle_conns(), 1);
     assert_eq!(pool.stats().releases, 1);
 
@@ -146,6 +147,7 @@ fn test_pool_protocol_and_sni_isolation() {
 fn test_pool_capacity_and_fd_protection() {
     let config = PoolConfig {
         max_idle_per_key: 2,
+        max_concurrent_streams: 100,
         idle_timeout: Duration::from_secs(30),
         max_lifetime: None,
     };

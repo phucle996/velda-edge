@@ -242,6 +242,7 @@ fn bench_idle_eviction_sweeper_soak() {
     let iters = 10_000;
     let config = PoolConfig {
         max_idle_per_key: 100,
+        max_concurrent_streams: 100,
         idle_timeout: Duration::from_secs(10),
         max_lifetime: None,
     };

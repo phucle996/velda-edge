@@ -21,6 +21,7 @@ velda-http3 = { path = "../velda-http3" }
 velda-grpc = { path = "../velda-grpc" }
 velda-router = { path = "../velda-router" }
 velda-upstream = { path = "../velda-upstream" }
+velda-connection-pool = { path = "../velda-connection-pool" }
 velda-discovery = { path = "../velda-discovery" }
 velda-lb = { path = "../velda-lb" }
 velda-sync = { path = "../velda-sync" }

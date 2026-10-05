@@ -5,7 +5,7 @@ use velda_lb::{
     IpHash, LeastConnections, LoadBalancer, PowerOfTwoChoices, Random, RoundRobin,
     SelectionContext, WeightedRoundRobin,
 };
-use velda_upstream::{TcpConnector, Upstream};
+use velda_upstream::Upstream;
 
 /// Pre-compiled load balancing algorithm variants.
 ///
@@ -67,7 +67,7 @@ impl LbAlgorithm {
 }
 
 /// Unified Edge upstream pipeline type backed by static LbAlgorithm.
-pub type EdgeUpstream = Upstream<TcpConnector, LbAlgorithm>;
+pub type EdgeUpstream = Upstream<LbAlgorithm>;
 
 #[cfg(test)]
 mod tests {

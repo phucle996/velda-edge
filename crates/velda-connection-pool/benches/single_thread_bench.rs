@@ -221,6 +221,7 @@ fn bench_subpool_depth_scaling() {
     for &depth in &depths {
         let config = PoolConfig {
             max_idle_per_key: depth,
+            max_concurrent_streams: 100,
             idle_timeout: Duration::from_secs(60),
             max_lifetime: None,
         };
@@ -285,6 +286,7 @@ fn bench_eviction_scaling() {
     for &count in &scales {
         let config = PoolConfig {
             max_idle_per_key: count,
+            max_concurrent_streams: 100,
             idle_timeout: Duration::from_secs(30),
             max_lifetime: None,
         };

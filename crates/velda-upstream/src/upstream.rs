@@ -1,16 +1,8 @@
 //! # velda-upstream: Logical Upstream Pipeline Root
 //!
-//! Owns the complete backend request lifecycle:
+//! Owns logical backends, discovery, health tracking, and load balancing:
 //! ```text
-//! [1. Discovery] ──> [2. Usable Health Filter] ──> [3. Load Balancer]
-//!                                                         │
-//!                            ┌────────────────────────────┴───────────────────────────┐
-//!                            ▼                                                        ▼
-//!                 [4a. Pool Reuse (HIT)]                                   [4b. Network Connect (MISS)]
-//!                            │                                                        │
-//!                            └────────────────────────────┬───────────────────────────┘
-//!                                                         ▼
-//!                                              [5. RAII BackendLease]
+//! [1. Discovery] ──> [2. Usable Health Filter] ──> [3. Load Balancer] ──> [4. Candidate Execution / Failover]
 //! ```
 
 use std::collections::HashSet;
@@ -19,15 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use velda_connection_pool::PoolStats;
 use velda_core::Endpoint;
 use velda_discovery::{Discovery, EndpointSet};
 use velda_lb::{LoadBalancer, RoundRobin, SelectionContext};
 
-use crate::connection::{ConnectionKey, Connector, TcpConnector};
 use crate::error::{Result, UpstreamError};
 use crate::health::{HealthConfig, HealthTracker};
-use crate::lease::{AcquireTarget, BackendLease, UpstreamPoolManager};
 
 #[derive(Debug)]
 struct DegradedSnapshot {
@@ -41,8 +30,6 @@ struct DegradedSnapshot {
 // ============================================================================
 
 /// Timeout configuration for upstream connections.
-///
-/// NOTE: Timeouts must be explicitly configured from sync/JSON. Zero default guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpstreamTimeouts {
     /// Timeout for establishing a new physical backend connection (TCP/TLS handshake).
@@ -79,24 +66,18 @@ impl UpstreamTimeouts {
 // 2. Logical Upstream Entity
 // ============================================================================
 
-/// Represents an active logical upstream managing backend discovery, health, and pooling.
-pub struct Upstream<C: Connector = TcpConnector, LB: LoadBalancer = RoundRobin> {
+/// Represents an active logical upstream managing backend discovery, health, and load balancing.
+pub struct Upstream<LB: LoadBalancer = RoundRobin> {
     id: String,
     protocol: Arc<str>,
     discovery: Arc<Discovery>,
     health: Arc<HealthTracker>,
     balancer: LB,
-    pool: Arc<UpstreamPoolManager>,
-    connector: Arc<C>,
     timeouts: UpstreamTimeouts,
     degraded_cache: ArcSwap<DegradedSnapshot>,
 }
 
-// ============================================================================
-// 5. Core Methods & Flat Workflow Pipeline
-// ============================================================================
-
-impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
+impl<LB: LoadBalancer> Upstream<LB> {
     /// Primary constructor for a fully configured upstream entity.
     pub fn new(
         id: impl Into<String>,
@@ -104,7 +85,6 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         discovery: Arc<Discovery>,
         balancer: LB,
         timeouts: UpstreamTimeouts,
-        connector: Arc<C>,
     ) -> Self {
         Self {
             id: id.into(),
@@ -112,8 +92,6 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
             discovery,
             health: Arc::new(HealthTracker::new(HealthConfig::default())),
             balancer,
-            pool: Arc::new(UpstreamPoolManager::new()),
-            connector,
             timeouts,
             degraded_cache: ArcSwap::from_pointee(DegradedSnapshot {
                 discovery_gen: u64::MAX,
@@ -151,16 +129,16 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         &self.protocol
     }
 
+    /// Returns the upstream configured timeouts.
+    #[inline]
+    pub fn timeouts(&self) -> &UpstreamTimeouts {
+        &self.timeouts
+    }
+
     /// Returns the current active [`EndpointSet`] from discovery.
     #[inline]
     pub fn current_endpoints(&self) -> Arc<EndpointSet> {
         self.discovery.current_endpoints()
-    }
-
-    /// Returns the current pool statistics (hits, misses, evictions).
-    #[inline]
-    pub fn pool_stats(&self) -> PoolStats {
-        self.pool.stats()
     }
 
     /// Accesses the underlying health tracker.
@@ -169,23 +147,7 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         &self.health
     }
 
-    /// Performs an active sweep of expired idle connections and empty subpools.
-    ///
-    /// Returns `(connections_evicted, empty_subpools_pruned)`.
-    pub fn sweep_idle(&self) -> (usize, usize) {
-        let evicted = self.pool.evict_expired(self.timeouts.idle);
-        let pruned = self.pool.prune_empty_pools(self.timeouts.idle);
-        (evicted, pruned)
-    }
-
-    /// Closes all idle connections across all pool shards and clears containers.
-    pub fn clear_pool(&self) {
-        self.pool.clear();
-    }
-
     /// Prunes health tracker state for endpoints that are no longer part of active discovery.
-    ///
-    /// Prevents unbounded memory growth in long-running clusters with high discovery churn.
     pub fn prune_retired_endpoints(&self) {
         let current = self.discovery.current_endpoints();
         let active_addrs: HashSet<SocketAddr> = current
@@ -196,14 +158,12 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         self.health.prune_unregistered(&active_addrs);
     }
 
-    /// Spawns a background maintenance worker that periodically sweeps idle connections
-    /// and prunes retired endpoint health state.
+    /// Spawns a background maintenance worker that periodically prunes retired endpoint health state.
     pub fn spawn_maintenance_task(
         self: &Arc<Self>,
         interval: Duration,
     ) -> tokio::task::JoinHandle<()>
     where
-        C: 'static,
         LB: 'static,
     {
         let upstream = Arc::clone(self);
@@ -212,26 +172,14 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
-                upstream.sweep_idle();
                 upstream.prune_retired_endpoints();
             }
         })
     }
 
     // ------------------------------------------------------------------------
-    // Public Acquisition Entrypoints
+    // Public Acquisition & Execution Entrypoints
     // ------------------------------------------------------------------------
-
-    /// Acquires a backend connection lease using the default protocol configured for this upstream.
-    pub async fn acquire(&self) -> Result<BackendLease> {
-        self.acquire_with_target(AcquireTarget::default_target())
-            .await
-    }
-
-    /// Acquires a backend connection lease with an explicit protocol override.
-    pub async fn acquire_protocol(&self, protocol: &str) -> Result<BackendLease> {
-        self.acquire_with_target(AcquireTarget::new(protocol)).await
-    }
 
     /// Selects a healthy endpoint address using the configured load balancer.
     pub fn select_endpoint(&self) -> Result<SocketAddr> {
@@ -330,242 +278,75 @@ impl<C: Connector, LB: LoadBalancer> Upstream<C, LB> {
         })
     }
 
-    /// The core Flat Workflow Pipeline:
-    ///
-    /// 1. Query Discovery -> Filter healthy endpoints.
-    /// 2. Pick candidate via Load Balancer.
-    /// 3. Try Pool HIT (reuse idle connection).
-    /// 4. On Pool MISS -> Connect via network with timeout.
-    /// 5. On connection error -> Record health failure & fallback to next candidate.
-    pub async fn acquire_with_target(&self, target: AcquireTarget<'_>) -> Result<BackendLease> {
-        // Step 1: Query Discovery snapshot
-        let endpoints = self.discovery.current_endpoints();
-        let all_eps = endpoints.all_endpoints();
-
-        if all_eps.is_empty() {
-            return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
-        }
-
-        // Step 2: Determine usable healthy endpoints
-        // Zero-Alloc Fast Path: If all endpoints are healthy (normal hot path), bypass filtering!
-        // Degraded Snapshot: If endpoints are degraded, read compiled snapshot from ArcSwap (O(1), zero-alloc).
-        let cached_degraded;
-        let usable: &[Endpoint] = if !self.health.has_unhealthy() {
-            all_eps
-        } else {
-            let current_gen = endpoints.generation();
-            let current_epoch = self.health.epoch();
-            cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
-            if cached_degraded.is_empty() {
-                return Err(UpstreamError::NoEndpointsAvailable(self.id.clone()));
-            }
-            &cached_degraded[..]
-        };
-
-        // Step 3: Attempt selection and connection (primary + 1 fallback on connection failure)
-        let max_attempts = usable.len().min(2);
-        let mut last_err = None;
-        let mut candidate_slice = usable;
-        let mut fallback_endpoints: Vec<Endpoint>;
-
-        for _ in 0..max_attempts {
-            // Step 3a: Run Load Balancer algorithm on healthy pool
-            let Some(selected) = self
-                .balancer
-                .select(candidate_slice, &target.selection_context)
-            else {
-                break;
-            };
-
-            let is_draining = !endpoints.contains_addr(&selected.address);
-
-            // Step 3b: Try acquiring from pool or establishing new connection
-            match self
-                .try_acquire_endpoint(selected, &target, is_draining)
-                .await
-            {
-                Ok(lease) => return Ok(lease),
-                Err(err) => {
-                    let failed_addr = selected.address;
-                    last_err = Some(err);
-
-                    // Ensure subsequent retry falls back to another endpoint, even with deterministic hash balancers (IpHash)
-                    if candidate_slice.len() > 1 {
-                        fallback_endpoints = candidate_slice
-                            .iter()
-                            .filter(|ep| ep.address != failed_addr)
-                            .cloned()
-                            .collect();
-                        candidate_slice = &fallback_endpoints;
-                    }
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| UpstreamError::NoEndpointsAvailable(self.id.clone())))
-    }
-
-    // ------------------------------------------------------------------------
-    // Internal Pipeline Helpers
-    // ------------------------------------------------------------------------
-
-    /// Retrieves the cached degraded healthy endpoints or compiles and swaps a fresh snapshot.
     fn get_or_compile_degraded(
         &self,
-        endpoints: &EndpointSet,
-        discovery_gen: u64,
-        health_epoch: u64,
+        endpoints: &Arc<EndpointSet>,
+        current_gen: u64,
+        current_epoch: u64,
     ) -> Arc<[Endpoint]> {
-        let cached = self.degraded_cache.load();
-        if cached.discovery_gen == discovery_gen && cached.health_epoch == health_epoch {
-            return Arc::clone(&cached.usable_endpoints);
+        let snapshot = self.degraded_cache.load();
+        if snapshot.discovery_gen == current_gen && snapshot.health_epoch == current_epoch {
+            return Arc::clone(&snapshot.usable_endpoints);
         }
 
-        let filtered: Vec<Endpoint> = endpoints
+        let compiled: Arc<[Endpoint]> = endpoints
             .all_endpoints()
             .iter()
             .filter(|ep| self.health.is_healthy(&ep.address))
             .cloned()
             .collect();
 
-        let new_usable: Arc<[Endpoint]> = Arc::from(filtered);
         self.degraded_cache.store(Arc::new(DegradedSnapshot {
-            discovery_gen,
-            health_epoch,
-            usable_endpoints: Arc::clone(&new_usable),
+            discovery_gen: current_gen,
+            health_epoch: current_epoch,
+            usable_endpoints: Arc::clone(&compiled),
         }));
-        new_usable
-    }
 
-    /// Attempts to acquire a connection for a specific endpoint (Pool HIT first, then Network Connect on MISS).
-    async fn try_acquire_endpoint(
-        &self,
-        endpoint: &Endpoint,
-        target: &AcquireTarget<'_>,
-        is_draining: bool,
-    ) -> Result<BackendLease> {
-        let proto = match &target.protocol {
-            Some(p) => Arc::clone(p),
-            None => Arc::clone(&self.protocol),
-        };
-        let key = ConnectionKey::http(
-            endpoint.address,
-            proto,
-            target.sni.clone(),
-            target.alpn.clone(),
-        );
-
-        // Sub-step A: Check Connection Pool (HIT)
-        if let Some(pooled) = self.pool.acquire(&key, self.timeouts.idle) {
-            return Ok(BackendLease::new(
-                pooled,
-                key,
-                Arc::clone(&self.pool),
-                Arc::clone(&self.health),
-                is_draining,
-            ));
-        }
-
-        // Sub-step B: Pool MISS -> Establish new connection with timeout
-        match tokio::time::timeout(
-            self.timeouts.connect,
-            self.connector.connect(endpoint.address),
-        )
-        .await
-        {
-            Ok(Ok(new_conn)) => {
-                self.health.record_success(&endpoint.address);
-                Ok(BackendLease::new(
-                    new_conn,
-                    key,
-                    Arc::clone(&self.pool),
-                    Arc::clone(&self.health),
-                    is_draining,
-                ))
-            }
-            Ok(Err(err)) => {
-                self.health.record_failure(&endpoint.address);
-                Err(err)
-            }
-            Err(_) => {
-                self.health.record_failure(&endpoint.address);
-                Err(UpstreamError::AcquisitionTimeout(self.timeouts.connect))
-            }
-        }
+        compiled
     }
 }
 
 // ============================================================================
-// 6. Testing & Custom Connector Constructors
-// ============================================================================
-
-#[cfg(any(test, feature = "test-utils"))]
-impl<C: Connector> Upstream<C, RoundRobin> {
-    /// Creates an upstream with a custom connector (useful for tests and non-TCP backends).
-    pub fn with_connector(
-        id: impl Into<String>,
-        protocol: impl Into<Arc<str>>,
-        discovery: Arc<Discovery>,
-        timeouts: UpstreamTimeouts,
-        connector: Arc<C>,
-    ) -> Self {
-        Self::new(
-            id,
-            protocol,
-            discovery,
-            RoundRobin::new(),
-            timeouts,
-            connector,
-        )
-    }
-}
-
-// ============================================================================
-// 8. Unit Tests
+// 3. Unit Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::MockConnector;
     use std::net::SocketAddr;
 
     #[tokio::test]
-    async fn test_upstream_acquire_and_pool_lifecycle() {
+    async fn test_upstream_round_robin_selection() {
         let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let discovery = Discovery::new_explicit(vec![Endpoint::new("e1", ep1, 1)]);
-        let connector = Arc::new(MockConnector::new());
+        let ep2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let discovery = Discovery::new_explicit(vec![
+            Endpoint::new("e1", ep1, 1),
+            Endpoint::new("e2", ep2, 1),
+        ]);
 
         let timeouts = UpstreamTimeouts::http(
             Duration::from_millis(500),
             Duration::from_secs(30),
             Duration::from_secs(5),
         );
-        let upstream =
-            Upstream::with_connector("users-service", "http1", discovery, timeouts, connector);
+        let upstream = Upstream::new(
+            "users-service",
+            "http1",
+            discovery,
+            RoundRobin::new(),
+            timeouts,
+        );
 
         assert_eq!(upstream.id(), "users-service");
         assert_eq!(upstream.protocol(), "http1");
 
-        // 1. First acquire using default protocol -> Miss
-        let lease1 = upstream.acquire().await.unwrap();
-        assert_eq!(lease1.endpoint(), ep1);
-        assert_eq!(upstream.pool_stats().misses, 1);
-        assert_eq!(upstream.pool_stats().hits, 0);
-
-        // Release connection into pool
-        lease1.release(true);
-        assert_eq!(upstream.pool_stats().releases, 1);
-
-        // 2. Second acquire -> Hit!
-        let lease2 = upstream.acquire().await.unwrap();
-        assert_eq!(lease2.endpoint(), ep1);
-        assert_eq!(upstream.pool_stats().hits, 1);
-        lease2.release(true);
+        let s1 = upstream.select_endpoint().unwrap();
+        let s2 = upstream.select_endpoint().unwrap();
+        assert_ne!(s1, s2);
     }
 
     #[tokio::test]
-    async fn test_upstream_connection_failure_fallback() {
+    async fn test_upstream_execute_failover() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
 
@@ -573,21 +354,30 @@ mod tests {
             Endpoint::new("e1", ep1, 1),
             Endpoint::new("e2", ep2, 1),
         ]);
-        let connector = Arc::new(MockConnector::new());
-        connector.set_failing(ep1);
 
         let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-        let upstream = Upstream::with_connector("test-up", "tcp", discovery, timeouts, connector);
+        let upstream = Upstream::new("test-up", "tcp", discovery, RoundRobin::new(), timeouts)
+            .with_health_config(HealthConfig::passive_only(1, Duration::from_secs(10)));
 
-        // Should attempt ep1, fail, and fallback to ep2!
-        let lease = upstream.acquire().await.unwrap();
-        assert_eq!(lease.endpoint(), ep2);
+        // Execute action where ep1 fails but ep2 succeeds
+        let res = upstream
+            .execute(|ep| async move {
+                if ep == ep1 {
+                    Err("connection refused")
+                } else {
+                    Ok("success")
+                }
+            })
+            .await;
+
+        assert_eq!(res.unwrap(), "success");
+        // ep1 should be recorded as failed, ep2 as succeeded
+        assert!(!upstream.health().is_healthy(&ep1));
+        assert!(upstream.health().is_healthy(&ep2));
     }
 
     #[tokio::test]
-    async fn test_upstream_iphash_deterministic_fallback() {
-        use velda_lb::IpHash;
-
+    async fn test_upstream_maintenance_and_prune() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
 
@@ -595,64 +385,18 @@ mod tests {
             Endpoint::new("e1", ep1, 1),
             Endpoint::new("e2", ep2, 1),
         ]);
-        let connector = Arc::new(MockConnector::new());
-
-        // We determine which endpoint IpHash selects first for client IP 192.168.1.100
-        let client_ip: SocketAddr = "192.168.1.100:50000".parse().unwrap();
-        let target = AcquireTarget::default_target()
-            .with_selection_context(SelectionContext::with_client_ip(client_ip));
-
-        let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
-        let upstream = Upstream::new(
-            "iphash-up",
-            "tcp",
-            discovery,
-            IpHash,
-            timeouts,
-            Arc::clone(&connector),
-        );
-
-        // Check which one IpHash picks when healthy
-        let lease = upstream.acquire_with_target(target.clone()).await.unwrap();
-        let first_chosen = lease.endpoint();
-        let fallback_expected = if first_chosen == ep1 { ep2 } else { ep1 };
-        lease.release(false); // Do not pool connection, forcing fresh connect attempt next time
-
-        // Now set the primary chosen endpoint to fail
-        connector.set_failing(first_chosen);
-
-        // Acquire must NOT fail or retry the dead node blindly; it must fall back to the survivor!
-        let lease2 = upstream.acquire_with_target(target).await.unwrap();
-        assert_eq!(lease2.endpoint(), fallback_expected);
-    }
-
-    #[tokio::test]
-    async fn test_upstream_sweep_idle_and_maintenance() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-
-        let discovery = Discovery::new_explicit(vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
-        ]);
-        let connector = Arc::new(MockConnector::new());
         let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_millis(10));
         let health_config = HealthConfig::passive_only(1, Duration::from_secs(10));
         let upstream = Arc::new(
-            Upstream::with_connector("sweep-up", "tcp", discovery.clone(), timeouts, connector)
-                .with_health_config(health_config),
+            Upstream::new(
+                "sweep-up",
+                "tcp",
+                discovery.clone(),
+                RoundRobin::new(),
+                timeouts,
+            )
+            .with_health_config(health_config),
         );
-
-        // Acquire and release into pool
-        let lease = upstream.acquire().await.unwrap();
-        lease.release(true);
-
-        // Sleep to exceed idle timeout (10ms)
-        tokio::time::sleep(Duration::from_millis(15)).await;
-
-        // Sweep idle connections
-        let (evicted, _) = upstream.sweep_idle();
-        assert_eq!(evicted, 1);
 
         // Populate health record for ep2
         upstream.health().record_failure(&ep2);

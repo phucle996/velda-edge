@@ -11,7 +11,7 @@ use velda_discovery::{
 };
 use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::TlsClientEngine;
-use velda_upstream::{TcpConnector, Upstream, UpstreamTimeouts};
+use velda_upstream::{Upstream, UpstreamTimeouts};
 
 use super::grpc::GrpcUpstream;
 use super::http1::Http1Upstream;
@@ -258,23 +258,67 @@ pub fn build_upstreams(
         let is_tls = config.tls.is_some();
         let protocol_str = Arc::from(config.protocol.transport.as_str());
         let balancer = LbAlgorithm::from_name(&config.load_balancer.algorithm);
-        let inner = Upstream::new(
-            &config.id,
-            protocol_str,
-            discovery,
-            balancer,
-            timeouts,
-            Arc::new(TcpConnector),
-        );
+
+        // Tier-aware Pool Sizing:
+        // - CpuTier dictates concurrency_shards (lock distribution)
+        // - MemoryTier dictates baseline capacity (max_idle_per_key and max_concurrent_streams)
+        // - UpstreamConfig::pool takes precedence if explicitly specified by operator in upstream.json
+        let topology = velda_core::global_hardware_topology();
+        let cpu_tier = topology.cpu_tier();
+        let mem_tier = topology.memory_tier();
+
+        let default_shards = velda_connection_pool::concurrency_shards_for_cpu_tier(cpu_tier);
+        let default_max_idle = velda_connection_pool::max_idle_per_key_for_mem_tier(mem_tier);
+        let default_max_streams =
+            velda_connection_pool::max_concurrent_streams_for_mem_tier(mem_tier);
+
+        let pool_opt = config.pool.as_ref();
+        let shard_count = pool_opt
+            .and_then(|p| p.concurrency_shards)
+            .map(|s| s.max(1).next_power_of_two())
+            .unwrap_or(default_shards);
+        let max_idle = pool_opt
+            .and_then(|p| p.max_idle_per_key)
+            .unwrap_or(default_max_idle);
+        let max_streams = pool_opt
+            .and_then(|p| p.max_concurrent_streams)
+            .unwrap_or(default_max_streams);
+        let idle_timeout = pool_opt
+            .and_then(|p| p.idle_timeout_ms.map(std::time::Duration::from_millis))
+            .unwrap_or(timeouts.idle);
+        let max_lifetime = pool_opt
+            .and_then(|p| p.max_lifetime_ms.map(std::time::Duration::from_millis))
+            .or(Some(velda_connection_pool::DEFAULT_MAX_LIFETIME));
+
+        let pool_config = velda_connection_pool::PoolConfig {
+            max_idle_per_key: max_idle,
+            max_concurrent_streams: max_streams,
+            idle_timeout,
+            max_lifetime,
+        };
+
+        let inner = Upstream::new(&config.id, protocol_str, discovery, balancer, timeouts);
 
         let transport = config.protocol.transport.to_ascii_lowercase();
         let app = config.protocol.application.to_ascii_lowercase();
 
         match app.as_str() {
             "grpc" => {
+                let grpc_acceleration = velda_grpc::GrpcAccelerationPath::for_topology(
+                    topology,
+                    timeouts.connect,
+                    timeouts.idle,
+                    is_tls,
+                );
                 grpc_map.insert(
                     config.id.clone(),
-                    Arc::new(GrpcUpstream::new(inner, config.protocol.streaming)),
+                    Arc::new(GrpcUpstream::new(
+                        inner,
+                        config.protocol.streaming,
+                        shard_count,
+                        max_streams,
+                        grpc_acceleration,
+                    )),
                 );
             }
             "http3" => {
@@ -284,13 +328,27 @@ pub fn build_upstreams(
                         inner,
                         target_sni,
                         config.protocol.streaming,
+                        shard_count,
+                        max_streams,
                     )),
                 );
             }
             "http2" => {
+                let http2_acceleration = velda_http2::Http2AccelerationPath::for_topology(
+                    topology,
+                    timeouts.connect,
+                    timeouts.idle,
+                    is_tls,
+                );
                 http2_map.insert(
                     config.id.clone(),
-                    Arc::new(Http2Upstream::new(inner, config.protocol.streaming)),
+                    Arc::new(Http2Upstream::new(
+                        inner,
+                        config.protocol.streaming,
+                        shard_count,
+                        max_streams,
+                        http2_acceleration,
+                    )),
                 );
             }
             "http1" => {
@@ -299,14 +357,22 @@ pub fn build_upstreams(
                 } else {
                     None
                 };
+                let http1_acceleration = velda_http1::Http1AccelerationPath::for_topology(
+                    topology,
+                    timeouts.connect,
+                    timeouts.idle,
+                    is_tls,
+                );
                 http1_map.insert(
                     config.id.clone(),
                     Arc::new(Http1Upstream::new(
                         inner,
                         target_sni,
-                        is_tls,
                         tls_engine,
                         config.protocol.streaming,
+                        pool_config,
+                        shard_count,
+                        http1_acceleration,
                     )),
                 );
             }
@@ -314,7 +380,13 @@ pub fn build_upstreams(
                 udp_map.insert(config.id.clone(), Arc::new(UdpUpstream::new(inner)));
             }
             "raw" => {
-                tcp_map.insert(config.id.clone(), Arc::new(TcpUpstream::new(inner)));
+                let tcp_acceleration = velda_upstream::SocketAccelerationPath::for_topology(
+                    topology, &timeouts, is_tls,
+                );
+                tcp_map.insert(
+                    config.id.clone(),
+                    Arc::new(TcpUpstream::new(inner, tcp_acceleration)),
+                );
             }
             other => {
                 tracing::warn!(
@@ -379,6 +451,7 @@ mod tests {
             },
             health_check: None,
             tls: None,
+            pool: None,
         }
     }
 
@@ -420,5 +493,32 @@ mod tests {
         assert_eq!(table.len(), 1);
         let http1 = table.http1.get("u_dns").expect("u_dns registered");
         assert_eq!(http1.id(), "u_dns");
+    }
+
+    #[test]
+    fn test_build_upstreams_with_operator_pool_override_and_tier_fallback() {
+        use velda_sync::post_sync::upstream::UpstreamPoolConfig;
+
+        // Upstream with operator-specified pool overrides
+        let mut u_override = make_test_upstream("u_override", "http2", "endpoints");
+        u_override.pool = Some(UpstreamPoolConfig {
+            concurrency_shards: Some(16),
+            max_idle_per_key: Some(77),
+            max_concurrent_streams: Some(333),
+            idle_timeout_ms: Some(40000),
+            max_lifetime_ms: Some(7200000),
+        });
+
+        // Upstream without pool config (relies on hardware tier fallback)
+        let u_default = make_test_upstream("u_default", "http2", "endpoints");
+
+        let table = build_upstreams_default(&[u_override, u_default], None);
+        let h2_override = table.http2.get("u_override").unwrap();
+        assert_eq!(h2_override.max_concurrent_streams, 333);
+
+        let h2_default = table.http2.get("u_default").unwrap();
+        let mem_tier = velda_core::global_hardware_topology().memory_tier();
+        let expected_streams = velda_connection_pool::max_concurrent_streams_for_mem_tier(mem_tier);
+        assert_eq!(h2_default.max_concurrent_streams, expected_streams);
     }
 }

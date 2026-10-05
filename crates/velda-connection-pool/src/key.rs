@@ -61,12 +61,6 @@ impl ConnectionKey {
         self.alpn = Some(alpn.into());
         self
     }
-
-    /// Accesses the target physical backend socket address.
-    #[inline]
-    pub fn target_addr(&self) -> SocketAddr {
-        self.target_addr
-    }
 }
 
 impl fmt::Display for ConnectionKey {
@@ -88,7 +82,7 @@ mod tests {
     fn test_connection_key_tcp() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let key = ConnectionKey::tcp(addr);
-        assert_eq!(key.target_addr(), addr);
+        assert_eq!(key.target_addr, addr);
         assert_eq!(&*key.protocol, "tcp");
         assert!(key.sni.is_none());
         assert!(key.alpn.is_none());
@@ -100,7 +94,7 @@ mod tests {
         let key = ConnectionKey::http(addr, "http2", None, None)
             .with_sni("api.velda.io")
             .with_alpn("h2");
-        assert_eq!(key.target_addr(), addr);
+        assert_eq!(key.target_addr, addr);
         assert_eq!(&*key.protocol, "http2");
         assert_eq!(key.sni.as_deref(), Some("api.velda.io"));
         assert_eq!(key.alpn.as_deref(), Some("h2"));
@@ -145,7 +139,7 @@ mod tests {
             Some("ipv6.example.com".into()),
             Some("h3".into()),
         );
-        assert_eq!(key.target_addr(), addr);
+        assert_eq!(key.target_addr, addr);
         assert_eq!(&*key.protocol, "http3");
         assert_eq!(key.sni.as_deref(), Some("ipv6.example.com"));
         assert_eq!(key.alpn.as_deref(), Some("h3"));

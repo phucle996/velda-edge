@@ -94,6 +94,7 @@ async fn test_end_to_end_l4_tcp_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -233,6 +234,7 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
@@ -366,6 +368,7 @@ async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
         },
         health_check: None,
         tls: None,
+        pool: None,
     }];
     let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
     fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();

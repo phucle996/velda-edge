@@ -361,33 +361,48 @@ pub async fn run_http1_loop<IO>(
         let cfg = *conn.config();
 
         // HTTP/1.1 Pipeline Invariant (RFC 9112):
-        // The Edge pipeline hands off the request processing closure directly to the upstream.
-        // The upstream manages single-round Load Balancing selection, idle connection pooling,
-        // pre-compiled TLS handshakes, error recovery, and streaming pipe execution.
-        let pipe_result = upstream
-            .dispatch_pipe(host_str, |mut upstream_stream| {
-                let conn_ref = &mut conn;
-                async move {
-                    match strategy {
-                        Http1PipeStrategy::Buffered => {
-                            pipe_buffered(conn_ref, head, framing, &mut upstream_stream, &cfg).await
-                        }
-                        Http1PipeStrategy::ServerStream => {
-                            pipe_server_stream(conn_ref, head, framing, &mut upstream_stream, &cfg)
-                                .await
-                        }
-                        Http1PipeStrategy::ClientStream => {
-                            pipe_client_stream(conn_ref, head, &mut upstream_stream, &cfg).await
-                        }
-                        Http1PipeStrategy::Duplex => {
-                            pipe_duplex(conn_ref, head, &mut upstream_stream, &cfg).await
-                        }
-                    }
-                }
-            })
-            .await;
+        // 1. Acquire pooled/fresh backend stream lease with automatic failover.
+        // 2. Execute contiguous streaming pipe top-to-bottom.
+        // 3. On success: lease automatically returns reusable socket to keep-alive pool.
+        // 4. On error: mark lease dirty so socket is closed and discarded.
+        let mut upstream_lease = match upstream.acquire_stream(host_str).await {
+            Ok(lease) => lease,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    upstream = %route.upstream_name,
+                    "Failed to acquire upstream HTTP/1.1 connection"
+                );
+                let err_resp = Http1Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                let _ = conn.send_response(&err_resp).await;
+                break;
+            }
+        };
+
+        let pipe_result = match strategy {
+            Http1PipeStrategy::Buffered => {
+                pipe_buffered(&mut conn, head, framing, &mut *upstream_lease, &cfg).await
+            }
+            Http1PipeStrategy::ServerStream => {
+                pipe_server_stream(&mut conn, head, framing, &mut *upstream_lease, &cfg).await
+            }
+            Http1PipeStrategy::ClientStream => {
+                pipe_client_stream(&mut conn, head, &mut *upstream_lease, &cfg).await
+            }
+            Http1PipeStrategy::Duplex => {
+                pipe_duplex(&mut conn, head, &mut *upstream_lease, &cfg).await
+            }
+        };
 
         if let Err(e) = pipe_result {
+            upstream_lease.mark_closed();
             tracing::warn!(
                 error = %e,
                 upstream = %route.upstream_name,

@@ -5,5 +5,5 @@
 pub mod connector;
 pub mod response;
 
-pub use connector::{connect, connect_stream};
+pub use connector::{Http2AccelerationPath, connect, connect_stream};
 pub use response::{Http2Response, Http2ResponseHead};

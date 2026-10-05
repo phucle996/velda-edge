@@ -1,15 +1,14 @@
 //! # velda-upstream
 //!
 //! Protocol-agnostic upstream backend lifecycle, discovery, health tracking,
-//! load balancing, and connection lease acquisition for the Velda Edge Data Plane.
+//! and load balancing for the Velda Edge Data Plane.
 //!
 //! Core invariant:
-//! **Router decides $\rightarrow$ Upstream resolves $\rightarrow$ Pool reuses $\rightarrow$ Execution executes.**
+//! **Router decides $\rightarrow$ Upstream resolves $\rightarrow$ Protocol connects & executes.**
 
 pub mod connection;
 pub mod error;
 pub mod health;
-pub mod lease;
 pub mod upstream;
 
 // Re-exports from velda-core
@@ -29,16 +28,8 @@ pub use velda_lb::{
     WeightedLeastRequests, WeightedRandom, WeightedRoundRobin, fnv1a_hash,
 };
 
-// Re-exports from velda-connection-pool
-pub use velda_connection_pool::{ConnectionKey, PoolManager, PoolStats, PoolableResource};
-
 // Re-exports for clean, ergonomic usage within upstream
-pub use connection::{BackendConnection, Connector, RealTcpConnection, TcpConnector};
+pub use connection::{SocketAccelerationPath, SocketAccelerationPathExt};
 pub use error::{Result, UpstreamError};
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
-pub use lease::{AcquireTarget, BackendLease, UpstreamPoolManager};
 pub use upstream::{Upstream, UpstreamTimeouts};
-
-// Test utilities
-#[cfg(any(test, feature = "test-utils"))]
-pub use connection::mock::{MockConnection, MockConnector};
