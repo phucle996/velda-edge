@@ -89,7 +89,7 @@ mod tests {
             Body::Bytes(bytes::Bytes::from_static(b"0123456789too-large-payload")),
         );
         let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let client = crate::client::Http3Client::dummy_for_test(target);
+        let (client, _rx) = crate::client::Http3Client::mock_for_test(target);
         let res = pipe_buffered(&client, &req, &config).await;
         assert!(matches!(res, Err(Http3Error::PayloadTooLarge(27))));
     }

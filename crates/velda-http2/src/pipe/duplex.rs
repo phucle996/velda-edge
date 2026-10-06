@@ -17,7 +17,7 @@ use crate::server::{Http2RequestHead, Http2Responder, Http2StreamReceiver};
 pub async fn pipe_duplex(
     mut head: Http2RequestHead,
     mut body_rx: Http2StreamReceiver,
-    responder: Http2Responder,
+    mut responder: Http2Responder,
     client: &mut SendRequest<Bytes>,
     config: &Http2Config,
 ) -> Result<(), Http2Error> {

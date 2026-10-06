@@ -396,12 +396,38 @@ pub async fn process_grpc_udp_request(
         }
     };
 
-    let pipe_res = match strategy {
+    let mut pipe_res = match strategy {
         GrpcUdpPipeStrategy::Buffered => pipe_buffered(&client, req, config).await,
         GrpcUdpPipeStrategy::ServerStream => pipe_server_stream(&client, req, config).await,
         GrpcUdpPipeStrategy::ClientStream => pipe_client_stream(&client, req, config).await,
         GrpcUdpPipeStrategy::Duplex => pipe_duplex(&client, req, config).await,
     };
+
+    // Self-Healing Retry:
+    // If upstream QUIC connection dropped or reset before processing,
+    // and downstream payload is in memory, acquire a fresh client and retry once.
+    if let Err(ref e) = pipe_res
+        && e.is_stale_or_refused()
+        && matches!(
+            strategy,
+            GrpcUdpPipeStrategy::Buffered | GrpcUdpPipeStrategy::ServerStream
+        )
+    {
+        tracing::debug!(
+            upstream = %route.upstream_name,
+            error = %e,
+            "gRPC over UDP connection dropped; self-healing with fresh connection"
+        );
+        if let Ok(fresh_client) = upstream.acquire_fresh(config).await {
+            pipe_res = match strategy {
+                GrpcUdpPipeStrategy::Buffered => pipe_buffered(&fresh_client, req, config).await,
+                GrpcUdpPipeStrategy::ServerStream => {
+                    pipe_server_stream(&fresh_client, req, config).await
+                }
+                _ => unreachable!(),
+            };
+        }
+    }
 
     match pipe_res {
         Ok(resp) => resp,

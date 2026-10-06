@@ -26,3 +26,27 @@ pub enum Http3Error {
     #[error("Streaming policy violation: {0}")]
     StreamingViolation(String),
 }
+
+impl Http3Error {
+    /// Returns true if this error indicates that the QUIC connection closed unexpectedly
+    /// or remote peer rejected the request (e.g. H3_REQUEST_REJECTED / peer shutdown).
+    pub fn is_connection_closed(&self) -> bool {
+        match self {
+            Http3Error::ConnectionClosed => true,
+            Http3Error::H3(msg) => {
+                msg.contains("connection closed")
+                    || msg.contains("H3_REQUEST_REJECTED")
+                    || msg.contains("reset")
+            }
+            Http3Error::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            ),
+            _ => false,
+        }
+    }
+}

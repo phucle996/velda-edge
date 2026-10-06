@@ -149,4 +149,49 @@ impl Http2Upstream {
             .await
             .map_err(EdgeError::Upstream)
     }
+
+    /// Connects a brand new HTTP/2 client connection directly, bypassing existing pool leases.
+    ///
+    /// Used for transparent 1-shot self-healing when an existing multiplexed connection encounters
+    /// GOAWAY, REFUSED_STREAM, or silent connection reset.
+    pub async fn acquire_fresh(
+        &self,
+        config: &velda_http2::Http2Config,
+    ) -> Result<h2::client::SendRequest<Bytes>, EdgeError> {
+        let max_streams = self.max_concurrent_streams;
+        let acceleration = self.acceleration;
+        let connect_timeout = self.inner.timeouts().connect;
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+
+        self.inner
+            .execute(|endpoint| async move {
+                let fresh = velda_http2::client::connect(
+                    endpoint,
+                    tls,
+                    config,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                let ready_fresh = fresh
+                    .ready()
+                    .await
+                    .map_err(|err| format!("Fresh H2 client not ready: {err}"))?;
+
+                let _ = self.pool.register(
+                    endpoint,
+                    Http2ClientResource::new(ready_fresh.clone()),
+                    max_streams,
+                );
+
+                Ok::<_, String>(ready_fresh)
+            })
+            .await
+            .map_err(EdgeError::Upstream)
+    }
 }

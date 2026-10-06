@@ -126,4 +126,31 @@ impl Http3Upstream {
             .await
             .map_err(EdgeError::Upstream)
     }
+
+    /// Connects a brand new HTTP/3 client directly, bypassing existing pool leases.
+    ///
+    /// Used for transparent 1-shot self-healing when an existing QUIC connection drops or closes.
+    pub async fn acquire_fresh(&self, config: &Http3Config) -> Result<Http3Client, EdgeError> {
+        let max_streams = self.max_concurrent_streams;
+        let server_name: &str = &self.target_sni;
+
+        self.inner
+            .execute(|endpoint| async move {
+                let client = velda_http3::client::connect(endpoint, server_name, config)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let _ = self.pool.register(
+                    endpoint,
+                    Http3ClientResource {
+                        client: client.clone(),
+                    },
+                    max_streams,
+                );
+
+                Ok::<_, String>(client)
+            })
+            .await
+            .map_err(EdgeError::Upstream)
+    }
 }

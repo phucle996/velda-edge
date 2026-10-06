@@ -267,16 +267,26 @@ async fn test_grpc_buffered_pipe_roundtrip() {
         let mut conn = GrpcServerConnection::handshake(sock, &srv_config)
             .await
             .unwrap();
-        while let Some(server_stream) = conn.accept().await.unwrap() {
+        while let Some(mut server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
                 let mut client =
                     GrpcUpstreamConnector::connect(backend_addr, None, &cfg, None, None)
                         .await
                         .unwrap();
-                pipe_buffered(server_stream, &mut client, &cfg)
+                let req_data = server_stream
+                    .read_raw_message(cfg.max_message_size)
                     .await
                     .unwrap();
+                pipe_buffered(
+                    &server_stream.parts,
+                    &req_data,
+                    &mut server_stream.respond,
+                    &mut client,
+                    &cfg,
+                )
+                .await
+                .unwrap();
             });
         }
     });
@@ -344,14 +354,31 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
         let mut conn = GrpcServerConnection::handshake(sock, &srv_config)
             .await
             .unwrap();
-        while let Some(server_stream) = conn.accept().await.unwrap() {
+        while let Some(mut server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
                 let mut client =
                     GrpcUpstreamConnector::connect(dummy_upstream, None, &cfg, None, None)
                         .await
                         .unwrap();
-                let _ = pipe_buffered(server_stream, &mut client, &cfg).await;
+                match server_stream.read_raw_message(cfg.max_message_size).await {
+                    Ok(req_data) => {
+                        let _ = pipe_buffered(
+                            &server_stream.parts,
+                            &req_data,
+                            &mut server_stream.respond,
+                            &mut client,
+                            &cfg,
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        let _ = server_stream.respond.send_trailers_only(
+                            GrpcStatus::ResourceExhausted,
+                            Some("request message size exceeds limit"),
+                        );
+                    }
+                }
             });
         }
     });

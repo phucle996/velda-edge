@@ -55,10 +55,17 @@ pub struct Http1Lease {
     pub endpoint: SocketAddr,
     pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
     reusable: bool,
+    pub is_reused: bool,
     created_at: Instant,
 }
 
 impl Http1Lease {
+    /// Returns true if this connection was leased from the keep-alive pool (reused).
+    #[inline]
+    pub fn is_reused(&self) -> bool {
+        self.is_reused
+    }
+
     /// Marks the leased connection as dirty/closed, preventing its return to the pool.
     #[inline]
     pub fn mark_closed(&mut self) {
@@ -176,12 +183,12 @@ impl Http1Upstream {
         let idle_timeout = self.inner.timeouts().idle;
         let pool = &self.pool;
 
-        let (stream, endpoint, created_at) = self
+        let (stream, endpoint, created_at, is_reused) = self
             .inner
             .execute(|endpoint| async move {
                 while let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
                     if res.is_healthy() {
-                        return Ok::<_, String>((res.stream, endpoint, res.created_at));
+                        return Ok::<_, String>((res.stream, endpoint, res.created_at, true));
                     }
                 }
 
@@ -194,7 +201,7 @@ impl Http1Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                Ok::<_, String>((stream, endpoint, Instant::now()))
+                Ok::<_, String>((stream, endpoint, Instant::now(), false))
             })
             .await
             .map_err(EdgeError::Upstream)?;
@@ -204,7 +211,46 @@ impl Http1Upstream {
             endpoint,
             pool: Arc::clone(&self.pool),
             reusable: true,
+            is_reused,
             created_at,
+        })
+    }
+
+    /// Connects a brand new HTTP/1.1 upstream stream directly, bypassing the keep-alive pool.
+    ///
+    /// Used for transparent 1-shot self-healing when a reused connection encounters a stale keep-alive race.
+    pub async fn acquire_fresh(&self) -> Result<Http1Lease, EdgeError> {
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+        let acceleration = self.acceleration;
+        let connect_timeout = self.inner.timeouts().connect;
+
+        let (stream, endpoint) = self
+            .inner
+            .execute(|endpoint| async move {
+                let stream = velda_http1::client::connect_stream(
+                    endpoint,
+                    tls,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                Ok::<_, String>((stream, endpoint))
+            })
+            .await
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(Http1Lease {
+            stream: Some(stream),
+            endpoint,
+            pool: Arc::clone(&self.pool),
+            reusable: true,
+            is_reused: false,
+            created_at: Instant::now(),
         })
     }
 }

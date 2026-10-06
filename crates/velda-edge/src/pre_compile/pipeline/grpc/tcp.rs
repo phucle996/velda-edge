@@ -380,7 +380,53 @@ async fn dispatch_grpc_tcp_request_stream(
     );
 
     let pipe_res = match strategy {
-        GrpcPipeStrategy::Buffered => pipe_buffered(server_stream, &mut client, config).await,
+        GrpcPipeStrategy::Buffered => {
+            let req_data = match server_stream
+                .read_raw_message(config.max_message_size)
+                .await
+            {
+                Ok(data) => data,
+                Err(_) => {
+                    let _ = server_stream.respond.send_trailers_only(
+                        GrpcStatus::ResourceExhausted,
+                        Some("request message size exceeds limit"),
+                    );
+                    return;
+                }
+            };
+            let mut res = pipe_buffered(
+                &server_stream.parts,
+                &req_data,
+                &mut server_stream.respond,
+                &mut client,
+                config,
+            )
+            .await;
+
+            // Self-Healing Retry (RFC 9113 §8.1.4):
+            // If upstream connection dropped or remote peer returned REFUSED_STREAM,
+            // retry transparently 1-shot on a fresh connection.
+            if let Err(ref e) = res
+                && e.is_stale_or_refused()
+            {
+                tracing::debug!(
+                    upstream = %route.upstream_name,
+                    error = %e,
+                    "gRPC upstream connection dropped or refused; self-healing with fresh connection"
+                );
+                if let Ok(mut fresh_client) = upstream.acquire_fresh(config).await {
+                    res = pipe_buffered(
+                        &server_stream.parts,
+                        &req_data,
+                        &mut server_stream.respond,
+                        &mut fresh_client,
+                        config,
+                    )
+                    .await;
+                }
+            }
+            res
+        }
         GrpcPipeStrategy::ServerStream => {
             pipe_server_stream(server_stream, &mut client, config).await
         }
@@ -437,5 +483,31 @@ mod tests {
         // RFC 9113 hop-by-hop headers MUST be stripped
         assert!(headers.get("connection").is_none());
         assert!(headers.get("keep-alive").is_none());
+    }
+
+    #[test]
+    fn test_grpc_stale_or_refused_detection() {
+        assert!(velda_grpc::GrpcError::Protocol("connection closed".into()).is_stale_or_refused());
+        assert!(
+            velda_grpc::GrpcError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe"
+            ))
+            .is_stale_or_refused()
+        );
+        assert!(
+            velda_grpc::GrpcError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset"
+            ))
+            .is_stale_or_refused()
+        );
+
+        // Status errors are business responses, not stale connections
+        assert!(
+            !velda_grpc::GrpcError::Status(GrpcStatus::NotFound, "not found".into())
+                .is_stale_or_refused()
+        );
+        assert!(!velda_grpc::GrpcError::PayloadTooLarge(100).is_stale_or_refused());
     }
 }

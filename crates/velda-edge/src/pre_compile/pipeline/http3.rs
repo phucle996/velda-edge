@@ -460,12 +460,38 @@ pub async fn process_http3_request(
         }
     };
 
-    let pipe_res = match strategy {
+    let mut pipe_res = match strategy {
         Http3PipeStrategy::Buffered => pipe_buffered(&client, req, &h3_config).await,
         Http3PipeStrategy::ServerStream => pipe_server_stream(&client, req, &h3_config).await,
         Http3PipeStrategy::ClientStream => pipe_client_stream(&client, req, &h3_config).await,
         Http3PipeStrategy::Duplex => pipe_duplex(&client, req, &h3_config).await,
     };
+
+    // Self-Healing Retry (RFC 9114):
+    // If upstream QUIC connection was closed or rejected before processing,
+    // and downstream payload is in memory, acquire a fresh HTTP/3 client and retry once.
+    if let Err(ref e) = pipe_res
+        && e.is_connection_closed()
+        && matches!(
+            strategy,
+            Http3PipeStrategy::Buffered | Http3PipeStrategy::ServerStream
+        )
+    {
+        tracing::debug!(
+            upstream = %route.upstream_name,
+            error = %e,
+            "HTTP/3 connection closed or rejected; self-healing with fresh connection"
+        );
+        if let Ok(fresh_client) = upstream.acquire_fresh(&h3_config).await {
+            pipe_res = match strategy {
+                Http3PipeStrategy::Buffered => pipe_buffered(&fresh_client, req, &h3_config).await,
+                Http3PipeStrategy::ServerStream => {
+                    pipe_server_stream(&fresh_client, req, &h3_config).await
+                }
+                _ => unreachable!(),
+            };
+        }
+    }
 
     match pipe_res {
         Ok(resp) => resp,
@@ -525,5 +551,21 @@ mod tests {
         // RFC 9114 hop-by-hop headers MUST be stripped
         assert!(headers.get("connection").is_none());
         assert!(headers.get("keep-alive").is_none());
+    }
+
+    #[test]
+    fn test_http3_connection_closed_detection() {
+        assert!(velda_http3::Http3Error::ConnectionClosed.is_connection_closed());
+        assert!(velda_http3::Http3Error::H3("H3_REQUEST_REJECTED".into()).is_connection_closed());
+        assert!(
+            velda_http3::Http3Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe"
+            ))
+            .is_connection_closed()
+        );
+
+        // Payload size errors are not retryable
+        assert!(!velda_http3::Http3Error::PayloadTooLarge(500).is_connection_closed());
     }
 }

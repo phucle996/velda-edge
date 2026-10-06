@@ -420,26 +420,74 @@ pub async fn run_http1_loop<IO>(
             }
         };
 
-        let pipe_result = match (strategy, req_body) {
+        let mut pipe_result = match (strategy, req_body.as_ref()) {
             (Http1PipeStrategy::Buffered, Some(body)) => {
-                let req = Http1Request::from_parts(head, body);
+                let req = Http1Request::from_parts(head.clone(), body.clone());
                 pipe_buffered(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
             (Http1PipeStrategy::ServerStream, Some(body)) => {
-                let req = Http1Request::from_parts(head, body);
+                let req = Http1Request::from_parts(head.clone(), body.clone());
                 pipe_server_stream(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
             (Http1PipeStrategy::ClientStream, None) => {
-                pipe_client_stream(&mut conn, head, &mut *upstream_lease, &cfg).await
+                pipe_client_stream(&mut conn, head.clone(), &mut *upstream_lease, &cfg).await
             }
             (Http1PipeStrategy::Duplex, None) => {
-                pipe_duplex(&mut conn, head, &mut *upstream_lease, &cfg).await
+                pipe_duplex(&mut conn, head.clone(), &mut *upstream_lease, &cfg).await
             }
             _ => unreachable!(),
         };
 
-        if let Err(e) = pipe_result {
+        // Self-Healing Retry (RFC 9112):
+        // If a reused connection failed due to a stale keep-alive connection race,
+        // and the request payload is in RAM (Buffered or ServerStream), transparently
+        // acquire a fresh upstream connection and retry once.
+        if let Err(ref e) = pipe_result
+            && upstream_lease.is_reused()
+            && e.is_stale_connection()
+            && matches!(
+                strategy,
+                Http1PipeStrategy::Buffered | Http1PipeStrategy::ServerStream
+            )
+        {
             upstream_lease.mark_closed();
+            drop(upstream_lease);
+
+            tracing::debug!(
+                upstream = %route.upstream_name,
+                "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
+            );
+
+            match upstream.acquire_fresh().await {
+                Ok(mut fresh_lease) => {
+                    let body = req_body.as_ref().unwrap();
+                    let retry_req = Http1Request::from_parts(head, body.clone());
+                    pipe_result = match strategy {
+                        Http1PipeStrategy::Buffered => {
+                            pipe_buffered(&mut conn, retry_req, &mut *fresh_lease, &cfg).await
+                        }
+                        Http1PipeStrategy::ServerStream => {
+                            pipe_server_stream(&mut conn, retry_req, &mut *fresh_lease, &cfg).await
+                        }
+                        _ => unreachable!(),
+                    };
+                    if pipe_result.is_err() {
+                        fresh_lease.mark_closed();
+                    }
+                }
+                Err(fresh_err) => {
+                    tracing::warn!(
+                        error = %fresh_err,
+                        upstream = %route.upstream_name,
+                        "Failed to acquire fresh connection for self-healing retry"
+                    );
+                }
+            }
+        } else if pipe_result.is_err() {
+            upstream_lease.mark_closed();
+        }
+
+        if let Err(e) = pipe_result {
             tracing::warn!(
                 error = %e,
                 upstream = %route.upstream_name,
@@ -506,5 +554,35 @@ mod tests {
         );
         // Untrusted extra x-forwarded-* headers MUST be stripped
         assert!(headers.get("x-forwarded-ssl").is_none());
+    }
+
+    #[test]
+    fn test_http1_stale_connection_detection() {
+        assert!(velda_http1::Http1Error::ConnectionClosed.is_stale_connection());
+        assert!(
+            velda_http1::Http1Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe"
+            ))
+            .is_stale_connection()
+        );
+        assert!(
+            velda_http1::Http1Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer"
+            ))
+            .is_stale_connection()
+        );
+        assert!(
+            velda_http1::Http1Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected eof"
+            ))
+            .is_stale_connection()
+        );
+
+        // Protocol errors are not stale connections (must not be retried)
+        assert!(!velda_http1::Http1Error::InvalidMethod("FOO".into()).is_stale_connection());
+        assert!(!velda_http1::Http1Error::PayloadTooLarge(100).is_stale_connection());
     }
 }

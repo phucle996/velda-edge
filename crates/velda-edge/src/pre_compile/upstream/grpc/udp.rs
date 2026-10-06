@@ -129,4 +129,32 @@ impl GrpcUdpUpstream {
             .await
             .map_err(EdgeError::Upstream)
     }
+
+    /// Connects a brand new gRPC over UDP client directly, bypassing existing pool leases.
+    ///
+    /// Used for transparent 1-shot self-healing when an existing QUIC session drops or closes.
+    pub async fn acquire_fresh(
+        &self,
+        config: &velda_grpc::GrpcConfig,
+    ) -> Result<GrpcUdpClient, EdgeError> {
+        let max_streams = self.max_concurrent_streams;
+        let server_name: &str = &self.target_sni;
+
+        self.inner
+            .execute(|endpoint| async move {
+                let fresh = velda_grpc::udp::connect_udp(endpoint, server_name, config)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let _ = self.pool.register(
+                    endpoint,
+                    GrpcUdpClientResource::new(fresh.clone()),
+                    max_streams,
+                );
+
+                Ok::<_, String>(fresh)
+            })
+            .await
+            .map_err(EdgeError::Upstream)
+    }
 }

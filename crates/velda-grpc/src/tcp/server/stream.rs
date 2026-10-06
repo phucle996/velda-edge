@@ -94,4 +94,69 @@ impl GrpcServerStream {
             )))
         }
     }
+
+    /// Reads and buffers the complete wire Length-Prefixed Message from downstream stream.
+    ///
+    /// Preserves the 5-byte LPM frame header for zero-copy forwarding to upstream backends.
+    pub async fn read_raw_message(&mut self, max_body_size: usize) -> Result<Bytes, GrpcError> {
+        if self.recv_stream.is_end_stream() {
+            return Ok(Bytes::new());
+        }
+
+        let Some(first_chunk_res) = self.recv_stream.data().await else {
+            return Ok(Bytes::new());
+        };
+        let chunk = first_chunk_res.map_err(GrpcError::H2)?;
+        let len = chunk.len();
+        let _ = self.recv_stream.flow_control().release_capacity(len);
+
+        if len >= 5 {
+            let declared_len =
+                u32::from_be_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]) as usize;
+            if declared_len > max_body_size {
+                let _ = self.respond.send_trailers_only(
+                    crate::status::GrpcStatus::ResourceExhausted,
+                    Some("request message length exceeds limit"),
+                );
+                return Err(GrpcError::PayloadTooLarge(declared_len));
+            }
+        }
+
+        if self.recv_stream.is_end_stream() {
+            Ok(chunk)
+        } else {
+            let mut buf = BytesMut::with_capacity(len * 2);
+            buf.extend_from_slice(&chunk);
+            let mut checked_lpm = len >= 5;
+
+            while let Some(chunk_res) = self.recv_stream.data().await {
+                let chunk = chunk_res.map_err(GrpcError::H2)?;
+                let len = chunk.len();
+                buf.extend_from_slice(&chunk);
+                let _ = self.recv_stream.flow_control().release_capacity(len);
+
+                if !checked_lpm && buf.len() >= 5 {
+                    let declared_len =
+                        u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+                    if declared_len > max_body_size {
+                        let _ = self.respond.send_trailers_only(
+                            crate::status::GrpcStatus::ResourceExhausted,
+                            Some("request message length exceeds limit"),
+                        );
+                        return Err(GrpcError::PayloadTooLarge(declared_len));
+                    }
+                    checked_lpm = true;
+                }
+
+                if buf.len() > max_body_size + 5 {
+                    let _ = self.respond.send_trailers_only(
+                        crate::status::GrpcStatus::ResourceExhausted,
+                        Some("request message size exceeds limit"),
+                    );
+                    return Err(GrpcError::PayloadTooLarge(buf.len()));
+                }
+            }
+            Ok(buf.freeze())
+        }
+    }
 }

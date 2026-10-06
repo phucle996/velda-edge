@@ -120,7 +120,7 @@ async fn bench_rapid_reset_resilience() {
     let mut handled = 0;
     for _ in 0..RESETS {
         match server_conn.accept_request().await {
-            Ok(Some((_req, responder))) => {
+            Ok(Some((_req, mut responder))) => {
                 let resp = velda_core::L7Response::from_bytes(StatusCode::OK, vec![]);
                 let _ = responder.send_response(&resp);
                 handled += 1;

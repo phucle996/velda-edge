@@ -40,7 +40,7 @@ async fn test_http2_server_and_client_roundtrip() {
     let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
-    let (req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let (req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
 
     assert_eq!(req.method, Method::POST);
     assert_eq!(req.path(), "/echo");
@@ -96,7 +96,7 @@ async fn test_http2_multiplexing_concurrent_streams() {
     // Server accepts 4 concurrent streams and processes each in an independent task
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..4 {
-        let (h2_req, responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
+        let (h2_req, mut responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
         tasks.spawn(async move {
             let path = h2_req.head.path().to_string();
             let id = path.trim_start_matches("/stream/");
@@ -233,7 +233,7 @@ async fn test_http2_server_streaming_sse() {
         .unwrap();
 
     let server_task = tokio::spawn(async move {
-        let (_req, responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
+        let (_req, mut responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
         let mut sse_headers = http::HeaderMap::new();
         sse_headers.insert("content-type", "text/event-stream".parse().unwrap());
         sse_headers.insert("cache-control", "no-cache".parse().unwrap());
@@ -303,7 +303,7 @@ async fn test_http2_client_streaming_upload() {
         .unwrap();
 
     let server_task = tokio::spawn(async move {
-        let (head, mut receiver, responder) = server_conn
+        let (head, mut receiver, mut responder) = server_conn
             .accept_streaming_request()
             .await
             .unwrap()
@@ -382,7 +382,7 @@ async fn test_empty_body_response() {
     let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
         .await
         .unwrap();
-    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
     let resp = velda_core::L7Response::from_bytes(StatusCode::OK, vec![]);
     responder.send_response(&resp).unwrap();
 }
@@ -438,7 +438,7 @@ async fn test_head_and_no_body_status_invariants() {
         .unwrap();
 
     // 1. Handle HEAD: send response with content-length but Body::Empty
-    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
     let resp = velda_core::L7Response::new(
         StatusCode::OK,
         http::Version::HTTP_2,
@@ -452,13 +452,13 @@ async fn test_head_and_no_body_status_invariants() {
     responder.send_response(&resp).unwrap();
 
     // 2. Handle 204: send response with 204 status even if Body::Bytes is provided
-    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
     let resp =
         velda_core::L7Response::from_bytes(StatusCode::NO_CONTENT, b"must-be-ignored".to_vec());
     responder.send_response(&resp).unwrap();
 
     // 3. Handle 304: send response with 304 status
-    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
     let resp = velda_core::L7Response::new(
         StatusCode::NOT_MODIFIED,
         http::Version::HTTP_2,

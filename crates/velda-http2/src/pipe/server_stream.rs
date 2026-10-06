@@ -13,43 +13,39 @@ use velda_core::{Body, L7Response};
 
 use crate::config::Http2Config;
 use crate::error::Http2Error;
-use crate::server::{Http2RequestHead, Http2Responder, Http2StreamReceiver};
+use crate::server::{Http2RequestHead, Http2Responder};
 
 /// Pipes a server-streaming HTTP/2 request (buffered request, streaming response).
+///
+/// Uses borrowed head and body to eliminate heap allocations on hot path and enable transparent self-healing.
 pub async fn pipe_server_stream(
-    mut head: Http2RequestHead,
-    mut body_rx: Http2StreamReceiver,
-    responder: Http2Responder,
+    head: &Http2RequestHead,
+    body: &Body,
+    responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,
     config: &Http2Config,
 ) -> Result<(), Http2Error> {
-    // 1. Read complete downstream request body into RAM
-    let body = body_rx.consume_all().await?;
-
-    // 2. Build and sanitize outbound upstream H2 request (zero-clone)
+    // 1. Build outbound upstream H2 request from borrowed head
     let is_head = head.method == http::Method::HEAD;
-    crate::headers::sanitize_h2_headers(&mut head.headers);
     let mut builder = http::Request::builder()
-        .method(head.method)
-        .uri(head.uri)
+        .method(&head.method)
+        .uri(&head.uri)
         .version(Version::HTTP_2);
 
-    for (k, v) in head.headers.drain() {
-        if let Some(k) = k {
-            builder = builder.header(k, v);
-        }
+    for (k, v) in &head.headers {
+        builder = builder.header(k, v);
     }
     let http_req = builder
         .body(())
         .map_err(|e| Http2Error::Parse(e.to_string()))?;
 
-    // 3. Transmit HEADERS frame and optional DATA body frame to upstream
+    // 2. Transmit HEADERS frame and optional DATA body frame to upstream
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
     if let Body::Bytes(b) = body
         && !b.is_empty()
     {
-        send_stream.send_data(b, true)?;
+        send_stream.send_data(b.clone(), true)?;
     }
 
     // 4. Await upstream response headers

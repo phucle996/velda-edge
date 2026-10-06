@@ -70,14 +70,16 @@ impl Http3Client {
         let _ = self.command_tx.send(ClientCommand::Close).await;
     }
 
-    /// Creates a dummy client handle without background driver for unit testing.
-    #[doc(hidden)]
-    pub fn dummy_for_test(target: SocketAddr) -> Self {
-        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            command_tx: cmd_tx,
-            target,
-        }
+    #[cfg(test)]
+    pub(crate) fn mock_for_test(target: SocketAddr) -> (Self, mpsc::Receiver<ClientCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        (
+            Self {
+                command_tx: cmd_tx,
+                target,
+            },
+            cmd_rx,
+        )
     }
 }
 

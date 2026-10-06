@@ -57,13 +57,13 @@ impl Http2Responder {
     }
 
     /// Sends a response using the canonical [`L7Response`] type.
-    pub fn send_response(self, response: &L7Response) -> Result<(), Http2Error> {
+    pub fn send_response(&mut self, response: &L7Response) -> Result<(), Http2Error> {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
     /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.
     pub fn send_response_and_cancel_upload(
-        mut self,
+        &mut self,
         response: &L7Response,
     ) -> Result<(), Http2Error> {
         let is_no_body = response.status.is_informational()
@@ -90,7 +90,7 @@ impl Http2Responder {
     }
 
     /// Sends a response using the protocol-owned [`Http2Response`] type.
-    pub fn send_h2_response(self, response: &Http2Response) -> Result<(), Http2Error> {
+    pub fn send_h2_response(&mut self, response: &Http2Response) -> Result<(), Http2Error> {
         self.send_parts(response.head.status, &response.head.headers, &response.body)
     }
 
@@ -100,7 +100,7 @@ impl Http2Responder {
     /// an [`Http2StreamSender`] handle for progressively transmitting DATA chunks
     /// (e.g. Server-Sent Events (SSE), NDJSON streaming, or chunked file downloads).
     pub fn send_stream_response(
-        mut self,
+        &mut self,
         status: StatusCode,
         headers: &HeaderMap,
     ) -> Result<Http2StreamSender, Http2Error> {
@@ -111,7 +111,7 @@ impl Http2Responder {
 
     /// Sends response headers and body over the HTTP/2 stream in one shot.
     pub fn send_parts(
-        mut self,
+        &mut self,
         status: StatusCode,
         headers: &HeaderMap,
         body: &Body,

@@ -146,4 +146,51 @@ impl GrpcTcpUpstream {
             .await
             .map_err(EdgeError::Upstream)
     }
+
+    /// Connects a brand new gRPC over TCP client connector directly, bypassing pool leases.
+    ///
+    /// Used for transparent 1-shot self-healing when an existing multiplexed connection encounters
+    /// GOAWAY, REFUSED_STREAM, or silent connection drop.
+    pub async fn acquire_fresh(
+        &self,
+        config: &GrpcConfig,
+    ) -> Result<GrpcUpstreamConnector, EdgeError> {
+        let max_streams = self.max_concurrent_streams;
+        let acceleration = self.acceleration;
+        let connect_timeout = self.inner.timeouts().connect;
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+
+        self.inner
+            .execute(|endpoint| async move {
+                let mut fresh = GrpcUpstreamConnector::connect(
+                    endpoint,
+                    tls,
+                    config,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                fresh
+                    .ready()
+                    .await
+                    .map_err(|err| format!("Fresh gRPC TCP client not ready: {err}"))?;
+
+                let _ = self.pool.register(
+                    endpoint,
+                    GrpcTcpClientResource {
+                        client: fresh.clone(),
+                    },
+                    max_streams,
+                );
+
+                Ok::<_, String>(fresh)
+            })
+            .await
+            .map_err(EdgeError::Upstream)
+    }
 }

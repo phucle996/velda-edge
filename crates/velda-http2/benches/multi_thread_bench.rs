@@ -82,7 +82,7 @@ async fn bench_multiplexed_concurrency(concurrency: usize, requests_per_worker: 
         .await
         .unwrap();
 
-    while let Ok(Some((_req, responder))) = server_conn.accept_request().await {
+    while let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
         let resp = L7Response::from_bytes(StatusCode::OK, vec![]);
         responder.send_response(&resp).unwrap();
     }

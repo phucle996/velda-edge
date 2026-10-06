@@ -137,7 +137,7 @@ async fn bench_h2_roundtrip_turnaround() {
         .await
         .unwrap();
 
-    while let Ok(Some((_req, responder))) = server_conn.accept_request().await {
+    while let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
         let resp = L7Response::from_bytes(StatusCode::OK, vec![]);
         responder.send_response(&resp).unwrap();
     }
@@ -205,7 +205,7 @@ async fn bench_h2_roundtrip_turnaround() {
         .unwrap();
 
     while let Ok(Some(req)) = server_conn.accept_request().await {
-        let (req_data, responder) = req;
+        let (req_data, mut responder) = req;
         let body_bytes = match req_data.body {
             Body::Bytes(b) => b,
             _ => Bytes::new(),
@@ -283,7 +283,7 @@ async fn bench_streaming_response_turnaround() {
         .await
         .unwrap();
 
-    while let Ok(Some((_req, responder))) = server_conn.accept_request().await {
+    while let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
         let mut sender = responder
             .send_stream_response(StatusCode::OK, &HeaderMap::new())
             .unwrap();
@@ -339,14 +339,15 @@ async fn bench_proxy_pipe_turnaround() {
             .await
             .unwrap();
 
-        while let Ok(Some((head, body_rx, responder))) =
+        while let Ok(Some((head, mut body_rx, mut responder))) =
             server_conn.accept_streaming_request().await
         {
+            let body = body_rx.consume_all().await.unwrap();
             upstream_client = upstream_client.ready().await.unwrap();
             velda_http2::pipe::pipe_buffered(
-                head,
-                body_rx,
-                responder,
+                &head,
+                &body,
+                &mut responder,
                 &mut upstream_client,
                 &TEST_CONFIG,
             )

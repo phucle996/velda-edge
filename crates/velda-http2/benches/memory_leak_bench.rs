@@ -77,7 +77,7 @@ async fn bench_heap_leak_detection(iterations: u64) {
 
     // Consume warmup requests on server
     for _ in 0..50 {
-        if let Ok(Some((_req, responder))) = server_conn.accept_request().await {
+        if let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
             let resp = L7Response::from_bytes(StatusCode::OK, vec![]);
             responder.send_response(&resp).unwrap();
         }
@@ -87,7 +87,7 @@ async fn bench_heap_leak_detection(iterations: u64) {
     ALLOCATOR.reset();
     let initial_snapshot = ALLOCATOR.snapshot();
 
-    while let Ok(Some((_req, responder))) = server_conn.accept_request().await {
+    while let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
         let resp = L7Response::from_bytes(StatusCode::OK, vec![]);
         responder.send_response(&resp).unwrap();
     }

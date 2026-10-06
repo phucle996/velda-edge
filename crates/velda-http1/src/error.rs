@@ -47,3 +47,22 @@ pub enum Http1Error {
     #[error("I/O timeout exceeded: connection idle")]
     Timeout,
 }
+
+impl Http1Error {
+    /// Returns true if this error is caused by a closed or broken connection
+    /// (e.g. stale keep-alive connection race).
+    pub fn is_stale_connection(&self) -> bool {
+        match self {
+            Http1Error::ConnectionClosed => true,
+            Http1Error::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            ),
+            _ => false,
+        }
+    }
+}

@@ -247,7 +247,7 @@ pub async fn run_http2_loop<IO>(
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
-                Ok(Ok(Some((head, receiver, responder)))) => {
+                Ok(Ok(Some((head, receiver, mut responder)))) => {
                     let host_hdr = head.headers.get(http::header::HOST).cloned();
                     let host_str = host_hdr
                         .as_ref()
@@ -349,8 +349,8 @@ pub async fn run_http2_loop<IO>(
 #[allow(clippy::too_many_arguments)]
 async fn serve_http2_stream(
     mut head: Http2RequestHead,
-    receiver: Http2StreamReceiver,
-    responder: Http2Responder,
+    mut receiver: Http2StreamReceiver,
+    mut responder: Http2Responder,
     listener_id: Arc<str>,
     peer: SocketAddr,
     local_addr: SocketAddr,
@@ -392,9 +392,9 @@ async fn serve_http2_stream(
         .or_else(|| head.uri.host());
 
     enrich_http2_forwarded_headers(&mut head.headers, peer, local_addr, is_tls, host_str);
+    velda_http2::headers::sanitize_h2_headers(&mut head.headers);
 
-    // HTTP/2 Pipeline Invariant (RFC 9113 & AGENTS.md §2.8):
-    // Pipeline acquires multiplexed upstream SendRequest directly, then streams flatly.
+    // Fail-fast: Acquire upstream multiplexed connection before reading downstream body
     let upstream_cfg = config;
     let mut client = match upstream.acquire(&upstream_cfg).await {
         Ok(client) => client,
@@ -422,17 +422,98 @@ async fn serve_http2_stream(
     };
 
     let pipe_res = match strategy {
-        Http2PipeStrategy::Buffered => {
-            pipe_buffered(head, receiver, responder, &mut client, &config).await
-        }
-        Http2PipeStrategy::ServerStream => {
-            pipe_server_stream(head, receiver, responder, &mut client, &config).await
-        }
         Http2PipeStrategy::ClientStream => {
-            pipe_client_stream(head, receiver, responder, &mut client, &config).await
+            if let Err(e) =
+                pipe_client_stream(head, receiver, responder, &mut client, &config).await
+            {
+                tracing::warn!(
+                    error = %e,
+                    upstream = %route.upstream_name,
+                    "HTTP/2 upstream pipe failed"
+                );
+            }
+            return;
         }
         Http2PipeStrategy::Duplex => {
-            pipe_duplex(head, receiver, responder, &mut client, &config).await
+            if let Err(e) = pipe_duplex(head, receiver, responder, &mut client, &config).await {
+                tracing::warn!(
+                    error = %e,
+                    upstream = %route.upstream_name,
+                    "HTTP/2 upstream pipe failed"
+                );
+            }
+            return;
+        }
+        Http2PipeStrategy::ServerStream => {
+            let body = match receiver.consume_all().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let err_resp = L7Response::from_bytes(
+                        StatusCode::BAD_REQUEST,
+                        format!("400 Bad Request: {e}\n").into_bytes(),
+                    )
+                    .with_header(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                    );
+                    let _ = responder.send_response(&err_resp);
+                    return;
+                }
+            };
+            let mut res =
+                pipe_server_stream(&head, &body, &mut responder, &mut client, &config).await;
+            if let Err(ref e) = res
+                && e.is_refused_or_goaway()
+            {
+                tracing::debug!(
+                    upstream = %route.upstream_name,
+                    error = %e,
+                    "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
+                );
+                if let Ok(mut fresh_client) = upstream.acquire_fresh(&upstream_cfg).await {
+                    res = pipe_server_stream(
+                        &head,
+                        &body,
+                        &mut responder,
+                        &mut fresh_client,
+                        &config,
+                    )
+                    .await;
+                }
+            }
+            res
+        }
+        Http2PipeStrategy::Buffered => {
+            let body = match receiver.consume_all().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let err_resp = L7Response::from_bytes(
+                        StatusCode::BAD_REQUEST,
+                        format!("400 Bad Request: {e}\n").into_bytes(),
+                    )
+                    .with_header(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                    );
+                    let _ = responder.send_response(&err_resp);
+                    return;
+                }
+            };
+            let mut res = pipe_buffered(&head, &body, &mut responder, &mut client, &config).await;
+            if let Err(ref e) = res
+                && e.is_refused_or_goaway()
+            {
+                tracing::debug!(
+                    upstream = %route.upstream_name,
+                    error = %e,
+                    "HTTP/2 buffered stream refused or connection closed; self-healing with fresh connection"
+                );
+                if let Ok(mut fresh_client) = upstream.acquire_fresh(&upstream_cfg).await {
+                    res = pipe_buffered(&head, &body, &mut responder, &mut fresh_client, &config)
+                        .await;
+                }
+            }
+            res
         }
     };
 
@@ -442,6 +523,15 @@ async fn serve_http2_stream(
             upstream = %route.upstream_name,
             "HTTP/2 upstream pipe failed"
         );
+        let err_resp = L7Response::from_bytes(
+            StatusCode::BAD_GATEWAY,
+            format!("502 Bad Gateway: {e}\n").into_bytes(),
+        )
+        .with_header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        let _ = responder.send_response(&err_resp);
     }
 }
 
@@ -481,5 +571,27 @@ mod tests {
         );
         // Untrusted extra x-forwarded-* headers MUST be stripped
         assert!(headers.get("x-forwarded-ssl").is_none());
+    }
+
+    #[test]
+    fn test_http2_refused_or_goaway_detection() {
+        assert!(velda_http2::Http2Error::ConnectionClosed.is_refused_or_goaway());
+        assert!(
+            velda_http2::Http2Error::StreamReset(h2::Reason::REFUSED_STREAM).is_refused_or_goaway()
+        );
+        assert!(
+            velda_http2::Http2Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe"
+            ))
+            .is_refused_or_goaway()
+        );
+
+        // Stream resets with other reasons are not safe to retry
+        assert!(
+            !velda_http2::Http2Error::StreamReset(h2::Reason::INTERNAL_ERROR)
+                .is_refused_or_goaway()
+        );
+        assert!(!velda_http2::Http2Error::PayloadTooLarge(500).is_refused_or_goaway());
     }
 }
