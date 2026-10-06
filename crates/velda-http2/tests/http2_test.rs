@@ -467,3 +467,90 @@ async fn test_head_and_no_body_status_invariants() {
     );
     responder.send_response(&resp).unwrap();
 }
+
+#[tokio::test]
+async fn test_streaming_response_and_trailers() {
+    let (client_io, server_io) = duplex(64 * 1024);
+
+    tokio::spawn(async move {
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/stream-events")
+            .body(())
+            .unwrap();
+
+        let (resp_fut, _) = client.send_request(req, true).unwrap();
+        let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        assert_eq!(parts.headers.get("x-custom-stream").unwrap(), "active");
+
+        let c1 = body.data().await.unwrap().unwrap();
+        assert_eq!(&c1[..], b"chunk-1;");
+        let c2 = body.data().await.unwrap().unwrap();
+        assert_eq!(&c2[..], b"chunk-2;");
+
+        let trailers = body.trailers().await.unwrap().expect("expected trailers");
+        assert_eq!(trailers.get("grpc-status").unwrap(), "0");
+        assert!(trailers.get("connection").is_none());
+    });
+
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
+        .await
+        .unwrap();
+    let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert("x-custom-stream", "active".parse().unwrap());
+    headers.insert("connection", "keep-alive".parse().unwrap()); // should be stripped
+
+    let mut stream_sender = responder
+        .send_stream_response(StatusCode::OK, &headers)
+        .unwrap();
+
+    stream_sender
+        .send_chunk(Bytes::from_static(b"chunk-1;"))
+        .await
+        .unwrap();
+    stream_sender
+        .send_chunk(Bytes::from_static(b"chunk-2;"))
+        .await
+        .unwrap();
+
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("grpc-status", "0".parse().unwrap());
+    trailers.insert("connection", "close".parse().unwrap()); // should be stripped
+    stream_sender.send_trailers(trailers).unwrap();
+}
+
+#[test]
+fn test_build_h2_response_zero_allocation_filtering() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    headers.insert("connection", "keep-alive".parse().unwrap());
+    headers.insert("keep-alive", "timeout=5".parse().unwrap());
+    headers.insert("proxy-connection", "keep-alive".parse().unwrap());
+    headers.insert("transfer-encoding", "chunked".parse().unwrap());
+    headers.insert("upgrade", "websocket".parse().unwrap());
+    headers.insert("te", "trailers".parse().unwrap());
+    headers.insert("x-custom-header", "velda-edge".parse().unwrap());
+
+    let resp = velda_http2::server::build_h2_response(StatusCode::OK, &headers).unwrap();
+    let resp_headers = resp.headers();
+
+    assert_eq!(
+        resp_headers.get("content-type").unwrap(),
+        "application/json"
+    );
+    assert_eq!(resp_headers.get("x-custom-header").unwrap(), "velda-edge");
+    assert_eq!(resp_headers.get("te").unwrap(), "trailers");
+    assert!(resp_headers.get("connection").is_none());
+    assert!(resp_headers.get("keep-alive").is_none());
+    assert!(resp_headers.get("proxy-connection").is_none());
+    assert!(resp_headers.get("transfer-encoding").is_none());
+    assert!(resp_headers.get("upgrade").is_none());
+}

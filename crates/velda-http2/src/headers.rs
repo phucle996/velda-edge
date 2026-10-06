@@ -23,6 +23,37 @@ static H2_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
+/// Returns true if a header field is prohibited under RFC 9113 Section 8.2.2.
+///
+/// Invariants:
+/// - Pseudo-headers (starting with ':') MUST NOT appear in generic header maps.
+/// - Connection-specific hop-by-hop headers (`connection`, `keep-alive`,
+///   `proxy-connection`, `transfer-encoding`, `upgrade`) MUST NOT appear in HTTP/2.
+/// - `te` is permitted ONLY when its value is exactly "trailers" (case-insensitive).
+#[inline]
+pub fn is_disallowed_h2_header(name: &HeaderName, value: &http::HeaderValue) -> bool {
+    let s = name.as_str();
+    if s.starts_with(':') {
+        return true;
+    }
+    if s.eq_ignore_ascii_case("connection")
+        || s.eq_ignore_ascii_case("keep-alive")
+        || s.eq_ignore_ascii_case("proxy-connection")
+        || s.eq_ignore_ascii_case("transfer-encoding")
+        || s.eq_ignore_ascii_case("upgrade")
+    {
+        return true;
+    }
+    if s.eq_ignore_ascii_case("te")
+        && !value
+            .to_str()
+            .is_ok_and(|v| v.eq_ignore_ascii_case("trailers"))
+    {
+        return true;
+    }
+    false
+}
+
 /// Sanitizes an HTTP header map in-place according to RFC 9113 Section 8.2.2.
 ///
 /// Invariants:
@@ -47,13 +78,15 @@ pub fn sanitize_h2_headers(headers: &mut HeaderMap) {
     }
 
     // 3. Strip pseudo-headers (starting with ':') unconditionally
-    let pseudo_keys: Vec<HeaderName> = headers
-        .keys()
-        .filter(|name| name.as_str().starts_with(':'))
-        .cloned()
-        .collect();
-    for name in &pseudo_keys {
-        headers.remove(name);
+    if headers.keys().any(|name| name.as_str().starts_with(':')) {
+        let pseudo_keys: Vec<HeaderName> = headers
+            .keys()
+            .filter(|name| name.as_str().starts_with(':'))
+            .cloned()
+            .collect();
+        for name in &pseudo_keys {
+            headers.remove(name);
+        }
     }
 }
 

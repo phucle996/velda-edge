@@ -10,5 +10,5 @@ pub mod request;
 
 pub use connection::Http2ServerConnection;
 pub use decode::{Http2StreamReceiver, decode_request, decode_request_body};
-pub use encode::{Http2Responder, Http2StreamSender};
+pub use encode::{Http2Responder, Http2StreamSender, build_h2_response};
 pub use request::{Http2Request, Http2RequestHead};

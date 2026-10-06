@@ -23,11 +23,11 @@ pub use client::{
 };
 pub use config::Http2Config;
 pub use error::Http2Error;
-pub use headers::{filter_h2_headers, sanitize_h2_headers};
+pub use headers::{filter_h2_headers, is_disallowed_h2_header, sanitize_h2_headers};
 pub use pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 pub use server::{
     Http2Request, Http2RequestHead, Http2Responder, Http2ServerConnection, Http2StreamReceiver,
-    Http2StreamSender, decode_request,
+    Http2StreamSender, build_h2_response, decode_request,
 };

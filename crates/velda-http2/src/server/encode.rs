@@ -21,15 +21,19 @@ fn cold_parse_error(e: impl std::fmt::Display) -> Http2Error {
 }
 
 /// Constructs an HTTP/2 response head frame builder with sanitized RFC 9113 headers.
+///
+/// Performs on-the-fly filtering directly into [`Response::builder`] to achieve
+/// zero intermediate [`HeaderMap`] cloning or heap allocations on the hot path.
 #[inline]
 pub fn build_h2_response(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<Response<()>, Http2Error> {
     let mut builder = Response::builder().status(status).version(Version::HTTP_2);
-    let clean_headers = crate::headers::filter_h2_headers(headers);
-    for (name, val) in &clean_headers {
-        builder = builder.header(name, val);
+    for (name, val) in headers {
+        if !crate::headers::is_disallowed_h2_header(name, val) {
+            builder = builder.header(name, val);
+        }
     }
     builder.body(()).map_err(cold_parse_error)
 }
@@ -153,12 +157,12 @@ impl Http2StreamSender {
         self.send_stream.stream_id()
     }
 
-    /// Progressively sends a DATA frame chunk across the HTTP/2 stream without closing it.
-    ///
-    /// Manages stream flow-control backpressure: if the client's window capacity is
-    /// temporarily exhausted, reserves capacity asynchronously.
-    pub async fn send_chunk(&mut self, data: Bytes) -> Result<(), Http2Error> {
+    /// Sends a DATA frame chunk across the HTTP/2 stream with flow-control backpressure handling.
+    pub async fn send_data(&mut self, data: Bytes, end_of_stream: bool) -> Result<(), Http2Error> {
         if data.is_empty() {
+            if end_of_stream {
+                self.send_stream.send_data(Bytes::new(), true)?;
+            }
             return Ok(());
         }
         self.send_stream.reserve_capacity(data.len());
@@ -169,47 +173,45 @@ impl Http2StreamSender {
                 None => return Err(Http2Error::ConnectionClosed),
             }
         }
-        self.send_stream.send_data(data, false)?;
+        self.send_stream.send_data(data, end_of_stream)?;
         Ok(())
     }
 
-    /// Attempts to send a DATA chunk immediately if flow-control window capacity permits.
+    /// Progressively sends a DATA frame chunk across the HTTP/2 stream without closing it.
     ///
-    /// Unlike [`send_chunk`], this does not await additional window capacity.
-    /// Returns [`Http2Error::ConnectionClosed`] if insufficient capacity is available.
-    pub fn try_send_chunk(&mut self, data: Bytes) -> Result<(), Http2Error> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        self.send_stream.reserve_capacity(data.len());
-        if self.send_stream.capacity() < data.len() {
-            return Err(Http2Error::ConnectionClosed);
-        }
-        self.send_stream.send_data(data, false)?;
-        Ok(())
+    /// Manages stream flow-control backpressure: if the client's window capacity is
+    /// temporarily exhausted, reserves capacity asynchronously.
+    #[inline]
+    pub async fn send_chunk(&mut self, data: Bytes) -> Result<(), Http2Error> {
+        self.send_data(data, false).await
     }
 
     /// Completes the HTTP/2 stream by sending an empty DATA frame with `end_of_stream = true`.
+    #[inline]
     pub fn finish(mut self) -> Result<(), Http2Error> {
         self.send_stream.send_data(Bytes::new(), true)?;
         Ok(())
     }
 
     /// Completes the HTTP/2 stream with a final DATA chunk.
+    #[inline]
     pub async fn finish_with_data(mut self, data: Bytes) -> Result<(), Http2Error> {
-        if data.is_empty() {
-            return self.finish();
-        }
-        self.send_stream.reserve_capacity(data.len());
-        while self.send_stream.capacity() < data.len() {
-            match std::future::poll_fn(|cx| self.send_stream.poll_capacity(cx)).await {
-                Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(Http2Error::H2(e)),
-                None => return Err(Http2Error::ConnectionClosed),
+        self.send_data(data, true).await
+    }
+
+    /// Completes the HTTP/2 stream by transmitting sanitized RFC 9113 trailers.
+    pub fn send_trailers(mut self, trailers: HeaderMap) -> Result<(), Http2Error> {
+        let mut clean = HeaderMap::with_capacity(trailers.len());
+        for (k, v) in trailers {
+            if let Some(name) = k
+                && !crate::headers::is_disallowed_h2_header(&name, &v)
+            {
+                clean.insert(name, v);
             }
         }
-        self.send_stream.send_data(data, true)?;
-        Ok(())
+        self.send_stream
+            .send_trailers(clean)
+            .map_err(Http2Error::H2)
     }
 
     /// Aborts the stream with an explicit HTTP/2 RST_STREAM frame.
