@@ -10,11 +10,11 @@ use http::Version;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::client::GrpcUpstreamConnector;
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::server::GrpcServerStream;
 use crate::status::GrpcStatus;
+use crate::tcp::client::GrpcUpstreamConnector;
+use crate::tcp::server::GrpcServerStream;
 
 /// Pipes a Unary (non-streaming) gRPC call between downstream and upstream.
 ///

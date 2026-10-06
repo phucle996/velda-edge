@@ -73,11 +73,12 @@ pub fn load_initial_runtime(
     // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
     if let Some(tls) = tls_server.as_ref() {
         for listener in &listeners {
-            if listener.transport.protocol.eq_ignore_ascii_case("udp")
-                && (listener.application.protocol.eq_ignore_ascii_case("http3")
-                    || listener.application.protocol.eq_ignore_ascii_case("grpc"))
-            {
-                let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
+            if listener.transport.protocol.eq_ignore_ascii_case("udp") {
+                if listener.application.protocol.eq_ignore_ascii_case("http3") {
+                    let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
+                } else if listener.application.protocol.eq_ignore_ascii_case("grpc") {
+                    let _ = crate::pipeline::grpc::udp::init_grpc_udp_engine(&listener.id, tls);
+                }
             }
         }
     }
@@ -204,11 +205,12 @@ pub async fn apply_reload(
     // (existing engines and their active QUIC connections are preserved without disruption!)
     if let Some(tls) = tls_server.as_ref() {
         for listener in &config.listeners {
-            if listener.transport.protocol.eq_ignore_ascii_case("udp")
-                && (listener.application.protocol.eq_ignore_ascii_case("http3")
-                    || listener.application.protocol.eq_ignore_ascii_case("grpc"))
-            {
-                let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
+            if listener.transport.protocol.eq_ignore_ascii_case("udp") {
+                if listener.application.protocol.eq_ignore_ascii_case("http3") {
+                    let _ = crate::pipeline::http3::init_h3_engine(&listener.id, tls);
+                } else if listener.application.protocol.eq_ignore_ascii_case("grpc") {
+                    let _ = crate::pipeline::grpc::udp::init_grpc_udp_engine(&listener.id, tls);
+                }
             }
         }
     }

@@ -7,7 +7,10 @@ pub mod http3;
 pub mod tcp;
 pub mod udp;
 
-pub use grpc::{handle_grpc_tcp, handle_grpc_udp};
+pub use grpc::{
+    clear_grpc_udp_engines, handle_grpc_tcp, handle_grpc_udp, has_grpc_udp_engine,
+    init_grpc_udp_engine,
+};
 pub use http1::handle_http1_stream;
 pub use http2::handle_http2_stream;
 pub use http3::{clear_h3_engines, handle_http3_handoff, has_h3_engine, init_h3_engine};

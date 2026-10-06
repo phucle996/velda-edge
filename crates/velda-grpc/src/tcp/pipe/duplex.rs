@@ -10,11 +10,11 @@ use http::Version;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::client::GrpcUpstreamConnector;
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::server::GrpcServerStream;
 use crate::status::GrpcStatus;
+use crate::tcp::client::GrpcUpstreamConnector;
+use crate::tcp::server::GrpcServerStream;
 
 /// Pipes an active downstream gRPC stream directly to an upstream backend endpoint
 /// in full-duplex bidirectional streaming mode.

@@ -24,4 +24,10 @@ pub enum GrpcError {
 
     #[error("Payload too large: {0} bytes exceeds max_body_size")]
     PayloadTooLarge(usize),
+
+    #[error("Operation timed out")]
+    Timeout,
+
+    #[error("Internal gRPC error: {0}")]
+    Internal(String),
 }

@@ -8,4 +8,4 @@ pub mod tcp;
 pub mod udp;
 
 pub use tcp::handle_grpc_tcp;
-pub use udp::handle_grpc_udp;
+pub use udp::{clear_grpc_udp_engines, handle_grpc_udp, has_grpc_udp_engine, init_grpc_udp_engine};

@@ -21,7 +21,7 @@ pub use server_stream::pipe_server_stream;
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::server::GrpcServerStream;
+use crate::tcp::server::GrpcServerStream;
 
 /// Discrete streaming strategies for gRPC RPC request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

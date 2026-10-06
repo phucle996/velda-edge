@@ -1978,6 +1978,8 @@ dependencies = [
  "h2",
  "http",
  "libc",
+ "quinn-proto",
+ "rustls",
  "thiserror",
  "tokio",
  "tracing",

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_grpc::GrpcConfig;
 use velda_grpc::GrpcStatus;
-use velda_grpc::server::{GrpcServerConnection, GrpcServerStream};
+use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
