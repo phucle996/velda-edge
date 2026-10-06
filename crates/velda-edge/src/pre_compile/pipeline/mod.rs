@@ -7,12 +7,10 @@ pub mod http3;
 pub mod tcp;
 pub mod udp;
 
-pub use grpc::handle_grpc_stream;
+pub use grpc::{handle_grpc_tcp, handle_grpc_udp};
 pub use http1::handle_http1_stream;
 pub use http2::handle_http2_stream;
-pub use http3::{
-    clear_h3_engines, handle_grpc_udp_handoff, handle_http3_handoff, has_h3_engine, init_h3_engine,
-};
+pub use http3::{clear_h3_engines, handle_http3_handoff, has_h3_engine, init_h3_engine};
 pub use tcp::handle_l4_tcp;
 pub use udp::{UdpSessionKey, UdpSessionTable, get_udp_session_table, handle_l4_udp};
 
@@ -24,7 +22,7 @@ use crate::runtime::SharedRuntime;
 use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 
 /// Dispatches an accepted TCP connection to its compiled pipeline:
-/// L7 (HTTP/1, HTTP/2, gRPC) when the listener has one, otherwise raw L4 forwarding.
+/// L7 (HTTP/1, HTTP/2, gRPC over TCP) when the listener has one, otherwise raw L4 forwarding.
 pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
     let Some(listener_id) = connection.listener_id.clone() else {
         tracing::warn!(peer = %connection.peer(), "Accepted TCP connection without listener_id; dropping");
@@ -80,7 +78,7 @@ pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
             tls_enabled,
             streaming: _,
         } => {
-            handle_grpc_stream(
+            handle_grpc_tcp(
                 connection,
                 listener_id,
                 config,
@@ -93,7 +91,7 @@ pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
 }
 
 /// Dispatches a received UDP datagram to its compiled pipeline:
-/// L7 (HTTP/3, gRPC over QUIC) when the listener has one, otherwise raw L4 forwarding.
+/// L7 (HTTP/3, gRPC over UDP) when the listener has one, otherwise raw L4 forwarding.
 pub async fn handle_udp(
     listener_id: Arc<str>,
     socket: Arc<UdpSocket>,
@@ -117,7 +115,7 @@ pub async fn handle_udp(
             handle_http3_handoff(datagram, socket, listener_id, config, runtime).await;
         }
         UdpPipeline::Grpc { config, .. } => {
-            handle_grpc_udp_handoff(datagram, socket, listener_id, config, runtime).await;
+            handle_grpc_udp(datagram, socket, listener_id, config, runtime).await;
         }
     }
 }

@@ -1,12 +1,12 @@
-//! Layer 7 gRPC pipeline: downstream stream worker, route evaluation, and streaming forwarding.
+//! Layer 7 gRPC over TCP: downstream stream worker, route evaluation, and streaming forwarding.
 //!
 //! Powered entirely by `velda-grpc`. Operates strictly for listeners explicitly configured
-//! with `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and bidirectional streaming.
+//! with `transport = "tcp"` and `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing,
+//! and full bidirectional streaming.
 
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{L7Request, L7Response};
 use velda_grpc::GrpcConfig;
 use velda_grpc::GrpcStatus;
 use velda_grpc::server::{GrpcServerConnection, GrpcServerStream};
@@ -16,12 +16,12 @@ use velda_transport::Connection;
 
 use crate::runtime::SharedRuntime;
 
-/// Asynchronous stream worker dispatching incoming gRPC connections.
+/// Asynchronous stream worker dispatching incoming gRPC connections over TCP.
 ///
 /// Inspects the pre-compiled listener metadata to determine whether downstream
 /// TLS termination is active. If TLS is required, negotiates the handshake, validates
-/// ALPN against "h2", and passes the encrypted stream to the gRPC loop.
-pub async fn handle_grpc_stream(
+/// ALPN against "h2", and passes the encrypted stream to the gRPC TCP loop.
+pub async fn handle_grpc_tcp(
     connection: Connection,
     listener_id: Arc<str>,
     config: GrpcConfig,
@@ -65,7 +65,7 @@ pub async fn handle_grpc_stream(
                     return;
                 }
 
-                run_grpc_loop(tls_stream, listener_id, config, runtime).await;
+                run_grpc_tcp_loop(tls_stream, listener_id, config, runtime).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -77,12 +77,12 @@ pub async fn handle_grpc_stream(
             }
         }
     } else {
-        run_grpc_loop(connection, listener_id, config, runtime).await;
+        run_grpc_tcp_loop(connection, listener_id, config, runtime).await;
     }
 }
 
-/// Core gRPC downstream stream worker loop decoupled from transport layer.
-pub async fn run_grpc_loop<IO>(
+/// Core gRPC downstream stream worker loop over TCP decoupled from transport layer.
+pub async fn run_grpc_tcp_loop<IO>(
     stream: IO,
     listener_id: Arc<str>,
     config: GrpcConfig,
@@ -112,7 +112,7 @@ pub async fn run_grpc_loop<IO>(
                 let cfg = config;
 
                 tokio::spawn(async move {
-                    dispatch_grpc_request_stream(server_stream, &lid, &cfg, &rt).await;
+                    dispatch_grpc_tcp_request_stream(server_stream, &lid, &cfg, &rt).await;
                 });
             }
             Ok(None) => break,
@@ -125,7 +125,7 @@ pub async fn run_grpc_loop<IO>(
 }
 
 /// Dispatches a single downstream gRPC request stream through the router to upstream backend.
-async fn dispatch_grpc_request_stream(
+async fn dispatch_grpc_tcp_request_stream(
     mut server_stream: GrpcServerStream,
     listener_id: &str,
     config: &GrpcConfig,
@@ -184,39 +184,5 @@ async fn dispatch_grpc_request_stream(
             upstream = %route.upstream_name,
             "gRPC stream pipe terminated with error"
         );
-    }
-}
-
-/// Dispatches a single unary gRPC request through `GrpcRouter` to the upstream backend.
-/// Used for unary RPC execution or UDP L7 datagram handoff when the listener explicitly declares protocol = "grpc".
-pub async fn process_grpc_request(
-    req: &L7Request,
-    listener_id: &str,
-    config: &GrpcConfig,
-    runtime: &SharedRuntime,
-) -> L7Response {
-    let authority = req
-        .headers
-        .get(":authority")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| req.host().and_then(|h| h.to_str().ok()))
-        .or_else(|| req.uri.authority().map(|a| a.as_str()));
-
-    let Some(grpc_req) = GrpcRouteRequest::from_path(req.path(), authority) else {
-        return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for empty path"));
-    };
-
-    let rt = runtime.load();
-    let Some(route) = rt.router.route_grpc(listener_id, &grpc_req) else {
-        return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
-    };
-
-    let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
-        return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
-    };
-
-    match upstream.dispatch_unary(req, config).await {
-        Ok(resp) => resp,
-        Err(e) => GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}"))),
     }
 }
