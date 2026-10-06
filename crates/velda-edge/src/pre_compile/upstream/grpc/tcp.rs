@@ -109,10 +109,7 @@ impl GrpcTcpUpstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self
-                    .pool
-                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
-                {
+                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     let mut connector = lease.client.clone();
                     match connector.ready().await {
                         Ok(()) => return Ok::<_, String>(connector),

@@ -13,7 +13,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::config::DEFAULT_IDLE_TIMEOUT;
 use crate::container::hasher::FastBuildHasher;
 use crate::container::probed_shard_count;
 use crate::lease::StreamLease;
@@ -311,11 +310,7 @@ where
 
     /// Acquires a stream slot from an existing available multiplexed connection,
     /// enforcing the safe idle threshold (75% cutoff) on idle connections.
-    pub fn acquire_stream_with_timeout(
-        &self,
-        key: &K,
-        idle_timeout: Duration,
-    ) -> Option<StreamLease<R>> {
+    pub fn acquire_stream(&self, key: &K, idle_timeout: Duration) -> Option<StreamLease<R>> {
         let now = Instant::now();
         let shard = self.shard_for(key);
 
@@ -377,12 +372,6 @@ where
         }
 
         acquired
-    }
-
-    /// Acquires a stream slot using default idle timeout.
-    #[inline]
-    pub fn acquire_stream(&self, key: &K) -> Option<StreamLease<R>> {
-        self.acquire_stream_with_timeout(key, DEFAULT_IDLE_TIMEOUT)
     }
 
     /// Registers a newly established connection and immediately claims 1 stream lease.

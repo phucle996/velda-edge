@@ -114,10 +114,7 @@ impl Http2Upstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self
-                    .pool
-                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
-                {
+                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     let ready_client = lease.client.clone();
                     match ready_client.ready().await {
                         Ok(ready_client) => return Ok::<_, String>(ready_client),

@@ -405,7 +405,7 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
                 let shard = self.shards.shard_for(&profile.key);
                 if let Some(stream_lease) = self
                     .multiplexed
-                    .acquire_stream_with_timeout(&profile.key, profile.idle_timeout)
+                    .acquire_stream(&profile.key, profile.idle_timeout)
                 {
                     shard.record_hit();
                     Some(ConnectionLease::Multiplexed(stream_lease))
@@ -481,7 +481,7 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
         let shard = self.shards.shard_for(&profile.key);
         if let Some(stream) = self
             .multiplexed
-            .acquire_stream_with_timeout(&profile.key, profile.idle_timeout)
+            .acquire_stream(&profile.key, profile.idle_timeout)
         {
             shard.record_hit();
             Some(stream)

@@ -108,10 +108,7 @@ impl GrpcUdpUpstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self
-                    .pool
-                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
-                {
+                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     if !lease.client.is_closed() {
                         return Ok::<_, String>(lease.client.clone());
                     }
