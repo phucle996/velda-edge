@@ -35,15 +35,6 @@ pub enum EdgeError {
 
     #[error("Internal error: {0}")]
     Internal(String),
-
-    #[error(
-        "ALPN protocol mismatch on listener '{listener_id}': expected '{expected}', actual '{actual}'"
-    )]
-    AlpnMismatch {
-        listener_id: String,
-        expected: String,
-        actual: String,
-    },
 }
 
 impl From<velda_sync::SyncError> for EdgeError {

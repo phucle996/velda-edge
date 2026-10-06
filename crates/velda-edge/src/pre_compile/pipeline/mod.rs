@@ -1,6 +1,5 @@
 //! Flat protocol pipelines: each module represents an isolated, self-contained protocol pipeline.
 
-pub mod context;
 pub mod grpc;
 pub mod http1;
 pub mod http2;
@@ -8,7 +7,6 @@ pub mod http3;
 pub mod tcp;
 pub mod udp;
 
-pub use context::{IngressContext, TlsMetadata};
 pub use grpc::handle_grpc_stream;
 pub use http1::handle_http1_stream;
 pub use http2::handle_http2_stream;
@@ -47,24 +45,49 @@ pub async fn handle_tcp(connection: Connection, runtime: &SharedRuntime) {
         return;
     };
 
-    let context = IngressContext::new_tcp(
-        connection.id(),
-        listener_id,
-        connection.peer(),
-        connection.local_addr(),
-        pipeline.tls_enabled(),
-        pipeline.streaming(),
-    );
-
     match pipeline {
-        TcpPipeline::Http1 { config, .. } => {
-            handle_http1_stream(connection, context, config, runtime.clone()).await;
+        TcpPipeline::Http1 {
+            config,
+            tls_enabled,
+            streaming,
+        } => {
+            handle_http1_stream(
+                connection,
+                listener_id,
+                config,
+                tls_enabled,
+                streaming,
+                runtime.clone(),
+            )
+            .await;
         }
-        TcpPipeline::Http2 { config, .. } => {
-            handle_http2_stream(connection, context, config, runtime.clone()).await;
+        TcpPipeline::Http2 {
+            config,
+            tls_enabled,
+            streaming: _,
+        } => {
+            handle_http2_stream(
+                connection,
+                listener_id,
+                config,
+                tls_enabled,
+                runtime.clone(),
+            )
+            .await;
         }
-        TcpPipeline::Grpc { config, .. } => {
-            handle_grpc_stream(connection, context, config, runtime.clone()).await;
+        TcpPipeline::Grpc {
+            config,
+            tls_enabled,
+            streaming: _,
+        } => {
+            handle_grpc_stream(
+                connection,
+                listener_id,
+                config,
+                tls_enabled,
+                runtime.clone(),
+            )
+            .await;
         }
     }
 }
@@ -89,20 +112,12 @@ pub async fn handle_udp(
         return;
     };
 
-    let context = IngressContext::new_udp(
-        listener_id,
-        datagram.peer(),
-        datagram.local_addr(),
-        pipeline.tls_enabled(),
-        pipeline.streaming(),
-    );
-
     match pipeline {
         UdpPipeline::Http3 { config, .. } => {
-            handle_http3_handoff(datagram, socket, context, config, runtime).await;
+            handle_http3_handoff(datagram, socket, listener_id, config, runtime).await;
         }
         UdpPipeline::Grpc { config, .. } => {
-            handle_grpc_udp_handoff(datagram, socket, context, config, runtime).await;
+            handle_grpc_udp_handoff(datagram, socket, listener_id, config, runtime).await;
         }
     }
 }

@@ -20,7 +20,9 @@ use velda_router::Http1RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::pipeline::context::{IngressContext, TlsMetadata};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use crate::runtime::SharedRuntime;
 
 pub use crate::runtime::upstream::UpstreamHttp1Stream;
@@ -28,13 +30,14 @@ pub use crate::runtime::upstream::UpstreamHttp1Stream;
 /// Enriches HTTP/1.1 request headers with RFC 7239 and standard proxy forwarding metadata.
 fn enrich_http1_forwarded_headers(
     headers: &mut http::HeaderMap,
-    context: &IngressContext,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    is_tls: bool,
     host: Option<&str>,
 ) {
     use http::header::{HeaderName, HeaderValue};
 
-    let client_ip = context.peer.ip();
-    let is_tls = context.tls_enabled || context.tls.is_some();
+    let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
 
     // Format peer IP directly into stack buffer
@@ -74,7 +77,7 @@ fn enrich_http1_forwarded_headers(
     let port_len = {
         use std::io::Write;
         let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", context.local_addr.port());
+        let _ = write!(cursor, "{}", local_addr.port());
         cursor.position() as usize
     };
     if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
@@ -113,7 +116,7 @@ fn enrich_http1_forwarded_headers(
             }
         }
         let _ = write!(cursor, ";proto={proto};by=");
-        match context.local_addr.ip() {
+        match local_addr.ip() {
             std::net::IpAddr::V4(v4) => {
                 let _ = write!(cursor, "{v4}");
             }
@@ -147,20 +150,24 @@ fn enrich_http1_forwarded_headers(
 ///
 /// Inspects the pre-compiled listener metadata to determine whether downstream
 /// TLS termination is active. If TLS is required, negotiates the handshake, validates
-/// ALPN against the declared protocol, and passes the encrypted stream to the HTTP/1.1 loop.
+/// ALPN against "http/1.1", and passes the encrypted stream to the HTTP/1.1 loop.
 pub async fn handle_http1_stream(
     connection: Connection,
-    context: IngressContext,
+    listener_id: Arc<str>,
     config: Http1Config,
+    tls_enabled: bool,
+    streaming: velda_core::StreamingMode,
     runtime: SharedRuntime,
 ) {
     let rt = runtime.load();
+    let peer = connection.peer();
+    let local_addr = connection.local_addr();
 
-    if context.tls_enabled {
+    if tls_enabled {
         let Some(tls_server) = rt.tls_server.as_ref() else {
             tracing::error!(
-                listener = %context.listener_id,
-                peer = %context.peer,
+                listener = %listener_id,
+                peer = %peer,
                 "TLS required for listener, but no TLS server engine is compiled; dropping connection"
             );
             return;
@@ -170,45 +177,71 @@ pub async fn handle_http1_stream(
             Ok(tls_stream) => {
                 let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
                 tracing::debug!(
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     sni = ?handshake_info.sni,
                     alpn = ?handshake_info.alpn,
                     "Downstream TLS handshake succeeded"
                 );
-                let enriched_context =
-                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
 
-                if let Err(err) = enriched_context.validate_alpn("http1") {
+                if let Some(alpn) = handshake_info.alpn.as_deref()
+                    && alpn != "http/1.1"
+                {
                     tracing::warn!(
-                        error = %err,
-                        listener = %enriched_context.listener_id,
-                        peer = %enriched_context.peer,
+                        listener = %listener_id,
+                        peer = %peer,
+                        expected = "http/1.1",
+                        actual = alpn,
                         "Dropping connection due to protocol ALPN mismatch"
                     );
                     return;
                 }
 
-                run_http1_loop(tls_stream, enriched_context, config, runtime).await;
+                run_http1_loop(
+                    tls_stream,
+                    listener_id,
+                    peer,
+                    local_addr,
+                    true,
+                    streaming,
+                    config,
+                    runtime,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     "Downstream TLS handshake failed"
                 );
             }
         }
     } else {
-        run_http1_loop(connection, context, config, runtime).await;
+        run_http1_loop(
+            connection,
+            listener_id,
+            peer,
+            local_addr,
+            false,
+            streaming,
+            config,
+            runtime,
+        )
+        .await;
     }
 }
 
 /// Core HTTP/1.1 downstream request-response loop decoupled from transport layer.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_http1_loop<IO>(
     stream: IO,
-    context: IngressContext,
+    listener_id: Arc<str>,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    is_tls: bool,
+    streaming: velda_core::StreamingMode,
     config: Http1Config,
     runtime: SharedRuntime,
 ) where
@@ -241,7 +274,7 @@ pub async fn run_http1_loop<IO>(
                 }
                 Err(_) => {
                     tracing::debug!(
-                        listener = %context.listener_id,
+                        listener = %listener_id,
                         timeout_ms = config.header_read_timeout_ms,
                         "HTTP/1.1 request head read timed out"
                     );
@@ -255,9 +288,9 @@ pub async fn run_http1_loop<IO>(
 
         // Enforce Ingress Streaming Policy (Option A):
         // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
-        if framing == Http1BodyFraming::Chunked && !context.streaming.client {
+        if framing == Http1BodyFraming::Chunked && !streaming.client {
             tracing::warn!(
-                listener = %context.listener_id,
+                listener = %listener_id,
                 "Rejecting chunked request: streaming upload is disabled on this listener"
             );
             let rejected = Http1Response::from_bytes(
@@ -284,9 +317,9 @@ pub async fn run_http1_loop<IO>(
         }
         http_req = http_req.with_method(head.method.as_str());
 
-        let Some(route) = rt.router.route_http1(&context.listener_id, &http_req) else {
+        let Some(route) = rt.router.route_http1(&listener_id, &http_req) else {
             tracing::debug!(
-                listener = %context.listener_id,
+                listener = %listener_id,
                 path = %head.path(),
                 host = ?host_str,
                 method = %head.method,
@@ -306,7 +339,7 @@ pub async fn run_http1_loop<IO>(
 
         let Some(upstream) = rt.upstreams.http1.get(&route.upstream_name) else {
             tracing::error!(
-                listener = %context.listener_id,
+                listener = %listener_id,
                 route = %route.id,
                 upstream = %route.upstream_name,
                 "No HTTP/1.1 upstream configured"
@@ -324,7 +357,7 @@ pub async fn run_http1_loop<IO>(
         };
 
         let strategy = upstream.strategy;
-        enrich_http1_forwarded_headers(&mut head.headers, &context, host_str);
+        enrich_http1_forwarded_headers(&mut head.headers, peer, local_addr, is_tls, host_str);
         let cfg = *conn.config();
 
         // HTTP/1.1 Pipeline Invariant (RFC 9112 & AGENTS.md §2.3):
@@ -429,7 +462,7 @@ pub async fn run_http1_loop<IO>(
 
         if reach_max_keepalive || conn.is_closed() {
             tracing::debug!(
-                listener = %context.listener_id,
+                listener = %listener_id,
                 requests_served,
                 max = config.max_keepalive_requests,
                 "Closing HTTP/1.1 connection (reached max keepalive requests or connection closed)"

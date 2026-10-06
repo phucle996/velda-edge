@@ -3,6 +3,8 @@
 //! Powered entirely by `velda-grpc`. Operates strictly for listeners explicitly configured
 //! with `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and bidirectional streaming.
 
+use std::sync::Arc;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::{L7Request, L7Response};
 use velda_grpc::GrpcConfig;
@@ -12,27 +14,28 @@ use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::pipeline::context::{IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
 
 /// Asynchronous stream worker dispatching incoming gRPC connections.
 ///
 /// Inspects the pre-compiled listener metadata to determine whether downstream
 /// TLS termination is active. If TLS is required, negotiates the handshake, validates
-/// ALPN against the declared protocol, and passes the encrypted stream to the gRPC loop.
+/// ALPN against "h2", and passes the encrypted stream to the gRPC loop.
 pub async fn handle_grpc_stream(
     connection: Connection,
-    context: IngressContext,
+    listener_id: Arc<str>,
     config: GrpcConfig,
+    tls_enabled: bool,
     runtime: SharedRuntime,
 ) {
     let rt = runtime.load();
+    let peer = connection.peer();
 
-    if context.tls_enabled {
+    if tls_enabled {
         let Some(tls_server) = rt.tls_server.as_ref() else {
             tracing::error!(
-                listener = %context.listener_id,
-                peer = %context.peer,
+                listener = %listener_id,
+                peer = %peer,
                 "TLS required for listener, but no TLS server engine is compiled; dropping connection"
             );
             return;
@@ -42,45 +45,46 @@ pub async fn handle_grpc_stream(
             Ok(tls_stream) => {
                 let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
                 tracing::debug!(
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     sni = ?handshake_info.sni,
                     alpn = ?handshake_info.alpn,
                     "Downstream TLS handshake succeeded"
                 );
-                let enriched_context =
-                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
 
-                if let Err(err) = enriched_context.validate_alpn("grpc") {
+                if let Some(alpn) = handshake_info.alpn.as_deref()
+                    && alpn != "h2"
+                {
                     tracing::warn!(
-                        error = %err,
-                        listener = %enriched_context.listener_id,
-                        peer = %enriched_context.peer,
+                        listener = %listener_id,
+                        peer = %peer,
+                        expected = "h2",
+                        actual = alpn,
                         "Dropping connection due to protocol ALPN mismatch"
                     );
                     return;
                 }
 
-                run_grpc_loop(tls_stream, enriched_context, config, runtime).await;
+                run_grpc_loop(tls_stream, listener_id, config, runtime).await;
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     "Downstream TLS handshake failed"
                 );
             }
         }
     } else {
-        run_grpc_loop(connection, context, config, runtime).await;
+        run_grpc_loop(connection, listener_id, config, runtime).await;
     }
 }
 
 /// Core gRPC downstream stream worker loop decoupled from transport layer.
 pub async fn run_grpc_loop<IO>(
     stream: IO,
-    context: IngressContext,
+    listener_id: Arc<str>,
     config: GrpcConfig,
     runtime: SharedRuntime,
 ) where
@@ -91,7 +95,7 @@ pub async fn run_grpc_loop<IO>(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                listener = %context.listener_id,
+                listener = %listener_id,
                 "Failed downstream gRPC server handshake"
             );
             return;
@@ -103,12 +107,12 @@ pub async fn run_grpc_loop<IO>(
     while let Ok(accept_result) = tokio::time::timeout(timeout_duration, conn.accept()).await {
         match accept_result {
             Ok(Some(server_stream)) => {
-                let ctx = context.clone();
+                let lid = listener_id.clone();
                 let rt = runtime.clone();
                 let cfg = config;
 
                 tokio::spawn(async move {
-                    dispatch_grpc_request_stream(server_stream, &ctx, &cfg, &rt).await;
+                    dispatch_grpc_request_stream(server_stream, &lid, &cfg, &rt).await;
                 });
             }
             Ok(None) => break,
@@ -123,7 +127,7 @@ pub async fn run_grpc_loop<IO>(
 /// Dispatches a single downstream gRPC request stream through the router to upstream backend.
 async fn dispatch_grpc_request_stream(
     mut server_stream: GrpcServerStream,
-    context: &IngressContext,
+    listener_id: &str,
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
@@ -144,7 +148,7 @@ async fn dispatch_grpc_request_stream(
     };
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_grpc(&context.listener_id, &grpc_req) else {
+    let Some(route) = rt.router.route_grpc(listener_id, &grpc_req) else {
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
@@ -154,7 +158,7 @@ async fn dispatch_grpc_request_stream(
 
     let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
         tracing::error!(
-            listener = %context.listener_id,
+            listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for gRPC upstream"
@@ -166,7 +170,7 @@ async fn dispatch_grpc_request_stream(
     };
 
     tracing::debug!(
-        listener = %context.listener_id,
+        listener = %listener_id,
         route = %route.id,
         upstream = %route.upstream_name,
         service = %grpc_req.service,
@@ -187,7 +191,7 @@ async fn dispatch_grpc_request_stream(
 /// Used for unary RPC execution or UDP L7 datagram handoff when the listener explicitly declares protocol = "grpc".
 pub async fn process_grpc_request(
     req: &L7Request,
-    context: &IngressContext,
+    listener_id: &str,
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) -> L7Response {
@@ -203,7 +207,7 @@ pub async fn process_grpc_request(
     };
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_grpc(&context.listener_id, &grpc_req) else {
+    let Some(route) = rt.router.route_grpc(listener_id, &grpc_req) else {
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 

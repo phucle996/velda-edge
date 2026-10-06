@@ -25,7 +25,6 @@ use velda_tls::TlsServerEngine;
 use velda_transport::{Datagram, UdpSocket};
 
 use crate::error::EdgeError;
-use crate::pipeline::context::IngressContext;
 use crate::runtime::SharedRuntime;
 
 /// Sharded container of HTTP/3 engines partitioned by remote peer address to eliminate
@@ -173,17 +172,16 @@ pub fn get_or_init_h3_engine_for_peer(
 pub async fn handle_http3_handoff(
     datagram: Datagram,
     socket: Arc<UdpSocket>,
-    context: IngressContext,
+    listener_id: Arc<str>,
     _config: velda_http3::Http3Config,
     runtime: &SharedRuntime,
 ) {
-    let listener_id = context.listener_id.clone();
     let peer = datagram.peer();
 
     let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
         tracing::warn!(
             listener = %listener_id,
-            peer = %context.peer,
+            peer = %peer,
             "Received UDP L7 handoff, but no HTTP/3 engine is compiled"
         );
         return;
@@ -209,18 +207,18 @@ pub async fn handle_http3_handoff(
     for req_event in requests {
         let socket = socket.clone();
         let engine_lock = engine_lock.clone();
-        let context = context.clone();
+        let lid = listener_id.clone();
         let runtime = runtime.clone();
 
         tokio::spawn(async move {
             tracing::debug!(
                 method = %req_event.request.method,
                 path = %req_event.request.path(),
-                peer = %context.peer,
+                peer = %peer,
                 "Decoded HTTP/3 request from UDP"
             );
 
-            let response = process_http3_request(&req_event.request, &context, &runtime).await;
+            let response = process_http3_request(&req_event.request, &lid, &runtime).await;
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
                 let mut engine = engine_lock.lock().await;
@@ -240,17 +238,16 @@ pub async fn handle_http3_handoff(
 pub async fn handle_grpc_udp_handoff(
     datagram: Datagram,
     socket: Arc<UdpSocket>,
-    context: IngressContext,
+    listener_id: Arc<str>,
     config: velda_grpc::GrpcConfig,
     runtime: &SharedRuntime,
 ) {
-    let listener_id = context.listener_id.clone();
     let peer = datagram.peer();
 
     let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
         tracing::warn!(
             listener = %listener_id,
-            peer = %context.peer,
+            peer = %peer,
             "Received UDP L7 handoff, but no gRPC over QUIC engine is compiled"
         );
         return;
@@ -276,19 +273,19 @@ pub async fn handle_grpc_udp_handoff(
     for req_event in requests {
         let socket = socket.clone();
         let engine_lock = engine_lock.clone();
-        let context = context.clone();
+        let lid = listener_id.clone();
         let runtime = runtime.clone();
 
         tokio::spawn(async move {
             tracing::debug!(
                 method = %req_event.request.method,
                 path = %req_event.request.path(),
-                peer = %context.peer,
+                peer = %peer,
                 "Decoded gRPC request from UDP"
             );
 
             let response =
-                super::grpc::process_grpc_request(&req_event.request, &context, &config, &runtime)
+                super::grpc::process_grpc_request(&req_event.request, &lid, &config, &runtime)
                     .await;
 
             let resp_now = std::time::Instant::now();
@@ -309,7 +306,7 @@ pub async fn handle_grpc_udp_handoff(
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 pub async fn process_http3_request(
     req: &L7Request,
-    context: &IngressContext,
+    listener_id: &str,
     runtime: &SharedRuntime,
 ) -> L7Response {
     let host = req
@@ -324,9 +321,9 @@ pub async fn process_http3_request(
     http_req = http_req.with_method(req.method.as_str());
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_http3(&context.listener_id, &http_req) else {
+    let Some(route) = rt.router.route_http3(listener_id, &http_req) else {
         tracing::debug!(
-            listener = %context.listener_id,
+            listener = %listener_id,
             path = %req.path(),
             host = ?host,
             method = %req.method,
@@ -344,7 +341,7 @@ pub async fn process_http3_request(
 
     let Some(upstream) = rt.upstreams.http3.get(&route.upstream_name) else {
         tracing::error!(
-            listener = %context.listener_id,
+            listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No HTTP/3 upstream configured"

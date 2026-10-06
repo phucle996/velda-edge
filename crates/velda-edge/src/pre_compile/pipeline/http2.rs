@@ -18,19 +18,22 @@ use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::pipeline::context::{IngressContext, TlsMetadata};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use crate::runtime::SharedRuntime;
 
 /// Enriches HTTP/2 request headers with RFC 7239 and standard proxy forwarding metadata.
 fn enrich_http2_forwarded_headers(
     headers: &mut http::HeaderMap,
-    context: &IngressContext,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    is_tls: bool,
     host: Option<&str>,
 ) {
     use http::header::{HeaderName, HeaderValue};
 
-    let client_ip = context.peer.ip();
-    let is_tls = context.tls_enabled || context.tls.is_some();
+    let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
 
     // Format peer IP directly into stack buffer
@@ -70,7 +73,7 @@ fn enrich_http2_forwarded_headers(
     let port_len = {
         use std::io::Write;
         let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", context.local_addr.port());
+        let _ = write!(cursor, "{}", local_addr.port());
         cursor.position() as usize
     };
     if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
@@ -109,7 +112,7 @@ fn enrich_http2_forwarded_headers(
             }
         }
         let _ = write!(cursor, ";proto={proto};by=");
-        match context.local_addr.ip() {
+        match local_addr.ip() {
             std::net::IpAddr::V4(v4) => {
                 let _ = write!(cursor, "{v4}");
             }
@@ -146,17 +149,20 @@ fn enrich_http2_forwarded_headers(
 /// and passes the encrypted stream to the HTTP/2 loop.
 pub async fn handle_http2_stream(
     connection: Connection,
-    context: IngressContext,
+    listener_id: Arc<str>,
     config: Http2Config,
+    tls_enabled: bool,
     runtime: SharedRuntime,
 ) {
     let rt = runtime.load();
+    let peer = connection.peer();
+    let local_addr = connection.local_addr();
 
-    if context.tls_enabled {
+    if tls_enabled {
         let Some(tls_server) = rt.tls_server.as_ref() else {
             tracing::error!(
-                listener = %context.listener_id,
-                peer = %context.peer,
+                listener = %listener_id,
+                peer = %peer,
                 "TLS required for listener, but no TLS server engine is compiled; dropping connection"
             );
             return;
@@ -166,45 +172,67 @@ pub async fn handle_http2_stream(
             Ok(tls_stream) => {
                 let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
                 tracing::debug!(
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     sni = ?handshake_info.sni,
                     alpn = ?handshake_info.alpn,
                     "Downstream TLS handshake succeeded"
                 );
-                let enriched_context =
-                    context.with_tls_metadata(TlsMetadata::from_handshake(handshake_info));
 
-                if let Err(err) = enriched_context.validate_alpn("http2") {
+                if let Some(alpn) = handshake_info.alpn.as_deref()
+                    && alpn != "h2"
+                {
                     tracing::warn!(
-                        error = %err,
-                        listener = %enriched_context.listener_id,
-                        peer = %enriched_context.peer,
+                        listener = %listener_id,
+                        peer = %peer,
+                        expected = "h2",
+                        actual = alpn,
                         "Dropping connection due to protocol ALPN mismatch"
                     );
                     return;
                 }
 
-                run_http2_loop(tls_stream, enriched_context, config, runtime).await;
+                run_http2_loop(
+                    tls_stream,
+                    listener_id,
+                    peer,
+                    local_addr,
+                    true,
+                    config,
+                    runtime,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    listener = %context.listener_id,
-                    peer = %context.peer,
+                    listener = %listener_id,
+                    peer = %peer,
                     "Downstream TLS handshake failed"
                 );
             }
         }
     } else {
-        run_http2_loop(connection, context, config, runtime).await;
+        run_http2_loop(
+            connection,
+            listener_id,
+            peer,
+            local_addr,
+            false,
+            config,
+            runtime,
+        )
+        .await;
     }
 }
 
 /// Core HTTP/2 downstream request-response loop decoupled from transport layer.
 pub async fn run_http2_loop<IO>(
     stream: IO,
-    context: IngressContext,
+    listener_id: Arc<str>,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    is_tls: bool,
     config: Http2Config,
     runtime: SharedRuntime,
 ) where
@@ -234,10 +262,7 @@ pub async fn run_http2_loop<IO>(
                     http_req = http_req.with_method(head.method.as_str());
 
                     let rt = runtime.load();
-                    let matched_route = rt
-                        .router
-                        .route_http2(&context.listener_id, &http_req)
-                        .cloned();
+                    let matched_route = rt.router.route_http2(&listener_id, &http_req).cloned();
 
                     // ========================================================
                     // FAST-PATH 404 EVALUATION (Zero Tokio Task Allocation)
@@ -250,8 +275,8 @@ pub async fn run_http2_loop<IO>(
                         consecutive_not_founds += 1;
                         if consecutive_not_founds > MAX_CONSECUTIVE_NOT_FOUNDS {
                             tracing::warn!(
-                                listener = %context.listener_id,
-                                peer = %context.peer,
+                                listener = %listener_id,
+                                peer = %peer,
                                 consecutive = consecutive_not_founds,
                                 "Aborting HTTP/2 connection: excessive consecutive non-matching routes (possible scan/flood)"
                             );
@@ -288,12 +313,13 @@ pub async fn run_http2_loop<IO>(
                     };
 
                     consecutive_not_founds = 0;
-                    let ctx_clone = context.clone();
+                    let lid_clone = listener_id.clone();
                     let rt_clone = runtime.clone();
                     let cfg_clone = config;
                     tokio::spawn(async move {
                         serve_http2_stream(
-                            head, receiver, responder, ctx_clone, cfg_clone, rt_clone, route,
+                            head, receiver, responder, lid_clone, peer, local_addr, is_tls,
+                            cfg_clone, rt_clone, route,
                         )
                         .await;
                     });
@@ -305,7 +331,7 @@ pub async fn run_http2_loop<IO>(
                 }
                 Err(_) => {
                     tracing::debug!(
-                        listener = %context.listener_id,
+                        listener = %listener_id,
                         timeout_ms = config.idle_timeout_ms,
                         "HTTP/2 stream accept timed out"
                     );
@@ -320,11 +346,15 @@ pub async fn run_http2_loop<IO>(
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
+#[allow(clippy::too_many_arguments)]
 async fn serve_http2_stream(
     mut head: Http2RequestHead,
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
-    context: IngressContext,
+    listener_id: Arc<str>,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    is_tls: bool,
     config: Http2Config,
     runtime: SharedRuntime,
     route: velda_router::Http2Route,
@@ -332,7 +362,7 @@ async fn serve_http2_stream(
     let rt = runtime.load();
     let Some(upstream) = rt.upstreams.http2.get(&route.upstream_name) else {
         tracing::error!(
-            listener = %context.listener_id,
+            listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for HTTP/2 upstream"
@@ -361,7 +391,7 @@ async fn serve_http2_stream(
         .or_else(|| head.uri.authority().map(|a| a.as_str()))
         .or_else(|| head.uri.host());
 
-    enrich_http2_forwarded_headers(&mut head.headers, &context, host_str);
+    enrich_http2_forwarded_headers(&mut head.headers, peer, local_addr, is_tls, host_str);
 
     // HTTP/2 Pipeline Invariant (RFC 9113):
     // The Edge pipeline hands off the request processing closure directly to the upstream.
