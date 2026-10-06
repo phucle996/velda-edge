@@ -20,6 +20,9 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::sync::Mutex;
 use velda_core::{L7Request, L7Response};
 use velda_http3::Http3Engine;
+use velda_http3::pipe::{
+    Http3PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+};
 use velda_router::Http3RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::{Datagram, UdpSocket};
@@ -165,11 +168,149 @@ pub fn get_or_init_h3_engine_for_peer(
         .map(|p| p.get_shard_for_peer(peer))
 }
 
-/// Dispatches incoming UDP L7 handoff to the persistent HTTP/3 state machine.
+/// Enriches HTTP/3 request headers with RFC 7239 and standard proxy forwarding metadata.
+///
+/// Anti-Spoofing Invariant:
+/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
+/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
+/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
+/// protocol scheme, and verified host).
+/// Connection-specific RFC 9114 hop-by-hop headers are also stripped in-place.
+fn enrich_http3_forwarded_headers(
+    headers: &mut http::HeaderMap,
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    host: Option<&str>,
+) {
+    use http::header::{HeaderName, HeaderValue};
+
+    // 1. Strip all client-supplied untrusted forwarding headers
+    if headers.keys().any(|k| {
+        let s = k.as_str();
+        s.starts_with("x-forwarded-")
+            || s.eq_ignore_ascii_case("x-real-ip")
+            || s.eq_ignore_ascii_case("forwarded")
+    }) {
+        let to_remove: Vec<HeaderName> = headers
+            .keys()
+            .filter(|k| {
+                let s = k.as_str();
+                s.starts_with("x-forwarded-")
+                    || s.eq_ignore_ascii_case("x-real-ip")
+                    || s.eq_ignore_ascii_case("forwarded")
+            })
+            .cloned()
+            .collect();
+        for name in to_remove {
+            headers.remove(&name);
+        }
+    }
+
+    // 2. Strip RFC 9114 connection-specific hop-by-hop headers
+    static H3_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
+        http::header::CONNECTION,
+        HeaderName::from_static("keep-alive"),
+        HeaderName::from_static("proxy-connection"),
+        http::header::TRANSFER_ENCODING,
+        http::header::UPGRADE,
+    ];
+    for name in &H3_HOP_BY_HOP_NAMES {
+        headers.remove(name);
+    }
+    if let Some(te_val) = headers.get(http::header::TE) {
+        let is_trailers = te_val
+            .to_str()
+            .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
+        if !is_trailers {
+            headers.remove(http::header::TE);
+        }
+    }
+
+    let client_ip = peer.ip();
+    let proto = "https"; // HTTP/3 QUIC is always TLS 1.3 encrypted
+
+    let mut ip_buf = [0u8; 64];
+    let ip_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
+        let _ = write!(cursor, "{}", client_ip);
+        cursor.position() as usize
+    };
+    let client_ip_bytes = &ip_buf[..ip_len];
+
+    // 3. Authoritative X-Forwarded-For
+    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
+        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
+    }
+
+    // 4. Authoritative X-Real-IP
+    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
+        headers.insert(HeaderName::from_static("x-real-ip"), val);
+    }
+
+    // 5. Authoritative X-Forwarded-Proto
+    headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(proto),
+    );
+
+    // 6. Authoritative X-Forwarded-Port
+    let mut port_buf = [0u8; 8];
+    let port_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
+        let _ = write!(cursor, "{}", local_addr.port());
+        cursor.position() as usize
+    };
+    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
+        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
+    }
+
+    // 7. Authoritative X-Forwarded-Host
+    if let Some(h) = host
+        && let Ok(val) = HeaderValue::from_str(h)
+    {
+        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
+    }
+
+    // 8. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
+    let mut fwd_buf = [0u8; 256];
+    let fwd_len = {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
+        match client_ip {
+            std::net::IpAddr::V4(v4) => {
+                let _ = write!(cursor, "for={v4}");
+            }
+            std::net::IpAddr::V6(v6) => {
+                let _ = write!(cursor, "for=\"[{v6}]\"");
+            }
+        }
+        let _ = write!(cursor, ";proto={proto};by=");
+        match local_addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                let _ = write!(cursor, "{v4}");
+            }
+            std::net::IpAddr::V6(v6) => {
+                let _ = write!(cursor, "\"[{v6}]\"");
+            }
+        }
+        if let Some(h) = host {
+            let _ = write!(cursor, ";host=\"{h}\"");
+        }
+        cursor.position() as usize
+    };
+    let fwd_bytes = &fwd_buf[..fwd_len];
+    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
+        headers.insert(HeaderName::from_static("forwarded"), val);
+    }
+}
+
+/// Dispatches incoming UDP datagrams to the persistent HTTP/3 state machine.
 ///
 /// Ingests the packet, drives QUIC handshake/flow control, transmits outgoing datagrams,
 /// and passes decoded requests through `Http3Router`.
-pub async fn handle_http3_handoff(
+pub async fn handle_http3_udp(
     listener_id: Arc<str>,
     socket: Arc<UdpSocket>,
     datagram: Datagram,
@@ -177,12 +318,13 @@ pub async fn handle_http3_handoff(
     runtime: &SharedRuntime,
 ) {
     let peer = datagram.peer();
+    let local_addr = datagram.local_addr();
 
     let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %peer,
-            "Received UDP L7 handoff, but no HTTP/3 engine is compiled"
+            "Received UDP datagram, but no HTTP/3 engine is compiled"
         );
         return;
     };
@@ -218,7 +360,16 @@ pub async fn handle_http3_handoff(
                 "Decoded HTTP/3 request from UDP"
             );
 
-            let response = process_http3_request(&req_event.request, &lid, &runtime).await;
+            let mut req = req_event.request;
+            let host_hdr = req.headers.get(http::header::HOST).cloned();
+            let host_str = host_hdr
+                .as_ref()
+                .and_then(|h| h.to_str().ok())
+                .or_else(|| req.uri.authority().map(|a| a.as_str()))
+                .or_else(|| req.uri.host());
+            enrich_http3_forwarded_headers(&mut req.headers, peer, local_addr, host_str);
+
+            let response = process_http3_request(&req, &lid, &runtime).await;
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
                 let mut engine = engine_lock.lock().await;
@@ -287,23 +438,42 @@ pub async fn process_http3_request(
         );
     };
 
-    let server_name = upstream.resolve_sni(req, host);
     let h3_config = velda_http3::Http3Config::auto();
+    let strategy = upstream.strategy;
 
-    // HTTP/3 QUIC Multiplexing Invariant (RFC 9114):
-    // The Edge pipeline hands off the request directly to the upstream.
-    // The upstream manages single-round Load Balancing selection, persistent multiplexed QUIC
-    // client reuse across concurrent requests, and candidate failover without HOL blocking.
-    match upstream
-        .dispatch_request(req.clone(), &server_name, &h3_config)
-        .await
-    {
+    let client = match upstream.acquire(&h3_config).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                upstream = %route.upstream_name,
+                "Failed to acquire upstream HTTP/3 connection"
+            );
+            return L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+        }
+    };
+
+    let pipe_res = match strategy {
+        Http3PipeStrategy::Buffered => pipe_buffered(&client, req, &h3_config).await,
+        Http3PipeStrategy::ServerStream => pipe_server_stream(&client, req, &h3_config).await,
+        Http3PipeStrategy::ClientStream => pipe_client_stream(&client, req, &h3_config).await,
+        Http3PipeStrategy::Duplex => pipe_duplex(&client, req, &h3_config).await,
+    };
+
+    match pipe_res {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %route.upstream_name,
-                "HTTP/3 upstream dispatch request failed"
+                "HTTP/3 upstream request failed"
             );
             L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
@@ -314,5 +484,46 @@ pub async fn process_http3_request(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    #[test]
+    fn test_enrich_http3_forwarded_headers_anti_spoofing() {
+        let mut headers = HeaderMap::new();
+        // Client attempts to spoof their IP, host, and SSL status
+        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
+        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
+        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert("x-forwarded-ssl", "off".parse().unwrap());
+        headers.insert("connection", "close".parse().unwrap());
+        headers.insert("keep-alive", "timeout=5".parse().unwrap());
+        headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+
+        let peer: SocketAddr = "192.0.2.30:60000".parse().unwrap();
+        let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
+
+        enrich_http3_forwarded_headers(&mut headers, peer, local, Some("quic.example.com"));
+
+        // Client spoofed values MUST be completely replaced with authoritative values
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.30");
+        assert_eq!(headers.get("x-real-ip").unwrap(), "192.0.2.30");
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
+        assert_eq!(headers.get("x-forwarded-port").unwrap(), "443");
+        assert_eq!(headers.get("x-forwarded-host").unwrap(), "quic.example.com");
+        assert_eq!(
+            headers.get("forwarded").unwrap(),
+            "for=192.0.2.30;proto=https;by=10.0.0.1;host=\"quic.example.com\""
+        );
+        // Untrusted extra x-forwarded-* headers MUST be stripped
+        assert!(headers.get("x-forwarded-ssl").is_none());
+        // RFC 9114 hop-by-hop headers MUST be stripped
+        assert!(headers.get("connection").is_none());
+        assert!(headers.get("keep-alive").is_none());
     }
 }

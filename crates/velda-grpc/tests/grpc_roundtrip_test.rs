@@ -7,7 +7,7 @@ use velda_grpc::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
 use velda_grpc::status::GrpcStatus;
 use velda_grpc::tcp::client::GrpcUpstreamConnector;
-use velda_grpc::tcp::pipe::{GrpcPipeStrategy, pipe_grpc_stream};
+use velda_grpc::tcp::pipe::{pipe_buffered, pipe_duplex, pipe_server_stream};
 use velda_grpc::tcp::server::GrpcServerConnection;
 
 #[tokio::test]
@@ -44,7 +44,7 @@ async fn test_grpc_unary_one_way_roundtrip() {
     // 2. Client calls unary RPC using GrpcUpstreamConnector
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config, None, None)
+    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
 
@@ -104,7 +104,7 @@ async fn test_grpc_server_trailers_only_response() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, &test_config, None, None)
+    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
 
@@ -180,9 +180,11 @@ async fn test_grpc_streaming_pipe_roundtrip() {
         while let Some(server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
-                pipe_grpc_stream(server_stream, backend_addr, GrpcPipeStrategy::Duplex, &cfg)
-                    .await
-                    .unwrap();
+                let mut client =
+                    GrpcUpstreamConnector::connect(backend_addr, None, &cfg, None, None)
+                        .await
+                        .unwrap();
+                pipe_duplex(server_stream, &mut client, &cfg).await.unwrap();
             });
         }
     });
@@ -190,7 +192,7 @@ async fn test_grpc_streaming_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client connects to proxy and receives streaming messages
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, None, &test_config, None, None)
         .await
         .unwrap();
     let req = http::Request::builder()
@@ -268,14 +270,13 @@ async fn test_grpc_buffered_pipe_roundtrip() {
         while let Some(server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
-                pipe_grpc_stream(
-                    server_stream,
-                    backend_addr,
-                    GrpcPipeStrategy::Buffered,
-                    &cfg,
-                )
-                .await
-                .unwrap();
+                let mut client =
+                    GrpcUpstreamConnector::connect(backend_addr, None, &cfg, None, None)
+                        .await
+                        .unwrap();
+                pipe_buffered(server_stream, &mut client, &cfg)
+                    .await
+                    .unwrap();
             });
         }
     });
@@ -283,7 +284,7 @@ async fn test_grpc_buffered_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client calls unary request via proxy
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, None, &test_config, None, None)
         .await
         .unwrap();
     let mut req_body = BytesMut::new();
@@ -327,8 +328,16 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
 
-    // Upstream address that shouldn't even be reached
-    let dummy_upstream = "127.0.0.1:1".parse().unwrap();
+    let dummy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dummy_upstream = dummy_listener.local_addr().unwrap();
+    let dummy_task = tokio::spawn(async move {
+        if let Ok((sock, _)) = dummy_listener.accept().await {
+            let mut srv = h2::server::handshake(sock).await.unwrap();
+            while let Some(res) = srv.accept().await {
+                let _ = res;
+            }
+        }
+    });
 
     let proxy_task = tokio::spawn(async move {
         let (sock, _) = proxy_listener.accept().await.unwrap();
@@ -338,13 +347,11 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
         while let Some(server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
-                let _ = pipe_grpc_stream(
-                    server_stream,
-                    dummy_upstream,
-                    GrpcPipeStrategy::Buffered,
-                    &cfg,
-                )
-                .await;
+                let mut client =
+                    GrpcUpstreamConnector::connect(dummy_upstream, None, &cfg, None, None)
+                        .await
+                        .unwrap();
+                let _ = pipe_buffered(server_stream, &mut client, &cfg).await;
             });
         }
     });
@@ -352,9 +359,10 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Send a 100-byte payload which exceeds the 32-byte limit
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &restricted_config, None, None)
-        .await
-        .unwrap();
+    let mut connector =
+        GrpcUpstreamConnector::connect(proxy_addr, None, &restricted_config, None, None)
+            .await
+            .unwrap();
     let large_payload = vec![42u8; 100];
     let mut req_body = BytesMut::new();
     encode_grpc_frame(&large_payload, false, &mut req_body);
@@ -378,6 +386,7 @@ async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
     assert_eq!(resp.headers.get("grpc-status").unwrap(), "8");
 
     proxy_task.abort();
+    dummy_task.abort();
 }
 
 #[tokio::test]
@@ -428,14 +437,13 @@ async fn test_grpc_server_stream_pipe_roundtrip() {
         while let Some(server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
-                pipe_grpc_stream(
-                    server_stream,
-                    backend_addr,
-                    GrpcPipeStrategy::ServerStream,
-                    &cfg,
-                )
-                .await
-                .unwrap();
+                let mut client =
+                    GrpcUpstreamConnector::connect(backend_addr, None, &cfg, None, None)
+                        .await
+                        .unwrap();
+                pipe_server_stream(server_stream, &mut client, &cfg)
+                    .await
+                    .unwrap();
             });
         }
     });
@@ -443,7 +451,7 @@ async fn test_grpc_server_stream_pipe_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 3. Client receives stream chunks
-    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, &test_config, None, None)
+    let mut connector = GrpcUpstreamConnector::connect(proxy_addr, None, &test_config, None, None)
         .await
         .unwrap();
     let req = http::Request::builder()

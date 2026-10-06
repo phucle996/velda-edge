@@ -533,3 +533,354 @@ async fn test_end_to_end_tls_http1_upstream_forwarding() {
     shutdown_tx.send(true).unwrap();
     let _ = edge_task.await;
 }
+
+#[tokio::test]
+async fn test_end_to_end_tls_http2_upstream_forwarding() {
+    let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let backend_cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let backend_cert_pem = backend_cert.cert.pem();
+    let backend_key_pem = backend_cert.signing_key.serialize_pem();
+
+    let backend_tls_config = velda_tls::ServerTlsConfig {
+        sni: vec!["localhost".into()],
+        cert_pem: backend_cert_pem.clone(),
+        key_pem: backend_key_pem,
+        client_ca_pem: None,
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+    };
+    let backend_tls_engine = velda_tls::TlsServerEngine::new_with_params(
+        &[backend_tls_config],
+        &velda_tls::TlsServerParams::from_hardware(),
+    )
+    .unwrap();
+
+    // Mock upstream HTTP/2 server wrapped in TLS with ALPN h2
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = backend_listener.accept().await {
+            let engine = backend_tls_engine.clone();
+            tokio::spawn(async move {
+                if let Ok(tls_stream) = engine.accept(sock).await
+                    && let Ok(mut h2_server) = h2::server::handshake(tls_stream).await
+                {
+                    while let Some(Ok((_req, mut respond))) = h2_server.accept().await {
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(resp, false).unwrap();
+                        send.send_data(bytes::Bytes::from_static(b"hello from h2 tls!"), true)
+                            .unwrap();
+                    }
+                }
+            });
+        }
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_h2_upstream_tls.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "h2-plain-in".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http2".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "h2-tls-up".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http2".into(),
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: Some(velda_sync::post_sync::upstream::UpstreamTlsConfig {
+            ca_pem: Some(backend_cert_pem),
+            client_cert_pem: None,
+            client_key_pem: None,
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            sni: vec!["localhost".into()],
+            insecure_skip_verify: false,
+        }),
+        pool: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "h2-tls-route".into(),
+        kind: "l7".into(),
+        listener: "h2-plain-in".into(),
+        match_rule: RouteMatch {
+            path_prefix: Some("/h2-secure".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "h2-tls-up".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
+
+    let config = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect downstream HTTP/2 client
+    let client_stream = TcpStream::connect(gateway_addr).await.unwrap();
+    let (mut client, h2_conn) = h2::client::handshake(client_stream).await.unwrap();
+    tokio::spawn(async move {
+        let _ = h2_conn.await;
+    });
+
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("http://localhost/h2-secure")
+        .body(())
+        .unwrap();
+
+    let (response, _) = client.send_request(request, true).unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let mut body = response.into_body();
+    let chunk = body.data().await.unwrap().unwrap();
+    assert_eq!(&chunk[..], b"hello from h2 tls!");
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
+}
+
+#[tokio::test]
+async fn test_end_to_end_tls_grpc_upstream_forwarding() {
+    let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let backend_cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let backend_cert_pem = backend_cert.cert.pem();
+    let backend_key_pem = backend_cert.signing_key.serialize_pem();
+
+    let backend_tls_config = velda_tls::ServerTlsConfig {
+        sni: vec!["localhost".into()],
+        cert_pem: backend_cert_pem.clone(),
+        key_pem: backend_key_pem,
+        client_ca_pem: None,
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+    };
+    let backend_tls_engine = velda_tls::TlsServerEngine::new_with_params(
+        &[backend_tls_config],
+        &velda_tls::TlsServerParams::from_hardware(),
+    )
+    .unwrap();
+
+    // Mock upstream gRPC server wrapped in TLS with ALPN h2
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = backend_listener.accept().await {
+            let engine = backend_tls_engine.clone();
+            tokio::spawn(async move {
+                if let Ok(tls_stream) = engine.accept(sock).await
+                    && let Ok(mut h2_server) = h2::server::handshake(tls_stream).await
+                {
+                    while let Some(Ok((_req, mut respond))) = h2_server.accept().await {
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .header("content-type", "application/grpc")
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(resp, false).unwrap();
+                        let mut resp_frame = bytes::BytesMut::new();
+                        velda_grpc::frame::encode_grpc_frame(
+                            b"grpc tls pong",
+                            false,
+                            &mut resp_frame,
+                        );
+                        send.send_data(resp_frame.freeze(), false).unwrap();
+
+                        let mut trailers = http::HeaderMap::new();
+                        trailers.insert("grpc-status", "0".parse().unwrap());
+                        send.send_trailers(trailers).unwrap();
+                    }
+                }
+            });
+        }
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_grpc_upstream_tls.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "grpc-plain-in".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "grpc".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "grpc-tls-up".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "grpc".into(),
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: Some(velda_sync::post_sync::upstream::UpstreamTlsConfig {
+            ca_pem: Some(backend_cert_pem),
+            client_cert_pem: None,
+            client_key_pem: None,
+            versions: vec!["tls1.3".into()],
+            alpn: vec!["h2".into()],
+            sni: vec!["localhost".into()],
+            insecure_skip_verify: false,
+        }),
+        pool: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "grpc-tls-route".into(),
+        kind: "l7".into(),
+        listener: "grpc-plain-in".into(),
+        match_rule: RouteMatch {
+            protocol: Some("grpc".into()),
+            path: Some("test.Service".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "grpc-tls-up".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
+
+    let config = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect downstream gRPC client over HTTP/2
+    let client_stream = TcpStream::connect(gateway_addr).await.unwrap();
+    let (mut client, h2_conn) = h2::client::handshake(client_stream).await.unwrap();
+    tokio::spawn(async move {
+        let _ = h2_conn.await;
+    });
+
+    let mut req_body = bytes::BytesMut::new();
+    velda_grpc::frame::encode_grpc_frame(b"grpc ping", false, &mut req_body);
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("http://localhost/test.Service/Echo")
+        .header("content-type", "application/grpc")
+        .body(())
+        .unwrap();
+
+    let (response, mut send_stream) = client.send_request(request, false).unwrap();
+    send_stream.send_data(req_body.freeze(), true).unwrap();
+
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/grpc"
+    );
+
+    let mut body = response.into_body();
+    let chunk = body.data().await.unwrap().unwrap();
+    assert!(!chunk.is_empty());
+
+    let mut chunk_buf = bytes::BytesMut::from(&chunk[..]);
+    let (is_compressed, msg) = velda_grpc::frame::decode_grpc_frame(&mut chunk_buf)
+        .unwrap()
+        .expect("frame should be present");
+    assert!(!is_compressed);
+    assert_eq!(&msg[..], b"grpc tls pong");
+
+    let trailers = body.trailers().await.unwrap().unwrap();
+    assert_eq!(trailers.get("grpc-status").unwrap(), "0");
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
+}

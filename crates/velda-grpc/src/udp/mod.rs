@@ -13,8 +13,7 @@ pub mod wire;
 
 pub use client::{GrpcUdpClient, connect as connect_udp, default_client_config};
 pub use pipe::{
-    GrpcUdpPipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_grpc_udp_stream,
-    pipe_grpc_udp_unary, pipe_server_stream,
+    GrpcUdpPipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 pub use quinn_proto;
 pub use server::{

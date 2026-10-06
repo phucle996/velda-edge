@@ -294,12 +294,12 @@ pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
 }
 
 /// Connects directly to an HTTP/1.1 backend target with optional socket acceleration, timeout, and TLS encryption.
+///
+/// `tls` is `Some((engine, sni))` for TLS upstreams. The SNI is the upstream's pre-compiled
+/// static property; it is never derived from the request Host or the target IP.
 pub async fn connect_stream(
     target: SocketAddr,
-    is_tls: bool,
-    target_sni: Option<&str>,
-    tls_client: Option<&TlsClientEngine>,
-    host: Option<&str>,
+    tls: Option<(&TlsClientEngine, &str)>,
     acceleration: Option<&Http1AccelerationPath>,
     timeout: Option<std::time::Duration>,
 ) -> Result<UpstreamHttp1Stream, Http1Error> {
@@ -341,18 +341,19 @@ pub async fn connect_stream(
         let _ = tcp_stream.set_nodelay(true);
     }
 
-    if is_tls {
-        let target_ip_str = target.ip().to_string();
-        let sni = target_sni.or(host).unwrap_or(&target_ip_str);
-        let client_engine = tls_client.ok_or_else(|| {
-            Http1Error::InvalidConfig(format!(
-                "Upstream requires TLS for {sni}, but no tls_client engine configured"
-            ))
-        })?;
-        let tls_stream = client_engine
+    if let Some((engine, sni)) = tls {
+        let tls_stream = engine
             .connect(sni, tcp_stream)
             .await
             .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?;
+        if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
+            && alpn != b"http/1.1"
+        {
+            return Err(Http1Error::Io(std::io::Error::other(format!(
+                "upstream negotiated ALPN {:?}, expected \"http/1.1\"",
+                String::from_utf8_lossy(alpn)
+            ))));
+        }
         Ok(UpstreamHttp1Stream::Tls(Box::new(tls_stream)))
     } else {
         Ok(UpstreamHttp1Stream::Plain(tcp_stream))

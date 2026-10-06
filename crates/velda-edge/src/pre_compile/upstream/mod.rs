@@ -1,12 +1,12 @@
-//! Protocol-isolated in-memory upstream tables and pipeline handoff.
+//! Protocol-isolated in-memory upstream tables and pipeline forwarding.
 //!
 //! Separates backend upstreams into 6 dedicated, typed, protocol-isolated modules:
-//! - `tcp`: L4 raw TCP connection pool & streaming handoff
+//! - `tcp`: L4 raw TCP connection pool & streaming forwarding
 //! - `udp`: L4 raw UDP endpoints & session tracking
-//! - `http1`: L7 HTTP/1.1 backend endpoints, connection pooling & pipe handoff
-//! - `http2`: L7 HTTP/2 backend endpoints, persistent client multiplexing & pipe handoff
-//! - `http3`: L7 HTTP/3 backend endpoints, QUIC client multiplexing & request handoff
-//! - `grpc`: L7 gRPC backend endpoints, bidirectional streaming & unary handoff
+//! - `http1`: L7 HTTP/1.1 backend endpoints, connection pooling & pipe forwarding
+//! - `http2`: L7 HTTP/2 backend endpoints, persistent client multiplexing & pipe forwarding
+//! - `http3`: L7 HTTP/3 backend endpoints, QUIC client multiplexing & request forwarding
+//! - `grpc`: L7 gRPC backend endpoints, bidirectional streaming & unary forwarding
 //!
 //! Pre-compiles upstream TLS client engines and streaming policies into static pipeline
 //! processors, eliminating dynamic lookups and protocol guessing on the request hot path.

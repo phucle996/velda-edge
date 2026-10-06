@@ -69,6 +69,16 @@ impl Http3Client {
     pub async fn close(&self) {
         let _ = self.command_tx.send(ClientCommand::Close).await;
     }
+
+    /// Creates a dummy client handle without background driver for unit testing.
+    #[doc(hidden)]
+    pub fn dummy_for_test(target: SocketAddr) -> Self {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(1);
+        Self {
+            command_tx: cmd_tx,
+            target,
+        }
+    }
 }
 
 /// Establishes a new persistent, multiplexed HTTP/3 client connection to the target backend endpoint.

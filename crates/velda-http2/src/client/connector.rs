@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
+use velda_tls::TlsClientEngine;
 
 use crate::config::Http2Config;
 use crate::error::Http2Error;
@@ -227,11 +228,17 @@ pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
     }
 }
 
-/// Connects to the upstream target over TCP with optional socket acceleration, timeout, and performs the HTTP/2 client handshake.
+/// Connects to the upstream target over TCP with optional socket acceleration, timeout, optional TLS,
+/// and performs the HTTP/2 client handshake.
+///
+/// `tls` is `Some((engine, sni))` for TLS upstreams; the SNI is the upstream's pre-compiled static
+/// property. The protocol is always HTTP/2 as declared by the upstream: ALPN is only validated
+/// (a negotiated value other than `h2` is rejected), never used to choose the protocol.
 ///
 /// Spawns the H2 connection driver onto a background Tokio task.
 pub async fn connect(
     target: SocketAddr,
+    tls: Option<(&TlsClientEngine, &str)>,
     config: &Http2Config,
     acceleration: Option<&Http2AccelerationPath>,
     timeout: Option<std::time::Duration>,
@@ -268,7 +275,23 @@ pub async fn connect(
         let _ = stream.set_nodelay(true);
     }
 
-    connect_stream(stream, config).await
+    let Some((engine, sni)) = tls else {
+        return connect_stream(stream, config).await;
+    };
+
+    let tls_stream = engine
+        .connect(sni, stream)
+        .await
+        .map_err(|e| Http2Error::Tls(e.to_string()))?;
+    if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
+        && alpn != b"h2"
+    {
+        return Err(Http2Error::Tls(format!(
+            "upstream negotiated ALPN {:?}, expected \"h2\"",
+            String::from_utf8_lossy(alpn)
+        )));
+    }
+    connect_stream(tls_stream, config).await
 }
 
 /// Performs the HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. TLS or TCP).

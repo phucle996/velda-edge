@@ -258,7 +258,13 @@ pub fn build_upstreams(
                 .map(std::time::Duration::from_millis),
         };
 
-        let target_sni = config.tls.as_ref().and_then(|t| t.sni.first().cloned());
+        let target_sni: Option<Arc<str>> = config
+            .tls
+            .as_ref()
+            .and_then(|t| t.sni.first())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(Arc::from);
         let is_tls = config.tls.is_some();
         let protocol_str = Arc::from(config.protocol.transport.as_str());
         let balancer = LbAlgorithm::from_name(&config.load_balancer.algorithm);
@@ -306,14 +312,62 @@ pub fn build_upstreams(
         let transport = config.protocol.transport.to_ascii_lowercase();
         let app = config.protocol.application.to_ascii_lowercase();
 
+        // Compile-time TLS identity validation (never accept TLS without an explicit SNI,
+        // never fall back to guessed names, never silently downgrade to cleartext):
+        // - QUIC upstreams (http3, grpc/udp) always handshake TLS and require an SNI.
+        // - TCP upstreams (http1, http2, grpc/tcp) with TLS require an SNI and a client engine.
+        // - Declared ALPN, if any, must contain the protocol id the upstream speaks. ALPN never
+        //   selects the protocol; the connector only validates the negotiated value.
+        let is_quic = app == "http3" || (app == "grpc" && transport == "udp");
+        let expected_alpn = match app.as_str() {
+            "http1" => Some("http/1.1"),
+            "http2" => Some("h2"),
+            "grpc" if !is_quic => Some("h2"),
+            "http3" => Some("h3"),
+            _ => None,
+        };
+        let alpn_mismatch = match (config.tls.as_ref(), expected_alpn) {
+            (Some(t), Some(expected)) => {
+                !t.alpn.is_empty()
+                    && !t
+                        .alpn
+                        .iter()
+                        .any(|a| a.trim().eq_ignore_ascii_case(expected))
+            }
+            _ => false,
+        };
+        let needs_tls_identity = is_tls && (is_quic || expected_alpn.is_some());
+        let tls_reject = if is_quic && target_sni.is_none() {
+            Some("QUIC upstream requires tls.sni")
+        } else if needs_tls_identity && target_sni.is_none() {
+            Some("TLS upstream requires a non-empty tls.sni")
+        } else if needs_tls_identity && !is_quic && shared_tls_client.is_none() {
+            Some("TLS upstream declared but no TLS client engine compiled")
+        } else if alpn_mismatch {
+            Some("tls.alpn does not contain the protocol id spoken by this upstream")
+        } else {
+            None
+        };
+        if let Some(reason) = tls_reject {
+            tracing::error!(upstream = %config.id, application = %app, reason, "Upstream rejected at compile time");
+            continue;
+        }
+
+        // TLS identity for TCP-based upstreams; `None` means cleartext.
+        let tls = match (is_tls, shared_tls_client.as_ref(), target_sni.clone()) {
+            (true, Some(engine), Some(sni)) => Some((Arc::clone(engine), sni)),
+            _ => None,
+        };
+
         match app.as_str() {
             "grpc" => {
                 if transport == "udp" {
+                    let Some(sni) = target_sni else { continue };
                     grpc_udp_map.insert(
                         config.id.clone(),
                         Arc::new(GrpcUdpUpstream::new(
                             inner,
-                            target_sni,
+                            sni,
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
@@ -331,6 +385,7 @@ pub fn build_upstreams(
                         config.id.clone(),
                         Arc::new(GrpcTcpUpstream::new(
                             inner,
+                            tls,
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
@@ -340,11 +395,12 @@ pub fn build_upstreams(
                 }
             }
             "http3" => {
+                let Some(sni) = target_sni else { continue };
                 http3_map.insert(
                     config.id.clone(),
                     Arc::new(Http3Upstream::new(
                         inner,
-                        target_sni,
+                        sni,
                         config.protocol.streaming,
                         shard_count,
                         max_streams,
@@ -362,6 +418,7 @@ pub fn build_upstreams(
                     config.id.clone(),
                     Arc::new(Http2Upstream::new(
                         inner,
+                        tls,
                         config.protocol.streaming,
                         shard_count,
                         max_streams,
@@ -370,11 +427,6 @@ pub fn build_upstreams(
                 );
             }
             "http1" => {
-                let tls_engine = if is_tls {
-                    shared_tls_client.clone()
-                } else {
-                    None
-                };
                 let http1_acceleration = velda_http1::Http1AccelerationPath::for_topology(
                     topology,
                     timeouts.connect,
@@ -385,8 +437,7 @@ pub fn build_upstreams(
                     config.id.clone(),
                     Arc::new(Http1Upstream::new(
                         inner,
-                        target_sni,
-                        tls_engine,
+                        tls,
                         config.protocol.streaming,
                         pool_config,
                         shard_count,
@@ -473,6 +524,18 @@ mod tests {
         }
     }
 
+    fn test_tls(sni: &[&str]) -> Option<velda_sync::post_sync::upstream::UpstreamTlsConfig> {
+        Some(velda_sync::post_sync::upstream::UpstreamTlsConfig {
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            versions: vec!["tls1.3".into()],
+            alpn: vec![],
+            sni: sni.iter().map(|s| s.to_string()).collect(),
+            insecure_skip_verify: false,
+        })
+    }
+
     #[test]
     fn test_build_upstreams_explicit_endpoints() {
         let mut u_udp = make_test_upstream("u_udp", "raw", "endpoints");
@@ -482,9 +545,11 @@ mod tests {
 
         let mut u_h3 = make_test_upstream("u_h3", "http3", "endpoints");
         u_h3.protocol.transport = "quic".to_string();
+        u_h3.tls = test_tls(&["h3.internal"]);
 
         let mut u_grpc_udp = make_test_upstream("u_grpc_udp", "grpc", "endpoints");
         u_grpc_udp.protocol.transport = "udp".to_string();
+        u_grpc_udp.tls = test_tls(&["grpc.internal"]);
 
         let configs = vec![
             make_test_upstream("u1", "http1", "endpoints"),
@@ -505,6 +570,69 @@ mod tests {
         assert!(table.udp.get("u_udp").is_some());
         assert!(table.tcp.get("u_tcp").is_some());
         assert!(table.http3.get("u_h3").is_some());
+        assert_eq!(&*table.http3.get("u_h3").unwrap().target_sni, "h3.internal");
+    }
+
+    #[test]
+    fn test_build_upstreams_rejects_invalid_tls_identity() {
+        // QUIC upstream without SNI: no fallback to upstream id.
+        let mut h3_no_sni = make_test_upstream("h3_no_sni", "http3", "endpoints");
+        h3_no_sni.protocol.transport = "quic".to_string();
+
+        // QUIC upstream with blank SNI.
+        let mut h3_blank = make_test_upstream("h3_blank", "http3", "endpoints");
+        h3_blank.tls = test_tls(&["  "]);
+
+        // TLS http1 without SNI.
+        let mut h1_no_sni = make_test_upstream("h1_no_sni", "http1", "endpoints");
+        h1_no_sni.tls = test_tls(&[]);
+
+        // TLS http2 without a compiled client engine must not silently downgrade to h2c.
+        let mut h2_tls = make_test_upstream("h2_tls", "http2", "endpoints");
+        h2_tls.tls = test_tls(&["h2.internal"]);
+
+        let table = build_upstreams_default(&[h3_no_sni, h3_blank, h1_no_sni, h2_tls], None);
+        assert_eq!(table.len(), 0);
+    }
+
+    fn test_engine(sni: &str) -> TlsClientEngine {
+        TlsClientEngine::new(&[velda_tls::ClientTlsConfig {
+            sni: vec![sni.to_string()],
+            versions: vec!["tls1.3".into()],
+            insecure_skip_verify: true,
+            ..Default::default()
+        }])
+        .unwrap()
+    }
+
+    #[test]
+    fn test_build_upstreams_tls_for_http2_and_grpc_tcp() {
+        let mut h2 = make_test_upstream("h2", "http2", "endpoints");
+        h2.tls = test_tls(&["h2.internal"]);
+        let mut grpc = make_test_upstream("grpc", "grpc", "endpoints");
+        grpc.tls = test_tls(&["grpc.internal"]);
+
+        let engine = test_engine("h2.internal");
+        let table = build_upstreams_default(&[h2, grpc], Some(&engine));
+        assert!(table.http2.get("h2").is_some());
+        assert!(table.grpc_tcp.get("grpc").is_some());
+    }
+
+    #[test]
+    fn test_build_upstreams_rejects_alpn_protocol_mismatch() {
+        let engine = test_engine("h2.internal");
+
+        // ALPN is validation only: declaring h3-only ALPN on an http2 upstream is a config error.
+        let mut h2 = make_test_upstream("h2", "http2", "endpoints");
+        h2.tls = test_tls(&["h2.internal"]);
+        h2.tls.as_mut().unwrap().alpn = vec!["http/1.1".into()];
+
+        let mut h1 = make_test_upstream("h1", "http1", "endpoints");
+        h1.tls = test_tls(&["h2.internal"]);
+        h1.tls.as_mut().unwrap().alpn = vec!["h2".into()];
+
+        let table = build_upstreams_default(&[h2, h1], Some(&engine));
+        assert_eq!(table.len(), 0);
     }
 
     #[tokio::test]

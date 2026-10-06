@@ -1,11 +1,13 @@
-//! Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe handoff.
+//! Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe forwarding.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
 use velda_http2::pipe::Http2PipeStrategy;
+use velda_tls::TlsClientEngine;
 
 use super::lb::EdgeUpstream;
 use crate::error::EdgeError;
@@ -30,13 +32,16 @@ impl PoolableResource for Http2ClientResource {
     fn close(&mut self) {}
 }
 
-/// Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe handoff.
+/// Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe forwarding.
 ///
 /// Pre-compiled with static load balancer, wire pipe strategy, and sharded multiplexed client pool.
 pub struct Http2Upstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
+    /// [PRE-COMPILED]: Upstream TLS identity: client engine plus the static target SNI.
+    /// `None` for cleartext (h2c) upstreams. TLS without SNI is rejected at compile time.
+    tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
     /// Declarative streaming mode from upstream configuration.
     pub streaming: StreamingMode,
     /// [PRE-COMPILED]: Pre-computed wire forwarding strategy (`Http2PipeStrategy`) derived from
@@ -66,6 +71,7 @@ impl Http2Upstream {
     /// Creates a new pre-compiled [`Http2Upstream`].
     pub fn new(
         inner: EdgeUpstream,
+        tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
         streaming: StreamingMode,
         shard_count: usize,
         max_concurrent_streams: u32,
@@ -74,6 +80,7 @@ impl Http2Upstream {
         let strategy = Http2PipeStrategy::from_streaming(streaming);
         Self {
             inner,
+            tls,
             streaming,
             strategy,
             pool: MultiplexedPool::with_shards(shard_count),
@@ -88,26 +95,23 @@ impl Http2Upstream {
         self.inner.id()
     }
 
-    /// Hands off downstream HTTP/2 pipe execution to a persistent multiplexed client connection.
+    /// Acquires an active, ready multiplexed HTTP/2 client connection from the pool or connects a fresh one.
     ///
     /// Hundreds of concurrent downstream streams share the same underlying TCP connection
     /// without repeated handshakes. Dead connections are automatically replaced.
-    pub async fn dispatch_pipe<F, Fut, T, E>(
+    pub async fn acquire(
         &self,
         config: &velda_http2::Http2Config,
-        pipe: F,
-    ) -> Result<T, EdgeError>
-    where
-        F: FnOnce(h2::client::SendRequest<Bytes>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, E>>,
-        E: std::fmt::Display,
-    {
+    ) -> Result<h2::client::SendRequest<Bytes>, EdgeError> {
         let max_streams = self.max_concurrent_streams;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
 
-        let client = self
-            .inner
+        self.inner
             .execute(|endpoint| async move {
                 if let Some(lease) = self.pool.acquire_stream(&endpoint) {
                     let ready_client = lease.client.clone();
@@ -121,6 +125,7 @@ impl Http2Upstream {
 
                 let fresh = velda_http2::client::connect(
                     endpoint,
+                    tls,
                     config,
                     Some(&acceleration),
                     Some(connect_timeout),
@@ -142,10 +147,6 @@ impl Http2Upstream {
                 Ok::<_, String>(ready_fresh)
             })
             .await
-            .map_err(EdgeError::Upstream)?;
-
-        pipe(client).await.map_err(|e| {
-            EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
-        })
+            .map_err(EdgeError::Upstream)
     }
 }

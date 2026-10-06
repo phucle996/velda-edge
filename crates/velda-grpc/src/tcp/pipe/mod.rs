@@ -11,17 +11,12 @@ pub mod client_stream;
 pub mod duplex;
 pub mod server_stream;
 
-use std::net::SocketAddr;
 use velda_core::StreamingMode;
 
 pub use buffered::pipe_buffered;
 pub use client_stream::pipe_client_stream;
 pub use duplex::pipe_duplex;
 pub use server_stream::pipe_server_stream;
-
-use crate::config::GrpcConfig;
-use crate::error::GrpcError;
-use crate::tcp::server::GrpcServerStream;
 
 /// Discrete streaming strategies for gRPC RPC request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,21 +44,5 @@ impl GrpcPipeStrategy {
             (true, false) => Self::ClientStream,
             (false, false) => Self::Buffered,
         }
-    }
-}
-
-/// Pipes an active downstream gRPC stream to an upstream backend endpoint
-/// according to the designated [`GrpcPipeStrategy`].
-pub async fn pipe_grpc_stream(
-    server_stream: GrpcServerStream,
-    target: SocketAddr,
-    strategy: GrpcPipeStrategy,
-    config: &GrpcConfig,
-) -> Result<(), GrpcError> {
-    match strategy {
-        GrpcPipeStrategy::Buffered => pipe_buffered(server_stream, target, config).await,
-        GrpcPipeStrategy::ServerStream => pipe_server_stream(server_stream, target, config).await,
-        GrpcPipeStrategy::ClientStream => pipe_client_stream(server_stream, target, config).await,
-        GrpcPipeStrategy::Duplex => pipe_duplex(server_stream, target, config).await,
     }
 }

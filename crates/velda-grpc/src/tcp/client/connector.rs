@@ -5,11 +5,11 @@
 
 use bytes::{Bytes, BytesMut};
 use h2::SendStream;
-use h2::client::{Connection, ResponseFuture, SendRequest};
+use h2::client::{ResponseFuture, SendRequest};
 use http::Version;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
 use velda_core::{Body, L7Request, L7Response};
+use velda_tls::TlsClientEngine;
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
@@ -250,9 +250,15 @@ impl GrpcUpstreamConnector {
     }
 
     /// Establishes a new HTTP/2 connection to the upstream target backend endpoint
-    /// applying limits from [`GrpcConfig`], optional socket acceleration path, and connection timeout.
+    /// applying limits from [`GrpcConfig`], optional socket acceleration path, optional TLS,
+    /// and connection timeout.
+    ///
+    /// `tls` is `Some((engine, sni))` for TLS upstreams; the SNI is the upstream's pre-compiled
+    /// static property. gRPC is always HTTP/2 as declared by the upstream: ALPN is only validated
+    /// (a negotiated value other than `h2` is rejected), never used to choose the protocol.
     pub async fn connect(
         target: SocketAddr,
+        tls: Option<(&TlsClientEngine, &str)>,
         config: &GrpcConfig,
         acceleration: Option<&GrpcAccelerationPath>,
         timeout: Option<std::time::Duration>,
@@ -296,13 +302,39 @@ impl GrpcUpstreamConnector {
         let mut builder = h2::client::Builder::default();
         builder.max_header_list_size(config.max_header_size as u32);
 
-        let (send_request, connection): (SendRequest<Bytes>, Connection<TcpStream, Bytes>) =
-            builder.handshake(stream).await.map_err(GrpcError::H2)?;
-
-        // Drive background H2 connection management
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let send_request = if let Some((engine, sni)) = tls {
+            let tls_stream = engine
+                .connect(sni, stream)
+                .await
+                .map_err(|e| GrpcError::Tls(e.to_string()))?;
+            if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
+                && alpn != b"h2"
+            {
+                return Err(GrpcError::Tls(format!(
+                    "upstream negotiated ALPN {:?}, expected \"h2\"",
+                    String::from_utf8_lossy(alpn)
+                )));
+            }
+            let (send_request, connection) = builder
+                .handshake::<_, Bytes>(tls_stream)
+                .await
+                .map_err(GrpcError::H2)?;
+            // Drive background H2 connection management
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            send_request
+        } else {
+            let (send_request, connection) = builder
+                .handshake::<_, Bytes>(stream)
+                .await
+                .map_err(GrpcError::H2)?;
+            // Drive background H2 connection management
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            send_request
+        };
 
         Ok(Self { send_request })
     }

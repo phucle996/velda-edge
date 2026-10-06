@@ -11,17 +11,12 @@ pub mod client_stream;
 pub mod duplex;
 pub mod server_stream;
 
-use std::net::SocketAddr;
-
-use velda_core::{L7Request, L7Response, StreamingMode};
+use velda_core::StreamingMode;
 
 pub use buffered::pipe_buffered;
 pub use client_stream::pipe_client_stream;
 pub use duplex::pipe_duplex;
 pub use server_stream::pipe_server_stream;
-
-use crate::config::Http3Config;
-use crate::error::Http3Error;
 
 /// Discrete streaming strategies for HTTP/3 request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,27 +45,15 @@ impl Http3PipeStrategy {
             (false, false) => Self::Buffered,
         }
     }
-
-    /// Dispatches an HTTP/3 request through the derived streaming pipe.
-    pub async fn dispatch(
-        self,
-        req: &L7Request,
-        target: SocketAddr,
-        config: &Http3Config,
-    ) -> Result<L7Response, Http3Error> {
-        match self {
-            Self::Buffered => pipe_buffered(req, target, config).await,
-            Self::ServerStream => pipe_server_stream(req, target, config).await,
-            Self::ClientStream => pipe_client_stream(req, target, config).await,
-            Self::Duplex => pipe_duplex(req, target, config).await,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_core::{Body, StreamingMode};
+    use crate::config::Http3Config;
+    use crate::error::Http3Error;
+    use std::net::SocketAddr;
+    use velda_core::{Body, L7Request, StreamingMode};
 
     #[test]
     fn test_strategy_derivation_from_streaming_mode() {
@@ -106,7 +89,8 @@ mod tests {
             Body::Bytes(bytes::Bytes::from_static(b"0123456789too-large-payload")),
         );
         let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let res = pipe_buffered(&req, target, &config).await;
+        let client = crate::client::Http3Client::dummy_for_test(target);
+        let res = pipe_buffered(&client, &req, &config).await;
         assert!(matches!(res, Err(Http3Error::PayloadTooLarge(27))));
     }
 }

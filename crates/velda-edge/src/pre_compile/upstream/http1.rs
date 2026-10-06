@@ -1,4 +1,4 @@
-//! Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe handoff.
+//! Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe forwarding.
 
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
@@ -88,18 +88,17 @@ impl Drop for Http1Lease {
             return;
         }
         if let Some(stream) = self.stream.take() {
-            let mut res = Http1ClientResource {
+            let res = Http1ClientResource {
                 stream,
                 created_at: self.created_at,
                 last_used_at: Instant::now(),
             };
-            res.touch();
             self.pool.release(&self.endpoint, res, true, false);
         }
     }
 }
 
-/// Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe handoff.
+/// Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe forwarding.
 ///
 /// Pre-compiled with static TLS engine, load balancer, sequential keep-alive pool, and streaming strategy.
 pub struct Http1Upstream {
@@ -108,11 +107,9 @@ pub struct Http1Upstream {
     inner: EdgeUpstream,
     /// Lock-sharded persistent HTTP/1.1 sequential client connection pool for keep-alive reuse.
     pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
-    /// [PRE-COMPILED]: Pre-compiled TLS client engine holding TLS connectors and root CAs.
-    /// Baked at snapshot compilation; eliminates runtime lookup of TLS context.
-    tls_engine: Option<Arc<TlsClientEngine>>,
-    /// [PRE-COMPILED]: Target SNI hostname validated and pre-resolved from configuration.
-    target_sni: Option<String>,
+    /// [PRE-COMPILED]: Upstream TLS identity: client engine plus the static target SNI.
+    /// `None` for plaintext upstreams. A TLS upstream without SNI is rejected at compile time.
+    tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
     /// Declarative streaming mode from upstream configuration.
     pub streaming: StreamingMode,
     /// [PRE-COMPILED]: Pre-computed wire forwarding strategy (`Http1PipeStrategy`) derived from
@@ -126,8 +123,7 @@ impl std::fmt::Debug for Http1Upstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Http1Upstream")
             .field("id", &self.inner.id())
-            .field("target_sni", &self.target_sni)
-            .field("is_tls", &self.tls_engine.is_some())
+            .field("tls_sni", &self.tls.as_ref().map(|(_, sni)| sni))
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
             .field("acceleration", &self.acceleration)
@@ -139,8 +135,7 @@ impl Http1Upstream {
     /// Creates a new pre-compiled [`Http1Upstream`].
     pub fn new(
         inner: EdgeUpstream,
-        target_sni: Option<String>,
-        tls_engine: Option<Arc<TlsClientEngine>>,
+        tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
         streaming: StreamingMode,
         pool_config: PoolConfig,
         shard_count: usize,
@@ -154,8 +149,7 @@ impl Http1Upstream {
         Self {
             inner,
             pool,
-            tls_engine,
-            target_sni,
+            tls,
             streaming,
             strategy,
             acceleration,
@@ -172,45 +166,35 @@ impl Http1Upstream {
     ///
     /// Manages single-round Load Balancer selection, idle connection reuse (HIT),
     /// fresh TCP/TLS connection establishment (MISS), and automatic candidate failover.
-    pub async fn acquire_stream(
-        &self,
-        host_override: Option<&str>,
-    ) -> Result<Http1Lease, EdgeError> {
-        let target_sni = self.target_sni.as_deref();
-        let is_tls = self.tls_engine.is_some();
-        let host = host_override;
-        let tls_engine = self.tls_engine.as_deref();
+    pub async fn acquire(&self) -> Result<Http1Lease, EdgeError> {
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
-        let pool = Arc::clone(&self.pool);
+        let pool = &self.pool;
 
         let (stream, endpoint, created_at) = self
             .inner
-            .execute(|endpoint| {
-                let pool = Arc::clone(&pool);
-                async move {
-                    while let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None)
-                    {
-                        if res.is_healthy() {
-                            return Ok::<_, String>((res.stream, endpoint, res.created_at));
-                        }
+            .execute(|endpoint| async move {
+                while let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
+                    if res.is_healthy() {
+                        return Ok::<_, String>((res.stream, endpoint, res.created_at));
                     }
-
-                    let stream = velda_http1::client::connect_stream(
-                        endpoint,
-                        is_tls,
-                        target_sni,
-                        tls_engine,
-                        host,
-                        Some(&acceleration),
-                        Some(connect_timeout),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                    Ok::<_, String>((stream, endpoint, Instant::now()))
                 }
+
+                let stream = velda_http1::client::connect_stream(
+                    endpoint,
+                    tls,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                Ok::<_, String>((stream, endpoint, Instant::now()))
             })
             .await
             .map_err(EdgeError::Upstream)?;

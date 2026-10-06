@@ -7,7 +7,6 @@
 
 use bytes::{Bytes, BytesMut};
 use http::Version;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::config::GrpcConfig;
@@ -17,17 +16,9 @@ use crate::tcp::client::GrpcUpstreamConnector;
 use crate::tcp::server::GrpcServerStream;
 
 /// Pipes a server-streaming gRPC call between downstream and upstream.
-///
-/// Workflow:
-/// 1. Consume client request message, validating size early via 5-byte LPM header.
-/// 2. Establish connection to upstream backend endpoint with `config` limits.
-/// 3. Build and transmit outbound HTTP/2 request frame.
-/// 4. Await upstream response headers frame.
-/// 5. Progressively stream response data frames and trailers downstream without buffering in RAM.
-/// 6. Bound the entire call within `max_call_duration_ms` timeout.
 pub async fn pipe_server_stream(
     mut server_stream: GrpcServerStream,
-    target: SocketAddr,
+    connector: &mut GrpcUpstreamConnector,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
@@ -72,20 +63,7 @@ pub async fn pipe_server_stream(
             }
         }
 
-        // Step 2: Establish upstream connection applying config limits
-        let mut connector = match GrpcUpstreamConnector::connect(target, config, None, None).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(target = %target, error = %e, "Failed to connect to gRPC upstream");
-                let _ = server_stream.respond.send_trailers_only(
-                    GrpcStatus::Unavailable,
-                    Some(&format!("upstream connect error: {e}")),
-                );
-                return Err(e);
-            }
-        };
-
-        // Step 3: Build outbound HTTP/2 request frame from downstream parts
+        // Step 2: Build outbound HTTP/2 request frame from downstream parts
         let mut req_builder = http::Request::builder()
             .method(server_stream.parts.method)
             .uri(server_stream.parts.uri)

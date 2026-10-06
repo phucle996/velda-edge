@@ -26,6 +26,9 @@ pub enum Http2Error {
     #[error("Connection closed unexpectedly")]
     ConnectionClosed,
 
+    #[error("Upstream TLS error: {0}")]
+    Tls(String),
+
     #[error("Streaming policy violation: {0}")]
     StreamingViolation(String),
 }

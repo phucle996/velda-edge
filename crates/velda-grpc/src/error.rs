@@ -19,6 +19,9 @@ pub enum GrpcError {
     #[error("gRPC protocol error: {0}")]
     Protocol(String),
 
+    #[error("Upstream TLS error: {0}")]
+    Tls(String),
+
     #[error("gRPC status error: code {0:?}, message: {1}")]
     Status(GrpcStatus, String),
 

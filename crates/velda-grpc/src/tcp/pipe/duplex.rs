@@ -7,28 +7,18 @@
 
 use bytes::Bytes;
 use http::Version;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::status::GrpcStatus;
 use crate::tcp::client::GrpcUpstreamConnector;
 use crate::tcp::server::GrpcServerStream;
 
 /// Pipes an active downstream gRPC stream directly to an upstream backend endpoint
 /// in full-duplex bidirectional streaming mode.
-///
-/// Workflow:
-/// 1. Establish connection to upstream backend endpoint with `config` limits.
-/// 2. Build and transmit outbound HTTP/2 request frame.
-/// 3. Concurrently drive two asynchronous pump streams:
-///    - Downstream -> Upstream: forwards client frames and trailers to backend.
-///    - Upstream -> Downstream: forwards backend frames and trailers to client.
-/// 4. Bound the entire bidirectional session within `max_call_duration_ms` timeout.
 pub async fn pipe_duplex(
     server_stream: GrpcServerStream,
-    target: SocketAddr,
+    connector: &mut GrpcUpstreamConnector,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
@@ -40,20 +30,7 @@ pub async fn pipe_duplex(
             mut respond,
         } = server_stream;
 
-        // Step 1: Establish upstream connection applying config limits
-        let mut connector = match GrpcUpstreamConnector::connect(target, config, None, None).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(target = %target, error = %e, "Failed to connect to gRPC upstream");
-                let _ = respond.send_trailers_only(
-                    GrpcStatus::Unavailable,
-                    Some(&format!("upstream connect error: {e}")),
-                );
-                return Err(e);
-            }
-        };
-
-        // Step 2: Build outbound HTTP/2 request frame from downstream parts
+        // Step 1: Build outbound HTTP/2 request frame from downstream parts
         let mut req_builder = http::Request::builder()
             .method(parts.method)
             .uri(parts.uri)

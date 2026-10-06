@@ -800,6 +800,11 @@ async fn test_end_to_end_l7_http1_hop_by_hop_and_forwarded_headers() {
         assert!(req_str.contains("GET /api/v1/test HTTP/1.1"));
         assert!(!req_str.to_ascii_lowercase().contains("x-custom-hop:"));
         assert!(!req_str.to_ascii_lowercase().contains("keep-alive:"));
+        // Anti-spoofing verification: client spoofed values MUST be completely removed
+        assert!(!req_str.contains("203.0.113.195"));
+        assert!(!req_str.contains("evil.attacker.com"));
+        assert!(!req_str.to_ascii_lowercase().contains("x-forwarded-ssl:"));
+        // Authoritative values strictly verified
         assert!(
             req_str
                 .to_ascii_lowercase()
@@ -917,7 +922,7 @@ async fn test_end_to_end_l7_http1_hop_by_hop_and_forwarded_headers() {
 
     let mut client = TcpStream::connect(gateway_addr).await.unwrap();
     client
-        .write_all(b"GET /api/v1/test HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive, X-Custom-Hop\r\nX-Custom-Hop: sensitive\r\nKeep-Alive: timeout=5\r\n\r\n")
+        .write_all(b"GET /api/v1/test HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive, X-Custom-Hop\r\nX-Custom-Hop: sensitive\r\nKeep-Alive: timeout=5\r\nX-Forwarded-For: 203.0.113.195\r\nX-Real-IP: 203.0.113.195\r\nX-Forwarded-Host: evil.attacker.com\r\nX-Forwarded-Ssl: on\r\nForwarded: for=203.0.113.195;proto=https\r\n\r\n")
         .await
         .unwrap();
 

@@ -115,7 +115,7 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                     let rt = runtime.clone();
                     let lid = Arc::clone(&lid);
                     Box::pin(async move {
-                        http3::handle_http3_handoff(lid, socket, datagram, config, &rt).await;
+                        http3::handle_http3_udp(lid, socket, datagram, config, &rt).await;
                     })
                 },
             )

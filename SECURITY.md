@@ -21,7 +21,7 @@ If you discover a security vulnerability or suspect a security flaw in Velda Edg
 
 Instead, report it responsibly via our coordinated disclosure process:
 
-1. **Email**: Send detailed security reports to `security@velda.io` (or maintainer contact).
+1. **Email**: Send detailed security reports to 10k.polime.vnd@gmail.com (or maintainer contact).
 2. **Details to Include**:
    - Subsystem affected (e.g. `crates/velda-tls`, `crates/velda-http1`, `control-plane`).
    - Type of vulnerability (e.g. Denial of Service, Protocol Confusion, Memory Leak, Authentication Bypass).

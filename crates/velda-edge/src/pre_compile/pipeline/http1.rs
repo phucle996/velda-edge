@@ -25,9 +25,13 @@ use std::sync::Arc;
 
 use crate::runtime::SharedRuntime;
 
-pub use crate::runtime::upstream::UpstreamHttp1Stream;
-
 /// Enriches HTTP/1.1 request headers with RFC 7239 and standard proxy forwarding metadata.
+///
+/// Anti-Spoofing Invariant:
+/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
+/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
+/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
+/// protocol scheme, and verified host).
 fn enrich_http1_forwarded_headers(
     headers: &mut http::HeaderMap,
     peer: SocketAddr,
@@ -36,6 +40,28 @@ fn enrich_http1_forwarded_headers(
     host: Option<&str>,
 ) {
     use http::header::{HeaderName, HeaderValue};
+
+    // 1. Strip all client-supplied untrusted forwarding headers
+    if headers.keys().any(|k| {
+        let s = k.as_str();
+        s.starts_with("x-forwarded-")
+            || s.eq_ignore_ascii_case("x-real-ip")
+            || s.eq_ignore_ascii_case("forwarded")
+    }) {
+        let to_remove: Vec<HeaderName> = headers
+            .keys()
+            .filter(|k| {
+                let s = k.as_str();
+                s.starts_with("x-forwarded-")
+                    || s.eq_ignore_ascii_case("x-real-ip")
+                    || s.eq_ignore_ascii_case("forwarded")
+            })
+            .cloned()
+            .collect();
+        for name in to_remove {
+            headers.remove(&name);
+        }
+    }
 
     let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
@@ -50,29 +76,23 @@ fn enrich_http1_forwarded_headers(
     };
     let client_ip_bytes = &ip_buf[..ip_len];
 
-    // 1. X-Forwarded-For
-    let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
-    if let Some(existing) = headers.get(&x_forwarded_for) {
-        if let Ok(existing_bytes) = existing.to_str() {
-            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + ip_len);
-            combined.extend_from_slice(existing_bytes.as_bytes());
-            combined.extend_from_slice(b", ");
-            combined.extend_from_slice(client_ip_bytes);
-            if let Ok(val) = HeaderValue::from_bytes(&combined) {
-                headers.insert(x_forwarded_for, val);
-            }
-        }
-    } else if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(x_forwarded_for, val);
+    // 2. Authoritative X-Forwarded-For
+    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
+        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
     }
 
-    // 2. X-Forwarded-Proto
+    // 3. Authoritative X-Real-IP
+    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
+        headers.insert(HeaderName::from_static("x-real-ip"), val);
+    }
+
+    // 4. Authoritative X-Forwarded-Proto
     headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static(proto),
     );
 
-    // 3. X-Forwarded-Port
+    // 5. Authoritative X-Forwarded-Port
     let mut port_buf = [0u8; 8];
     let port_len = {
         use std::io::Write;
@@ -84,25 +104,14 @@ fn enrich_http1_forwarded_headers(
         headers.insert(HeaderName::from_static("x-forwarded-port"), val);
     }
 
-    // 4. X-Forwarded-Host
-    let x_forwarded_host = HeaderName::from_static("x-forwarded-host");
-    if !headers.contains_key(&x_forwarded_host)
-        && let Some(h) = host
+    // 6. Authoritative X-Forwarded-Host
+    if let Some(h) = host
         && let Ok(val) = HeaderValue::from_str(h)
     {
-        headers.insert(x_forwarded_host, val);
+        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
     }
 
-    // 5. X-Real-IP
-    let x_real_ip = HeaderName::from_static("x-real-ip");
-    if !headers.contains_key(&x_real_ip)
-        && let Ok(val) = HeaderValue::from_bytes(client_ip_bytes)
-    {
-        headers.insert(x_real_ip, val);
-    }
-
-    // 6. Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    let forwarded = HeaderName::from_static("forwarded");
+    // 7. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
     let mut fwd_buf = [0u8; 256];
     let fwd_len = {
         use std::io::Write;
@@ -130,19 +139,8 @@ fn enrich_http1_forwarded_headers(
         cursor.position() as usize
     };
     let fwd_bytes = &fwd_buf[..fwd_len];
-
-    if let Some(existing) = headers.get(&forwarded) {
-        if let Ok(existing_bytes) = existing.to_str() {
-            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + fwd_len);
-            combined.extend_from_slice(existing_bytes.as_bytes());
-            combined.extend_from_slice(b", ");
-            combined.extend_from_slice(fwd_bytes);
-            if let Ok(val) = HeaderValue::from_bytes(&combined) {
-                headers.insert(forwarded, val);
-            }
-        }
-    } else if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(forwarded, val);
+    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
+        headers.insert(HeaderName::from_static("forwarded"), val);
     }
 }
 
@@ -401,7 +399,7 @@ pub async fn run_http1_loop<IO>(
             Http1PipeStrategy::ClientStream | Http1PipeStrategy::Duplex => None,
         };
 
-        let mut upstream_lease = match upstream.acquire_stream(host_str).await {
+        let mut upstream_lease = match upstream.acquire().await {
             Ok(lease) => lease,
             Err(e) => {
                 tracing::warn!(
@@ -469,5 +467,44 @@ pub async fn run_http1_loop<IO>(
             );
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    #[test]
+    fn test_enrich_http1_forwarded_headers_anti_spoofing() {
+        let mut headers = HeaderMap::new();
+        // Client attempts to spoof their IP, host, and SSL status
+        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
+        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
+        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-ssl", "on".parse().unwrap());
+        headers.insert(
+            "forwarded",
+            "for=203.0.113.195;proto=https".parse().unwrap(),
+        );
+
+        let peer: SocketAddr = "192.0.2.10:45678".parse().unwrap();
+        let local: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+
+        enrich_http1_forwarded_headers(&mut headers, peer, local, false, Some("api.example.com"));
+
+        // Client spoofed values MUST be completely replaced with authoritative values
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.10");
+        assert_eq!(headers.get("x-real-ip").unwrap(), "192.0.2.10");
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
+        assert_eq!(headers.get("x-forwarded-port").unwrap(), "8080");
+        assert_eq!(headers.get("x-forwarded-host").unwrap(), "api.example.com");
+        assert_eq!(
+            headers.get("forwarded").unwrap(),
+            "for=192.0.2.10;proto=http;by=10.0.0.1;host=\"api.example.com\""
+        );
+        // Untrusted extra x-forwarded-* headers MUST be stripped
+        assert!(headers.get("x-forwarded-ssl").is_none());
     }
 }

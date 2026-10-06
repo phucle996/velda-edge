@@ -7,18 +7,16 @@
 //!   when server streaming is disabled on this listener, returns [`Http3Error::StreamingViolation`].
 //! - Upstream response body is bounded within `max_body_size`.
 
-use std::net::SocketAddr;
-
 use velda_core::{Body, L7Request, L7Response};
 
-use crate::client::{connect, extract_sni};
+use crate::client::Http3Client;
 use crate::config::Http3Config;
 use crate::error::Http3Error;
 
-/// Pipes a non-streaming HTTP/3 request to the target backend endpoint.
+/// Pipes a non-streaming HTTP/3 request using an active multiplexed client connection.
 pub async fn pipe_buffered(
+    client: &Http3Client,
     req: &L7Request,
-    target: SocketAddr,
     config: &Http3Config,
 ) -> Result<L7Response, Http3Error> {
     // 1. Verify downstream request body limit
@@ -29,8 +27,6 @@ pub async fn pipe_buffered(
     }
 
     // 2. Forward request to upstream HTTP/3 backend
-    let server_name = extract_sni(req, &target);
-    let client = connect(target, &server_name, config).await?;
     let resp = client.send_request_ref(req).await?;
 
     // 3. Enforce non-streaming invariant: reject SSE if listener has server streaming disabled

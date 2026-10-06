@@ -11,16 +11,12 @@ pub mod client_stream;
 pub mod duplex;
 pub mod server_stream;
 
-use velda_core::{L7Request, L7Response, StreamingMode};
+use velda_core::StreamingMode;
 
 pub use buffered::pipe_buffered;
 pub use client_stream::pipe_client_stream;
 pub use duplex::pipe_duplex;
 pub use server_stream::pipe_server_stream;
-
-use crate::config::GrpcConfig;
-use crate::error::GrpcError;
-use crate::udp::client::GrpcUdpClient;
 
 /// Discrete streaming strategies for gRPC over UDP request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,30 +45,4 @@ impl GrpcUdpPipeStrategy {
             (false, false) => Self::Buffered,
         }
     }
-}
-
-/// Pipes a gRPC call over UDP / QUIC to an upstream backend endpoint
-/// according to the designated [`GrpcUdpPipeStrategy`].
-pub async fn pipe_grpc_udp_stream(
-    client: &GrpcUdpClient,
-    req: &L7Request,
-    strategy: GrpcUdpPipeStrategy,
-    config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
-    match strategy {
-        GrpcUdpPipeStrategy::Buffered => pipe_buffered(client, req, config).await,
-        GrpcUdpPipeStrategy::ServerStream => pipe_server_stream(client, req, config).await,
-        GrpcUdpPipeStrategy::ClientStream => pipe_client_stream(client, req, config).await,
-        GrpcUdpPipeStrategy::Duplex => pipe_duplex(client, req, config).await,
-    }
-}
-
-/// Pipes a unary gRPC call between downstream and upstream backend over UDP / QUIC.
-#[inline]
-pub async fn pipe_grpc_udp_unary(
-    client: &GrpcUdpClient,
-    req: &L7Request,
-    config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
-    pipe_buffered(client, req, config).await
 }
