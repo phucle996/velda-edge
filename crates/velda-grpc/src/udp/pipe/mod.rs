@@ -1,21 +1,23 @@
 //! Dedicated gRPC wire pipe modules over UDP.
 //!
-//! Submodules:
-//! - Pumping RPC messages between downstream UDP streams and upstream backends.
+//! Pumping RPC messages between downstream UDP streams and upstream backends
+//! over upstream-managed sockets.
 
 use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 use velda_core::{L7Request, L7Response};
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 use crate::udp::client::GrpcUdpUpstreamConnector;
 
-/// Pipes a unary gRPC call between downstream and upstream backend over UDP.
+/// Pipes a unary gRPC call between downstream and upstream backend over UDP
+/// using an upstream-managed socket.
 pub async fn pipe_grpc_udp_unary(
-    req: &L7Request,
+    socket: &UdpSocket,
     target: SocketAddr,
+    req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
-    let connector = GrpcUdpUpstreamConnector::default();
-    connector.dispatch_unary(target, req, config).await
+    GrpcUdpUpstreamConnector::dispatch_with_socket(socket, target, req, config).await
 }

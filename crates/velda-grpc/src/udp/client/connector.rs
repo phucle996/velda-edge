@@ -1,7 +1,8 @@
-//! Upstream gRPC client connector over UDP.
+//! Upstream gRPC client protocol execution over UDP.
 //!
-//! Sockets and egress binding are owned by the Upstream subsystem according to
-//! user configuration. This connector handles protocol framing and message dispatch.
+//! Protocol handles only encoding, transmission, and response decoding over an
+//! upstream-provided socket. Socket allocation, interface binding, and connection
+//! lifecycle are strictly owned by the Upstream subsystem.
 
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
@@ -10,23 +11,15 @@ use velda_core::{Body, L7Request, L7Response};
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 
-/// Upstream gRPC client connector for UDP backends.
-#[derive(Debug, Clone, Default)]
-pub struct GrpcUdpUpstreamConnector {
-    /// User-configured local bind address for egress UDP traffic.
-    pub bind_addr: Option<SocketAddr>,
-}
+/// Upstream gRPC client protocol dispatcher over UDP.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrpcUdpUpstreamConnector;
 
 impl GrpcUdpUpstreamConnector {
-    /// Creates a new UDP connector with an optional user-configured bind address.
-    pub fn new(bind_addr: Option<SocketAddr>) -> Self {
-        Self { bind_addr }
-    }
-
-    /// Dispatches a unary gRPC request using a pre-opened upstream socket.
+    /// Dispatches a unary gRPC request using a pre-allocated upstream-owned socket.
     ///
-    /// Preserves the architectural invariant: socket lifecycle and interface binding
-    /// are owned by the Upstream subsystem, eliminating per-request socket churn.
+    /// The Upstream subsystem owns socket lifecycle, interface binding, and connection state.
+    /// This function strictly executes protocol encoding, dispatching, and response decoding.
     pub async fn dispatch_with_socket(
         socket: &UdpSocket,
         target: SocketAddr,
@@ -60,30 +53,5 @@ impl GrpcUdpUpstreamConnector {
             http::HeaderMap::new(),
             Body::Bytes(resp_bytes),
         ))
-    }
-
-    /// Dispatches a unary gRPC request to an upstream backend endpoint over UDP,
-    /// binding to the user-configured egress address or family-appropriate wildcard.
-    pub async fn dispatch_unary(
-        &self,
-        target: SocketAddr,
-        req: &L7Request,
-        config: &GrpcConfig,
-    ) -> Result<L7Response, GrpcError> {
-        let bind_addr = self.bind_addr.unwrap_or_else(|| {
-            if target.is_ipv4() {
-                SocketAddr::from(([0, 0, 0, 0], 0))
-            } else {
-                SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
-            }
-        });
-
-        let socket = UdpSocket::bind(bind_addr).await.map_err(|e| {
-            GrpcError::Internal(format!(
-                "failed to bind client UDP socket to {bind_addr}: {e}"
-            ))
-        })?;
-
-        Self::dispatch_with_socket(&socket, target, req, config).await
     }
 }
