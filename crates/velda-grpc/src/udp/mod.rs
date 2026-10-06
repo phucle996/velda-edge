@@ -3,7 +3,7 @@
 //! Submodules:
 //! - `server`: Downstream packet-driven state machine, stream parsing, and responder.
 //! - `client`: Upstream backend connection management and Unary forwarding over UDP.
-//! - `pipe`: Bidirectional message pumping and unary forwarding strategies over UDP.
+//! - `pipe`: Strategy-driven bidirectional stream pumping between downstream and upstream.
 //! - `wire`: Self-contained variable-length integer framing and QPACK header codec.
 
 pub mod client;
@@ -12,7 +12,10 @@ pub mod server;
 pub mod wire;
 
 pub use client::GrpcUdpUpstreamConnector;
-pub use pipe::pipe_grpc_udp_unary;
+pub use pipe::{
+    GrpcUdpPipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_grpc_udp_stream,
+    pipe_grpc_udp_unary, pipe_server_stream,
+};
 pub use quinn_proto;
 pub use server::{
     GrpcUdpEngine, GrpcUdpRequestEvent, GrpcUdpResponder, GrpcUdpServerStream, OutgoingDatagram,
