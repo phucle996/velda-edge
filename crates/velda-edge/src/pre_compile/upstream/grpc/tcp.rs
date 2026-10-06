@@ -1,4 +1,4 @@
-//! Layer 7 gRPC Upstream managing streaming and unary proxying handoff.
+//! Layer 7 gRPC over TCP Upstream managing streaming and unary proxying handoff over HTTP/2.
 
 use std::net::SocketAddr;
 
@@ -8,28 +8,28 @@ use velda_grpc::client::GrpcUpstreamConnector;
 use velda_grpc::pipe::{GrpcPipeStrategy, pipe_grpc_stream};
 use velda_grpc::server::GrpcServerStream;
 
-use super::lb::EdgeUpstream;
+use super::super::lb::EdgeUpstream;
 use crate::error::EdgeError;
 
-/// Pooled gRPC client resource wrapping [`GrpcUpstreamConnector`].
+/// Pooled gRPC TCP client resource wrapping [`GrpcUpstreamConnector`].
 #[derive(Clone)]
-pub struct GrpcClientResource {
+pub struct GrpcTcpClientResource {
     pub connector: GrpcUpstreamConnector,
 }
 
-impl GrpcClientResource {
+impl GrpcTcpClientResource {
     pub fn new(connector: GrpcUpstreamConnector) -> Self {
         Self { connector }
     }
 }
 
-impl std::fmt::Debug for GrpcClientResource {
+impl std::fmt::Debug for GrpcTcpClientResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GrpcClientResource").finish()
+        f.debug_struct("GrpcTcpClientResource").finish()
     }
 }
 
-impl PoolableResource for GrpcClientResource {
+impl PoolableResource for GrpcTcpClientResource {
     fn is_healthy(&self) -> bool {
         true
     }
@@ -37,10 +37,13 @@ impl PoolableResource for GrpcClientResource {
     fn close(&mut self) {}
 }
 
-/// Layer 7 gRPC Upstream managing streaming and unary proxying handoff.
+/// Backwards-compatibility alias for [`GrpcTcpClientResource`].
+pub type GrpcClientResource = GrpcTcpClientResource;
+
+/// Layer 7 gRPC over TCP Upstream managing streaming and unary proxying handoff.
 ///
 /// Pre-compiled with static load balancer, streaming strategy, and sharded multiplexed client pool.
-pub struct GrpcUpstream {
+pub struct GrpcTcpUpstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
@@ -50,16 +53,16 @@ pub struct GrpcUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcPipeStrategy,
     /// Lock-sharded persistent multiplexed gRPC client connection pool for Unary RPC reuse.
-    pool: MultiplexedPool<SocketAddr, GrpcClientResource>,
+    pool: MultiplexedPool<SocketAddr, GrpcTcpClientResource>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     pub acceleration: velda_grpc::GrpcAccelerationPath,
 }
 
-impl std::fmt::Debug for GrpcUpstream {
+impl std::fmt::Debug for GrpcTcpUpstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GrpcUpstream")
+        f.debug_struct("GrpcTcpUpstream")
             .field("id", &self.inner.id())
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
@@ -69,8 +72,8 @@ impl std::fmt::Debug for GrpcUpstream {
     }
 }
 
-impl GrpcUpstream {
-    /// Creates a new [`GrpcUpstream`] instance.
+impl GrpcTcpUpstream {
+    /// Creates a new [`GrpcTcpUpstream`] instance.
     pub fn new(
         inner: EdgeUpstream,
         streaming: StreamingMode,
@@ -146,7 +149,7 @@ impl GrpcUpstream {
 
                 let _ = self.pool.register(
                     endpoint,
-                    GrpcClientResource::new(fresh.clone()),
+                    GrpcTcpClientResource::new(fresh.clone()),
                     max_streams,
                 );
 
@@ -160,3 +163,6 @@ impl GrpcUpstream {
         })
     }
 }
+
+/// Backwards-compatibility alias for [`GrpcTcpUpstream`].
+pub type GrpcUpstream = GrpcTcpUpstream;

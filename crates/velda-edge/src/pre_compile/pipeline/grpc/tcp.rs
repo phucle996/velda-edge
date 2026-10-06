@@ -156,7 +156,7 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
-    let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
+    let Some(upstream) = rt.upstreams.grpc_tcp.get(&route.upstream_name) else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,

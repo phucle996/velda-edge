@@ -226,11 +226,11 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 
-    let Some(upstream) = rt.upstreams.grpc.get(&route.upstream_name) else {
+    let Some(upstream) = rt.upstreams.grpc_udp.get(&route.upstream_name) else {
         return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
     };
 
-    match upstream.dispatch_unary(req, config).await {
+    match upstream.dispatch_request(req, config).await {
         Ok(resp) => resp,
         Err(e) => GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}"))),
     }

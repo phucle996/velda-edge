@@ -13,7 +13,7 @@ use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::TlsClientEngine;
 use velda_upstream::{Upstream, UpstreamTimeouts};
 
-use super::grpc::GrpcUpstream;
+use super::grpc::{GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http1::Http1Upstream;
 use super::http2::Http2Upstream;
 use super::http3::Http3Upstream;
@@ -78,7 +78,7 @@ impl<T> SubUpstreamTable<T> {
     }
 }
 
-/// Pre-compiled upstream table divided strictly into 6 protocol-isolated tables.
+/// Pre-compiled upstream table divided strictly into 7 protocol-isolated tables.
 ///
 /// Guaranteed zero cross-protocol lookup overhead and zero dynamic casting on the request serving hot path.
 #[derive(Clone, Default, Debug)]
@@ -93,8 +93,10 @@ pub struct UpstreamTable {
     pub http2: SubUpstreamTable<Http2Upstream>,
     /// [PRE-COMPILED]: Protocol table for L7 HTTP/3 QUIC streams.
     pub http3: SubUpstreamTable<Http3Upstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 gRPC RPC endpoints.
-    pub grpc: SubUpstreamTable<GrpcUpstream>,
+    /// [PRE-COMPILED]: Protocol table for L7 gRPC over TCP RPC endpoints.
+    pub grpc_tcp: SubUpstreamTable<GrpcTcpUpstream>,
+    /// [PRE-COMPILED]: Protocol table for L7 gRPC over UDP RPC endpoints.
+    pub grpc_udp: SubUpstreamTable<GrpcUdpUpstream>,
 }
 
 impl UpstreamTable {
@@ -105,7 +107,8 @@ impl UpstreamTable {
             + self.http1.len()
             + self.http2.len()
             + self.http3.len()
-            + self.grpc.len()
+            + self.grpc_tcp.len()
+            + self.grpc_udp.len()
     }
 
     /// Returns true if all protocol tables are empty.
@@ -131,7 +134,8 @@ pub fn build_upstreams(
     let mut http1_map = FxHashMap::default();
     let mut http2_map = FxHashMap::default();
     let mut http3_map = FxHashMap::default();
-    let mut grpc_map = FxHashMap::default();
+    let mut grpc_tcp_map = FxHashMap::default();
+    let mut grpc_udp_map = FxHashMap::default();
 
     let shared_tls_client = tls_client.map(|c| Arc::new(c.clone()));
 
@@ -304,22 +308,35 @@ pub fn build_upstreams(
 
         match app.as_str() {
             "grpc" => {
-                let grpc_acceleration = velda_grpc::GrpcAccelerationPath::for_topology(
-                    topology,
-                    timeouts.connect,
-                    timeouts.idle,
-                    is_tls,
-                );
-                grpc_map.insert(
-                    config.id.clone(),
-                    Arc::new(GrpcUpstream::new(
-                        inner,
-                        config.protocol.streaming,
-                        shard_count,
-                        max_streams,
-                        grpc_acceleration,
-                    )),
-                );
+                if transport == "udp" {
+                    grpc_udp_map.insert(
+                        config.id.clone(),
+                        Arc::new(GrpcUdpUpstream::new(
+                            inner,
+                            target_sni,
+                            config.protocol.streaming,
+                            shard_count,
+                            max_streams,
+                        )),
+                    );
+                } else {
+                    let grpc_acceleration = velda_grpc::GrpcAccelerationPath::for_topology(
+                        topology,
+                        timeouts.connect,
+                        timeouts.idle,
+                        is_tls,
+                    );
+                    grpc_tcp_map.insert(
+                        config.id.clone(),
+                        Arc::new(GrpcTcpUpstream::new(
+                            inner,
+                            config.protocol.streaming,
+                            shard_count,
+                            max_streams,
+                            grpc_acceleration,
+                        )),
+                    );
+                }
             }
             "http3" => {
                 http3_map.insert(
@@ -403,7 +420,8 @@ pub fn build_upstreams(
         http1: SubUpstreamTable::new(http1_map),
         http2: SubUpstreamTable::new(http2_map),
         http3: SubUpstreamTable::new(http3_map),
-        grpc: SubUpstreamTable::new(grpc_map),
+        grpc_tcp: SubUpstreamTable::new(grpc_tcp_map),
+        grpc_udp: SubUpstreamTable::new(grpc_udp_map),
     }
 }
 
@@ -464,6 +482,9 @@ mod tests {
         let mut u_h3 = make_test_upstream("u_h3", "http3", "endpoints");
         u_h3.protocol.transport = "quic".to_string();
 
+        let mut u_grpc_udp = make_test_upstream("u_grpc_udp", "grpc", "endpoints");
+        u_grpc_udp.protocol.transport = "udp".to_string();
+
         let configs = vec![
             make_test_upstream("u1", "http1", "endpoints"),
             make_test_upstream("u2", "http2", "endpoints"),
@@ -471,13 +492,15 @@ mod tests {
             u_udp,
             u_tcp,
             u_h3,
+            u_grpc_udp,
         ];
 
         let table = build_upstreams_default(&configs, None);
-        assert_eq!(table.len(), 6);
+        assert_eq!(table.len(), 7);
         assert!(table.http1.get("u1").is_some());
         assert!(table.http2.get("u2").is_some());
-        assert!(table.grpc.get("u3").is_some());
+        assert!(table.grpc_tcp.get("u3").is_some());
+        assert!(table.grpc_udp.get("u_grpc_udp").is_some());
         assert!(table.udp.get("u_udp").is_some());
         assert!(table.tcp.get("u_tcp").is_some());
         assert!(table.http3.get("u_h3").is_some());

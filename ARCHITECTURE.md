@@ -185,11 +185,17 @@ RuntimeSnapshot (Gen N, Revision: u64)
 │   │   ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved QUIC TLS 1.3 SNI)
 │   │   └── [PRE-COMPILED] strategy ───────────> Http3PipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
 │   │
-│   └── grpc:  upstream_name ──> GrpcUpstream
+│   ├── grpc_tcp: upstream_name ──> GrpcTcpUpstream
+│   │   ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
+│   │   ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed gRPC TCP Client Connection Pool
+│   │   ├── [PRE-COMPILED] strategy ───────────> GrpcPipeStrategy (Unary | ClientStream | ServerStream | Duplex)
+│   │   └── [PRE-COMPILED] acceleration ───────> GrpcAccelerationPath (Kernel TCP tuning & FastOpen)
+│   │
+│   └── grpc_udp: upstream_name ──> GrpcUdpUpstream
 │       ├── inner: EdgeUpstream ───────────────> [Discovery: Vec<Endpoint> + HealthTracker + LbAlgorithm + Timeouts]
-│       ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed gRPC Client Connection Pool
-│       ├── [PRE-COMPILED] strategy ───────────> GrpcPipeStrategy (Unary | ClientStream | ServerStream | Duplex)
-│       └── [PRE-COMPILED] acceleration ───────> GrpcAccelerationPath (Kernel TCP tuning & FastOpen)
+│       ├── pool: MultiplexedPool ─────────────> Lock-Sharded Multiplexed QUIC Client Connection Pool
+│       ├── [PRE-COMPILED] target_sni ─────────> Option<String> (Pre-resolved QUIC TLS 1.3 SNI)
+│       └── [PRE-COMPILED] strategy ───────────> GrpcUdpPipeStrategy (Buffered | ServerStream | ClientStream | Duplex)
 │
 └── 4. rt.tls (TLS Engines) ──────────────────────────── [Pre-Compiled Cryptographic Contexts]
     │
@@ -199,7 +205,7 @@ RuntimeSnapshot (Gen N, Revision: u64)
 
 ### Key Hot-Path Invariants in the State Tree
 
-- **Per-Upstream Pool & Cache Isolation**: Pools are **never** shared globally across upstreams. Every single Upstream instance (`Http1Upstream`, `Http2Upstream`, `Http3Upstream`, `GrpcUpstream`) owns its private, dedicated lock-sharded connection pool.
+- **Per-Upstream Pool & Cache Isolation**: Pools are **never** shared globally across upstreams. Every single Upstream instance (`Http1Upstream`, `Http2Upstream`, `Http3Upstream`, `GrpcTcpUpstream`, `GrpcUdpUpstream`) owns its private, dedicated lock-sharded connection pool.
 - **Dedicated Per-Upstream Load Balancers & Timeouts**: Every Upstream owns its private `LbAlgorithm` enum variant (RR, WRR, LeastConn, Random, IpHash, P2C) and `UpstreamTimeouts { connect, idle, request }`. Rotation counters and connection states are completely isolated between backends.
 - **Physical Endpoint Topology in Discovery**: Backend endpoints are pre-resolved into canonical `Vec<Endpoint>` (`address: SocketAddr`, `weight: u32`) avoiding dynamic DNS lookups during request execution.
 - **Lock-Sharded Pools vs Multiplexed Pools**:
