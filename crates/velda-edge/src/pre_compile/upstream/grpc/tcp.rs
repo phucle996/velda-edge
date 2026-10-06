@@ -101,6 +101,7 @@ impl GrpcTcpUpstream {
         let max_streams = self.max_concurrent_streams;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
+        let idle_timeout = self.inner.timeouts().idle;
         let tls = self
             .tls
             .as_ref()
@@ -108,7 +109,10 @@ impl GrpcTcpUpstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self.pool.acquire_stream(&endpoint) {
+                if let Some(lease) = self
+                    .pool
+                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
+                {
                     let mut connector = lease.client.clone();
                     match connector.ready().await {
                         Ok(()) => return Ok::<_, String>(connector),

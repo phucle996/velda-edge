@@ -106,6 +106,7 @@ impl Http2Upstream {
         let max_streams = self.max_concurrent_streams;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
+        let idle_timeout = self.inner.timeouts().idle;
         let tls = self
             .tls
             .as_ref()
@@ -113,7 +114,10 @@ impl Http2Upstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self.pool.acquire_stream(&endpoint) {
+                if let Some(lease) = self
+                    .pool
+                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
+                {
                     let ready_client = lease.client.clone();
                     match ready_client.ready().await {
                         Ok(ready_client) => return Ok::<_, String>(ready_client),

@@ -403,7 +403,10 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
         match profile.reuse_mode {
             ReuseMode::Multiplexed => {
                 let shard = self.shards.shard_for(&profile.key);
-                if let Some(stream_lease) = self.multiplexed.acquire_stream(&profile.key) {
+                if let Some(stream_lease) = self
+                    .multiplexed
+                    .acquire_stream_with_timeout(&profile.key, profile.idle_timeout)
+                {
                     shard.record_hit();
                     Some(ConnectionLease::Multiplexed(stream_lease))
                 } else {
@@ -476,7 +479,10 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
     /// Directly acquires a stream slot on an existing multiplexed connection.
     pub fn acquire_stream(&self, profile: &ConnectionProfile) -> Option<StreamLease<R>> {
         let shard = self.shards.shard_for(&profile.key);
-        if let Some(stream) = self.multiplexed.acquire_stream(&profile.key) {
+        if let Some(stream) = self
+            .multiplexed
+            .acquire_stream_with_timeout(&profile.key, profile.idle_timeout)
+        {
             shard.record_hit();
             Some(stream)
         } else {

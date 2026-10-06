@@ -368,3 +368,38 @@ fn test_pool_profiles_end_to_end_integration() {
     drop(s2);
     drop(s5);
 }
+
+#[test]
+fn test_safe_idle_threshold_75_percent_cutoff() {
+    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let addr: SocketAddr = "10.0.0.99:8080".parse().unwrap();
+    let key = ConnectionKey::tcp(addr);
+    let idle_timeout = Duration::from_secs(100); // 75% cutoff = 75s
+
+    // 1. Connection idle for 50s (< 75s cutoff): Safe to reuse
+    let mut safe_conn = MockConnection::new(addr);
+    safe_conn.last_used = Instant::now() - Duration::from_secs(50);
+    pool.release(&key, safe_conn, true, false);
+
+    let acquired = pool.acquire(&key, idle_timeout);
+    assert!(
+        acquired.is_some(),
+        "Connection idle for 50s should be safely acquired"
+    );
+
+    // 2. Connection idle for 80s (> 75s cutoff): At risk of keep-alive race, must be retired
+    let mut at_risk_conn = MockConnection::new(addr);
+    let at_risk_closed = Arc::clone(&at_risk_conn.closed);
+    at_risk_conn.last_used = Instant::now() - Duration::from_secs(80);
+    pool.release(&key, at_risk_conn, true, false);
+
+    let at_risk_acquired = pool.acquire(&key, idle_timeout);
+    assert!(
+        at_risk_acquired.is_none(),
+        "Connection idle for 80s (> 75% cutoff) must not be acquired"
+    );
+    assert!(
+        at_risk_closed.load(Ordering::Acquire),
+        "At-risk connection must be closed upon acquire rejection"
+    );
+}

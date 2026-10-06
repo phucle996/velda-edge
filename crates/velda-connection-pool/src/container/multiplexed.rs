@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::config::DEFAULT_IDLE_TIMEOUT;
 use crate::container::hasher::FastBuildHasher;
 use crate::container::probed_shard_count;
 use crate::lease::StreamLease;
@@ -185,6 +186,22 @@ impl<R: PoolableResource> MultiplexedConnection<R> {
         now_ms.saturating_sub(last_ms) >= idle_timeout.as_millis() as u64
     }
 
+    /// Checks if this connection is idle and at risk of keep-alive race
+    /// (0 active streams and idle duration >= 75% of `idle_timeout`).
+    #[inline]
+    pub fn is_idle_at_risk(&self, idle_timeout: Duration, now: Instant) -> bool {
+        if self.active_streams() > 0 {
+            return false;
+        }
+        if self.is_goaway() || !self.resource.is_healthy() {
+            return true;
+        }
+        let safe_cutoff_ms = (idle_timeout.as_millis() as u64).saturating_mul(3) / 4;
+        let now_ms = now.saturating_duration_since(process_epoch()).as_millis() as u64;
+        let last_ms = self.last_activity_ms.load(Ordering::Acquire);
+        now_ms.saturating_sub(last_ms) >= safe_cutoff_ms
+    }
+
     /// Timestamp when this multiplexed connection was established.
     #[inline]
     pub fn created_at(&self) -> Instant {
@@ -292,12 +309,14 @@ where
         &self.shards[idx]
     }
 
-    /// Acquires a stream slot from an existing available multiplexed connection.
-    ///
-    /// Returns `Some(StreamLease)` if an existing connection has spare capacity.
-    /// Returns `None` (MISS) if no connection exists or all are saturated.
-    /// Fast-path checks connections with early break, pruning dead connections only on demand.
-    pub fn acquire_stream(&self, key: &K) -> Option<StreamLease<R>> {
+    /// Acquires a stream slot from an existing available multiplexed connection,
+    /// enforcing the safe idle threshold (75% cutoff) on idle connections.
+    pub fn acquire_stream_with_timeout(
+        &self,
+        key: &K,
+        idle_timeout: Duration,
+    ) -> Option<StreamLease<R>> {
+        let now = Instant::now();
         let shard = self.shard_for(key);
 
         // Fast-path: quickly scan and clone candidate Arc under minimal lock hold time (< 10 ns)
@@ -306,7 +325,10 @@ where
             let conns = guard.get(key)?;
             let mut found = None;
             for conn in conns.iter() {
-                if !conn.is_goaway() && !conn.is_exhausted() {
+                if !conn.is_goaway()
+                    && !conn.is_exhausted()
+                    && !conn.is_idle_at_risk(idle_timeout, now)
+                {
                     found = Some(Arc::clone(conn));
                     break;
                 }
@@ -329,22 +351,38 @@ where
         let mut has_dead = false;
 
         for conn in conns.iter() {
-            if !conn.is_goaway() && !conn.is_exhausted() {
+            if !conn.is_goaway() && !conn.is_exhausted() && !conn.is_idle_at_risk(idle_timeout, now)
+            {
                 if let Some(lease) = conn.try_acquire_stream() {
                     acquired = Some(lease);
                     break;
                 }
-            } else if conn.is_idle() && (!conn.is_healthy() || conn.is_goaway()) {
+            } else if conn.is_idle()
+                && (!conn.is_healthy()
+                    || conn.is_goaway()
+                    || conn.is_idle_at_risk(idle_timeout, now))
+            {
                 has_dead = true;
             }
         }
 
-        // Only prune dead connections if one was encountered
+        // Only prune dead or at-risk idle connections if one was encountered
         if has_dead {
-            conns.retain(|conn| !(conn.is_idle() && (!conn.is_healthy() || conn.is_goaway())));
+            conns.retain(|conn| {
+                !(conn.is_idle()
+                    && (!conn.is_healthy()
+                        || conn.is_goaway()
+                        || conn.is_idle_at_risk(idle_timeout, now)))
+            });
         }
 
         acquired
+    }
+
+    /// Acquires a stream slot using default idle timeout.
+    #[inline]
+    pub fn acquire_stream(&self, key: &K) -> Option<StreamLease<R>> {
+        self.acquire_stream_with_timeout(key, DEFAULT_IDLE_TIMEOUT)
     }
 
     /// Registers a newly established connection and immediately claims 1 stream lease.

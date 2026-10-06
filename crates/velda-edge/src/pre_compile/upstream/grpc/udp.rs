@@ -104,10 +104,14 @@ impl GrpcUdpUpstream {
     ) -> Result<GrpcUdpClient, EdgeError> {
         let max_streams = self.max_concurrent_streams;
         let server_name: &str = &self.target_sni;
+        let idle_timeout = self.inner.timeouts().idle;
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self.pool.acquire_stream(&endpoint) {
+                if let Some(lease) = self
+                    .pool
+                    .acquire_stream_with_timeout(&endpoint, idle_timeout)
+                {
                     if !lease.client.is_closed() {
                         return Ok::<_, String>(lease.client.clone());
                     }

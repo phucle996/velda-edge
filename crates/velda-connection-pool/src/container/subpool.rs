@@ -76,9 +76,15 @@ impl<R: PoolableResource> SubPool<R> {
         max_lifetime: Option<Duration>,
         now: Instant,
     ) -> Option<R> {
+        // Safe Idle Threshold (75% cutoff / 3/4 rule):
+        // If an idle connection has been unused for > 75% of idle_timeout, it is at high risk
+        // of remote peer keep-alive expiration race. Proactively retire it upon acquire so
+        // that callers receive a fresh connection with zero risk of stale socket drops.
+        let safe_idle_cutoff = idle_timeout.saturating_mul(3) / 4;
+
         while let Some(resource) = self.idle_resources.pop() {
             let is_idle_valid =
-                now.saturating_duration_since(resource.last_used_at()) <= idle_timeout;
+                now.saturating_duration_since(resource.last_used_at()) <= safe_idle_cutoff;
             let is_lifetime_valid = match max_lifetime {
                 Some(ttl) => now.saturating_duration_since(resource.created_at()) <= ttl,
                 None => true,
