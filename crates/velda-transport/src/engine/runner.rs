@@ -115,17 +115,18 @@ impl TrafficEngine {
     }
 
     /// Starts all ingress listener loops across all configured TCP and UDP ports concurrently,
-    /// dispatching stateful TCP connections to `tcp_handler` and stateless UDP datagrams to `udp_handler`
-    /// until shutdown is signaled.
-    pub async fn run<TcpH, UdpH, FutTcp, FutUdp>(
+    /// resolving specialized protocol handlers per listener via `tcp_dispatcher` and `udp_dispatcher`.
+    pub async fn run_with_dispatchers<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
         mut self,
         mut shutdown: watch::Receiver<bool>,
-        tcp_handler: TcpH,
-        udp_handler: UdpH,
+        tcp_dispatcher: TcpD,
+        udp_dispatcher: UdpD,
     ) -> Result<()>
     where
+        TcpD: Fn(&str) -> TcpH + Send + Sync + Clone + 'static,
         TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
         FutTcp: std::future::Future<Output = ()> + Send + 'static,
+        UdpD: Fn(&str) -> UdpH + Send + Sync + Clone + 'static,
         UdpH: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
         FutUdp: std::future::Future<Output = ()> + Send + 'static,
     {
@@ -145,7 +146,8 @@ impl TrafficEngine {
             let binding = IngressBinding::Tcp(ingress.binding().clone());
             let id = binding.id().to_string();
             let (tx, rx) = watch::channel(false);
-            TcpIngress::spawn_accept_loop(Arc::new(ingress), &mut tasks, rx, tcp_handler.clone());
+            let handler = tcp_dispatcher(&id);
+            TcpIngress::spawn_accept_loop(Arc::new(ingress), &mut tasks, rx, handler);
             active_listeners.insert(id, (binding, tx));
         }
 
@@ -154,7 +156,8 @@ impl TrafficEngine {
             let binding = IngressBinding::Udp(ingress.binding().clone());
             let id = binding.id().to_string();
             let (tx, rx) = watch::channel(false);
-            UdpIngress::spawn_receive_loop(Arc::new(ingress), &mut tasks, rx, udp_handler.clone());
+            let handler = udp_dispatcher(&id);
+            UdpIngress::spawn_receive_loop(Arc::new(ingress), &mut tasks, rx, handler);
             active_listeners.insert(id, (binding, tx));
         }
 
@@ -164,8 +167,8 @@ impl TrafficEngine {
                 &mut active_listeners,
                 self.initial_bindings,
                 &mut tasks,
-                tcp_handler.clone(),
-                udp_handler.clone(),
+                tcp_dispatcher.clone(),
+                udp_dispatcher.clone(),
             );
         }
 
@@ -186,8 +189,8 @@ impl TrafficEngine {
                         &mut active_listeners,
                         desired,
                         &mut tasks,
-                        tcp_handler.clone(),
-                        udp_handler.clone(),
+                        tcp_dispatcher.clone(),
+                        udp_dispatcher.clone(),
                     );
                 }
                 Some(res) = tasks.join_next() => {
@@ -207,5 +210,28 @@ impl TrafficEngine {
 
         tracing::info!("Velda Traffic Engine stopped gracefully across all ports");
         Ok(())
+    }
+
+    /// Starts all ingress listener loops across all configured TCP and UDP ports concurrently,
+    /// dispatching stateful TCP connections to `tcp_handler` and stateless UDP datagrams to `udp_handler`
+    /// until shutdown is signaled.
+    pub async fn run<TcpH, UdpH, FutTcp, FutUdp>(
+        self,
+        shutdown: watch::Receiver<bool>,
+        tcp_handler: TcpH,
+        udp_handler: UdpH,
+    ) -> Result<()>
+    where
+        TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
+        FutTcp: std::future::Future<Output = ()> + Send + 'static,
+        UdpH: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
+        FutUdp: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.run_with_dispatchers(
+            shutdown,
+            move |_| tcp_handler.clone(),
+            move |_| udp_handler.clone(),
+        )
+        .await
     }
 }

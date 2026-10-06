@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 use tokio::sync::watch;
-use velda_transport::{Connection, Datagram, TrafficEngine};
+use velda_transport::{Connection, Datagram, TrafficEngine, UdpSocket};
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
 use crate::lifecycle::ipc::run_ipc_server;
-use crate::pipeline::{handle_tcp, handle_udp};
+use crate::pipeline::{build_tcp_pipeline_runner, build_udp_pipeline_runner};
 use crate::runtime::SharedRuntime;
 
 /// Coordinates the end-to-end gateway execution:
@@ -42,23 +42,28 @@ pub async fn run_gateway(
     });
 
     // 2. Drive TrafficEngine accept and pipeline dispatch loops directly
+    // Cold-path per-listener dispatchers: pre-resolves specialized pipeline runners ONCE per listener!
     let rt_tcp = shared_runtime.clone();
-    let tcp_handler = move |conn: Connection| {
-        let rt = rt_tcp.clone();
-        async move {
-            handle_tcp(conn, &rt).await;
+    let tcp_dispatcher = move |listener_id: &str| {
+        let runner = build_tcp_pipeline_runner(listener_id, rt_tcp.clone());
+        move |conn: Connection| {
+            let runner = Arc::clone(&runner);
+            runner(conn)
         }
     };
 
     let rt_udp = shared_runtime.clone();
-    let udp_handler = move |id: Arc<str>, socket, dgram: Datagram| {
-        let rt = rt_udp.clone();
-        async move {
-            handle_udp(id, socket, dgram, &rt).await;
+    let udp_dispatcher = move |listener_id: &str| {
+        let runner = build_udp_pipeline_runner(listener_id, rt_udp.clone());
+        move |id: Arc<str>, socket: Arc<UdpSocket>, dgram: Datagram| {
+            let runner = Arc::clone(&runner);
+            runner(id, socket, dgram)
         }
     };
 
-    let engine_result = engine.run(shutdown, tcp_handler, udp_handler).await;
+    let engine_result = engine
+        .run_with_dispatchers(shutdown, tcp_dispatcher, udp_dispatcher)
+        .await;
 
     // 3. Await background IPC task termination
     let _ = ipc_task.await;

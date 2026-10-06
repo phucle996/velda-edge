@@ -15,15 +15,17 @@ use crate::udp::socket::UdpSocket;
 /// - Closes removed or modified listeners (releasing OS ports).
 /// - Binds new or modified listeners (spawning accept / receive loops).
 /// - Leaves identical listeners completely untouched.
-pub fn reconcile_active_listeners<TcpH, UdpH, FutTcp, FutUdp>(
+pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
     active: &mut HashMap<String, (IngressBinding, watch::Sender<bool>)>,
     desired: Vec<IngressBinding>,
     tasks: &mut JoinSet<()>,
-    tcp_handler: TcpH,
-    udp_handler: UdpH,
+    tcp_dispatcher: TcpD,
+    udp_dispatcher: UdpD,
 ) where
+    TcpD: Fn(&str) -> TcpH + Send + Sync + Clone + 'static,
     TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
     FutTcp: std::future::Future<Output = ()> + Send + 'static,
+    UdpD: Fn(&str) -> UdpH + Send + Sync + Clone + 'static,
     UdpH: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
     FutUdp: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -67,12 +69,8 @@ pub fn reconcile_active_listeners<TcpH, UdpH, FutTcp, FutUdp>(
                                 "Declarative Reconcile: Bound new TCP listener shards"
                             );
                             let (tx, rx) = watch::channel(false);
-                            TcpIngress::spawn_accept_loop(
-                                Arc::new(ingress),
-                                tasks,
-                                rx,
-                                tcp_handler.clone(),
-                            );
+                            let handler = tcp_dispatcher(&id);
+                            TcpIngress::spawn_accept_loop(Arc::new(ingress), tasks, rx, handler);
                             e.insert((binding, tx));
                         }
                         Err(err) => {
@@ -95,12 +93,8 @@ pub fn reconcile_active_listeners<TcpH, UdpH, FutTcp, FutUdp>(
                                 "Declarative Reconcile: Bound new UDP socket shards"
                             );
                             let (tx, rx) = watch::channel(false);
-                            UdpIngress::spawn_receive_loop(
-                                Arc::new(ingress),
-                                tasks,
-                                rx,
-                                udp_handler.clone(),
-                            );
+                            let handler = udp_dispatcher(&id);
+                            UdpIngress::spawn_receive_loop(Arc::new(ingress), tasks, rx, handler);
                             e.insert((binding, tx));
                         }
                         Err(err) => {
