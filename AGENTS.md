@@ -91,9 +91,9 @@ Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) wi
     - Upstream **MUST NEVER** configure kernel transport flags (`TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`, `TCP_NOTSENT_LOWAT`, socket buffer sizes).
     - Upstream **MUST NEVER** execute protocol or security handshakes (TLS ClientHello, ALPN negotiation, HTTP/2 SETTINGS exchange, QUIC crypto exchange).
     - Upstream **MUST NEVER** inspect, encode, or decode protocol-specific wire frames. Upstream treats connections as opaque typed handles leased from the protocol layer.
-- **Protocol Subsystems (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`, `velda-transport`)**:
+- **Protocol Subsystems (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`, `velda-edge::tcp`)**:
   - **Single Responsibility**: Connection Mechanics, Kernel Acceleration & Wire Protocol Execution (**"HOW"**).
-  - Owns: Transport socket instantiation (IPv4/IPv6 address families, TCP/UDP sockets), kernel acceleration tuning (`SocketAccelerationPath`, `Http1AccelerationPath`, `GrpcAccelerationPath`), cryptographic and protocol handshakes (TLS, ALPN, HTTP/2, QUIC), background connection driver loops (driving H2 stream multiplexing, QUIC packet loops), wire codecs (LPM framing, QPACK, text/binary parsing), and streaming pipe strategies (`buffered`, `server_stream`, `client_stream`, `duplex`).
+  - Owns: Transport socket instantiation (IPv4/IPv6 address families, TCP/UDP sockets), kernel acceleration tuning (`TcpAccelerationPath`, `Http1AccelerationPath`, `GrpcAccelerationPath`), cryptographic and protocol handshakes (TLS, ALPN, HTTP/2, QUIC), background connection driver loops (driving H2 stream multiplexing, QUIC packet loops), wire codecs (LPM framing, QPACK, text/binary parsing), and streaming pipe strategies (`buffered`, `server_stream`, `client_stream`, `duplex`).
   - **Strict Invariants**:
     - Protocol subsystems **MUST NEVER** decide load balancing or select physical backend targets.
     - Protocol subsystems **MUST NEVER** manage persistent connection pool lifecycle, endpoint health states, or cross-endpoint failover.
@@ -106,7 +106,7 @@ Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) wi
 
 ### 3.1 Rust Data Plane (`crates/`)
 - `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
-- `velda-transport`: Edge Traffic Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff).
+- `velda-transport`: Edge Traffic Ingress Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff). Strictly ingress-oriented.
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
 - `velda-http1`: Owns L7 HTTP/1.1 protocol lifecycle (RFC 9112: text streaming, keep-alive, zero-copy parsing, and downstream connection handling).
 - `velda-http2`: Owns L7 HTTP/2 protocol engine (RFC 9113: binary framing, flow control, multiplexed stream lifecycle, and responder).
@@ -115,12 +115,12 @@ Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) wi
 - `velda-router`: Owns route matching (Path, Host, Method, Headers) and route selection.
 - `velda-plugin`: Owns hook registration and execution order. Hooks have constrained authority: `Action::Continue`, `Action::Respond`, `Action::Reject`.
 - `velda-discovery`: [Stage 1] Backend Topology Discovery (DNS / static endpoints, in-memory cache, LKG resilience, zero-IO hot path).
-- `velda-upstream`: [Stage 2] Logical backends, endpoint lifecycle, passive health tracking, and eligible candidate management.
+- `velda-upstream`: [Stage 2] Logical backends, endpoint lifecycle, passive health tracking, and eligible candidate management. 100% protocol-blind (zero socket syscalls, zero libc setsockopt, zero wire framing).
 - `velda-lb`: [Stage 3] Pure in-memory load balancing algorithms (RoundRobin, WRR, LeastConn, Maglev, RingHash, P2C, Random, Hash). Zero allocations on hot path.
 - `velda-connection-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.
-- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, initializes subsystem states, and starts `velda-transport` engine).
+- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, pre-computes protocol-specialized upstreams in `pre_compile/upstream/`, and starts `velda-transport` engine).
 
 ### 3.2 Go Control Plane (`control-plane/`)
 - Follows **Clean Architecture / DDD**:

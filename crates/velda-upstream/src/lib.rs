@@ -6,7 +6,6 @@
 //! Core invariant:
 //! **Router decides $\rightarrow$ Upstream resolves $\rightarrow$ Protocol connects & executes.**
 
-pub mod connection;
 pub mod error;
 pub mod health;
 pub mod upstream;
@@ -29,7 +28,6 @@ pub use velda_lb::{
 };
 
 // Re-exports for clean, ergonomic usage within upstream
-pub use connection::{SocketAccelerationPath, connect_tcp_stream};
 pub use error::{Result, UpstreamError};
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
 pub use upstream::{Upstream, UpstreamTimeouts};

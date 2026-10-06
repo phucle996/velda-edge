@@ -26,5 +26,5 @@ pub use http2::Http2Upstream;
 pub use http3::Http3Upstream;
 pub use lb::{EdgeUpstream, LbAlgorithm};
 pub use table::{SubUpstreamTable, UpstreamTable, build_upstreams, build_upstreams_default};
-pub use tcp::TcpUpstream;
+pub use tcp::{TcpAccelerationPath, TcpUpstream};
 pub use udp::UdpUpstream;

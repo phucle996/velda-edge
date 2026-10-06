@@ -2130,7 +2130,6 @@ name = "velda-upstream"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "libc",
  "serde",
  "thiserror",
  "tokio",

@@ -380,9 +380,8 @@ pub fn build_upstreams(
                 udp_map.insert(config.id.clone(), Arc::new(UdpUpstream::new(inner)));
             }
             "raw" | "tcp" => {
-                let tcp_acceleration = velda_upstream::SocketAccelerationPath::for_topology(
-                    topology, &timeouts, is_tls,
-                );
+                let tcp_acceleration =
+                    super::tcp::TcpAccelerationPath::for_topology(topology, &timeouts, is_tls);
                 tcp_map.insert(
                     config.id.clone(),
                     Arc::new(TcpUpstream::new(inner, tcp_acceleration)),
