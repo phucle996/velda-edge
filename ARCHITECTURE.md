@@ -40,7 +40,32 @@ Velda Edge is a performance-oriented, polyglot edge platform organized into thre
 
 ---
 
-## 2. Core Architectural Invariants
+## 2. Core Architectural Model & Invariants
+
+Velda Edge is built around **The Hourglass Architecture** (Top cone: pre-bound Ingress $\to$ Razor-thin in-memory waist: Router $\to$ Bottom cone: autonomous Upstream), fused with **Flat Workflows** and **Strict Protocol Isolation**.
+
+```text
+               DOWNSTREAM INGRESS (Top Cone)
+   [ HTTP/1.1 | HTTP/2 | HTTP/3 | gRPC TCP | gRPC UDP | L4 TCP/UDP ]
+   ↳ Dedicated Listener Runners (pre-bound at cold start)
+                  \                           /
+                   \                         /
+                    ▼                       ▼
+               ┌─────────────────────────────────┐
+               │      THE NARROW WAIST (Eo)      │
+               │   Pure In-Memory Static Route   │
+               │  (Path/Host/Method → UpstreamId)│
+               └─────────────────────────────────┘
+                    ▲                       ▲
+                   /                         \
+                  /                           \
+               UPSTREAM EGRESS (Bottom Cone)
+   [ HTTP/1 Pool | H2 Multiplex | H3 QUIC | gRPC TCP | gRPC UDP | L4 Pipe ]
+   ↳ Direct Protocol Stream Pipe & Autonomous Sharded Pools
+```
+
+> [!NOTE]
+> For the comprehensive mental model, design philosophy, and anti-pattern breakdown, see [Hourglass Architecture](docs/HOURGLASS_MODEL.md).
 
 ### 2.1 The Hot-Path Invariant (Zero-IO in Serving)
 Request processing in the Data Plane hot path (`crates/`) **never**:

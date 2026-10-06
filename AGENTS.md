@@ -7,6 +7,7 @@ This document specifies the engineering contract, architectural invariants, and 
 ## 1. Mission & Architectural Mindset
 
 Velda Edge is a performance-oriented, polyglot edge platform built around:
+- **The Hourglass Architecture**: Top cone (pre-bound Ingress) $\to$ Razor-thin in-memory waist (Router) $\to$ Bottom cone (autonomous Upstream) (see [Hourglass Architecture](docs/HOURGLASS_MODEL.md))
 - **Flat workflows** (`decode -> pre_route -> route -> pre_upstream -> upstream -> post_response -> encode`)
 - **Flat entities** (`Session`, `Stream`, `RequestContext`, `RequestState`, `Route`, `Upstream`, `Endpoint`)
 - **Explicit ownership & clean dependency boundaries**

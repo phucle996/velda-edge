@@ -14,7 +14,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let first = args[1].as_str();
         if matches!(first, "-v" | "--version" | "version") {
             let prov = velda_core::Provenance::current();
-            println!("{}", prov.banner("velda-edge"));
+            let config = EdgeConfig::default();
+            let hardware = HardwareTopology::probe();
+            let runtime_profile = resolve_runtime_profile(&config.runtime_dir(), &hardware);
+            let worker_threads = runtime_profile.transport.io_workers.max(1);
+            let cpu_pinning = runtime_profile.transport.cpu_pinning;
+            let listeners =
+                match velda_edge::load_initial_runtime(&config.runtime_dir(), &runtime_profile) {
+                    Ok(rt) => rt
+                        .config
+                        .listeners
+                        .iter()
+                        .map(|l| {
+                            let tls_suffix = if l.tls.enabled { "+TLS" } else { "" };
+                            format!(
+                                "{} ({}{})",
+                                l.address,
+                                l.application.protocol.to_uppercase(),
+                                tls_suffix
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
+                };
+            velda_edge::print_startup_banner(
+                &prov,
+                &hardware,
+                worker_threads,
+                cpu_pinning,
+                &config.runtime_dir(),
+                &listeners,
+            );
             return Ok(());
         }
         if matches!(first, "-h" | "--help" | "help") {
@@ -32,6 +62,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = velda_core::provenance::watermark();
     let prov = velda_core::Provenance::current();
 
+    // Discover hardware topology and runtime profile to size Tokio runtime
+    let config = EdgeConfig::default();
+    let hardware = HardwareTopology::probe();
+    let runtime_profile = resolve_runtime_profile(&config.runtime_dir(), &hardware);
+    let worker_threads = runtime_profile.transport.io_workers.max(1);
+    let cpu_pinning = runtime_profile.transport.cpu_pinning;
+
+    // Resolve initial listeners for banner display
+    let listeners = match velda_edge::load_initial_runtime(&config.runtime_dir(), &runtime_profile)
+    {
+        Ok(rt) => rt
+            .config
+            .listeners
+            .iter()
+            .map(|l| {
+                let tls_suffix = if l.tls.enabled { "+TLS" } else { "" };
+                format!(
+                    "{} ({}{})",
+                    l.address,
+                    l.application.protocol.to_uppercase(),
+                    tls_suffix
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    // Print the Hourglass ASCII startup banner to console
+    velda_edge::print_startup_banner(
+        &prov,
+        &hardware,
+        worker_threads,
+        cpu_pinning,
+        &config.runtime_dir(),
+        &listeners,
+    );
+
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -39,21 +106,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-
-    tracing::info!(
-        version = prov.version,
-        git_hash = prov.git_hash,
-        author = prov.author,
-        target = prov.target_triple,
-        "Initializing Velda Edge Data Plane supervisor..."
-    );
-
-    // Discover hardware topology and runtime profile to size Tokio runtime
-    let config = EdgeConfig::default();
-    let hardware = HardwareTopology::probe();
-    let runtime_profile = resolve_runtime_profile(&config.runtime_dir(), &hardware);
-    let worker_threads = runtime_profile.transport.io_workers.max(1);
-    let cpu_pinning = runtime_profile.transport.cpu_pinning;
 
     tracing::info!(
         cores = hardware.available_cores,

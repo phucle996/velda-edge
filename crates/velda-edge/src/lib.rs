@@ -13,6 +13,7 @@
 //! is owned by `velda-transport` and downstream protocol crates.
 
 pub mod affinity;
+pub mod banner;
 pub mod bootstrap;
 pub mod config;
 pub mod error;
@@ -22,6 +23,7 @@ pub mod reload;
 pub mod runtime_profile;
 
 pub use affinity::{ThreadPinner, get_allowed_cores, pin_current_thread_to_core};
+pub use banner::{format_startup_banner, print_startup_banner};
 pub use bootstrap::{EdgeSupervisor, bootstrap};
 pub use config::EdgeConfig;
 pub use error::EdgeError;
