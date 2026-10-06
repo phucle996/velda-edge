@@ -170,9 +170,9 @@ pub fn get_or_init_h3_engine_for_peer(
 /// Ingests the packet, drives QUIC handshake/flow control, transmits outgoing datagrams,
 /// and passes decoded requests through `Http3Router`.
 pub async fn handle_http3_handoff(
-    datagram: Datagram,
-    socket: Arc<UdpSocket>,
     listener_id: Arc<str>,
+    socket: Arc<UdpSocket>,
+    datagram: Datagram,
     _config: velda_http3::Http3Config,
     runtime: &SharedRuntime,
 ) {

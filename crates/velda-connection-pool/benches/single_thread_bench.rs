@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{BenchResource, CountingAllocator, calculate_big_o, format_duration};
-use velda_connection_pool::{ConnectionKey, ConnectionProfile, PoolConfig, PoolLease, PoolManager};
+use velda_connection_pool::{
+    ConnectionKey, ConnectionProfile, PoolConfig, PoolManager, SequentialLease,
+};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -157,12 +159,12 @@ fn bench_lease_overhead() {
     let elapsed_mux = start_mux.elapsed();
     let (allocs_mux, _) = ALLOCATOR.snapshot();
 
-    // 4. Raw PoolLease (Baseline)
+    // 4. Raw SequentialLease (Baseline)
     ALLOCATOR.reset();
     let start_raw = Instant::now();
     for _ in 0..iters {
         if let Some(res) = pool.acquire(&key_seq, Duration::from_secs(60)) {
-            let lease = PoolLease::new(res, key_seq.clone(), Arc::clone(&pool), false);
+            let lease = SequentialLease::new(res, key_seq.clone(), Arc::clone(&pool), false);
             std::hint::black_box(&*lease);
         }
     }
@@ -194,7 +196,7 @@ fn bench_lease_overhead() {
     print_row("SequentialLease (HTTP/1.1 Drop)", elapsed_seq, allocs_seq);
     print_row("ExclusiveLease (TCP Recycle)", elapsed_excl, allocs_excl);
     print_row("StreamLease (HTTP/2 Atomic)", elapsed_mux, allocs_mux);
-    print_row("Raw PoolLease (Baseline)", elapsed_raw, allocs_raw);
+    print_row("Raw SequentialLease (Baseline)", elapsed_raw, allocs_raw);
     println!();
 }
 

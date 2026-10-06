@@ -128,9 +128,6 @@ where
     }
 }
 
-/// Backwards-compatible alias for [`SequentialLease`].
-pub type PoolLease<K, R> = SequentialLease<K, R>;
-
 // ============================================================================
 // 2. ExclusiveLease (Raw TCP / L4 Dedicated Tunnel)
 // ============================================================================

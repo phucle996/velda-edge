@@ -135,9 +135,9 @@ pub fn get_or_init_grpc_udp_engine_for_peer(
 
 /// Dispatches incoming UDP L7 handoff for gRPC over UDP to the persistent state machine.
 pub async fn handle_grpc_udp(
-    datagram: Datagram,
-    socket: Arc<UdpSocket>,
     listener_id: Arc<str>,
+    socket: Arc<UdpSocket>,
+    datagram: Datagram,
     config: GrpcConfig,
     runtime: &SharedRuntime,
 ) {

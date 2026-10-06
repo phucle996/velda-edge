@@ -45,24 +45,32 @@ async fn test_traffic_engine_pre_bound_tcp_ingress_carries_listener_id() {
         engine
             .run(
                 shutdown_rx,
-                move |mut conn| {
+                {
                     let web = Arc::clone(&web_clone);
                     let raw = Arc::clone(&raw_clone);
-                    async move {
-                        let listener_id = conn.listener_id().unwrap().to_string();
-                        let mut buf = [0u8; 32];
-                        let _ = conn.read(&mut buf).await;
-                        if listener_id == "http" || listener_id == "https" {
-                            web.fetch_add(1, Ordering::SeqCst);
-                            let _ = conn.write_all(b"web-ok").await;
-                        } else {
-                            assert_eq!(listener_id, "tcp-ingress");
-                            raw.fetch_add(1, Ordering::SeqCst);
-                            let _ = conn.write_all(b"raw-ok").await;
+                    move |_id| {
+                        let web = Arc::clone(&web);
+                        let raw = Arc::clone(&raw);
+                        move |mut conn| {
+                            let web = Arc::clone(&web);
+                            let raw = Arc::clone(&raw);
+                            async move {
+                                let listener_id = conn.listener_id().unwrap().to_string();
+                                let mut buf = [0u8; 32];
+                                let _ = conn.read(&mut buf).await;
+                                if listener_id == "http" || listener_id == "https" {
+                                    web.fetch_add(1, Ordering::SeqCst);
+                                    let _ = conn.write_all(b"web-ok").await;
+                                } else {
+                                    assert_eq!(listener_id, "tcp-ingress");
+                                    raw.fetch_add(1, Ordering::SeqCst);
+                                    let _ = conn.write_all(b"raw-ok").await;
+                                }
+                            }
                         }
                     }
                 },
-                |_id, _socket, _dgram| async move {},
+                |_| |_id, _socket, _dgram| async move {},
             )
             .await
     });
@@ -117,16 +125,21 @@ async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
         engine
             .run(
                 shutdown_rx,
-                |mut conn| async move {
-                    let mut buf = [0u8; 32];
-                    if let Ok(n) = conn.read(&mut buf).await {
-                        let resp = format!("ack-tcp-{}", String::from_utf8_lossy(&buf[..n]));
-                        let _ = conn.write_all(resp.as_bytes()).await;
+                |_| {
+                    |mut conn| async move {
+                        let mut buf = [0u8; 32];
+                        if let Ok(n) = conn.read(&mut buf).await {
+                            let resp = format!("ack-tcp-{}", String::from_utf8_lossy(&buf[..n]));
+                            let _ = conn.write_all(resp.as_bytes()).await;
+                        }
                     }
                 },
-                |id, socket, dgram| async move {
-                    let resp = format!("ack-udp-{id}-{}", String::from_utf8_lossy(dgram.data()));
-                    let _ = socket.send_to(resp.as_bytes(), dgram.peer()).await;
+                |_| {
+                    |id, socket, dgram| async move {
+                        let resp =
+                            format!("ack-udp-{id}-{}", String::from_utf8_lossy(dgram.data()));
+                        let _ = socket.send_to(resp.as_bytes(), dgram.peer()).await;
+                    }
                 },
             )
             .await
@@ -171,14 +184,16 @@ async fn test_traffic_engine_declarative_reconciliation() {
         engine
             .run(
                 shutdown_rx,
-                |mut conn| async move {
-                    let mut buf = [0u8; 16];
-                    if let Ok(n) = conn.read(&mut buf).await {
-                        let msg = format!("ack-{}", String::from_utf8_lossy(&buf[..n]));
-                        let _ = conn.write_all(msg.as_bytes()).await;
+                |_| {
+                    |mut conn| async move {
+                        let mut buf = [0u8; 16];
+                        if let Ok(n) = conn.read(&mut buf).await {
+                            let msg = format!("ack-{}", String::from_utf8_lossy(&buf[..n]));
+                            let _ = conn.write_all(msg.as_bytes()).await;
+                        }
                     }
                 },
-                |_id, _socket, _dgram| async move {},
+                |_| |_id, _socket, _dgram| async move {},
             )
             .await
     });
@@ -272,19 +287,23 @@ async fn test_multi_protocol_engine_tcp_udp_dispatch_by_listener_id() {
         engine
             .run(
                 shutdown_rx,
-                |mut conn| async move {
-                    let mut buf = [0u8; 32];
-                    let _ = conn.read(&mut buf).await;
-                    let reply: &[u8] = match conn.listener_id() {
-                        Some("h1") => b"h1-ack",
-                        Some("h2") => b"h2-ack",
+                |id| {
+                    let reply: &'static [u8] = match id {
+                        "h1" => b"h1-ack",
+                        "h2" => b"h2-ack",
                         _ => b"tcp-ack",
                     };
-                    let _ = conn.write_all(reply).await;
+                    move |mut conn| async move {
+                        let mut buf = [0u8; 32];
+                        let _ = conn.read(&mut buf).await;
+                        let _ = conn.write_all(reply).await;
+                    }
                 },
-                |id, sock, dgram| async move {
-                    let reply: &[u8] = if &*id == "h3" { b"h3-ack" } else { b"udp-ack" };
-                    let _ = sock.send_to(reply, dgram.peer()).await;
+                |id| {
+                    let reply: &'static [u8] = if id == "h3" { b"h3-ack" } else { b"udp-ack" };
+                    move |_id, sock, dgram| async move {
+                        let _ = sock.send_to(reply, dgram.peer()).await;
+                    }
                 },
             )
             .await

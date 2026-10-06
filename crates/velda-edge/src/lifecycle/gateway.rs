@@ -1,8 +1,7 @@
 //! End-to-end gateway execution and traffic serving coordination.
 
-use std::sync::Arc;
 use tokio::sync::watch;
-use velda_transport::{Connection, Datagram, TrafficEngine, UdpSocket};
+use velda_transport::TrafficEngine;
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
@@ -46,24 +45,16 @@ pub async fn run_gateway(
     let rt_tcp = shared_runtime.clone();
     let tcp_dispatcher = move |listener_id: &str| {
         let runner = build_tcp_pipeline_runner(listener_id, rt_tcp.clone());
-        move |conn: Connection| {
-            let runner = Arc::clone(&runner);
-            runner(conn)
-        }
+        move |conn| runner(conn)
     };
 
     let rt_udp = shared_runtime.clone();
     let udp_dispatcher = move |listener_id: &str| {
         let runner = build_udp_pipeline_runner(listener_id, rt_udp.clone());
-        move |id: Arc<str>, socket: Arc<UdpSocket>, dgram: Datagram| {
-            let runner = Arc::clone(&runner);
-            runner(id, socket, dgram)
-        }
+        move |id, sock, dgram| runner(id, sock, dgram)
     };
 
-    let engine_result = engine
-        .run_with_dispatchers(shutdown, tcp_dispatcher, udp_dispatcher)
-        .await;
+    let engine_result = engine.run(shutdown, tcp_dispatcher, udp_dispatcher).await;
 
     // 3. Await background IPC task termination
     let _ = ipc_task.await;

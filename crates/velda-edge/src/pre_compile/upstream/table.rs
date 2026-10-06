@@ -320,12 +320,13 @@ pub fn build_upstreams(
                         )),
                     );
                 } else {
-                    let grpc_acceleration = velda_grpc::GrpcAccelerationPath::for_topology(
-                        topology,
-                        timeouts.connect,
-                        timeouts.idle,
-                        is_tls,
-                    );
+                    let grpc_acceleration =
+                        velda_grpc::tcp::client::GrpcAccelerationPath::for_topology(
+                            topology,
+                            timeouts.connect,
+                            timeouts.idle,
+                            is_tls,
+                        );
                     grpc_tcp_map.insert(
                         config.id.clone(),
                         Arc::new(GrpcTcpUpstream::new(

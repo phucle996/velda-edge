@@ -116,7 +116,7 @@ impl TrafficEngine {
 
     /// Starts all ingress listener loops across all configured TCP and UDP ports concurrently,
     /// resolving specialized protocol handlers per listener via `tcp_dispatcher` and `udp_dispatcher`.
-    pub async fn run_with_dispatchers<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
+    pub async fn run<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
         mut self,
         mut shutdown: watch::Receiver<bool>,
         tcp_dispatcher: TcpD,
@@ -210,28 +210,5 @@ impl TrafficEngine {
 
         tracing::info!("Velda Traffic Engine stopped gracefully across all ports");
         Ok(())
-    }
-
-    /// Starts all ingress listener loops across all configured TCP and UDP ports concurrently,
-    /// dispatching stateful TCP connections to `tcp_handler` and stateless UDP datagrams to `udp_handler`
-    /// until shutdown is signaled.
-    pub async fn run<TcpH, UdpH, FutTcp, FutUdp>(
-        self,
-        shutdown: watch::Receiver<bool>,
-        tcp_handler: TcpH,
-        udp_handler: UdpH,
-    ) -> Result<()>
-    where
-        TcpH: Fn(Connection) -> FutTcp + Send + Sync + Clone + 'static,
-        FutTcp: std::future::Future<Output = ()> + Send + 'static,
-        UdpH: Fn(Arc<str>, Arc<UdpSocket>, Datagram) -> FutUdp + Send + Sync + Clone + 'static,
-        FutUdp: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.run_with_dispatchers(
-            shutdown,
-            move |_| tcp_handler.clone(),
-            move |_| udp_handler.clone(),
-        )
-        .await
     }
 }

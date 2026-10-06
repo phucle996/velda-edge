@@ -18,7 +18,7 @@ use crate::container::{
     MultiplexedPool, ShardTable, SubPool, optimal_max_idle_per_key, optimal_shard_count,
 };
 use crate::key::ConnectionKey;
-use crate::lease::{ConnectionLease, ExclusiveLease, PoolLease, SequentialLease, StreamLease};
+use crate::lease::{ConnectionLease, ExclusiveLease, SequentialLease, StreamLease};
 use crate::profile::{ConnectionProfile, ReuseMode};
 use crate::resource::PoolableResource;
 
@@ -246,25 +246,25 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         None
     }
 
-    /// Acquires an idle reusable connection wrapped in an RAII [`PoolLease`].
+    /// Acquires an idle reusable connection wrapped in an RAII [`SequentialLease`].
     pub fn acquire_lease(
         self: &Arc<Self>,
         key: &K,
         idle_timeout: Duration,
-    ) -> Option<PoolLease<K, R>> {
+    ) -> Option<SequentialLease<K, R>> {
         self.acquire_lease_with_lifetime(key, idle_timeout, self.config.max_lifetime, false)
     }
 
-    /// Acquires an idle reusable connection wrapped in an RAII [`PoolLease`] with explicit lifetime and draining mode.
+    /// Acquires an idle reusable connection wrapped in an RAII [`SequentialLease`] with explicit lifetime and draining mode.
     pub fn acquire_lease_with_lifetime(
         self: &Arc<Self>,
         key: &K,
         idle_timeout: Duration,
         max_lifetime: Option<Duration>,
         is_draining: bool,
-    ) -> Option<PoolLease<K, R>> {
+    ) -> Option<SequentialLease<K, R>> {
         let res = self.acquire_with_lifetime(key, idle_timeout, max_lifetime)?;
-        Some(PoolLease::new(
+        Some(SequentialLease::new(
             res,
             key.clone(),
             Arc::clone(self),

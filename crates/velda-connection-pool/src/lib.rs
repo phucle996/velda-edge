@@ -18,19 +18,6 @@ pub mod pool;
 pub mod profile;
 pub mod resource;
 
-/// Backward-compatibility shims for pre-refactor module paths.
-pub mod connection {
-    pub use crate::container::multiplexed::{MultiplexedConnection, MultiplexedPool};
-    pub use crate::lease::{ConnectionLease, ExclusiveLease, SequentialLease, StreamLease};
-    pub use crate::profile::{ConnectionProfile, ReuseMode};
-}
-
-/// Backward-compatibility shims for pre-refactor module paths.
-pub mod manager {
-    pub use crate::config::{PoolConfig, PoolStats};
-    pub use crate::pool::PoolManager;
-}
-
 // Flat canonical exports at crate root
 pub use config::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_LIFETIME, PoolConfig, PoolStats};
 pub use container::{
@@ -42,7 +29,7 @@ pub use container::{
 };
 pub use key::ConnectionKey;
 pub use lease::{
-    ConnectionLease, ExclusiveLease, ExclusiveReturnTarget, PoolLease, SequentialLease, StreamLease,
+    ConnectionLease, ExclusiveLease, ExclusiveReturnTarget, SequentialLease, StreamLease,
 };
 pub use pool::PoolManager;
 pub use profile::{ConnectionProfile, ReuseMode};

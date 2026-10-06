@@ -343,7 +343,7 @@ async fn bench_reconciler_channel_contention() {
 
     let engine_task = tokio::spawn(async move {
         let _ = engine
-            .run(shutdown_rx, |_c| async {}, |_id, _s, _d| async {})
+            .run(shutdown_rx, |_| |_c| async {}, |_| |_id, _s, _d| async {})
             .await;
     });
 

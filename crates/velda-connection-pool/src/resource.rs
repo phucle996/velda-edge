@@ -70,11 +70,6 @@ impl<T: PoolableResource + ?Sized> PoolableResource for Box<T> {
     }
 }
 
-/// Transactional RAII lease alias for [`crate::lease::SequentialLease`].
-///
-/// Automatically returns healthy sockets to the pool on drop and closes dirty sockets.
-pub type PoolLease<K, R> = crate::lease::SequentialLease<K, R>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +77,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
+    use crate::lease::SequentialLease;
     use crate::pool::PoolManager;
 
     #[derive(Debug)]
@@ -142,7 +138,7 @@ mod tests {
         let pool = Arc::new(PoolManager::<String, MockResource>::new());
         let key = "test_backend".to_string();
         let res = MockResource::new();
-        let mut lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), false);
+        let mut lease = SequentialLease::new(res, key.clone(), Arc::clone(&pool), false);
 
         assert_eq!(&lease.key, &key);
         assert!(!lease.is_draining);
@@ -160,7 +156,7 @@ mod tests {
         let pool = Arc::new(PoolManager::<String, MockResource>::new());
         let key = "backend_a".to_string();
         let res = MockResource::new();
-        let lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), false);
+        let lease = SequentialLease::new(res, key.clone(), Arc::clone(&pool), false);
 
         // explicit release as reusable returns connection to pool
         lease.release(true);
@@ -178,7 +174,7 @@ mod tests {
         let pool = Arc::new(PoolManager::<String, MockResource>::new());
         let key = "backend_b".to_string();
         let res = MockResource::new();
-        let mut lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), false);
+        let mut lease = SequentialLease::new(res, key.clone(), Arc::clone(&pool), false);
 
         let before = lease.last_used_at();
         std::thread::sleep(Duration::from_millis(1));
@@ -197,7 +193,7 @@ mod tests {
         let res = MockResource::new();
 
         {
-            let mut lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), false);
+            let mut lease = SequentialLease::new(res, key.clone(), Arc::clone(&pool), false);
             lease.close(); // marked unhealthy
             // drops here
         }
@@ -213,7 +209,7 @@ mod tests {
         let res = MockResource::new();
 
         {
-            let _lease = PoolLease::new(res, key.clone(), Arc::clone(&pool), true); // draining = true
+            let _lease = SequentialLease::new(res, key.clone(), Arc::clone(&pool), true); // draining = true
             // drops here
         }
 

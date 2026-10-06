@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::{L7Request, L7Response, StreamingMode};
-use velda_grpc::client::GrpcUpstreamConnector;
-use velda_grpc::pipe::{GrpcPipeStrategy, pipe_grpc_stream};
-use velda_grpc::server::GrpcServerStream;
+use velda_grpc::tcp::client::{GrpcAccelerationPath, GrpcUpstreamConnector};
+use velda_grpc::tcp::pipe::{GrpcPipeStrategy, pipe_grpc_stream};
+use velda_grpc::tcp::server::GrpcServerStream;
 
 use super::super::lb::EdgeUpstream;
 use crate::error::EdgeError;
@@ -37,9 +37,6 @@ impl PoolableResource for GrpcTcpClientResource {
     fn close(&mut self) {}
 }
 
-/// Backwards-compatibility alias for [`GrpcTcpClientResource`].
-pub type GrpcClientResource = GrpcTcpClientResource;
-
 /// Layer 7 gRPC over TCP Upstream managing streaming and unary proxying handoff.
 ///
 /// Pre-compiled with static load balancer, streaming strategy, and sharded multiplexed client pool.
@@ -57,7 +54,7 @@ pub struct GrpcTcpUpstream {
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
-    pub acceleration: velda_grpc::GrpcAccelerationPath,
+    pub acceleration: GrpcAccelerationPath,
 }
 
 impl std::fmt::Debug for GrpcTcpUpstream {
@@ -79,7 +76,7 @@ impl GrpcTcpUpstream {
         streaming: StreamingMode,
         shard_count: usize,
         max_concurrent_streams: u32,
-        acceleration: velda_grpc::GrpcAccelerationPath,
+        acceleration: GrpcAccelerationPath,
     ) -> Self {
         let strategy = GrpcPipeStrategy::from_streaming(streaming);
         Self {
@@ -163,6 +160,3 @@ impl GrpcTcpUpstream {
         })
     }
 }
-
-/// Backwards-compatibility alias for [`GrpcTcpUpstream`].
-pub type GrpcUpstream = GrpcTcpUpstream;

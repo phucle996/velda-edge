@@ -20,7 +20,7 @@ pub mod table;
 pub mod tcp;
 pub mod udp;
 
-pub use grpc::{GrpcTcpUpstream, GrpcUdpUpstream, GrpcUpstream};
+pub use grpc::{GrpcTcpUpstream, GrpcUdpUpstream};
 pub use http1::{Http1Upstream, UpstreamHttp1Stream};
 pub use http2::Http2Upstream;
 pub use http3::Http3Upstream;

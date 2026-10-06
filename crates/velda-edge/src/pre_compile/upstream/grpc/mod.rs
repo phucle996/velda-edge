@@ -7,5 +7,5 @@
 pub mod tcp;
 pub mod udp;
 
-pub use tcp::{GrpcClientResource, GrpcTcpClientResource, GrpcTcpUpstream, GrpcUpstream};
+pub use tcp::{GrpcTcpClientResource, GrpcTcpUpstream};
 pub use udp::{GrpcUdpClientResource, GrpcUdpUpstream};

@@ -3,7 +3,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use velda_upstream::{Discovery, Endpoint, Upstream, UpstreamTimeouts};
+use velda_core::Endpoint;
+use velda_discovery::Discovery;
+use velda_lb::RoundRobin;
+use velda_upstream::{Upstream, UpstreamTimeouts};
 
 #[tokio::test]
 async fn test_upstream_explicit_discovery_and_round_robin() {
@@ -23,7 +26,7 @@ async fn test_upstream_explicit_discovery_and_round_robin() {
         "explicit-svc",
         "tcp",
         discovery,
-        velda_upstream::RoundRobin::new(),
+        RoundRobin::new(),
         timeouts,
     );
 
@@ -52,7 +55,7 @@ async fn test_upstream_passive_health_and_failover() {
         "failover-svc",
         "tcp",
         discovery,
-        velda_upstream::RoundRobin::new(),
+        RoundRobin::new(),
         timeouts,
     )
     .with_health_config(velda_upstream::HealthConfig::passive_only(
@@ -92,7 +95,7 @@ async fn test_upstream_prune_retired_endpoints() {
         "prune-svc",
         "tcp",
         discovery.clone(),
-        velda_upstream::RoundRobin::new(),
+        RoundRobin::new(),
         timeouts,
     )
     .with_health_config(health_config);

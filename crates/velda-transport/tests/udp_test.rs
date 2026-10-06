@@ -175,23 +175,25 @@ async fn test_udp_ingress_delivers_datagram_with_listener_id() {
 
     let engine_task = tokio::spawn(async move {
         engine
-            .run(
-                shutdown_rx,
-                |_conn| async move {},
-                move |listener_id: Arc<str>, socket: Arc<UdpSocket>, dgram: Datagram| {
+            .run(shutdown_rx, |_| |_conn| async move {}, {
+                let received_tx = received_tx.clone();
+                move |_| {
                     let tx = received_tx.clone();
-                    async move {
-                        assert_eq!(&*listener_id, "h3-ingress");
-                        assert_eq!(dgram.data(), b"QUIC-Client-Hello");
+                    move |listener_id: Arc<str>, socket: Arc<UdpSocket>, dgram: Datagram| {
+                        let tx = tx.clone();
+                        async move {
+                            assert_eq!(&*listener_id, "h3-ingress");
+                            assert_eq!(dgram.data(), b"QUIC-Client-Hello");
 
-                        socket
-                            .send_to(b"QUIC-Server-Hello", dgram.peer())
-                            .await
-                            .unwrap();
-                        let _ = tx.send(()).await;
+                            socket
+                                .send_to(b"QUIC-Server-Hello", dgram.peer())
+                                .await
+                                .unwrap();
+                            let _ = tx.send(()).await;
+                        }
                     }
-                },
-            )
+                }
+            })
             .await
     });
 

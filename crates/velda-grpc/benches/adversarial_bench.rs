@@ -13,7 +13,7 @@ use velda_core::MemoryTier;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::error::GrpcError;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
-use velda_grpc::server::GrpcServerConnection;
+use velda_grpc::tcp::server::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
 #[tokio::main]
