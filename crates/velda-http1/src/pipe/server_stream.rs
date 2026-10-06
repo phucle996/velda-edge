@@ -8,14 +8,17 @@
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use velda_core::Body;
+
 use super::sanitize_hop_by_hop_headers;
 use crate::client::connector::{
     read_chunk_sized, read_next_chunk, read_response_head, send_request,
 };
+use crate::client::response::Http1Response;
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
-use crate::server::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
+use crate::server::request::{Http1BodyFraming, Http1Request};
 
 /// Pipes a server-streaming HTTP/1.1 request (buffered request, streaming response).
 ///
@@ -23,8 +26,7 @@ use crate::server::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
 /// immediately so that the upstream connection drops and stops processing (e.g. stops LLM generation).
 pub async fn pipe_server_stream<DownIO, UpIO>(
     conn: &mut Http1ServerConnection<DownIO>,
-    mut head: Http1RequestHead,
-    framing: Http1BodyFraming,
+    mut req: Http1Request,
     upstream: &mut UpIO,
     config: &Http1Config,
 ) -> Result<(), Http1Error>
@@ -32,13 +34,9 @@ where
     DownIO: AsyncRead + AsyncWrite + Unpin,
     UpIO: AsyncRead + AsyncWrite + Unpin,
 {
-    sanitize_hop_by_hop_headers(&mut head.headers);
+    sanitize_hop_by_hop_headers(&mut req.headers);
 
-    // 1. Read complete downstream request body into RAM
-    let body = conn.read_body(framing).await?;
-    let req = Http1Request::from_parts(head, body);
-
-    // 2. Send complete request to upstream backend
+    // 1. Send complete request to upstream backend
     send_request(&req, upstream, config).await?;
 
     // 3. Read upstream response head
@@ -46,7 +44,19 @@ where
     let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
     sanitize_hop_by_hop_headers(&mut resp_head.headers);
 
-    // 4. Send chunked response head downstream
+    // 4. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body_status = resp_head.status.is_informational()
+        || resp_head.status == http::StatusCode::NO_CONTENT
+        || resp_head.status == http::StatusCode::NOT_MODIFIED;
+
+    if is_head || is_no_body_status {
+        let resp = Http1Response::from_parts(resp_head, Body::Empty);
+        conn.send_response(&resp).await?;
+        return Ok(());
+    }
+
+    // Send chunked response head downstream
     conn.send_response_head_chunked(&resp_head).await?;
 
     // 5. Pump response chunks downstream with client disconnect detection

@@ -113,6 +113,8 @@ async fn splice_stream_to_stream(
     to: &TcpStream,
     pipe: &SplicePipe,
     chunk_size: usize,
+    last_activity_ms: Option<&std::sync::atomic::AtomicU64>,
+    start_instant: std::time::Instant,
 ) -> std::io::Result<u64> {
     use std::os::fd::AsRawFd;
     let from_fd = from.as_raw_fd();
@@ -142,6 +144,13 @@ async fn splice_stream_to_stream(
 
         if n == 0 {
             break;
+        }
+
+        if let Some(act) = last_activity_ms {
+            act.store(
+                start_instant.elapsed().as_millis() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         // Drain entire pipe into destination socket
@@ -190,6 +199,17 @@ pub async fn splice_bidirectional(
     server: &mut TcpStream,
     chunk_size: usize,
 ) -> std::io::Result<TransferStats> {
+    splice_bidirectional_inner(client, server, chunk_size, None, std::time::Instant::now()).await
+}
+
+#[cfg(target_os = "linux")]
+async fn splice_bidirectional_inner(
+    client: &mut TcpStream,
+    server: &mut TcpStream,
+    chunk_size: usize,
+    last_activity_ms: Option<&std::sync::atomic::AtomicU64>,
+    start_instant: std::time::Instant,
+) -> std::io::Result<TransferStats> {
     use std::os::fd::AsRawFd;
     let client_fd = client.as_raw_fd();
     let server_fd = server.as_raw_fd();
@@ -199,7 +219,15 @@ pub async fn splice_bidirectional(
 
     let (c2s_res, s2c_res) = tokio::join!(
         async {
-            let res = splice_stream_to_stream(client, server, &pipe_c2s, chunk_size).await;
+            let res = splice_stream_to_stream(
+                client,
+                server,
+                &pipe_c2s,
+                chunk_size,
+                last_activity_ms,
+                start_instant,
+            )
+            .await;
             if res.is_ok() {
                 unsafe {
                     libc::shutdown(server_fd, libc::SHUT_WR);
@@ -208,7 +236,15 @@ pub async fn splice_bidirectional(
             res
         },
         async {
-            let res = splice_stream_to_stream(server, client, &pipe_s2c, chunk_size).await;
+            let res = splice_stream_to_stream(
+                server,
+                client,
+                &pipe_s2c,
+                chunk_size,
+                last_activity_ms,
+                start_instant,
+            )
+            .await;
             if res.is_ok() {
                 unsafe {
                     libc::shutdown(client_fd, libc::SHUT_WR);
@@ -225,50 +261,93 @@ pub async fn splice_bidirectional(
 }
 
 /// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`]
+/// using the specified buffer size and an optional idle timeout enforced via a low-overhead Sleeping Watchdog.
+pub async fn forward_connection_with_timeout(
+    mut client: Connection,
+    mut server: TcpStream,
+    buffer_size: usize,
+    idle_timeout: Option<std::time::Duration>,
+) -> Result<TransferStats> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    let start_instant = Instant::now();
+    let last_activity_ms = Arc::new(AtomicU64::new(0));
+
+    let act_clone = last_activity_ms.clone();
+    let forward_fut = async {
+        #[cfg(target_os = "linux")]
+        {
+            match splice_bidirectional_inner(
+                client.stream_mut(),
+                &mut server,
+                buffer_size,
+                Some(&act_clone),
+                start_instant,
+            )
+            .await
+            {
+                Ok(stats) => return Ok(stats),
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "splice_bidirectional unavailable, falling back to copy_bidirectional"
+                    );
+                }
+            }
+        }
+
+        forward_bidirectional_with_sizes(client.stream_mut(), &mut server, buffer_size, buffer_size)
+            .await
+    };
+
+    let stats = if let Some(timeout) = idle_timeout {
+        let timeout_ms = timeout.as_millis() as u64;
+        let watchdog = async {
+            loop {
+                tokio::time::sleep(timeout).await;
+                let current_elapsed_ms = start_instant.elapsed().as_millis() as u64;
+                let last = last_activity_ms.load(Ordering::Relaxed);
+                if current_elapsed_ms.saturating_sub(last) >= timeout_ms {
+                    return Err(TransportError::Forward(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "L4 raw TCP stream idle timeout exceeded",
+                    )));
+                }
+            }
+        };
+
+        tokio::select! {
+            res = forward_fut => res?,
+            err = watchdog => err?,
+        }
+    } else {
+        forward_fut.await?
+    };
+
+    client.add_bytes_transferred(stats.client_to_server_bytes, stats.server_to_client_bytes);
+    Ok(stats)
+}
+
+/// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`]
 /// using the specified buffer size (e.g. from [`super::config::TcpListenerConfig::copy_buffer_size`]).
 ///
 /// On Linux, attempts kernel-space zero-copy splicing via [`splice_bidirectional`].
 /// Gracefully falls back to asynchronous user-space copy if splicing is unavailable or unsupported.
 pub async fn forward_connection_with_size(
-    mut client: Connection,
-    mut server: TcpStream,
+    client: Connection,
+    server: TcpStream,
     buffer_size: usize,
 ) -> Result<TransferStats> {
-    #[cfg(target_os = "linux")]
-    {
-        match splice_bidirectional(client.stream_mut(), &mut server, buffer_size).await {
-            Ok(stats) => {
-                client.add_bytes_transferred(
-                    stats.client_to_server_bytes,
-                    stats.server_to_client_bytes,
-                );
-                return Ok(stats);
-            }
-            Err(err) => {
-                tracing::debug!(
-                    error = %err,
-                    "splice_bidirectional unavailable, falling back to copy_bidirectional"
-                );
-            }
-        }
-    }
-
-    let stats = forward_bidirectional_with_sizes(
-        client.stream_mut(),
-        &mut server,
-        buffer_size,
-        buffer_size,
-    )
-    .await?;
-    client.add_bytes_transferred(stats.client_to_server_bytes, stats.server_to_client_bytes);
-    Ok(stats)
+    forward_connection_with_timeout(client, server, buffer_size, None).await
 }
 
 /// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`].
 ///
 /// Updates the internal byte counters of the client [`Connection`].
 pub async fn forward_connection(client: Connection, server: TcpStream) -> Result<TransferStats> {
-    forward_connection_with_size(client, server, 65536).await
+    forward_connection_with_timeout(client, server, 65536, None).await
 }
 
 /// Connects to a target upstream address and pumps bytes bidirectionally with the client connection.

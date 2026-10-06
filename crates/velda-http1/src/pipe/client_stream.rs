@@ -53,24 +53,33 @@ where
         ));
     }
 
-    // 5. Read bounded response body
-    let body = match resp_framing {
-        Http1BodyFraming::Empty => Body::Empty,
-        Http1BodyFraming::ContentLength(len) => {
-            if len > config.max_body_size {
-                return Err(Http1Error::PayloadTooLarge(len));
-            }
-            let mut bytes = BytesMut::with_capacity(len);
-            while bytes.len() < len {
-                let needed = len - bytes.len();
-                match read_chunk_sized(upstream, &mut read_buf, needed).await? {
-                    Some(c) => bytes.extend_from_slice(&c),
-                    None => break,
+    // 5. Read bounded response body (RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body)
+    let is_head = head.method == http::Method::HEAD;
+    let is_no_body_status = resp_head.status.is_informational()
+        || resp_head.status == http::StatusCode::NO_CONTENT
+        || resp_head.status == http::StatusCode::NOT_MODIFIED;
+
+    let body = if is_head || is_no_body_status {
+        Body::Empty
+    } else {
+        match resp_framing {
+            Http1BodyFraming::Empty => Body::Empty,
+            Http1BodyFraming::ContentLength(len) => {
+                if len > config.max_body_size {
+                    return Err(Http1Error::PayloadTooLarge(len));
                 }
+                let mut bytes = BytesMut::with_capacity(len);
+                while bytes.len() < len {
+                    let needed = len - bytes.len();
+                    match read_chunk_sized(upstream, &mut read_buf, needed).await? {
+                        Some(c) => bytes.extend_from_slice(&c),
+                        None => break,
+                    }
+                }
+                Body::Bytes(bytes.freeze())
             }
-            Body::Bytes(bytes.freeze())
+            Http1BodyFraming::Chunked => unreachable!(),
         }
-        Http1BodyFraming::Chunked => unreachable!(),
     };
 
     // 6. Send response downstream

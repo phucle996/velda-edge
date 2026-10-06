@@ -131,6 +131,7 @@ pub fn encode_response_head(
         && !headers.contains_key(CONTENT_LENGTH)
         && status != StatusCode::NO_CONTENT
         && status != StatusCode::NOT_MODIFIED
+        && !status.is_informational()
     {
         dst.put_slice(b"content-length: ");
         let mut itoa_buf = itoa::Buffer::new();
@@ -156,7 +157,11 @@ pub fn encode_response(response: &Http1Response, dst: &mut BytesMut) {
         dst,
     );
 
-    if let Body::Bytes(bytes) = &response.body {
+    let is_no_body = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body && let Body::Bytes(bytes) = &response.body {
         dst.extend_from_slice(bytes);
     }
 }
@@ -180,7 +185,12 @@ where
     );
 
     stream.write_all(write_buf).await?;
-    if let Body::Bytes(bytes) = &response.body {
+
+    let is_no_body = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body && let Body::Bytes(bytes) = &response.body {
         stream.write_all(bytes).await?;
     }
     stream.flush().await?;
@@ -214,7 +224,12 @@ where
     );
 
     stream.write_all(write_buf).await?;
-    if let Body::Bytes(bytes) = body {
+
+    let is_no_body = head.status.is_informational()
+        || head.status == StatusCode::NO_CONTENT
+        || head.status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body && let Body::Bytes(bytes) = body {
         stream.write_all(bytes).await?;
     }
     stream.flush().await?;

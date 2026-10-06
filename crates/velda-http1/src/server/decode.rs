@@ -134,7 +134,12 @@ pub fn parse_request_head(
     };
 
     let header_len = match status {
-        httparse::Status::Complete(len) => len,
+        httparse::Status::Complete(len) => {
+            if len > config.max_header_size {
+                return Err(Http1Error::HeaderTooLarge(len));
+            }
+            len
+        }
         httparse::Status::Partial => {
             if data.len() > config.max_header_size {
                 return Err(Http1Error::HeaderTooLarge(data.len()));

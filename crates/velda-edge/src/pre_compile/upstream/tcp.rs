@@ -39,6 +39,12 @@ impl TcpUpstream {
         self.inner.id()
     }
 
+    /// Returns the upstream timeouts.
+    #[inline]
+    pub fn timeouts(&self) -> velda_upstream::UpstreamTimeouts {
+        *self.inner.timeouts()
+    }
+
     /// Hands off downstream byte forwarding to an acquired upstream backend connection.
     pub async fn dispatch_stream<F, Fut, T, E>(&self, pipe: F) -> Result<T, EdgeError>
     where

@@ -410,6 +410,11 @@ pub fn decode_qpack(mut slice: &[u8]) -> Result<DecodedHeaders, Http3Error> {
         if let Ok(u) = uri_str.parse::<Uri>() {
             decoded.uri = Some(u);
         }
+    } else if let Some(auth) = raw_authority {
+        // CONNECT method uses authority-form URI without :path (RFC 9110 §7.1, RFC 9114 §4.4)
+        if let Ok(u) = auth.parse::<Uri>() {
+            decoded.uri = Some(u);
+        }
     }
 
     Ok(decoded)

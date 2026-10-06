@@ -821,3 +821,102 @@ async fn test_http3_adversarial_oversized_payload_bomb_rejected() {
     let _ = shutdown_tx.send(());
     let _ = server_task.await;
 }
+
+#[tokio::test]
+async fn test_h3_head_and_no_body_status_invariants() {
+    let (server_config, _) = generate_test_crypto();
+    let mut engine = Http3Engine::new(Arc::new(server_config));
+
+    let server_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_addr = server_socket.local_addr().unwrap();
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let s_socket = server_socket.clone();
+    let server_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                res = s_socket.recv_from(&mut buf) => {
+                    let (len, remote) = match res {
+                        Ok(pair) => pair,
+                        Err(_) => break,
+                    };
+                    let now = Instant::now();
+                    let (outgoing, requests) = engine.handle_datagram(now, remote, None, &buf[..len]);
+                    for out in outgoing {
+                        let _ = s_socket.send_to(&out.payload, out.peer).await;
+                    }
+                    for req_event in requests {
+                        let resp = match req_event.request.uri.path() {
+                            "/head-test" => {
+                                let mut h = http::HeaderMap::new();
+                                h.insert("content-length", "2048".parse().unwrap());
+                                L7Response::new(StatusCode::OK, http::Version::HTTP_3, h, Body::Empty)
+                            }
+                            "/no-content" => {
+                                L7Response::from_bytes(StatusCode::NO_CONTENT, b"must-be-dropped".to_vec())
+                            }
+                            "/not-modified" => {
+                                L7Response::new(StatusCode::NOT_MODIFIED, http::Version::HTTP_3, http::HeaderMap::new(), Body::Empty)
+                            }
+                            _ => L7Response::from_bytes(StatusCode::NOT_FOUND, b"not found".to_vec()),
+                        };
+                        if let Ok(resp_outgoing) = engine.send_response(now, req_event.handle, req_event.stream_id, &resp) {
+                            for out in resp_outgoing {
+                                let _ = s_socket.send_to(&out.payload, out.peer).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let client_cfg = velda_http3::Http3Config::auto();
+    let client = velda_http3::connect(server_addr, "localhost", &client_cfg)
+        .await
+        .expect("Client failed to connect to HTTP/3 server");
+
+    // 1. HEAD request
+    let head_req = velda_core::L7Request {
+        method: Method::HEAD,
+        uri: "/head-test".parse::<Uri>().unwrap(),
+        version: http::Version::HTTP_3,
+        headers: http::HeaderMap::new(),
+        body: Body::Empty,
+    };
+    let head_resp = client.send_request(head_req).await.unwrap();
+    assert_eq!(head_resp.status, StatusCode::OK);
+    assert_eq!(head_resp.headers.get("content-length").unwrap(), "2048");
+    assert_eq!(head_resp.body, Body::Empty);
+
+    // 2. 204 No Content
+    let del_req = velda_core::L7Request {
+        method: Method::DELETE,
+        uri: "/no-content".parse::<Uri>().unwrap(),
+        version: http::Version::HTTP_3,
+        headers: http::HeaderMap::new(),
+        body: Body::Empty,
+    };
+    let del_resp = client.send_request(del_req).await.unwrap();
+    assert_eq!(del_resp.status, StatusCode::NO_CONTENT);
+    assert_eq!(del_resp.body, Body::Empty);
+
+    // 3. 304 Not Modified
+    let get_304 = velda_core::L7Request {
+        method: Method::GET,
+        uri: "/not-modified".parse::<Uri>().unwrap(),
+        version: http::Version::HTTP_3,
+        headers: http::HeaderMap::new(),
+        body: Body::Empty,
+    };
+    let resp_304 = client.send_request(get_304).await.unwrap();
+    assert_eq!(resp_304.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(resp_304.body, Body::Empty);
+
+    client.close().await;
+    let _ = shutdown_tx.send(());
+    let _ = server_task.await;
+}

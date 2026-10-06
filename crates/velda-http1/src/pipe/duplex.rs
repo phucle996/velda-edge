@@ -8,10 +8,13 @@
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use velda_core::Body;
+
 use super::sanitize_hop_by_hop_headers;
 use crate::client::connector::{
     read_chunk_sized, read_next_chunk, read_response_head, send_request_head_chunked,
 };
+use crate::client::response::Http1Response;
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
@@ -45,7 +48,19 @@ where
     let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
     sanitize_hop_by_hop_headers(&mut resp_head.headers);
 
-    // 4. Send chunked response head downstream
+    // 4. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
+    let is_head = head.method == http::Method::HEAD;
+    let is_no_body_status = resp_head.status.is_informational()
+        || resp_head.status == http::StatusCode::NO_CONTENT
+        || resp_head.status == http::StatusCode::NOT_MODIFIED;
+
+    if is_head || is_no_body_status {
+        let resp = Http1Response::from_parts(resp_head, Body::Empty);
+        conn.send_response(&resp).await?;
+        return Ok(());
+    }
+
+    // Send chunked response head downstream
     conn.send_response_head_chunked(&resp_head).await?;
 
     // 5. Pump response chunks downstream with client disconnect detection

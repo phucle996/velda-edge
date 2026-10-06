@@ -386,3 +386,84 @@ async fn test_empty_body_response() {
     let resp = velda_core::L7Response::from_bytes(StatusCode::OK, vec![]);
     responder.send_response(&resp).unwrap();
 }
+
+#[tokio::test]
+async fn test_head_and_no_body_status_invariants() {
+    let (client_io, server_io) = duplex(64 * 1024);
+
+    tokio::spawn(async move {
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        // 1. HEAD request
+        let req_head = http::Request::builder()
+            .method("HEAD")
+            .uri("https://example.com/item")
+            .body(())
+            .unwrap();
+        let (resp_fut, _) = client.send_request(req_head, true).unwrap();
+        let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        assert_eq!(parts.headers.get("content-length").unwrap(), "1024");
+        // Must receive END_STREAM immediately without DATA frame
+        assert!(body.data().await.is_none());
+
+        // 2. 204 No Content response
+        let req_204 = http::Request::builder()
+            .method("DELETE")
+            .uri("https://example.com/item")
+            .body(())
+            .unwrap();
+        let (resp_fut, _) = client.send_request(req_204, true).unwrap();
+        let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+        assert_eq!(parts.status, StatusCode::NO_CONTENT);
+        assert!(body.data().await.is_none());
+
+        // 3. 304 Not Modified response
+        let req_304 = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/item")
+            .body(())
+            .unwrap();
+        let (resp_fut, _) = client.send_request(req_304, true).unwrap();
+        let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+        assert_eq!(parts.status, StatusCode::NOT_MODIFIED);
+        assert!(body.data().await.is_none());
+    });
+
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
+        .await
+        .unwrap();
+
+    // 1. Handle HEAD: send response with content-length but Body::Empty
+    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let resp = velda_core::L7Response::new(
+        StatusCode::OK,
+        http::Version::HTTP_2,
+        {
+            let mut h = http::HeaderMap::new();
+            h.insert("content-length", "1024".parse().unwrap());
+            h
+        },
+        Body::Empty,
+    );
+    responder.send_response(&resp).unwrap();
+
+    // 2. Handle 204: send response with 204 status even if Body::Bytes is provided
+    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let resp =
+        velda_core::L7Response::from_bytes(StatusCode::NO_CONTENT, b"must-be-ignored".to_vec());
+    responder.send_response(&resp).unwrap();
+
+    // 3. Handle 304: send response with 304 status
+    let (_req, responder) = server_conn.accept_request().await.unwrap().unwrap();
+    let resp = velda_core::L7Response::new(
+        StatusCode::NOT_MODIFIED,
+        http::Version::HTTP_2,
+        http::HeaderMap::new(),
+        Body::Empty,
+    );
+    responder.send_response(&resp).unwrap();
+}

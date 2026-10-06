@@ -38,5 +38,19 @@ pub async fn pipe_server_stream(
         return Err(Http3Error::PayloadTooLarge(b.len()));
     }
 
+    // 4. Enforce RFC 9110/9114 no-body invariant for HEAD, 1xx, 204, 304
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body = resp.status.is_informational()
+        || resp.status == http::StatusCode::NO_CONTENT
+        || resp.status == http::StatusCode::NOT_MODIFIED;
+    if is_head || is_no_body {
+        return Ok(L7Response::new(
+            resp.status,
+            resp.version,
+            resp.headers,
+            Body::Empty,
+        ));
+    }
+
     Ok(resp)
 }

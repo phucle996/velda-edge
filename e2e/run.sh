@@ -3,7 +3,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_PID_FILE="/tmp/velda_e2e_backend.pid"
 
 usage() {
     cat << EOF
@@ -21,6 +20,13 @@ COMMANDS:
     test churn              Run rapid connection churn & socket recycling test
     test reload             Run atomic hot-reload test under heavy traffic flood
     test soak [duration]    Run sustained soak load test (default: 60s, e.g. 5m, 1h)
+    test l4                 Run L4 raw TCP bidirectional flood & splice test (:9000)
+    test h2                 Run HTTP/2 deep multiplexing storm test (:8443)
+    test h2-scan            Run HTTP/2 fast-path 404 & scanner defense test
+    test streaming          Run HTTP/1.1 chunked transfer, large bodies & stream test
+    test cross-pool         Run parallel cross-protocol saturation test (L4 + H1 + H2)
+    test attack [vector]    Run security & resource exhaustion vector audit
+    test http1              Run comprehensive HTTP/1.1 protocol test suite (01-06)
     test all                Run all test scenarios sequentially
 EOF
     exit 1
@@ -29,7 +35,7 @@ EOF
 start_backend() {
     echo "[E2E] Building latest Go upstream test server..."
     mkdir -p "$SCRIPT_DIR/../target/release"
-    go build -o "$SCRIPT_DIR/../target/release/velda-e2e-backend" "$SCRIPT_DIR/backend/main.go"
+    (cd "$SCRIPT_DIR/backend" && go build -o "$SCRIPT_DIR/../target/release/velda-e2e-backend" ./cmd/server)
 
     echo "[E2E] Starting velda-e2e-backend via systemd..."
     systemctl --user start velda-e2e-backend.service
@@ -91,7 +97,7 @@ check_status() {
 }
 
 ensure_backend() {
-    if [ ! -f "$BACKEND_PID_FILE" ] || ! kill -0 "$(cat "$BACKEND_PID_FILE")" 2>/dev/null; then
+    if ! systemctl --user is-active --quiet velda-e2e-backend.service; then
         echo "[E2E] Upstream backend not running; starting automatically..."
         start_backend
     fi
@@ -130,9 +136,51 @@ case "$CMD" in
             soak)
                 exec "$SCRIPT_DIR/scenarios/04_soak_test.sh" "$@"
                 ;;
+            l4)
+                exec "$SCRIPT_DIR/scenarios/05_l4_tcp_flood.sh" "$@"
+                ;;
+            h2)
+                exec "$SCRIPT_DIR/scenarios/06_http2_multiplex_storm.sh" "$@"
+                ;;
+            h2-scan)
+                exec "$SCRIPT_DIR/scenarios/07_http2_scan_rst_attack.sh" "$@"
+                ;;
+            streaming)
+                exec "$SCRIPT_DIR/scenarios/08_http1_streaming_stress.sh" "$@"
+                ;;
+            cross-pool)
+                exec "$SCRIPT_DIR/scenarios/09_protocol_cross_pool.sh" "$@"
+                ;;
+            attack)
+                exec "$SCRIPT_DIR/scenarios/10_attack_vectors.sh" "$@"
+                ;;
+            http1)
+                echo "============================================================"
+                echo " Running Comprehensive HTTP/1.1 Protocol Test Suite"
+                echo "============================================================"
+                "$SCRIPT_DIR/scenarios/http1/01_lifecycle_and_headers.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/http1/02_stream_modes_under_load.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/http1/03_upstream_failures.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/http1/04_downstream_cancellations.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/http1/05_edge_cases_and_limits.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/http1/06_chaos_saturation.sh"
+                echo ""
+                echo "============================================================"
+                echo " ALL HTTP/1.1 PROTOCOL SCENARIOS PASSED SUCCESSFULLY!"
+                echo "============================================================"
+                ;;
+            http1/*)
+                SCENARIO_NAME="${SUITE#http1/}"
+                exec "$SCRIPT_DIR/scenarios/http1/$SCENARIO_NAME" "$@"
+                ;;
             all)
                 echo "============================================================"
-                echo " Running Full E2E Test Suite"
+                echo " Running Full Comprehensive E2E & Protocol Test Suite"
                 echo "============================================================"
                 "$SCRIPT_DIR/scenarios/01_http1_saturation.sh"
                 echo ""
@@ -140,10 +188,20 @@ case "$CMD" in
                 echo ""
                 "$SCRIPT_DIR/scenarios/03_reload_under_fire.sh"
                 echo ""
-                "$SCRIPT_DIR/scenarios/04_soak_test.sh" "30s"
+                "$SCRIPT_DIR/scenarios/04_soak_test.sh" "20s"
+                echo ""
+                "$SCRIPT_DIR/scenarios/05_l4_tcp_flood.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/06_http2_multiplex_storm.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/07_http2_scan_rst_attack.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/08_http1_streaming_stress.sh"
+                echo ""
+                "$SCRIPT_DIR/scenarios/09_protocol_cross_pool.sh"
                 echo ""
                 echo "============================================================"
-                echo " ALL E2E SUITES PASSED SUCCESSFULLY!"
+                echo " ALL PROTOCOL & E2E SUITES PASSED SUCCESSFULLY!"
                 echo "============================================================"
                 ;;
             *)

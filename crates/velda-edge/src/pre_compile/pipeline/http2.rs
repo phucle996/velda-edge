@@ -4,7 +4,7 @@
 //! Routes matched via `velda-router::Http2Router`, forwarded via `velda-http2`.
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::L7Response;
 use velda_http2::config::Http2Config;
@@ -18,80 +18,8 @@ use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::pipeline::context::{IngressContext, TlsMetadata};
+use crate::pipeline::context::{HostHeaderBuffer, IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
-
-/// Enriches downstream request headers with standard proxy forwarding metadata.
-fn enrich_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    context: &IngressContext,
-    host: Option<&str>,
-) {
-    let client_ip = context.peer.ip();
-    let is_tls = context.tls_enabled || context.tls.is_some();
-    let proto = if is_tls { "https" } else { "http" };
-
-    // Format peer IP directly into stack buffer
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 1. X-Forwarded-For
-    let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
-    if let Some(existing) = headers.get(&x_forwarded_for) {
-        if let Ok(existing_bytes) = existing.to_str() {
-            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + ip_len);
-            combined.extend_from_slice(existing_bytes.as_bytes());
-            combined.extend_from_slice(b", ");
-            combined.extend_from_slice(client_ip_bytes);
-            if let Ok(val) = HeaderValue::from_bytes(&combined) {
-                headers.insert(x_forwarded_for, val);
-            }
-        }
-    } else if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(x_forwarded_for, val);
-    }
-
-    // 2. X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 3. X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", context.local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 4. X-Forwarded-Host
-    let x_forwarded_host = HeaderName::from_static("x-forwarded-host");
-    if !headers.contains_key(&x_forwarded_host)
-        && let Some(h) = host
-        && let Ok(val) = HeaderValue::from_str(h)
-    {
-        headers.insert(x_forwarded_host, val);
-    }
-
-    // 5. X-Real-IP
-    let x_real_ip = HeaderName::from_static("x-real-ip");
-    if !headers.contains_key(&x_real_ip)
-        && let Ok(val) = HeaderValue::from_bytes(client_ip_bytes)
-    {
-        headers.insert(x_real_ip, val);
-    }
-}
 
 /// Asynchronous stream worker dispatching incoming HTTP/2 connections.
 ///
@@ -174,25 +102,9 @@ pub async fn run_http2_loop<IO>(
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
                 Ok(Ok(Some((head, receiver, responder)))) => {
-                    let mut host_buf = [0u8; 128];
-                    let mut host_len = 0;
-                    let mut heap_host = None;
-                    if let Some(h) = head.host() {
-                        if h.len() <= host_buf.len() {
-                            host_buf[..h.len()].copy_from_slice(h.as_bytes());
-                            host_len = h.len();
-                        } else {
-                            heap_host = Some(h.to_string());
-                        }
-                    }
-                    let host_str: Option<&str> = if host_len > 0 {
-                        std::str::from_utf8(&host_buf[..host_len]).ok()
-                    } else {
-                        heap_host.as_deref()
-                    };
-
+                    let host_buf = HostHeaderBuffer::extract(&head.headers, &head.uri);
                     let mut http_req = Http2RouteRequest::new(head.path());
-                    if let Some(h) = host_str {
+                    if let Some(h) = host_buf.as_deref() {
                         http_req = http_req.with_host(h);
                     }
                     http_req = http_req.with_method(head.method.as_str());
@@ -318,20 +230,8 @@ async fn serve_http2_stream(
     };
 
     let strategy = upstream.strategy;
-    let mut host_buf = [0u8; 128];
-    let host_len = if let Some(h) = head.host() {
-        let len = h.len().min(host_buf.len());
-        host_buf[..len].copy_from_slice(&h.as_bytes()[..len]);
-        len
-    } else {
-        0
-    };
-    let host_str = if host_len > 0 {
-        std::str::from_utf8(&host_buf[..host_len]).ok()
-    } else {
-        None
-    };
-    enrich_forwarded_headers(&mut head.headers, &context, host_str);
+    let host_buf = HostHeaderBuffer::extract(&head.headers, &head.uri);
+    context.enrich_forwarded_headers(&mut head.headers, host_buf.as_deref());
 
     // HTTP/2 Pipeline Invariant (RFC 9113):
     // The Edge pipeline hands off the request processing closure directly to the upstream.

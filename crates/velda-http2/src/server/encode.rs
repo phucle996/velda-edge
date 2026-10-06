@@ -66,11 +66,15 @@ impl Http2Responder {
         mut self,
         response: &L7Response,
     ) -> Result<(), Http2Error> {
-        let has_body = !response.body.is_empty();
+        let is_no_body = response.status.is_informational()
+            || response.status == StatusCode::NO_CONTENT
+            || response.status == StatusCode::NOT_MODIFIED;
+        let has_body = !is_no_body && !response.body.is_empty();
         let http_response = build_h2_response(response.status, &response.headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if let Body::Bytes(b) = &response.body
+        if has_body
+            && let Body::Bytes(b) = &response.body
             && !b.is_empty()
         {
             let _ = send_stream.send_data(b.clone(), true);
@@ -112,11 +116,15 @@ impl Http2Responder {
         headers: &HeaderMap,
         body: &Body,
     ) -> Result<(), Http2Error> {
-        let has_body = !body.is_empty();
+        let is_no_body = status.is_informational()
+            || status == StatusCode::NO_CONTENT
+            || status == StatusCode::NOT_MODIFIED;
+        let has_body = !is_no_body && !body.is_empty();
         let http_response = build_h2_response(status, headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if let Body::Bytes(b) = body
+        if has_body
+            && let Body::Bytes(b) = body
             && !b.is_empty()
         {
             send_stream.send_data(b.clone(), true)?;

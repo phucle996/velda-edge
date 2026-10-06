@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use velda_core::{L7Request, L7Response};
+use velda_core::{Body, L7Request, L7Response};
 
 use crate::client::{connect, extract_sni};
 use crate::config::Http3Config;
@@ -20,5 +20,18 @@ pub async fn pipe_duplex(
 ) -> Result<L7Response, Http3Error> {
     let server_name = extract_sni(req, &target);
     let client = connect(target, &server_name, config).await?;
-    client.send_request_ref(req).await
+    let resp = client.send_request_ref(req).await?;
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body = resp.status.is_informational()
+        || resp.status == http::StatusCode::NO_CONTENT
+        || resp.status == http::StatusCode::NOT_MODIFIED;
+    if is_head || is_no_body {
+        return Ok(L7Response::new(
+            resp.status,
+            resp.version,
+            resp.headers,
+            Body::Empty,
+        ));
+    }
+    Ok(resp)
 }

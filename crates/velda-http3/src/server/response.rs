@@ -24,7 +24,11 @@ pub fn build_edge_response_frames(status: StatusCode, body: &[u8]) -> BytesMut {
     let mut write_buf = BytesMut::new();
     encode_frame(&header_frame, &mut write_buf);
 
-    if !body.is_empty() {
+    let is_no_body = status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body && !body.is_empty() {
         let data_frame = Http3Frame::Data(Bytes::copy_from_slice(body));
         encode_frame(&data_frame, &mut write_buf);
     }
@@ -51,8 +55,15 @@ pub fn send_response(
     let mut write_buf = BytesMut::new();
     encode_frame(&header_frame, &mut write_buf);
 
-    // 2. Encode DATA frame if body is present
-    if let Body::Bytes(ref b) = response.body {
+    // 2. Encode DATA frame if body is present and status permits body (RFC 9114 §4.1)
+    let is_no_body = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body
+        && let Body::Bytes(ref b) = response.body
+        && !b.is_empty()
+    {
         let data_frame = Http3Frame::Data(b.clone());
         encode_frame(&data_frame, &mut write_buf);
     }

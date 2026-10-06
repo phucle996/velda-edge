@@ -7,6 +7,7 @@
 use bytes::Bytes;
 use h2::client::SendRequest;
 use http::Version;
+use velda_core::{Body, L7Response};
 
 use crate::config::Http2Config;
 use crate::error::Http2Error;
@@ -21,6 +22,7 @@ pub async fn pipe_duplex(
     config: &Http2Config,
 ) -> Result<(), Http2Error> {
     // 1. Build and sanitize outbound upstream H2 request with end_of_stream = false (zero-clone)
+    let is_head = head.method == http::Method::HEAD;
     crate::headers::sanitize_h2_headers(&mut head.headers);
     let mut builder = http::Request::builder()
         .method(head.method)
@@ -51,6 +53,17 @@ pub async fn pipe_duplex(
     let download_task = async move {
         let response = response_fut.await?;
         let (parts, mut body_stream) = response.into_parts();
+
+        let is_no_body_status = parts.status.is_informational()
+            || parts.status == http::StatusCode::NO_CONTENT
+            || parts.status == http::StatusCode::NOT_MODIFIED;
+
+        if is_head || is_no_body_status {
+            let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+            responder.send_response(&resp)?;
+            return Ok(());
+        }
+
         let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
 
         let mut total_bytes = 0;

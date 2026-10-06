@@ -34,6 +34,11 @@ pub(crate) enum ClientCommand {
     Close,
 }
 
+struct ActiveStream {
+    method: http::Method,
+    reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+}
+
 /// Background QUIC connection driver loop.
 ///
 /// Multiplexes concurrent bidirectional request streams onto a single QUIC connection,
@@ -46,8 +51,7 @@ pub(crate) async fn run_client_driver(
     mut command_rx: mpsc::Receiver<ClientCommand>,
     max_body_size: usize,
 ) {
-    let mut active_streams: HashMap<StreamId, oneshot::Sender<Result<L7Response, Http3Error>>> =
-        HashMap::new();
+    let mut active_streams: HashMap<StreamId, ActiveStream> = HashMap::new();
     let mut stream_headers: HashMap<StreamId, (Option<StatusCode>, HeaderMap)> = HashMap::new();
     let mut stream_raw_bufs: HashMap<StreamId, BytesMut> = HashMap::new();
     let mut stream_data_payloads: HashMap<StreamId, BytesMut> = HashMap::new();
@@ -84,6 +88,8 @@ pub(crate) async fn run_client_driver(
                                 continue;
                             }
                         };
+
+                        let req_method = request.method.clone();
 
                         // Encode QPACK request HEADERS frame
                         let mut header_buf = BytesMut::new();
@@ -131,7 +137,7 @@ pub(crate) async fn run_client_driver(
                         }
                         let _ = conn.send_stream(stream_id).finish();
 
-                        active_streams.insert(stream_id, reply_tx);
+                        active_streams.insert(stream_id, ActiveStream { method: req_method, reply_tx });
                         flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
                     }
                     Some(ClientCommand::Close) | None => {
@@ -187,7 +193,13 @@ pub(crate) async fn run_client_driver(
         // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver
         let cancelled_streams: Vec<StreamId> = active_streams
             .iter()
-            .filter_map(|(&id, tx)| if tx.is_closed() { Some(id) } else { None })
+            .filter_map(|(&id, active)| {
+                if active.reply_tx.is_closed() {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for id in cancelled_streams {
@@ -264,8 +276,9 @@ pub(crate) async fn run_client_driver(
                     }
 
                     if let Some(err) = stream_reset_err {
-                        if let Some(tx) = active_streams.remove(&id) {
-                            let _ = tx
+                        if let Some(active) = active_streams.remove(&id) {
+                            let _ = active
+                                .reply_tx
                                 .send(Err(Http3Error::H3(format!("Stream reset by peer: {err}"))));
                         }
                         stream_headers.remove(&id);
@@ -278,8 +291,10 @@ pub(crate) async fn run_client_driver(
                         let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                             error_code::H3_MESSAGE_ERROR as u32,
                         ));
-                        if let Some(tx) = active_streams.remove(&id) {
-                            let _ = tx.send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
+                        if let Some(active) = active_streams.remove(&id) {
+                            let _ = active
+                                .reply_tx
+                                .send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
                         }
                         stream_headers.remove(&id);
                         stream_raw_bufs.remove(&id);
@@ -315,26 +330,32 @@ pub(crate) async fn run_client_driver(
                         let headers_opt = stream_headers.remove(&id);
                         let body_opt = stream_data_payloads.remove(&id);
 
-                        if let Some(tx) = active_streams.remove(&id) {
+                        if let Some(active) = active_streams.remove(&id) {
                             let (status, headers) =
                                 headers_opt.unwrap_or((Some(StatusCode::OK), HeaderMap::new()));
-                            let body = body_opt
-                                .map(|b| {
-                                    if b.is_empty() {
-                                        Body::Empty
-                                    } else {
-                                        Body::Bytes(b.freeze())
-                                    }
-                                })
-                                .unwrap_or(Body::Empty);
+                            let status_code = status.unwrap_or(StatusCode::OK);
+                            let is_no_body = active.method == http::Method::HEAD
+                                || status_code.is_informational()
+                                || status_code == StatusCode::NO_CONTENT
+                                || status_code == StatusCode::NOT_MODIFIED;
 
-                            let response = L7Response::new(
-                                status.unwrap_or(StatusCode::OK),
-                                Version::HTTP_3,
-                                headers,
-                                body,
-                            );
-                            let _ = tx.send(Ok(response));
+                            let body = if is_no_body {
+                                Body::Empty
+                            } else {
+                                body_opt
+                                    .map(|b| {
+                                        if b.is_empty() {
+                                            Body::Empty
+                                        } else {
+                                            Body::Bytes(b.freeze())
+                                        }
+                                    })
+                                    .unwrap_or(Body::Empty)
+                            };
+
+                            let response =
+                                L7Response::new(status_code, Version::HTTP_3, headers, body);
+                            let _ = active.reply_tx.send(Ok(response));
                         }
                     }
                 }
@@ -346,8 +367,8 @@ pub(crate) async fn run_client_driver(
                     if id.dir() == Dir::Uni {
                         continue;
                     }
-                    if let Some(tx) = active_streams.remove(&id) {
-                        let _ = tx.send(Err(Http3Error::H3(format!(
+                    if let Some(active) = active_streams.remove(&id) {
+                        let _ = active.reply_tx.send(Err(Http3Error::H3(format!(
                             "Stream reset by peer: {error_code}"
                         ))));
                     }
@@ -356,8 +377,10 @@ pub(crate) async fn run_client_driver(
                     stream_data_payloads.remove(&id);
                 }
                 Event::ConnectionLost { reason } => {
-                    for (_, tx) in active_streams.drain() {
-                        let _ = tx.send(Err(Http3Error::H3(format!("Connection lost: {reason}"))));
+                    for (_, active) in active_streams.drain() {
+                        let _ = active
+                            .reply_tx
+                            .send(Err(Http3Error::H3(format!("Connection lost: {reason}"))));
                     }
                     return;
                 }
@@ -374,8 +397,8 @@ pub(crate) async fn run_client_driver(
     }
 
     // Notify any remaining in-flight requests
-    for (_, tx) in active_streams.drain() {
-        let _ = tx.send(Err(Http3Error::ConnectionClosed));
+    for (_, active) in active_streams.drain() {
+        let _ = active.reply_tx.send(Err(Http3Error::ConnectionClosed));
     }
 }
 

@@ -111,12 +111,20 @@ where
             return Ok(Body::Empty);
         }
 
+        let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
+
         loop {
             if let Some(body) = decode_body(&mut self.read_buf, framing, &self.config)? {
                 return Ok(body);
             }
 
-            let bytes_read = self.stream.read_buf(&mut self.read_buf).await?;
+            let bytes_read =
+                match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
+                    .await
+                {
+                    Ok(res) => res?,
+                    Err(_) => return Err(Http1Error::Timeout),
+                };
             if bytes_read == 0 {
                 return Err(Http1Error::Parse(
                     "Unexpected EOF while reading HTTP request body".into(),
@@ -245,7 +253,14 @@ where
                 return Ok(bytes);
             }
 
-            let bytes_read = self.stream.read_buf(&mut self.read_buf).await?;
+            let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
+            let bytes_read =
+                match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
+                    .await
+                {
+                    Ok(res) => res?,
+                    Err(_) => return Err(Http1Error::Timeout),
+                };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);

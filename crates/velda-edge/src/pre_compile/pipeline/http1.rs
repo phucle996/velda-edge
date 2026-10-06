@@ -10,165 +10,20 @@
 //! belong entirely inside `velda-http1`.
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::{
-    Http1BodyFraming, Http1Config, Http1PipeStrategy, Http1Response, Http1ServerConnection,
-    pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+    Http1BodyFraming, Http1Config, Http1Error, Http1PipeStrategy, Http1Request, Http1Response,
+    Http1ServerConnection, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 use velda_router::Http1RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use crate::pipeline::context::{IngressContext, TlsMetadata};
+use crate::pipeline::context::{HostHeaderBuffer, IngressContext, TlsMetadata};
 use crate::runtime::SharedRuntime;
 
 pub use crate::runtime::upstream::UpstreamHttp1Stream;
-
-/// Enriches HTTP request headers with standard proxy forwarding metadata.
-///
-/// Implements both the IETF official standard ([RFC 7239]) and the de-facto
-/// industry standards (`X-Forwarded-*`, `X-Real-IP`) used by modern reverse proxies
-/// (Nginx, Envoy, HAProxy, AWS ALB).
-///
-/// ### Standards Complied:
-/// 1. **RFC 7239 (Forwarded HTTP Extension)**:
-///    - Injects `Forwarded: for=<client>;proto=<http|https>;by=<local>;host=<host>`.
-///    - RFC 7239 §5.2: IPv6 addresses are explicitly wrapped in quotes and square brackets `"[...]"`
-///      to distinguish colons from port/parameter delimiters.
-///    - Chains with existing downstream `Forwarded` headers via comma separation.
-/// 2. **X-Forwarded-For (RFC 7239 §5.2 reference / Squid / Nginx)**:
-///    - Appends downstream client IP to existing list or initializes new header.
-/// 3. **X-Forwarded-Proto (De-facto industry standard / Envoy / Nginx / AWS ALB)**:
-///    - Authoritative downstream protocol (`"https"` if TLS terminated, else `"http"`).
-///    - Security Invariant: Overwrites any forged downstream `X-Forwarded-Proto` to prevent
-///      protocol spoofing and security bypasses on internal backends.
-/// 4. **X-Forwarded-Port (RFC 7239 §5.4 reference / Spring Boot / ASP.NET)**:
-///    - Sets the ingress listener port (`context.local_addr.port()`).
-///    - Enables upstream services to construct accurate absolute redirect URLs (301/302 `Location`).
-/// 5. **X-Forwarded-Host (RFC 7239 §5.3 reference / Apache / Envoy)**:
-///    - Injects original downstream `Host` if present and not already defined.
-/// 6. **X-Real-IP (Nginx `proxy_set_header` standard)**:
-///    - Sets direct peer client IP address without comma-separated multi-hop traversal.
-pub fn enrich_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    context: &IngressContext,
-    host: Option<&str>,
-) {
-    let client_ip = context.peer.ip();
-    let is_tls = context.tls.is_some();
-    let proto = if is_tls { "https" } else { "http" };
-
-    // Format peer IP directly into stack buffer
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 1. Standard: X-Forwarded-For (De-facto industry standard / RFC 7239 §5.2)
-    // Preserves proxy traversal chain by appending immediate peer IP.
-    let x_forwarded_for = HeaderName::from_static("x-forwarded-for");
-    if let Some(existing) = headers.get(&x_forwarded_for) {
-        if let Ok(existing_bytes) = existing.to_str() {
-            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + ip_len);
-            combined.extend_from_slice(existing_bytes.as_bytes());
-            combined.extend_from_slice(b", ");
-            combined.extend_from_slice(client_ip_bytes);
-            if let Ok(val) = HeaderValue::from_bytes(&combined) {
-                headers.insert(x_forwarded_for, val);
-            }
-        }
-    } else if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(x_forwarded_for, val);
-    }
-
-    // 2. Standard: X-Forwarded-Proto (De-facto industry standard / Envoy / Nginx)
-    // Security Invariant: As an edge proxy terminating downstream connections,
-    // we authoritatively declare the ingress transport protocol to prevent client spoofing.
-    let x_forwarded_proto = HeaderName::from_static("x-forwarded-proto");
-    headers.insert(x_forwarded_proto, HeaderValue::from_static(proto));
-
-    // 3. Standard: X-Forwarded-Port (De-facto industry standard / RFC 7239 §5.4)
-    // Advertises the ingress listener port so backends can generate correct 301/302 redirects.
-    let x_forwarded_port = HeaderName::from_static("x-forwarded-port");
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", context.local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(x_forwarded_port, val);
-    }
-
-    // 4. Standard: X-Forwarded-Host (De-facto industry standard / RFC 7239 §5.3)
-    // Advertises the original Host requested by the client if not already present.
-    let x_forwarded_host = HeaderName::from_static("x-forwarded-host");
-    if !headers.contains_key(&x_forwarded_host)
-        && let Some(h) = host
-        && let Ok(val) = HeaderValue::from_str(h)
-    {
-        headers.insert(x_forwarded_host, val);
-    }
-
-    // 5. Standard: X-Real-IP (Nginx de-facto standard)
-    // Supplies immediate client IP directly without requiring upstream to parse CSV chains.
-    let x_real_ip = HeaderName::from_static("x-real-ip");
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(x_real_ip, val);
-    }
-
-    // 6. Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    // Format: for=<client>;proto=<http|https>;by=<local>;host=<host>
-    // RFC 7239 §5.2: IPv6 addresses must be quoted with square brackets: "[...]"
-    let forwarded = HeaderName::from_static("forwarded");
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match context.local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(h) = host {
-            let _ = write!(cursor, ";host=\"{h}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-
-    if let Some(existing) = headers.get(&forwarded) {
-        if let Ok(existing_bytes) = existing.to_str() {
-            let mut combined = Vec::with_capacity(existing_bytes.len() + 2 + fwd_len);
-            combined.extend_from_slice(existing_bytes.as_bytes());
-            combined.extend_from_slice(b", ");
-            combined.extend_from_slice(fwd_bytes);
-            if let Ok(val) = HeaderValue::from_bytes(&combined) {
-                headers.insert(forwarded, val);
-            }
-        }
-    } else if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(forwarded, val);
-    }
-}
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///
@@ -254,6 +109,16 @@ pub async fn run_http1_loop<IO>(
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
                     tracing::debug!(error = %e, "HTTP/1.1 request head decode error");
+                    let status = match e {
+                        Http1Error::HeaderTooLarge(_) | Http1Error::TooManyHeaders(_) => {
+                            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                        }
+                        Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+                        _ => StatusCode::BAD_REQUEST,
+                    };
+                    let err_resp =
+                        Http1Response::from_bytes(status, format!("{status}\n").into_bytes());
+                    let _ = conn.send_response(&err_resp).await;
                     break;
                 }
                 Err(_) => {
@@ -289,30 +154,9 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        let mut host_buf = [0u8; 128];
-        let mut host_len = 0;
-        let mut heap_host = None;
-        if let Some(h) = head
-            .headers
-            .get(http::header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .or_else(|| head.uri.host())
-        {
-            if h.len() <= host_buf.len() {
-                host_buf[..h.len()].copy_from_slice(h.as_bytes());
-                host_len = h.len();
-            } else {
-                heap_host = Some(h.to_string());
-            }
-        }
-        let host_str: Option<&str> = if host_len > 0 {
-            std::str::from_utf8(&host_buf[..host_len]).ok()
-        } else {
-            heap_host.as_deref()
-        };
-
+        let host_buf = HostHeaderBuffer::extract(&head.headers, &head.uri);
         let mut http_req = Http1RouteRequest::new(head.path());
-        if let Some(h) = host_str {
+        if let Some(h) = host_buf.as_deref() {
             http_req = http_req.with_host(h);
         }
         http_req = http_req.with_method(head.method.as_str());
@@ -321,7 +165,7 @@ pub async fn run_http1_loop<IO>(
             tracing::debug!(
                 listener = %context.listener_id,
                 path = %head.path(),
-                host = ?host_str,
+                host = ?host_buf.as_deref(),
                 method = %head.method,
                 "No HTTP/1.1 route matched"
             );
@@ -357,15 +201,51 @@ pub async fn run_http1_loop<IO>(
         };
 
         let strategy = upstream.strategy;
-        enrich_forwarded_headers(&mut head.headers, &context, host_str);
+        context.enrich_forwarded_headers(&mut head.headers, host_buf.as_deref());
         let cfg = *conn.config();
 
-        // HTTP/1.1 Pipeline Invariant (RFC 9112):
-        // 1. Acquire pooled/fresh backend stream lease with automatic failover.
-        // 2. Execute contiguous streaming pipe top-to-bottom.
-        // 3. On success: lease automatically returns reusable socket to keep-alive pool.
-        // 4. On error: mark lease dirty so socket is closed and discarded.
-        let mut upstream_lease = match upstream.acquire_stream(host_str).await {
+        // HTTP/1.1 Pipeline Invariant (RFC 9112 & AGENTS.md §2.3):
+        // Stream mode dictates upstream lease lifecycle:
+        // - Buffered & ServerStream: Downstream body is completely read into RAM first.
+        //   Upstream connection is ONLY acquired when request is ready to forward,
+        //   completely eliminating upstream pool starvation from slow downstream uploads.
+        // - ClientStream & Duplex: Body is streamed in real-time to upstream, so upstream
+        //   connection is acquired before streaming begins.
+        let req_body = match strategy {
+            Http1PipeStrategy::Buffered | Http1PipeStrategy::ServerStream => {
+                match conn.read_body(framing).await {
+                    Ok(b) => Some(b),
+                    Err(Http1Error::Timeout) => {
+                        let err_resp = Http1Response::from_bytes(
+                            StatusCode::REQUEST_TIMEOUT,
+                            b"408 Request Timeout: client body read idle timeout exceeded\n"
+                                .to_vec(),
+                        )
+                        .with_header(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        );
+                        let _ = conn.send_response(&err_resp).await;
+                        break;
+                    }
+                    Err(e) => {
+                        let err_resp = Http1Response::from_bytes(
+                            StatusCode::BAD_REQUEST,
+                            format!("400 Bad Request: {e}\n").into_bytes(),
+                        )
+                        .with_header(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        );
+                        let _ = conn.send_response(&err_resp).await;
+                        break;
+                    }
+                }
+            }
+            Http1PipeStrategy::ClientStream | Http1PipeStrategy::Duplex => None,
+        };
+
+        let mut upstream_lease = match upstream.acquire_stream(host_buf.as_deref()).await {
             Ok(lease) => lease,
             Err(e) => {
                 tracing::warn!(
@@ -386,19 +266,22 @@ pub async fn run_http1_loop<IO>(
             }
         };
 
-        let pipe_result = match strategy {
-            Http1PipeStrategy::Buffered => {
-                pipe_buffered(&mut conn, head, framing, &mut *upstream_lease, &cfg).await
+        let pipe_result = match (strategy, req_body) {
+            (Http1PipeStrategy::Buffered, Some(body)) => {
+                let req = Http1Request::from_parts(head, body);
+                pipe_buffered(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
-            Http1PipeStrategy::ServerStream => {
-                pipe_server_stream(&mut conn, head, framing, &mut *upstream_lease, &cfg).await
+            (Http1PipeStrategy::ServerStream, Some(body)) => {
+                let req = Http1Request::from_parts(head, body);
+                pipe_server_stream(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
-            Http1PipeStrategy::ClientStream => {
+            (Http1PipeStrategy::ClientStream, None) => {
                 pipe_client_stream(&mut conn, head, &mut *upstream_lease, &cfg).await
             }
-            Http1PipeStrategy::Duplex => {
+            (Http1PipeStrategy::Duplex, None) => {
                 pipe_duplex(&mut conn, head, &mut *upstream_lease, &cfg).await
             }
+            _ => unreachable!(),
         };
 
         if let Err(e) = pipe_result {

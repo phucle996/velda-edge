@@ -43,4 +43,7 @@ pub enum Http1Error {
 
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
+
+    #[error("I/O timeout exceeded: connection idle")]
+    Timeout,
 }

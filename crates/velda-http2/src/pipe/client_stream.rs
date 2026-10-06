@@ -23,6 +23,7 @@ pub async fn pipe_client_stream(
     config: &Http2Config,
 ) -> Result<(), Http2Error> {
     // 1. Build and sanitize outbound upstream H2 request with end_of_stream = false (zero-clone)
+    let is_head = head.method == http::Method::HEAD;
     crate::headers::sanitize_h2_headers(&mut head.headers);
     let mut builder = http::Request::builder()
         .method(head.method)
@@ -64,7 +65,11 @@ pub async fn pipe_client_stream(
     }
 
     // 5. Accumulate bounded response body while releasing H2 flow-control window
-    let resp_body = if body_stream.is_end_stream() {
+    let is_no_body_status = parts.status.is_informational()
+        || parts.status == http::StatusCode::NO_CONTENT
+        || parts.status == http::StatusCode::NOT_MODIFIED;
+
+    let resp_body = if is_head || is_no_body_status || body_stream.is_end_stream() {
         Body::Empty
     } else if let Some(first_chunk) = body_stream.data().await {
         let data = first_chunk?;
