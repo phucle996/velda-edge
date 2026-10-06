@@ -282,6 +282,48 @@ impl SocketAccelerationPath {
     }
 }
 
+/// Connects a raw TCP stream to the target physical backend endpoint,
+/// applying pre-connect socket acceleration, connection timeout, and post-connect tuning.
+///
+/// Encapsulates all socket allocation and kernel option manipulation so that
+/// upstream load balancers and stream dispatchers treat connections as opaque handles.
+pub async fn connect_tcp_stream(
+    endpoint: std::net::SocketAddr,
+    acceleration: &SocketAccelerationPath,
+    timeout: std::time::Duration,
+) -> Result<tokio::net::TcpStream, std::io::Error> {
+    let socket = if endpoint.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        acceleration.apply_pre_connect(socket.as_raw_fd());
+    }
+
+    let connect_fut = socket.connect(endpoint);
+    let stream = tokio::time::timeout(timeout, connect_fut)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Connect timeout ({timeout:?}) to {endpoint}"),
+            )
+        })??;
+
+    let _ = stream.set_nodelay(acceleration.nodelay);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        acceleration.apply_post_connect(stream.as_raw_fd());
+    }
+
+    Ok(stream)
+}
+
 /// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
 ///
 /// Thresholds are scaled to memory tier with a 16KB minimum:

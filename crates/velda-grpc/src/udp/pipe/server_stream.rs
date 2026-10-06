@@ -1,26 +1,23 @@
-//! Server-streaming gRPC pipe forwarding over UDP.
+//! Server-streaming gRPC pipe forwarding over UDP / QUIC.
 //!
 //! Client sends a single request message, and upstream streams back multiple response messages.
-//! Data messages are forwarded over the upstream-managed socket within call deadlines.
+//! Data messages are forwarded over the persistent multiplexed QUIC client within call deadlines.
 
-use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use velda_core::{Body, L7Request, L7Response};
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::udp::client::GrpcUdpUpstreamConnector;
+use crate::udp::client::GrpcUdpClient;
 
-/// Pipes a server-streaming gRPC call over UDP.
+/// Pipes a server-streaming gRPC call over UDP / QUIC.
 ///
 /// Workflow:
 /// 1. Validate single downstream request message against LPM 5-byte header.
-/// 2. Dispatch request to upstream endpoint via upstream-managed socket.
+/// 2. Dispatch request to upstream endpoint via multiplexed [`GrpcUdpClient`].
 /// 3. Stream response messages from upstream backend within `max_call_duration_ms` timeout.
 pub async fn pipe_server_stream(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
@@ -39,7 +36,7 @@ pub async fn pipe_server_stream(
         }
 
         // Step 2: Dispatch request and await streaming response
-        GrpcUdpUpstreamConnector::dispatch_with_socket(socket, target, req, config).await
+        client.send_request_ref(req).await
     };
 
     tokio::time::timeout(timeout, workflow)

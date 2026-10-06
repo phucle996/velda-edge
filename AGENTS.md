@@ -80,6 +80,26 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
   - `grpc` listeners are dedicated RPC ingress pipelines (transported over HTTP/2 binary framing) through `GrpcRouter` and `handle_grpc_stream`. They do NOT evaluate HTTP routes.
 - **HTTP is HTTP, gRPC is gRPC**: Both protocols have distinct semantics, routing algorithms, status codes (`grpc-status` trailers vs HTTP status codes), and upstream forwarding paths. They must remain completely decoupled.
 
+### 2.8 Hard Subsystem Boundary: Upstream vs Protocol Subsystems (Lifecycle vs Mechanics)
+Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) without exception:
+- **Upstream Subsystem (`velda-upstream`, `pre_compile/upstream/`)**:
+  - **Single Responsibility**: Connection Lifecycle, Topology Resolution & Pool State (**"WHEN & WHO"**).
+  - Owns: Target physical endpoint selection (`select_endpoint()` via load balancing: RoundRobin, WRR, Maglev, LeastConn, etc.), active/passive health tracking, circuit breaking, connection pooling & stream leasing (`acquire_stream()`, `register()`, idle timeout eviction, GOAWAY handling, pool cleanup on drop).
+  - Determines **WHEN** to lease an existing connection, **WHEN** to request a new connection, and **WHO** (which physical endpoint) to connect to.
+  - **Strict Invariants**:
+    - Upstream **MUST NEVER** execute raw socket creation or binding syscalls (`TcpSocket::new`, `UdpSocket::bind`, `0.0.0.0:0`).
+    - Upstream **MUST NEVER** configure kernel transport flags (`TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`, `TCP_NOTSENT_LOWAT`, socket buffer sizes).
+    - Upstream **MUST NEVER** execute protocol or security handshakes (TLS ClientHello, ALPN negotiation, HTTP/2 SETTINGS exchange, QUIC crypto exchange).
+    - Upstream **MUST NEVER** inspect, encode, or decode protocol-specific wire frames. Upstream treats connections as opaque typed handles leased from the protocol layer.
+- **Protocol Subsystems (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`, `velda-transport`)**:
+  - **Single Responsibility**: Connection Mechanics, Kernel Acceleration & Wire Protocol Execution (**"HOW"**).
+  - Owns: Transport socket instantiation (IPv4/IPv6 address families, TCP/UDP sockets), kernel acceleration tuning (`SocketAccelerationPath`, `Http1AccelerationPath`, `GrpcAccelerationPath`), cryptographic and protocol handshakes (TLS, ALPN, HTTP/2, QUIC), background connection driver loops (driving H2 stream multiplexing, QUIC packet loops), wire codecs (LPM framing, QPACK, text/binary parsing), and streaming pipe strategies (`buffered`, `server_stream`, `client_stream`, `duplex`).
+  - **Strict Invariants**:
+    - Protocol subsystems **MUST NEVER** decide load balancing or select physical backend targets.
+    - Protocol subsystems **MUST NEVER** manage persistent connection pool lifecycle, endpoint health states, or cross-endpoint failover.
+    - Protocol connectors expose a narrow, uniform asynchronous contract: `connect(target: SocketAddr, ...)` returning an active client connection handle (`UpstreamHttp1Stream`, `SendRequest<Bytes>`, `Http3Client`, `GrpcUpstreamConnector`, `GrpcUdpClient`), which Upstream registers into its pool.
+    - Protocol pipe strategies execute purely on established protocol connection/stream handles, never creating or binding sockets ad-hoc per request.
+
 ---
 
 ## 3. Subsystem Invariants & Crate Boundaries

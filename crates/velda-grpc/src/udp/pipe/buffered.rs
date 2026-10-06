@@ -1,28 +1,25 @@
-//! Unary (buffered) gRPC request-response pipe forwarding over UDP.
+//! Unary (buffered) gRPC request-response pipe forwarding over UDP / QUIC.
 //!
 //! Expects a single downstream request message, validates LPM 5-byte header,
-//! transmits to upstream endpoint using upstream-managed socket, awaits response,
+//! transmits to upstream endpoint using persistent multiplexed QUIC client, awaits response,
 //! and verifies response LPM frame limits.
 
-use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use velda_core::{Body, L7Request, L7Response};
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::udp::client::GrpcUdpUpstreamConnector;
+use crate::udp::client::GrpcUdpClient;
 
-/// Pipes a Unary (non-streaming) gRPC call over UDP.
+/// Pipes a Unary (non-streaming) gRPC call over UDP / QUIC.
 ///
 /// Workflow:
 /// 1. Verify downstream request body length against LPM 5-byte header and `config.max_message_size`.
-/// 2. Dispatch call to upstream endpoint using upstream-managed socket.
+/// 2. Dispatch call to upstream endpoint using multiplexed [`GrpcUdpClient`].
 /// 3. Verify upstream response body against LPM 5-byte header and `config.max_message_size`.
 /// 4. Bound the call within `max_call_duration_ms` timeout.
 pub async fn pipe_buffered(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
@@ -44,9 +41,8 @@ pub async fn pipe_buffered(
             }
         }
 
-        // Step 2: Dispatch through upstream socket
-        let resp =
-            GrpcUdpUpstreamConnector::dispatch_with_socket(socket, target, req, config).await?;
+        // Step 2: Dispatch through multiplexed QUIC client
+        let resp = client.send_request_ref(req).await?;
 
         // Step 3: Validate upstream response LPM frame if body present
         if let Body::Bytes(ref b) = resp.body

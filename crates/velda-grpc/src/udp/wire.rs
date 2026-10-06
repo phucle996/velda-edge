@@ -329,11 +329,12 @@ pub fn encode_udp_frame(frame: &UdpFrame, dst: &mut BytesMut) {
     }
 }
 
-/// Decoded request headers from QPACK field section.
+/// Decoded request or response headers from QPACK field section.
 #[derive(Debug, Default)]
 pub struct DecodedHeaders {
     pub method: Option<Method>,
     pub uri: Option<Uri>,
+    pub status: Option<StatusCode>,
     pub headers: HeaderMap,
 }
 
@@ -441,6 +442,13 @@ fn apply_header_pair(
                     .insert(HeaderName::from_static(":scheme"), v);
             }
         }
+        ":status" => {
+            if let Ok(code) = val.parse::<u16>()
+                && let Ok(sc) = StatusCode::from_u16(code)
+            {
+                decoded.status = Some(sc);
+            }
+        }
         other => {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(other.as_bytes()),
@@ -472,6 +480,71 @@ pub fn encode_qpack_response(status: StatusCode, headers: &HeaderMap, dst: &mut 
 
     // 3. Encode additional headers (e.g. content-type, grpc-status, grpc-message)
     for (name, val) in headers {
+        let name_str = name.as_str();
+        encode_prefixed_int(name_str.len() as u64, 3, 0x20, dst);
+        dst.put_slice(name_str.as_bytes());
+        encode_string_literal(val.as_bytes(), dst);
+    }
+}
+
+/// Encodes QPACK request headers into the destination buffer (RFC 9204).
+pub fn encode_qpack_request(method: &Method, uri: &Uri, headers: &HeaderMap, dst: &mut BytesMut) {
+    // 1. Field Section Prefix: RIC = 0, Base = 0
+    dst.put_u8(0x00);
+    dst.put_u8(0x00);
+
+    // 2. :method
+    let method_idx = match *method {
+        Method::POST => Some(20),
+        Method::GET => Some(17),
+        Method::PUT => Some(21),
+        Method::DELETE => Some(16),
+        _ => None,
+    };
+    if let Some(idx) = method_idx {
+        encode_prefixed_int(idx, 6, 0xc0, dst);
+    } else {
+        encode_prefixed_int(17, 4, 0x50, dst);
+        encode_string_literal(method.as_str().as_bytes(), dst);
+    }
+
+    // 3. :scheme
+    let scheme = uri.scheme_str().unwrap_or("https");
+    if scheme == "https" {
+        encode_prefixed_int(23, 6, 0xc0, dst);
+    } else if scheme == "http" {
+        encode_prefixed_int(22, 6, 0xc0, dst);
+    } else {
+        encode_prefixed_int(23, 4, 0x50, dst);
+        encode_string_literal(scheme.as_bytes(), dst);
+    }
+
+    // 4. :path
+    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    if path == "/" {
+        encode_prefixed_int(1, 6, 0xc0, dst);
+    } else {
+        encode_prefixed_int(1, 4, 0x50, dst);
+        encode_string_literal(path.as_bytes(), dst);
+    }
+
+    // 5. :authority
+    if let Some(auth) = uri.authority() {
+        encode_prefixed_int(0, 4, 0x50, dst);
+        encode_string_literal(auth.as_str().as_bytes(), dst);
+    } else if let Some(host) = headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
+        encode_prefixed_int(0, 4, 0x50, dst);
+        encode_string_literal(host.as_bytes(), dst);
+    }
+
+    // 6. Additional headers (content-type, te, grpc-timeout, etc.)
+    for (name, val) in headers {
+        if name == http::header::HOST {
+            continue;
+        }
         let name_str = name.as_str();
         encode_prefixed_int(name_str.len() as u64, 3, 0x20, dst);
         dst.put_slice(name_str.as_bytes());

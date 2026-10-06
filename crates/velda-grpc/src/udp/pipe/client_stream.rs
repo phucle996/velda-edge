@@ -1,33 +1,29 @@
-//! Client-streaming gRPC pipe forwarding over UDP.
+//! Client-streaming gRPC pipe forwarding over UDP / QUIC.
 //!
 //! Downstream sends a stream of messages, and upstream responds with a single message.
-//! Forwarded over the upstream-managed socket within call deadlines.
+//! Forwarded over the persistent multiplexed QUIC client within call deadlines.
 
-use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use velda_core::{Body, L7Request, L7Response};
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::udp::client::GrpcUdpUpstreamConnector;
+use crate::udp::client::GrpcUdpClient;
 
-/// Pipes a client-streaming gRPC call over UDP.
+/// Pipes a client-streaming gRPC call over UDP / QUIC.
 ///
 /// Workflow:
-/// 1. Forward request message stream to upstream endpoint via upstream-managed socket.
+/// 1. Forward request message stream to upstream endpoint via multiplexed [`GrpcUdpClient`].
 /// 2. Collect upstream response message and validate against limits within `max_call_duration_ms`.
 pub async fn pipe_client_stream(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
-        let resp =
-            GrpcUdpUpstreamConnector::dispatch_with_socket(socket, target, req, config).await?;
+        let resp = client.send_request_ref(req).await?;
 
         // Validate response LPM length if present
         if let Body::Bytes(ref b) = resp.body

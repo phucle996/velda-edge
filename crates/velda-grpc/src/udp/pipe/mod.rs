@@ -1,4 +1,4 @@
-//! Dedicated gRPC wire pipe modules over UDP isolated by streaming strategy.
+//! Dedicated gRPC wire pipe modules over UDP / QUIC isolated by streaming strategy.
 //!
 //! Submodules:
 //! - `buffered`: Unary RPC pipe forwarding (1 request message, 1 response message).
@@ -11,8 +11,6 @@ pub mod client_stream;
 pub mod duplex;
 pub mod server_stream;
 
-use std::net::SocketAddr;
-use tokio::net::UdpSocket;
 use velda_core::{L7Request, L7Response, StreamingMode};
 
 pub use buffered::pipe_buffered;
@@ -22,6 +20,7 @@ pub use server_stream::pipe_server_stream;
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
+use crate::udp::client::GrpcUdpClient;
 
 /// Discrete streaming strategies for gRPC over UDP request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,31 +51,28 @@ impl GrpcUdpPipeStrategy {
     }
 }
 
-/// Pipes a gRPC call over UDP to an upstream backend endpoint
+/// Pipes a gRPC call over UDP / QUIC to an upstream backend endpoint
 /// according to the designated [`GrpcUdpPipeStrategy`].
 pub async fn pipe_grpc_udp_stream(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     strategy: GrpcUdpPipeStrategy,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
     match strategy {
-        GrpcUdpPipeStrategy::Buffered => pipe_buffered(socket, target, req, config).await,
-        GrpcUdpPipeStrategy::ServerStream => pipe_server_stream(socket, target, req, config).await,
-        GrpcUdpPipeStrategy::ClientStream => pipe_client_stream(socket, target, req, config).await,
-        GrpcUdpPipeStrategy::Duplex => pipe_duplex(socket, target, req, config).await,
+        GrpcUdpPipeStrategy::Buffered => pipe_buffered(client, req, config).await,
+        GrpcUdpPipeStrategy::ServerStream => pipe_server_stream(client, req, config).await,
+        GrpcUdpPipeStrategy::ClientStream => pipe_client_stream(client, req, config).await,
+        GrpcUdpPipeStrategy::Duplex => pipe_duplex(client, req, config).await,
     }
 }
 
-/// Pipes a unary gRPC call between downstream and upstream backend over UDP
-/// using an upstream-managed socket.
+/// Pipes a unary gRPC call between downstream and upstream backend over UDP / QUIC.
 #[inline]
 pub async fn pipe_grpc_udp_unary(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
-    pipe_buffered(socket, target, req, config).await
+    pipe_buffered(client, req, config).await
 }

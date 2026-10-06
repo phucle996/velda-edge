@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+velda-tls = { path = "../velda-tls" }
 tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt", "net", "time"] }
 bytes = "1.10"
 http = "1.2"

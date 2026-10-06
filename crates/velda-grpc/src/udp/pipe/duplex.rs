@@ -1,33 +1,29 @@
-//! Full-duplex bidirectional streaming gRPC pipe forwarding over UDP.
+//! Full-duplex bidirectional streaming gRPC pipe forwarding over UDP / QUIC.
 //!
 //! Streams request messages upstream while concurrently receiving response messages
-//! downstream over the upstream-managed socket within call deadlines.
+//! downstream over the persistent multiplexed QUIC client within call deadlines.
 
-use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use velda_core::{Body, L7Request, L7Response};
 
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
-use crate::udp::client::GrpcUdpUpstreamConnector;
+use crate::udp::client::GrpcUdpClient;
 
-/// Pipes an active gRPC stream in full-duplex bidirectional streaming mode over UDP.
+/// Pipes an active gRPC stream in full-duplex bidirectional streaming mode over UDP / QUIC.
 ///
 /// Workflow:
-/// 1. Concurrently stream request messages to upstream endpoint using upstream-managed socket.
+/// 1. Concurrently stream request messages to upstream endpoint using multiplexed [`GrpcUdpClient`].
 /// 2. Concurrently receive response messages from upstream backend within `max_call_duration_ms` timeout.
 pub async fn pipe_duplex(
-    socket: &UdpSocket,
-    target: SocketAddr,
+    client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
-        let resp =
-            GrpcUdpUpstreamConnector::dispatch_with_socket(socket, target, req, config).await?;
+        let resp = client.send_request_ref(req).await?;
 
         // Validate response LPM length if present
         if let Body::Bytes(ref b) = resp.body
