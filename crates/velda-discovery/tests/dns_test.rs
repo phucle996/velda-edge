@@ -305,7 +305,7 @@ async fn test_case_insensitive_domain_resolution() {
 }
 
 #[tokio::test]
-async fn test_singleflight_coalescing_prevents_thundering_herd() {
+async fn test_singleflight_coalescing() {
     // Inject 15ms artificial delay to simulate wire query window
     let server = TestUdpDnsServer::spawn(
         Some(Ipv4Addr::new(10, 0, 0, 99)),
@@ -458,7 +458,7 @@ async fn test_bounded_lkg_capacity_eviction() {
 }
 
 #[tokio::test]
-async fn test_authoritative_nxdomain_does_not_fallback_to_lkg() {
+async fn test_nxdomain_no_lkg_fallback() {
     let server = TestUdpDnsServer::spawn(Some(Ipv4Addr::new(10, 0, 0, 99)), None, false).await;
     let servers = StaticServerProvider::from_addresses(vec![server.addr]);
     let hosts = HostsFileSource::empty();

@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_and_validate_flat_tls_json_without_sni() {
+    fn test_flat_tls_without_sni() {
         let (server_cert, server_key) = make_test_cert(vec!["api.example.com".into()]);
         let (ca_cert, _) = make_test_cert(vec!["client-ca.internal".into()]);
 
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_binary_roundtrip_and_persistence() {
+    fn test_tls_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let (cert, key) = make_test_cert(vec!["default.com".into()]);
 
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compiled_tls_empty_sni_fails_invariants() {
+    fn test_empty_sni_fails() {
         let (cert, key) = make_test_cert(vec!["valid.com".into()]);
 
         let list_empty_sni = vec![TlsConfig {

@@ -48,7 +48,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_empty_versions_defaults_to_safe_defaults() {
+    fn test_empty_versions_fallback() {
         let empty = Vec::new();
         let resolved = resolve_protocol_versions(&empty).expect("default resolution");
         assert_eq!(resolved.len(), 2);
@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_both_versions_and_deduplicate() {
+    fn test_versions_deduplicate() {
         let v = vec![
             "tls1.2".to_string(),
             "TLS1.3".to_string(),

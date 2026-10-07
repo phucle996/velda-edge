@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn test_round_robin_with_workers_probed_scaling() {
+    fn test_worker_probed_scaling() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let endpoints = vec![Endpoint::new("e1", ep1, 1)];
         let ctx = SelectionContext::NONE;

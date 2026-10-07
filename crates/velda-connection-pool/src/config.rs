@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pool_config_for_tiers_cpu_and_mem_separation() {
+    fn test_pool_config_tiers() {
         // Constrained CPU + Constrained Memory
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
         assert_eq!(shards, 1);

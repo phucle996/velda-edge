@@ -451,7 +451,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_enrich_grpc_forwarded_headers_anti_spoofing() {
+    fn test_enrich_forwarded_headers() {
         let mut headers = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_grpc_stale_or_refused_detection() {
+    fn test_stale_or_refused_detection() {
         assert!(velda_grpc::GrpcError::Protocol("connection closed".into()).is_stale_or_refused());
         assert!(
             velda_grpc::GrpcError::Io(std::io::Error::new(

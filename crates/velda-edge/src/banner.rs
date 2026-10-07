@@ -207,7 +207,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_format_startup_banner_plain_and_colored() {
+    fn test_startup_banner_format() {
         let prov = Provenance::current();
         let hardware = HardwareTopology::probe();
         let path = PathBuf::from("/etc/velda");

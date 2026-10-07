@@ -448,7 +448,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_enrich_grpc_udp_forwarded_headers_anti_spoofing() {
+    fn test_enrich_forwarded_headers() {
         let mut headers = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());

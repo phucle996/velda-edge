@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_config_for_tiers_combines_cpu_and_mem() {
+    fn test_tcp_config_tiers() {
         let cfg =
             TcpListenerConfig::for_tiers(velda_core::CpuTier::Ultra, velda_core::MemoryTier::Small);
         assert_eq!(cfg.copy_buffer_size, 64 * 1024); // from Ultra CPU

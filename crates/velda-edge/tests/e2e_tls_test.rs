@@ -23,7 +23,7 @@ use velda_sync::post_sync::upstream::{
 use velda_tls::{ClientTlsConfig, TlsClientEngine};
 
 #[tokio::test]
-async fn test_end_to_end_tls_downstream_termination() {
+async fn test_tls_downstream_termination() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let runtime_dir = storage_dir.join("runtime");
@@ -205,7 +205,7 @@ async fn test_end_to_end_tls_downstream_termination() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_tls_h2_downstream() {
+async fn test_tls_h2_downstream() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let runtime_dir = storage_dir.join("runtime");
@@ -388,7 +388,7 @@ async fn test_end_to_end_tls_h2_downstream() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_tls_http1_upstream_forwarding() {
+async fn test_tls_http1_upstream() {
     let backend_cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let backend_cert_pem = backend_cert.cert.pem();
     let backend_key_pem = backend_cert.signing_key.serialize_pem();
@@ -535,7 +535,7 @@ async fn test_end_to_end_tls_http1_upstream_forwarding() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_tls_http2_upstream_forwarding() {
+async fn test_tls_http2_upstream() {
     let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_listener.local_addr().unwrap();
 
@@ -695,7 +695,7 @@ async fn test_end_to_end_tls_http2_upstream_forwarding() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_tls_grpc_upstream_forwarding() {
+async fn test_tls_grpc_upstream() {
     let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_listener.local_addr().unwrap();
 

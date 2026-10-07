@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_allows_all_upstream_is_buffered() {
+    fn test_allow_buffered_upstream() {
         let listeners = vec![make_listener("l1", StreamingMode::DUPLEX)];
         let upstreams = vec![make_upstream("u1", StreamingMode::DISABLED)];
         let routes = vec![make_route("r1", "l1", "u1")];
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_allows_all_upstream_is_server_streaming() {
+    fn test_allow_server_streaming_upstream() {
         let listeners = vec![make_listener("l1", StreamingMode::DUPLEX)];
         let upstreams = vec![make_upstream("u1", StreamingMode::SERVER)];
         let routes = vec![make_route("r1", "l1", "u1")];
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_forbids_streaming_upstream_requires_server() {
+    fn test_reject_upstream_requires_server() {
         let listeners = vec![make_listener("l1", StreamingMode::DISABLED)];
         let upstreams = vec![make_upstream("u1", StreamingMode::SERVER)];
         let routes = vec![make_route("r1", "l1", "u1")];
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_forbids_streaming_upstream_requires_client() {
+    fn test_reject_upstream_requires_client() {
         let listeners = vec![make_listener("l1", StreamingMode::DISABLED)];
         let upstreams = vec![make_upstream("u1", StreamingMode::CLIENT)];
         let routes = vec![make_route("r1", "l1", "u1")];

@@ -403,7 +403,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_passive_health_threshold_and_recovery() {
+    fn test_passive_health_recovery() {
         let config = HealthConfig::passive_only(2, Duration::from_millis(50));
         let tracker = HealthTracker::new(config);
         let ep: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_active_health_threshold_and_recovery() {
+    fn test_active_health_recovery() {
         let config = HealthConfig {
             passive: None,
             active: Some(ActiveHealthConfig {
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_unregistered_and_underflow_resilience() {
+    fn test_prune_underflow_resilience() {
         let config = HealthConfig::passive_only(1, Duration::from_secs(60));
         let tracker = HealthTracker::new(config);
         let ep1: SocketAddr = "127.0.0.1:9001".parse().unwrap();

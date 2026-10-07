@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_key_sni_and_alpn_differentiation() {
+    fn test_key_sni_alpn_diff() {
         let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
         let k1 = ConnectionKey::http(addr, "https", Some("api.com".into()), None);
         let k2 = ConnectionKey::http(addr, "https", Some("web.com".into()), None);

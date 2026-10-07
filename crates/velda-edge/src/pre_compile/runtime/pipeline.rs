@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_pipeline_generic_http_rejected() {
+    fn test_reject_generic_http() {
         let listeners = vec![
             cfg("web-h1", "tcp", "http", Some("1.1"), false),
             cfg("web-bad", "tcp", "http", None, false),
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_pipeline_table_with_explicit_tier() {
+    fn test_explicit_tier() {
         let listeners = vec![
             cfg("h1", "tcp", "http1", None, false),
             cfg("h2", "tcp", "http2", None, false),

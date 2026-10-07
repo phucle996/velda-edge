@@ -18,7 +18,7 @@ fn udp_binding(id: &str, addr: SocketAddr, tls: bool) -> IngressBinding {
 }
 
 #[tokio::test]
-async fn test_traffic_engine_pre_bound_tcp_ingress_carries_listener_id() {
+async fn test_tcp_ingress_carries_listener_id() {
     let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let http = TcpIngress::bind(TcpBinding::new("http", dummy_ephemeral, false)).unwrap();
@@ -100,7 +100,7 @@ async fn test_traffic_engine_pre_bound_tcp_ingress_carries_listener_id() {
 }
 
 #[tokio::test]
-async fn test_multi_port_heterogeneous_bindings_and_concurrency() {
+async fn test_multi_port_heterogeneous_bindings() {
     let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let mut engine = TrafficEngine::new();
@@ -245,7 +245,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
 }
 
 #[tokio::test]
-async fn test_multi_protocol_engine_tcp_udp_dispatch_by_listener_id() {
+async fn test_tcp_udp_dispatch_by_listener_id() {
     let l_tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let free_tcp = l_tcp.local_addr().unwrap();
     let l_h1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

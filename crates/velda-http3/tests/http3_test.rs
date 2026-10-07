@@ -738,7 +738,7 @@ fn test_http3_adversarial_malformed_datagram_flood() {
 }
 
 #[tokio::test]
-async fn test_http3_adversarial_oversized_payload_bomb_rejected() {
+async fn test_oversized_payload_bomb_rejected() {
     let (server_config, _) = generate_test_crypto();
     // Configure server with small max_body_size = 512 bytes
     let mut s_cfg = velda_http3::Http3Config::auto();

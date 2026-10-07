@@ -457,7 +457,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_runtime_profile_from_hardware_across_all_tiers() {
+    fn test_profile_across_all_tiers() {
         const MB: usize = 1024 * 1024;
         const GB: usize = 1024 * MB;
 
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_runtime_profile_operator_override() {
+    fn test_operator_override() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_runtime_profile_fallback_and_writeback() {
+    fn test_fallback_writeback() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_runtime_profile_partial_override_with_tier_fallback() {
+    fn test_partial_override() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_runtime_profile_grouped_transport_override() {
+    fn test_grouped_transport_override() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_runtime_profile_tls_override() {
+    fn test_tls_override() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_profile_effective_tier_override() {
+    fn test_effective_tier_override() {
         let temp_dir = tempfile::tempdir().unwrap();
         let runtime_json_path = temp_dir.path().join("runtime.json");
 

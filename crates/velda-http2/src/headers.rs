@@ -104,7 +104,7 @@ mod tests {
     use http::header::{CONNECTION, CONTENT_TYPE, HeaderValue, TE, TRANSFER_ENCODING, UPGRADE};
 
     #[test]
-    fn test_filter_h2_headers_removes_hop_by_hop() {
+    fn test_removes_hop_by_hop() {
         let mut map = HeaderMap::new();
         map.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         map.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_h2_headers_te_trailers_preserved() {
+    fn test_te_trailers_preserved() {
         let mut map = HeaderMap::new();
         map.insert(TE, HeaderValue::from_static("trailers"));
         let clean = filter_h2_headers(&map);

@@ -58,7 +58,7 @@ async fn test_tls_handshake_and_alpn_negotiation() {
 }
 
 #[tokio::test]
-async fn test_strict_no_sni_or_unknown_sni_rejects_handshake() {
+async fn test_reject_unknown_sni() {
     let (cert_pem, key_pem) = make_test_cert(vec!["api.example.com".into()]);
 
     let server_config = ServerTlsConfig {
@@ -96,7 +96,7 @@ async fn test_strict_no_sni_or_unknown_sni_rejects_handshake() {
 }
 
 #[tokio::test]
-async fn test_downstream_tls_handshake_timeout_and_completion() {
+async fn test_downstream_handshake_timeout() {
     let (cert_pem, key_pem) = make_test_cert(vec!["timeout.test".into()]);
 
     let server_config = ServerTlsConfig {
@@ -148,7 +148,7 @@ async fn test_downstream_tls_handshake_timeout_and_completion() {
 }
 
 #[tokio::test]
-async fn test_tls_version_enforcement_downstream_and_upstream() {
+async fn test_version_enforcement() {
     let (cert_pem, key_pem) = make_test_cert(vec!["version.test".into()]);
 
     // 1. Server configured exclusively for TLS 1.3

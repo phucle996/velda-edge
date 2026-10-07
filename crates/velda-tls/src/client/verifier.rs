@@ -88,7 +88,7 @@ mod tests {
     use rustls::client::danger::ServerCertVerifier;
 
     #[test]
-    fn test_supported_schemes_covers_full_suite() {
+    fn test_supported_schemes() {
         let verifier = InsecureCertVerifier;
         let schemes = verifier.supported_verify_schemes();
         // Must contain modern curves, RSA variations, and PQ schemes
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_insecure_client_config_default_and_explicit_versions() {
+    fn test_insecure_client_config() {
         let default_cfg = build_insecure_client_config(vec![b"h2".to_vec()]);
         assert_eq!(default_cfg.alpn_protocols, vec![b"h2".to_vec()]);
 

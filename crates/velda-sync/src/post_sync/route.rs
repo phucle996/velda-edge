@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_route_binary_roundtrip_and_persistence() {
+    fn test_route_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let routes = vec![RouteConfig {
             id: "api".into(),

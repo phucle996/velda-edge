@@ -252,7 +252,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_endpoint_metrics_with_workers_scaling() {
+    fn test_metrics_workers_scaling() {
         assert_eq!(EndpointMetrics::with_workers(1).shards.len(), 1);
         assert_eq!(EndpointMetrics::with_workers(4).shards.len(), 4);
         assert_eq!(EndpointMetrics::with_workers(8).shards.len(), 8);
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_endpoint_metrics_concurrency_and_balance() {
+    fn test_metrics_concurrency_balance() {
         let m = EndpointMetrics::with_workers(4);
         assert_eq!(m.active_connections(), 0);
         assert_eq!(m.inflight_requests(), 0);

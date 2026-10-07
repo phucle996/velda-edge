@@ -133,7 +133,7 @@ fn test_discovery_from_mode_explicit() {
 }
 
 #[test]
-fn test_discovery_from_mode_dns_missing_resolver_error() {
+fn test_dns_missing_resolver_error() {
     let res = Discovery::from_mode::<ResolvConfServerProvider, UdpDnsTransport>(
         DiscoveryMode::Dns {
             host: "unconfigured.service".into(),
@@ -218,7 +218,7 @@ async fn test_discovery_from_mode_async_eager_resolution() {
 }
 
 #[tokio::test]
-async fn test_discovery_dynamic_topology_evolution_and_lkg_outage() {
+async fn test_topology_evolution_and_lkg_outage() {
     let initial_ip = Ipv4Addr::new(10, 0, 3, 1);
     let server = spawn_test_udp_server(initial_ip).await;
 

@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use velda_edge::{EdgeConfig, EdgeSupervisor, RuntimeProfile};
 
 #[tokio::test]
-async fn test_cold_start_bootstrap_unconfigured_node_and_graceful_shutdown() {
+async fn test_bootstrap_and_shutdown() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let socket_path = tmp.path().join("edge_bootstrap.sock");
@@ -50,7 +50,7 @@ async fn test_cold_start_bootstrap_unconfigured_node_and_graceful_shutdown() {
 }
 
 #[test]
-fn test_cold_start_with_partial_runtime_override() {
+fn test_partial_runtime_override() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let socket_path = tmp.path().join("edge_override.sock");

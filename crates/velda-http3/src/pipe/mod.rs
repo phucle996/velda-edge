@@ -56,7 +56,7 @@ mod tests {
     use velda_core::{Body, L7Request, StreamingMode};
 
     #[test]
-    fn test_strategy_derivation_from_streaming_mode() {
+    fn test_pipe_strategy_derivation() {
         assert_eq!(
             Http3PipeStrategy::from_streaming(StreamingMode::new(false, false)),
             Http3PipeStrategy::Buffered

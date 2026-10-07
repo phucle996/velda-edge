@@ -19,7 +19,7 @@ use velda_sync::post_sync::upstream::{
 };
 
 #[tokio::test]
-async fn test_end_to_end_l4_tcp_forwarding() {
+async fn test_tcp_forwarding() {
     // 1. Start a mock TCP backend echo server
     let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_listener.local_addr().unwrap();
@@ -154,7 +154,7 @@ async fn test_end_to_end_l4_tcp_forwarding() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
+async fn test_udp_bidi_forwarding() {
     // 1. Start a mock UDP backend echo server
     let backend_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_socket.local_addr().unwrap();
@@ -299,7 +299,7 @@ async fn test_end_to_end_l4_udp_bidirectional_forwarding() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_l4_udp_unidirectional_forwarding() {
+async fn test_udp_unidirectional_forwarding() {
     // 1. Start a mock UDP backend receiver (fire-and-forget collector)
     let backend_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = backend_socket.local_addr().unwrap();

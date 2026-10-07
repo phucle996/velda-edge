@@ -116,7 +116,7 @@ async fn test_unknown_domain_name_returns_error() {
 }
 
 #[tokio::test]
-async fn test_optional_domain_missing_file_skipped_gracefully() {
+async fn test_missing_optional_domain_skipped() {
     let tmp = tempdir().unwrap();
     common::write_manifest(
         tmp.path(),

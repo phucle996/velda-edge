@@ -519,7 +519,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_enrich_http3_forwarded_headers_anti_spoofing() {
+    fn test_enrich_forwarded_headers() {
         let mut headers = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http3_connection_closed_detection() {
+    fn test_connection_closed_detection() {
         assert!(velda_http3::Http3Error::ConnectionClosed.is_connection_closed());
         assert!(velda_http3::Http3Error::H3("H3_REQUEST_REJECTED".into()).is_connection_closed());
         assert!(

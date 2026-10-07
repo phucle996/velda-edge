@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_protocol_alpn_compatible_all_protocols() {
+    fn test_alpn_compatible_protocols() {
         // http1
         assert!(is_protocol_alpn_compatible(Some("http/1.1"), "http1"));
         assert!(is_protocol_alpn_compatible(Some("HTTP/1.1"), "http1"));

@@ -1066,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_binary_roundtrip_and_persistence() {
+    fn test_upstream_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let upstreams = vec![mock_upstream_config("users")];
         let json_bytes = b"{\"upstreams\": []}";
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_pool_config_validation_and_binary_roundtrip() {
+    fn test_pool_config_roundtrip() {
         let json = r#"{
             "schema_version": 1,
             "upstreams": [{
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_health_check_missing_fields_fails() {
+    fn test_health_check_missing_fields() {
         // Missing cooldown_ms in passive config -> deserialization failure (no silent fallback!)
         let json_missing_cooldown = r#"{
             "schema_version": 1,
@@ -1210,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_timeouts_mandatory_in_json() {
+    fn test_timeouts_mandatory() {
         // Missing entire "timeouts" object -> deserialization failure
         let json_no_timeouts = r#"{
             "schema_version": 1,
@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_tls_auto_extract_sni_and_compile() {
+    fn test_tls_auto_extract_sni() {
         let certified_key =
             rcgen::generate_simple_self_signed(vec!["backend.internal.svc".into()]).unwrap();
         let ca_cert = certified_key.cert.pem();
@@ -1332,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_tls_insecure_skip_verify_and_explicit_sni() {
+    fn test_tls_insecure_and_sni() {
         let json = serde_json::json!({
             "schema_version": 1,
             "upstreams": [{

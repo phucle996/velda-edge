@@ -445,3 +445,23 @@ async fn test_progressive_chunked_client_upload() {
     let chunk_term = conn.read_next_chunk().await.unwrap();
     assert!(chunk_term.is_none());
 }
+
+#[test]
+fn test_chunked_body_with_trailers() {
+    let raw =
+        b"5\r\nhello\r\n0\r\nExpires: Wed, 21 Oct 2026 07:28:00 GMT\r\nX-Checksum: 1234\r\n\r\n";
+    let (wire_len, body) = velda_http1::parse_chunked_body(raw, 1024).unwrap().unwrap();
+    assert_eq!(wire_len, raw.len());
+    let bytes = match body {
+        velda_core::Body::Bytes(b) => b,
+        _ => panic!("expected bytes body"),
+    };
+    assert_eq!(&bytes[..], b"hello");
+
+    // Also test progressive parsing of terminal chunk with trailers
+    let term_raw = b"0\r\nExpires: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n";
+    let (term_len, payload, is_term) = velda_http1::parse_single_chunk(term_raw).unwrap().unwrap();
+    assert!(is_term);
+    assert_eq!(payload.len(), 0);
+    assert_eq!(term_len, term_raw.len());
+}

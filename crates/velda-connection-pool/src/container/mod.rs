@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_shard_alignment_and_poison_recovery() {
+    fn test_shard_poison_recovery() {
         assert_eq!(std::mem::align_of::<PoolShard<String, Dummy>>(), 64);
 
         let shard = PoolShard::<String, Dummy>::new();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_subpool_evict_expired_idle_and_lifetime() {
+    fn test_subpool_evict_expired() {
         let mut subpool = SubPool::new(10);
         let past = Instant::now() - Duration::from_secs(100);
 
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_optimal_shard_count_clamp_and_power_of_two() {
+    fn test_optimal_shard_count() {
         assert_eq!(optimal_shard_count(0), 8);
         assert_eq!(optimal_shard_count(1), 8);
         assert_eq!(optimal_shard_count(3), 8);
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_optimal_max_idle_per_key_scaling_and_clamp() {
+    fn test_optimal_max_idle() {
         assert_eq!(optimal_max_idle_per_key(0), 8);
         assert_eq!(optimal_max_idle_per_key(1), 8);
         assert_eq!(optimal_max_idle_per_key(2), 8);

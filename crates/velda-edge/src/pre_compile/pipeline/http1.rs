@@ -524,7 +524,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_enrich_http1_forwarded_headers_anti_spoofing() {
+    fn test_enrich_forwarded_headers() {
         let mut headers = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http1_stale_connection_detection() {
+    fn test_stale_connection_detection() {
         assert!(velda_http1::Http1Error::ConnectionClosed.is_stale_connection());
         assert!(
             velda_http1::Http1Error::Io(std::io::Error::new(

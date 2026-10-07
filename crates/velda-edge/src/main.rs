@@ -7,6 +7,14 @@ use velda_edge::{
     EdgeConfig, EdgeSupervisor, HardwareTopology, ThreadPinner, resolve_runtime_profile,
 };
 
+#[cfg(all(
+    feature = "jemalloc",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check CLI arguments first before runtime bootstrap
     let args: Vec<String> = std::env::args().collect();

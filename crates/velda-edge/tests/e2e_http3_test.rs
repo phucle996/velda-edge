@@ -14,7 +14,7 @@ use velda_sync::post_sync::listener::{
 use velda_sync::post_sync::tls::{TlsConfig, compile_tls_to_binary};
 
 #[tokio::test]
-async fn test_end_to_end_http3_udp_handoff_and_processing() {
+async fn test_http3_udp_handoff() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let runtime_dir = storage_dir.join("runtime");
@@ -94,7 +94,7 @@ async fn test_end_to_end_http3_udp_handoff_and_processing() {
 }
 
 #[tokio::test]
-async fn test_reload_preserves_active_http3_engine_instance() {
+async fn test_http3_reload() {
     use std::sync::Arc;
     use velda_edge::apply_reload;
     use velda_sync::SyncNotification;

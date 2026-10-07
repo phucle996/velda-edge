@@ -8,7 +8,7 @@ use common::make_test_cert;
 use velda_tls::{ServerTlsConfig, TlsServerEngine};
 
 #[test]
-fn test_quic_server_config_compilation_from_tls_engine() {
+fn test_quic_server_config_compilation() {
     let (cert_pem, key_pem) = make_test_cert(vec!["quic.example.com".into()]);
 
     let server_config = ServerTlsConfig {

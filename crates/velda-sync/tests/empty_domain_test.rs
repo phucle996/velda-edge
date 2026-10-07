@@ -10,7 +10,7 @@ use tempfile::tempdir;
 use velda_sync::post_sync::{listener, route, upstream};
 
 #[tokio::test]
-async fn test_empty_domains_compile_to_valid_empty_artifacts() {
+async fn test_empty_domains_compile() {
     let tmp = tempdir().unwrap();
     common::write_manifest(
         tmp.path(),

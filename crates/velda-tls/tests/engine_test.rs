@@ -162,7 +162,7 @@ async fn test_tls_engine_without_server_rejects_accept() {
 }
 
 #[test]
-fn test_client_tls_config_mismatched_keypair_fails_transparently() {
+fn test_mismatched_keypair_fails() {
     let (cert_pem, key_pem) = make_test_cert(vec!["test.internal".into()]);
 
     // 1. Cert provided but key missing
@@ -199,7 +199,7 @@ fn test_client_tls_config_mismatched_keypair_fails_transparently() {
 }
 
 #[test]
-fn test_client_engine_invalid_sni_fails_fast_at_startup() {
+fn test_invalid_sni_fails_fast() {
     let bad_cfg = ClientTlsConfig {
         sni: vec!["!@# invalid dns name".into()],
         versions: vec!["tls1.3".into()],

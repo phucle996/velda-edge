@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_lease_auto_drop_unhealthy_not_returned() {
+    fn test_unhealthy_lease_dropped() {
         let pool = Arc::new(PoolManager::<String, MockResource>::new());
         let key = "backend_unhealthy".to_string();
         let res = MockResource::new();
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_lease_auto_drop_draining_not_returned() {
+    fn test_draining_lease_dropped() {
         let pool = Arc::new(PoolManager::<String, MockResource>::new());
         let key = "backend_draining".to_string();
         let res = MockResource::new();

@@ -97,7 +97,7 @@ mod tests {
     use crate::algorithm::RoundRobin;
 
     #[test]
-    fn test_select_addr_returns_physical_socket_addr() {
+    fn test_select_addr_physical_socket() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
 

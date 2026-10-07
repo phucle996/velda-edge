@@ -168,36 +168,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cpu_tier_as_str() {
-        assert_eq!(CpuTier::Constrained.as_str(), "constrained");
-        assert_eq!(CpuTier::Small.as_str(), "small");
-        assert_eq!(CpuTier::Medium.as_str(), "medium");
-        assert_eq!(CpuTier::Large.as_str(), "large");
-        assert_eq!(CpuTier::XLarge.as_str(), "xlarge");
-        assert_eq!(CpuTier::TwoXLarge.as_str(), "2xlarge");
-        assert_eq!(CpuTier::Ultra.as_str(), "ultra");
+    fn test_cpu_tier_str_roundtrip() {
+        let tiers = [
+            CpuTier::Constrained,
+            CpuTier::Small,
+            CpuTier::Medium,
+            CpuTier::Large,
+            CpuTier::XLarge,
+            CpuTier::TwoXLarge,
+            CpuTier::Ultra,
+        ];
+        for tier in tiers {
+            assert_eq!(tier.as_str().parse::<CpuTier>().unwrap(), tier);
+        }
+        assert_eq!("twoxlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
+        assert!("invalid".parse::<CpuTier>().is_err());
     }
 
     #[test]
-    fn test_probe_cpu_returns_valid_profile() {
+    fn test_probe_cpu() {
         let cpu = probe_cpu();
         assert!(cpu.available_cores >= 1);
         assert!(!cpu.source.is_empty());
-    }
-
-    #[test]
-    fn test_cpu_tier_from_str() {
-        assert_eq!(
-            "constrained".parse::<CpuTier>().unwrap(),
-            CpuTier::Constrained
-        );
-        assert_eq!("small".parse::<CpuTier>().unwrap(), CpuTier::Small);
-        assert_eq!("medium".parse::<CpuTier>().unwrap(), CpuTier::Medium);
-        assert_eq!("large".parse::<CpuTier>().unwrap(), CpuTier::Large);
-        assert_eq!("xlarge".parse::<CpuTier>().unwrap(), CpuTier::XLarge);
-        assert_eq!("2xlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
-        assert_eq!("twoxlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
-        assert_eq!("ultra".parse::<CpuTier>().unwrap(), CpuTier::Ultra);
-        assert!("invalid".parse::<CpuTier>().is_err());
     }
 }

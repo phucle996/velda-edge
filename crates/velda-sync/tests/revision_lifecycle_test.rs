@@ -11,7 +11,7 @@ use velda_sync::SyncOutcome;
 use velda_sync::post_sync::route;
 
 #[tokio::test]
-async fn test_identical_content_different_revision_is_noop_by_checksum() {
+async fn test_noop_on_identical_checksum() {
     let dir = common::example_dir();
     let (mut comp, _storage) = common::make_composition(&dir);
 
@@ -29,7 +29,7 @@ async fn test_identical_content_different_revision_is_noop_by_checksum() {
 }
 
 #[tokio::test]
-async fn test_revision_rollback_with_content_change_triggers_update() {
+async fn test_rollback_triggers_update() {
     let tmp = tempdir().unwrap();
 
     // Rev 10: initial

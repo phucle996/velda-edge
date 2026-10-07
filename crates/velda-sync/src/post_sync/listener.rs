@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn test_conflicting_protocol_blocks_rejected() {
+    fn test_conflicting_protocols_rejected() {
         let json = r#"{
             "schema_version": 1,
             "listeners": [{
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_streaming_fails_deserialization() {
+    fn test_missing_streaming_fails() {
         let json = r#"{
             "schema_version": 1,
             "listeners": [{
@@ -1174,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_port_wildcard_overlap_fails() {
+    fn test_port_wildcard_overlap_fails() {
         let mut listeners = vec![
             cfg("all", "0.0.0.0:18081", "tcp", "http1"),
             cfg("loopback", "127.0.0.1:18081", "tcp", "raw"),
@@ -1211,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_binary_roundtrip_and_persistence() {
+    fn test_listener_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let listeners = vec![cfg("http", "0.0.0.0:80", "tcp", "http1")];
         let binary = compile_listeners_to_binary(&listeners, 5, [0x11u8; 32]).unwrap();

@@ -12,7 +12,7 @@ use velda_sync::post_sync::listener::{
 };
 
 #[tokio::test]
-async fn test_end_to_end_cold_start_and_uds_hot_reload() {
+async fn test_uds_hot_reload() {
     let tmp = tempdir().unwrap();
     let storage_dir = tmp.path().join("storage");
     let runtime_dir = storage_dir.join("runtime");

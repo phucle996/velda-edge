@@ -329,7 +329,7 @@ async fn test_grpc_buffered_pipe_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_grpc_buffered_pipe_rejects_payload_exceeding_max_message_size() {
+async fn test_buffered_pipe_payload_too_large() {
     // Limit max_message_size to 32 bytes
     let restricted_config = GrpcConfig::for_tier(MemoryTier::Constrained).with_max_message_size(32);
     let srv_config = restricted_config;

@@ -119,7 +119,7 @@ mod tests {
     use std::net::SocketAddr;
 
     #[test]
-    fn test_smooth_weighted_round_robin_distribution() {
+    fn test_smooth_wrr_distribution() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
         let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_weighted_round_robin_poisoned_mutex_resilience() {
+    fn test_poisoned_mutex_resilience() {
         use std::panic;
         use std::sync::Arc;
 

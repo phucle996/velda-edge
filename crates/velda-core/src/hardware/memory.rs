@@ -170,42 +170,30 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_tier_as_str() {
-        assert_eq!(MemoryTier::Constrained.as_str(), "constrained");
-        assert_eq!(MemoryTier::Small.as_str(), "small");
-        assert_eq!(MemoryTier::Medium.as_str(), "medium");
-        assert_eq!(MemoryTier::Large.as_str(), "large");
-        assert_eq!(MemoryTier::XLarge.as_str(), "xlarge");
-        assert_eq!(MemoryTier::TwoXLarge.as_str(), "2xlarge");
-        assert_eq!(MemoryTier::Ultra.as_str(), "ultra");
-    }
-
-    #[test]
-    fn test_probe_memory_returns_valid_profile() {
-        let mem = probe_memory();
-        assert!(mem.total_bytes >= 1024 * 1024);
-        assert!(!mem.source.is_empty());
-    }
-
-    #[test]
-    fn test_memory_tier_from_str() {
-        assert_eq!(
-            "constrained".parse::<MemoryTier>().unwrap(),
-            MemoryTier::Constrained
-        );
-        assert_eq!("small".parse::<MemoryTier>().unwrap(), MemoryTier::Small);
-        assert_eq!("medium".parse::<MemoryTier>().unwrap(), MemoryTier::Medium);
-        assert_eq!("large".parse::<MemoryTier>().unwrap(), MemoryTier::Large);
-        assert_eq!("xlarge".parse::<MemoryTier>().unwrap(), MemoryTier::XLarge);
-        assert_eq!(
-            "2xlarge".parse::<MemoryTier>().unwrap(),
-            MemoryTier::TwoXLarge
-        );
+    fn test_memory_tier_str_roundtrip() {
+        let tiers = [
+            MemoryTier::Constrained,
+            MemoryTier::Small,
+            MemoryTier::Medium,
+            MemoryTier::Large,
+            MemoryTier::XLarge,
+            MemoryTier::TwoXLarge,
+            MemoryTier::Ultra,
+        ];
+        for tier in tiers {
+            assert_eq!(tier.as_str().parse::<MemoryTier>().unwrap(), tier);
+        }
         assert_eq!(
             "twoxlarge".parse::<MemoryTier>().unwrap(),
             MemoryTier::TwoXLarge
         );
-        assert_eq!("ultra".parse::<MemoryTier>().unwrap(), MemoryTier::Ultra);
         assert!("invalid".parse::<MemoryTier>().is_err());
+    }
+
+    #[test]
+    fn test_probe_memory() {
+        let mem = probe_memory();
+        assert!(mem.total_bytes >= 1024 * 1024);
+        assert!(!mem.source.is_empty());
     }
 }

@@ -541,7 +541,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_enrich_http2_forwarded_headers_anti_spoofing() {
+    fn test_enrich_forwarded_headers() {
         let mut headers = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http2_refused_or_goaway_detection() {
+    fn test_refused_or_goaway_detection() {
         assert!(velda_http2::Http2Error::ConnectionClosed.is_refused_or_goaway());
         assert!(
             velda_http2::Http2Error::StreamReset(h2::Reason::REFUSED_STREAM).is_refused_or_goaway()

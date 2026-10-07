@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upstreams_explicit_endpoints() {
+    fn test_explicit_endpoints() {
         let mut u_udp = make_test_upstream("u_udp", "raw", "endpoints");
         u_udp.protocol.transport = "udp".to_string();
 
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upstreams_rejects_invalid_tls_identity() {
+    fn test_reject_invalid_tls_identity() {
         // QUIC upstream without SNI: no fallback to upstream id.
         let mut h3_no_sni = make_test_upstream("h3_no_sni", "http3", "endpoints");
         h3_no_sni.protocol.transport = "quic".to_string();
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upstreams_tls_for_http2_and_grpc_tcp() {
+    fn test_tls_http2_grpc() {
         let mut h2 = make_test_upstream("h2", "http2", "endpoints");
         h2.tls = test_tls(&["h2.internal"]);
         let mut grpc = make_test_upstream("grpc", "grpc", "endpoints");
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upstreams_rejects_alpn_protocol_mismatch() {
+    fn test_reject_alpn_mismatch() {
         let engine = test_engine("h2.internal");
 
         // ALPN is validation only: declaring h3-only ALPN on an http2 upstream is a config error.
@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_upstreams_dns_mode_and_custom_resolver() {
+    async fn test_dns_resolver() {
         let mut u_dns = make_test_upstream("u_dns", "http1", "dns");
         u_dns.endpoints.clear();
         u_dns.target = Some(DnsTarget {
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upstreams_with_operator_pool_override_and_tier_fallback() {
+    fn test_operator_pool_override() {
         use velda_sync::post_sync::upstream::UpstreamPoolConfig;
 
         // Upstream with operator-specified pool overrides

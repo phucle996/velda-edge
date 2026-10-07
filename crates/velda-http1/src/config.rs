@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_constrained_tier_uses_tightest_bounds() {
+    fn test_constrained_tier_bounds() {
         let cfg = Http1Config::for_tier(MemoryTier::Constrained);
         assert_eq!(cfg.max_body_size, 2 * 1024 * 1024);
         assert_eq!(cfg.max_header_size, 8 * 1024);
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ultra_tier_uses_largest_buffers_and_limits() {
+    fn test_ultra_tier_limits() {
         let cfg = Http1Config::for_tier(MemoryTier::Ultra);
         assert_eq!(cfg.max_body_size, 100 * 1024 * 1024);
         assert_eq!(cfg.max_header_size, 128 * 1024);
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shrink_threshold_always_at_least_4x_initial() {
+    fn test_shrink_threshold() {
         let tiers = [
             MemoryTier::Constrained,
             MemoryTier::Small,

@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_maglev_composite_table_size_auto_prime() {
+    fn test_table_size_auto_prime() {
         let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
         let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];

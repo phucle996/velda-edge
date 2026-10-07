@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plugin_binary_roundtrip_and_persistence() {
+    fn test_plugin_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let plugins = vec![PluginConfig {
             id: "jwt-auth".into(),

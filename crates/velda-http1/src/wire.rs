@@ -118,7 +118,7 @@ pub fn parse_chunked_body(
                 offset += 2;
                 break;
             }
-            if let Some(pos) = trailer_data.windows(4).position(|w| w == b"\r\n\r\n") {
+            if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
                 offset += pos + 4;
                 break;
             }
@@ -214,7 +214,7 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
         if trailer_data.starts_with(b"\r\n") {
             return Ok(Some((header_len + 2, &[], true)));
         }
-        if let Some(pos) = trailer_data.windows(4).position(|w| w == b"\r\n\r\n") {
+        if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
             return Ok(Some((header_len + pos + 4, &[], true)));
         }
         return Ok(None);
