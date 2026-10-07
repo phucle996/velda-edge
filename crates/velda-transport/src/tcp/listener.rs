@@ -34,6 +34,33 @@ impl TcpListener {
         }
 
         #[cfg(target_os = "linux")]
+        if config.freebind {
+            use std::os::fd::AsRawFd;
+            let fd = socket.as_raw_fd();
+            let val: libc::c_int = 1;
+            let (level, optname) = if addr.is_ipv4() {
+                (libc::IPPROTO_IP, libc::IP_FREEBIND)
+            } else {
+                (libc::IPPROTO_IPV6, libc::IPV6_FREEBIND)
+            };
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    level,
+                    optname,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "IP_FREEBIND socket option skipped or unsupported"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
         if let Some(secs) = config.defer_accept_secs {
             use std::os::fd::AsRawFd;
             let fd = socket.as_raw_fd();
@@ -249,6 +276,50 @@ impl TcpListener {
                     tracing::trace!(
                         errno = std::io::Error::last_os_error().raw_os_error(),
                         "SO_BUSY_POLL skipped on accepted socket"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(lowat) = self.config.notsent_lowat {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let val: libc::c_uint = lowat as libc::c_uint;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_NOTSENT_LOWAT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_NOTSENT_LOWAT skipped on accepted downstream socket"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(user_timeout) = self.config.user_timeout {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let val: libc::c_uint = user_timeout.as_millis().clamp(1000, 300_000) as libc::c_uint;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_USER_TIMEOUT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_USER_TIMEOUT skipped on accepted downstream socket"
                     );
                 }
             }

@@ -22,7 +22,11 @@ pub mod memory;
 use std::sync::OnceLock;
 
 pub use cpu::{CpuProfile, CpuTier, probe_cpu};
-pub use kernel::{AccelerationTier, KernelProfile, KernelVersion, probe_kernel};
+pub use kernel::{
+    AccelerationTier, CoreSteeringTier, DeadPeerTeardownTier, KernelAccelerationLadder,
+    KernelProfile, KernelVersion, MultiplexPacingTier, OutboundPortScalingTier, UdpOffloadTier,
+    probe_kernel,
+};
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
 
 /// Error returned when a hardware tier string fails to parse.
@@ -150,6 +154,12 @@ impl HardwareTopology {
     #[inline]
     pub fn is_accelerated(&self) -> bool {
         self.kernel.acceleration.is_accelerated()
+    }
+
+    /// Resolves the evolutionary acceleration ladder selecting the highest supported kernel path per goal.
+    #[inline]
+    pub fn acceleration_ladder(&self) -> KernelAccelerationLadder {
+        KernelAccelerationLadder::from_kernel(&self.kernel)
     }
 }
 

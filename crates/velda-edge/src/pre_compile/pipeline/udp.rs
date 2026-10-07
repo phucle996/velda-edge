@@ -264,37 +264,22 @@ pub async fn handle_l4_udp(
         "Established new bidirectional L4 UDP session"
     );
 
-    tokio::spawn(async move {
-        let bind_addr: SocketAddr = if target_addr.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
-        } else {
-            "[::]:0".parse().unwrap()
-        };
+    let up_clone = Arc::clone(up);
 
-        let upstream_socket = match tokio::net::UdpSocket::bind(bind_addr).await {
+    tokio::spawn(async move {
+        let upstream_socket = match up_clone.connect_socket(target_addr) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(
                     error = %e,
                     listener = %session_key.listener_id,
                     target = %target_addr,
-                    "Failed to bind ephemeral upstream UDP socket for L4 session"
+                    "Failed to connect accelerated upstream UDP socket for L4 session"
                 );
                 get_udp_session_table().remove(&session_key);
                 return;
             }
         };
-
-        if let Err(e) = upstream_socket.connect(target_addr).await {
-            tracing::error!(
-                error = %e,
-                listener = %session_key.listener_id,
-                target = %target_addr,
-                "Failed to connect ephemeral UDP socket to upstream target"
-            );
-            get_udp_session_table().remove(&session_key);
-            return;
-        }
 
         // Send the initial datagram to upstream
         if let Err(e) = upstream_socket.send(&initial_data).await {

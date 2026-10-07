@@ -38,6 +38,15 @@ pub struct TcpListenerConfig {
     /// Affines listener socket queues to specific CPU cores (`SO_INCOMING_CPU`) to steer
     /// packet processing directly to the worker thread's local CPU, maximizing L1/L2 cache locality.
     pub incoming_cpu: bool,
+    /// Caps unsent bytes in the socket write queue (`TCP_NOTSENT_LOWAT`) on accepted connections
+    /// to combat bufferbloat and keep multiplexed protocols (HTTP/2, gRPC) responsive.
+    pub notsent_lowat: Option<u32>,
+    /// Explicit deadline for unacknowledged transmitted data (`TCP_USER_TIMEOUT`, RFC 5482)
+    /// on accepted connections, tearing down silent/blackhole client connections fast.
+    pub user_timeout: Option<Duration>,
+    /// Enables non-local IP binding (`IP_FREEBIND`), allowing listeners to bind
+    /// to floating VIPs and Anycast addresses prior to interface assignment during HA failovers.
+    pub freebind: bool,
 }
 
 impl Default for TcpListenerConfig {
@@ -56,6 +65,9 @@ impl Default for TcpListenerConfig {
             fastopen_backlog: None,
             busy_poll_us: None,
             incoming_cpu: false,
+            notsent_lowat: None,
+            user_timeout: None,
+            freebind: false,
         }
     }
 }
@@ -142,6 +154,38 @@ impl TcpListenerConfig {
     pub fn with_send_buffer_size(mut self, size: usize) -> Self {
         self.send_buffer_size = Some(size);
         self
+    }
+
+    /// Sets `TCP_NOTSENT_LOWAT` bytes threshold on accepted sockets (Linux).
+    pub fn with_notsent_lowat(mut self, lowat: Option<u32>) -> Self {
+        self.notsent_lowat = lowat;
+        self
+    }
+
+    /// Sets `TCP_USER_TIMEOUT` on accepted sockets (Linux).
+    pub fn with_user_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.user_timeout = timeout;
+        self
+    }
+
+    /// Sets whether to enable `IP_FREEBIND` on the listening socket (Linux).
+    pub fn with_freebind(mut self, freebind: bool) -> Self {
+        self.freebind = freebind;
+        self
+    }
+
+    /// Calculates sensible `TCP_NOTSENT_LOWAT` threshold in bytes for a given memory tier.
+    #[inline]
+    pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
+        match tier {
+            velda_core::MemoryTier::Constrained => 16 * 1024,
+            velda_core::MemoryTier::Small => 16 * 1024,
+            velda_core::MemoryTier::Medium => 32 * 1024,
+            velda_core::MemoryTier::Large => 64 * 1024,
+            velda_core::MemoryTier::XLarge => 64 * 1024,
+            velda_core::MemoryTier::TwoXLarge => 128 * 1024,
+            velda_core::MemoryTier::Ultra => 128 * 1024,
+        }
     }
 
     /// Creates a TCP listener configuration sized appropriately for the host's [`velda_core::MemoryTier`].
@@ -248,8 +292,15 @@ impl TcpListenerConfig {
         {
             cfg.busy_poll_us = Some(50);
         }
-        if topo.kernel.supports_incoming_cpu() {
+        let ladder = topo.acceleration_ladder();
+        if ladder.core_steering >= velda_core::CoreSteeringTier::IncomingCpu {
             cfg.incoming_cpu = true;
+        }
+        if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
+            cfg.notsent_lowat = Some(Self::notsent_lowat_for_mem_tier(topo.memory_tier()));
+        }
+        if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
+            cfg.user_timeout = Some(Duration::from_secs(30));
         }
         cfg
     }
@@ -395,5 +446,30 @@ mod tests {
     fn test_incoming_cpu_builder() {
         let cfg = TcpListenerConfig::new().with_incoming_cpu(true);
         assert!(cfg.incoming_cpu);
+    }
+
+    #[test]
+    fn test_acceleration_options_builder() {
+        let cfg = TcpListenerConfig::new()
+            .with_notsent_lowat(Some(32768))
+            .with_user_timeout(Some(Duration::from_secs(45)))
+            .with_freebind(true);
+
+        assert_eq!(cfg.notsent_lowat, Some(32768));
+        assert_eq!(cfg.user_timeout, Some(Duration::from_secs(45)));
+        assert!(cfg.freebind);
+
+        assert_eq!(
+            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Constrained),
+            16 * 1024
+        );
+        assert_eq!(
+            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Medium),
+            32 * 1024
+        );
+        assert_eq!(
+            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Ultra),
+            128 * 1024
+        );
     }
 }

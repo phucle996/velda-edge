@@ -1970,6 +1970,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror",
  "tikv-jemallocator",

@@ -37,6 +37,7 @@ bytes = "1.10"
 h2 = "0.4"
 rustc-hash = "2.1"
 libc = "0.2"
+socket2 = "0.6"
 
 [target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

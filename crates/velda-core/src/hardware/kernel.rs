@@ -137,6 +137,15 @@ impl KernelProfile {
         self.version.is_at_least(2, 4)
     }
 
+    /// Evaluates if the kernel supports `IP_FREEBIND` (Linux >= 2.4).
+    ///
+    /// Allows sockets to bind to non-local IP addresses (e.g. Floating VIPs, Anycast),
+    /// enabling zero-failure cold boots and live failovers before the network interface claims the IP.
+    #[inline]
+    pub const fn supports_ip_freebind(&self) -> bool {
+        self.version.is_at_least(2, 4)
+    }
+
     /// Evaluates if the kernel supports `TCP_QUICKACK` (Linux >= 2.4).
     ///
     /// Immediately acknowledges incoming data to prevent 40ms delayed-ACK deadlocks
@@ -171,6 +180,14 @@ impl KernelProfile {
     /// aborting hung connections when cloud NAT gateways or firewalls silently drop packets.
     #[inline]
     pub const fn supports_tcp_user_timeout(&self) -> bool {
+        self.version.is_at_least(2, 6)
+    }
+
+    /// Evaluates if the kernel supports `SO_RXQ_OVFL` (Linux >= 2.6.33).
+    ///
+    /// Enables reading socket queue overflow dropped datagram counters from ancillary cmsg headers.
+    #[inline]
+    pub const fn supports_so_rxq_ovfl(&self) -> bool {
         self.version.is_at_least(2, 6)
     }
 
@@ -214,6 +231,22 @@ impl KernelProfile {
 
     // --- Linux 4.x ---
 
+    /// Evaluates if the kernel supports `IP_BIND_ADDRESS_NO_PORT` (Linux >= 4.2).
+    ///
+    /// Delays ephemeral source port selection until `connect(2)` to eliminate 64k outbound port exhaustion.
+    #[inline]
+    pub const fn supports_ip_bind_address_no_port(&self) -> bool {
+        self.version.is_at_least(4, 2)
+    }
+
+    /// Evaluates if the kernel supports classic BPF steering on `SO_REUSEPORT` (Linux >= 4.5).
+    ///
+    /// Enables deterministic mapping from NIC interrupt receiving CPU directly to the pinned worker.
+    #[inline]
+    pub const fn supports_so_attach_reuseport_cbpf(&self) -> bool {
+        self.version.is_at_least(4, 5)
+    }
+
     /// Evaluates if the kernel supports BBR congestion control (Linux >= 4.9).
     #[inline]
     pub const fn supports_bbr(&self) -> bool {
@@ -230,6 +263,14 @@ impl KernelProfile {
     }
 
     // --- Linux 5.x ---
+
+    /// Evaluates if the kernel supports Generic Receive Offload for UDP (`UDP_GRO`, Linux >= 5.0).
+    ///
+    /// Batches multiple incoming QUIC datagrams into up to 64KB buffers in a single system call.
+    #[inline]
+    pub const fn supports_udp_gro(&self) -> bool {
+        self.version.is_at_least(5, 0)
+    }
 
     /// Evaluates if the kernel version satisfies the minimum requirement for `io_uring`
     /// multishot networking and stable ring buffers (Linux >= 5.19).
@@ -257,6 +298,122 @@ impl KernelProfile {
         #[cfg(not(target_os = "linux"))]
         {
             false
+        }
+    }
+}
+
+/// Classification of Ingress CPU Core steering generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CoreSteeringTier {
+    /// Baseline single-acceptor listen queue (no multi-core distribution).
+    Baseline,
+    /// Kernel 4-tuple hashing across SO_REUSEPORT sockets (Linux >= 3.9).
+    ReusePort,
+    /// Steer listener socket queues to matching CPU core (SO_INCOMING_CPU, Linux >= 3.19).
+    IncomingCpu,
+    /// Direct BPF/eBPF steering from NIC softirq CPU to pinned worker (SO_ATTACH_REUSEPORT_CBPF, Linux >= 4.5).
+    BpfCpuSteering,
+}
+
+/// Classification of Upstream outbound ephemeral port allocation generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OutboundPortScalingTier {
+    /// Standard early ephemeral port allocation at bind time (Linux < 4.2).
+    Standard,
+    /// Delayed port allocation until connect() time (IP_BIND_ADDRESS_NO_PORT, Linux >= 4.2).
+    BindAddressNoPort,
+}
+
+/// Classification of UDP / HTTP/3 datagram receive offload generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UdpOffloadTier {
+    /// Standard per-datagram recv_from syscalls.
+    Standard,
+    /// Hardware/kernel drop monitoring via SO_RXQ_OVFL (Linux >= 2.6.33).
+    QueueMonitored,
+    /// Generic Receive Offload batching up to 64KB per syscall via UDP_GRO (Linux >= 5.0).
+    GenericReceiveOffload,
+}
+
+/// Classification of multiplexed write pacing generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MultiplexPacingTier {
+    /// Default OS send buffer.
+    DefaultBuffer,
+    /// Unsent queue threshold pacing via TCP_NOTSENT_LOWAT (Linux >= 3.12).
+    NotsentLowat,
+}
+
+/// Classification of zombie connection teardown generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeadPeerTeardownTier {
+    /// Standard TCP keepalive probes (Linux >= 2.4).
+    KeepaliveProbes,
+    /// Explicit deadline enforcement via TCP_USER_TIMEOUT (Linux >= 2.6.37).
+    UserTimeout,
+}
+
+/// Evolutionary acceleration ladder resolving the highest supported kernel acceleration path
+/// for each specific optimization goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelAccelerationLadder {
+    /// Ingress connection steering and core affinity generation.
+    pub core_steering: CoreSteeringTier,
+    /// Outbound ephemeral port scaling generation.
+    pub outbound_port_scaling: OutboundPortScalingTier,
+    /// UDP receive batching and offload generation.
+    pub udp_offload: UdpOffloadTier,
+    /// HTTP/2 and multiplexed stream write pacing generation.
+    pub multiplex_pacing: MultiplexPacingTier,
+    /// Silent peer disconnection and blackhole teardown generation.
+    pub dead_peer_teardown: DeadPeerTeardownTier,
+}
+
+impl KernelAccelerationLadder {
+    /// Resolves the highest evolution tier for each acceleration goal based on the detected kernel profile.
+    pub fn from_kernel(kernel: &KernelProfile) -> Self {
+        let core_steering = if kernel.supports_so_attach_reuseport_cbpf() {
+            CoreSteeringTier::BpfCpuSteering
+        } else if kernel.supports_incoming_cpu() {
+            CoreSteeringTier::IncomingCpu
+        } else if kernel.version.is_at_least(3, 9) {
+            CoreSteeringTier::ReusePort
+        } else {
+            CoreSteeringTier::Baseline
+        };
+
+        let outbound_port_scaling = if kernel.supports_ip_bind_address_no_port() {
+            OutboundPortScalingTier::BindAddressNoPort
+        } else {
+            OutboundPortScalingTier::Standard
+        };
+
+        let udp_offload = if kernel.supports_udp_gro() {
+            UdpOffloadTier::GenericReceiveOffload
+        } else if kernel.supports_so_rxq_ovfl() {
+            UdpOffloadTier::QueueMonitored
+        } else {
+            UdpOffloadTier::Standard
+        };
+
+        let multiplex_pacing = if kernel.supports_tcp_notsent_lowat() {
+            MultiplexPacingTier::NotsentLowat
+        } else {
+            MultiplexPacingTier::DefaultBuffer
+        };
+
+        let dead_peer_teardown = if kernel.supports_tcp_user_timeout() {
+            DeadPeerTeardownTier::UserTimeout
+        } else {
+            DeadPeerTeardownTier::KeepaliveProbes
+        };
+
+        Self {
+            core_steering,
+            outbound_port_scaling,
+            udp_offload,
+            multiplex_pacing,
+            dead_peer_teardown,
         }
     }
 }

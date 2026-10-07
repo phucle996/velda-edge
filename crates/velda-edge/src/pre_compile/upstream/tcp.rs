@@ -38,6 +38,9 @@ pub struct TcpAccelerationPath {
     pub quickack: bool,
     /// Attempts BBR congestion control (`TCP_CONGESTION`) for high-throughput, low-bufferbloat egress.
     pub bbr: bool,
+    /// Delays ephemeral source port selection until `connect(2)` (`IP_BIND_ADDRESS_NO_PORT`),
+    /// eliminating the 64,000 ephemeral outbound port exhaustion ceiling on high-concurrency gateways.
+    pub bind_address_no_port: bool,
 }
 
 impl Default for TcpAccelerationPath {
@@ -52,6 +55,7 @@ impl Default for TcpAccelerationPath {
             syncnt: None,
             quickack: true,
             bbr: false,
+            bind_address_no_port: false,
         }
     }
 }
@@ -66,19 +70,23 @@ impl TcpAccelerationPath {
     ) -> Self {
         let fastopen = is_tls && topo.kernel.supports_tcp_fastopen_connect();
 
-        let notsent_lowat = if topo.kernel.supports_tcp_notsent_lowat() {
-            Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
-        } else {
-            None
-        };
+        let ladder = topo.acceleration_ladder();
 
-        let user_timeout = if topo.kernel.supports_tcp_user_timeout() {
-            let candidate = timeouts.connect.saturating_mul(3);
-            let cap = timeouts.idle.min(Duration::from_secs(30));
-            Some(candidate.max(cap).max(Duration::from_secs(10)))
-        } else {
-            None
-        };
+        let notsent_lowat =
+            if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
+                Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
+            } else {
+                None
+            };
+
+        let user_timeout =
+            if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
+                let candidate = timeouts.connect.saturating_mul(3);
+                let cap = timeouts.idle.min(Duration::from_secs(30));
+                Some(candidate.max(cap).max(Duration::from_secs(10)))
+            } else {
+                None
+            };
 
         let keepalive = Some(timeouts.idle / 2);
 
@@ -104,6 +112,9 @@ impl TcpAccelerationPath {
             None
         };
 
+        let bind_address_no_port =
+            ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
+
         Self {
             nodelay: true,
             fastopen,
@@ -114,6 +125,7 @@ impl TcpAccelerationPath {
             syncnt,
             quickack,
             bbr,
+            bind_address_no_port,
         }
     }
 
@@ -121,6 +133,25 @@ impl TcpAccelerationPath {
     pub fn apply_pre_connect(&self, fd: std::os::unix::io::RawFd) {
         #[cfg(target_os = "linux")]
         {
+            if self.bind_address_no_port {
+                let val: libc::c_int = 1;
+                unsafe {
+                    let ret = libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IP,
+                        libc::IP_BIND_ADDRESS_NO_PORT,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&val) as libc::socklen_t,
+                    );
+                    if ret != 0 {
+                        tracing::trace!(
+                            errno = std::io::Error::last_os_error().raw_os_error(),
+                            "IP_BIND_ADDRESS_NO_PORT not supported by kernel or denied in container; skipping"
+                        );
+                    }
+                }
+            }
+
             if self.fastopen {
                 let val: libc::c_int = 1;
                 unsafe {

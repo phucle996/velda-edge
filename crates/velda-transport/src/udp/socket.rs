@@ -66,6 +66,77 @@ impl UdpSocket {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if config.freebind {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            let val: libc::c_int = 1;
+            let (level, optname) = if addr.is_ipv4() {
+                (libc::IPPROTO_IP, libc::IP_FREEBIND)
+            } else {
+                (libc::IPPROTO_IPV6, libc::IPV6_FREEBIND)
+            };
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    level,
+                    optname,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "IP_FREEBIND socket option skipped on UDP socket"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if config.gro {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            let val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_UDP,
+                    libc::UDP_GRO,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "UDP_GRO socket option skipped or unsupported by kernel"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if config.rxq_ovfl {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            let val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RXQ_OVFL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_RXQ_OVFL socket option skipped or unsupported by kernel"
+                    );
+                }
+            }
+        }
+
         if let Some(recv_buf) = config.recv_buffer_size {
             let _ = sock.set_recv_buffer_size(recv_buf);
         }

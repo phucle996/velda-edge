@@ -22,7 +22,7 @@ use velda_discovery::Discovery;
 use velda_edge::pipeline::udp::{SessionAcquisition, UdpSessionKey, get_udp_session_table};
 use velda_edge::resolve_runtime_profile;
 use velda_edge::runtime::{Runtime, new_shared_runtime};
-use velda_edge::upstream::{LbAlgorithm, UdpUpstream};
+use velda_edge::upstream::{LbAlgorithm, UdpAccelerationPath, UdpUpstream};
 use velda_upstream::{Upstream, UpstreamTimeouts};
 
 #[global_allocator]
@@ -416,7 +416,7 @@ fn bench_depleted_upstream_fail_fast_storm() {
     );
     let balancer = LbAlgorithm::from_name("round_robin");
     let inner = Upstream::new("depleted_upstream", "udp", discovery, balancer, timeouts);
-    let depleted_udp = UdpUpstream::new(inner);
+    let depleted_udp = UdpUpstream::new(inner, UdpAccelerationPath::default());
 
     let iters = 1_000_000;
 

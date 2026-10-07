@@ -11,6 +11,13 @@ pub struct UdpSocketConfig {
     pub reuseport: bool,
     /// Number of socket shards bound to the same port via `SO_REUSEPORT`.
     pub concurrency_shards: usize,
+    /// Enables non-local IP binding (`IP_FREEBIND`), allowing UDP listeners to bind
+    /// to floating VIPs and Anycast addresses prior to interface assignment during HA failovers.
+    pub freebind: bool,
+    /// Enables Generic Receive Offload (`UDP_GRO`), batching incoming datagrams into 64KB buffers.
+    pub gro: bool,
+    /// Enables socket queue overflow monitoring (`SO_RXQ_OVFL`) to trace dropped datagrams.
+    pub rxq_ovfl: bool,
 }
 
 impl Default for UdpSocketConfig {
@@ -20,6 +27,9 @@ impl Default for UdpSocketConfig {
             send_buffer_size: None,
             reuseport: cfg!(unix),
             concurrency_shards: 1,
+            freebind: false,
+            gro: false,
+            rxq_ovfl: false,
         }
     }
 }
@@ -39,6 +49,24 @@ impl UdpSocketConfig {
     /// Sets the send buffer size hint.
     pub fn with_send_buffer_size(mut self, size: usize) -> Self {
         self.send_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets whether to enable `IP_FREEBIND` on UDP sockets (Linux).
+    pub fn with_freebind(mut self, freebind: bool) -> Self {
+        self.freebind = freebind;
+        self
+    }
+
+    /// Sets whether to enable `UDP_GRO` on UDP sockets (Linux).
+    pub fn with_gro(mut self, gro: bool) -> Self {
+        self.gro = gro;
+        self
+    }
+
+    /// Sets whether to enable `SO_RXQ_OVFL` on UDP sockets (Linux).
+    pub fn with_rxq_ovfl(mut self, rxq_ovfl: bool) -> Self {
+        self.rxq_ovfl = rxq_ovfl;
         self
     }
 
@@ -64,42 +92,63 @@ impl UdpSocketConfig {
                 send_buffer_size: Some(256 * KB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::Small => Self {
                 recv_buffer_size: Some(512 * KB),
                 send_buffer_size: Some(512 * KB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::Medium => Self {
                 recv_buffer_size: Some(MB),
                 send_buffer_size: Some(MB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::Large => Self {
                 recv_buffer_size: Some(2 * MB),
                 send_buffer_size: Some(2 * MB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::XLarge => Self {
                 recv_buffer_size: Some(4 * MB),
                 send_buffer_size: Some(4 * MB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::TwoXLarge => Self {
                 recv_buffer_size: Some(8 * MB),
                 send_buffer_size: Some(8 * MB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
             velda_core::MemoryTier::Ultra => Self {
                 recv_buffer_size: Some(16 * MB),
                 send_buffer_size: Some(16 * MB),
                 reuseport: cfg!(unix),
                 concurrency_shards: 1,
+                freebind: false,
+                gro: false,
+                rxq_ovfl: false,
             },
         }
     }
@@ -118,6 +167,19 @@ impl UdpSocketConfig {
         };
         cfg
     }
+
+    /// Pre-compiles UDP socket acceleration settings from probed hardware topology and evolutionary ladder.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        let mut cfg = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
+        let ladder = topo.acceleration_ladder();
+        if ladder.udp_offload == velda_core::UdpOffloadTier::GenericReceiveOffload {
+            cfg.gro = true;
+            cfg.rxq_ovfl = true;
+        } else if ladder.udp_offload == velda_core::UdpOffloadTier::QueueMonitored {
+            cfg.rxq_ovfl = true;
+        }
+        cfg
+    }
 }
 
 #[cfg(test)]
@@ -128,10 +190,16 @@ mod tests {
     fn test_udp_config_builder() {
         let cfg = UdpSocketConfig::new()
             .with_recv_buffer_size(65536)
-            .with_send_buffer_size(32768);
+            .with_send_buffer_size(32768)
+            .with_freebind(true)
+            .with_gro(true)
+            .with_rxq_ovfl(true);
 
         assert_eq!(cfg.recv_buffer_size, Some(65536));
         assert_eq!(cfg.send_buffer_size, Some(32768));
+        assert!(cfg.freebind);
+        assert!(cfg.gro);
+        assert!(cfg.rxq_ovfl);
     }
 
     #[test]

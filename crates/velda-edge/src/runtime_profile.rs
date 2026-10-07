@@ -88,6 +88,12 @@ pub struct TcpRuntimeConfig {
     pub busy_poll_us: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_cpu: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notsent_lowat: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freebind: Option<bool>,
 }
 
 /// UDP-specific runtime configuration.
@@ -101,6 +107,12 @@ pub struct UdpRuntimeConfig {
     pub reuseport: bool,
     #[serde(default = "default_concurrency_shards")]
     pub concurrency_shards: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freebind: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gro: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rxq_ovfl: Option<bool>,
 }
 
 /// Transport subsystem tuning parameters.
@@ -171,6 +183,7 @@ impl RuntimeProfile {
         let dns_config = DnsResolverConfig::for_tier(memory_tier);
         let mut engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
         engine_config.tcp = TcpListenerConfig::for_topology(hardware);
+        engine_config.udp = UdpSocketConfig::for_topology(hardware);
         let tls_params = velda_tls::TlsServerParams::for_tiers(cpu_tier, memory_tier);
 
         Self {
@@ -210,12 +223,34 @@ impl RuntimeProfile {
                     fastopen_backlog: engine_config.tcp.fastopen_backlog,
                     busy_poll_us: engine_config.tcp.busy_poll_us,
                     incoming_cpu: Some(engine_config.tcp.incoming_cpu),
+                    notsent_lowat: engine_config.tcp.notsent_lowat,
+                    user_timeout_secs: engine_config.tcp.user_timeout.map(|d| d.as_secs()),
+                    freebind: if engine_config.tcp.freebind {
+                        Some(true)
+                    } else {
+                        None
+                    },
                 },
                 udp: UdpRuntimeConfig {
                     recv_buffer_size: engine_config.udp.recv_buffer_size,
                     send_buffer_size: engine_config.udp.send_buffer_size,
                     reuseport: engine_config.udp.reuseport,
                     concurrency_shards: engine_config.udp.concurrency_shards,
+                    freebind: if engine_config.udp.freebind {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                    gro: if engine_config.udp.gro {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                    rxq_ovfl: if engine_config.udp.rxq_ovfl {
+                        Some(true)
+                    } else {
+                        None
+                    },
                 },
             },
             tls: TlsRuntimeConfig {
@@ -281,6 +316,15 @@ impl RuntimeProfile {
         if let Some(ic) = self.transport.tcp.incoming_cpu {
             cfg = cfg.with_incoming_cpu(ic);
         }
+        if let Some(nl) = self.transport.tcp.notsent_lowat {
+            cfg = cfg.with_notsent_lowat(Some(nl));
+        }
+        if let Some(ut) = self.transport.tcp.user_timeout_secs {
+            cfg = cfg.with_user_timeout(Some(std::time::Duration::from_secs(ut)));
+        }
+        if let Some(fb) = self.transport.tcp.freebind {
+            cfg = cfg.with_freebind(fb);
+        }
         cfg
     }
 
@@ -294,6 +338,15 @@ impl RuntimeProfile {
         }
         if let Some(s) = self.transport.udp.send_buffer_size {
             cfg = cfg.with_send_buffer_size(s);
+        }
+        if let Some(fb) = self.transport.udp.freebind {
+            cfg = cfg.with_freebind(fb);
+        }
+        if let Some(gro) = self.transport.udp.gro {
+            cfg = cfg.with_gro(gro);
+        }
+        if let Some(rxq_ovfl) = self.transport.udp.rxq_ovfl {
+            cfg = cfg.with_rxq_ovfl(rxq_ovfl);
         }
         cfg
     }

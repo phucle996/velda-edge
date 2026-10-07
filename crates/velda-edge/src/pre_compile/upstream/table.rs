@@ -446,7 +446,11 @@ pub fn build_upstreams(
                 );
             }
             "raw" | "udp" if transport == "udp" => {
-                udp_map.insert(config.id.clone(), Arc::new(UdpUpstream::new(inner)));
+                let udp_acceleration = super::udp::UdpAccelerationPath::for_topology(topology);
+                udp_map.insert(
+                    config.id.clone(),
+                    Arc::new(UdpUpstream::new(inner, udp_acceleration)),
+                );
             }
             "raw" | "tcp" => {
                 let tcp_acceleration =
