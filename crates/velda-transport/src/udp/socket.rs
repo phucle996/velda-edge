@@ -137,6 +137,61 @@ impl UdpSocket {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if config.gso {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            const UDP_SEGMENT: libc::c_int = 103;
+            let val: libc::c_int = 1472;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_UDP,
+                    UDP_SEGMENT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "UDP_SEGMENT (GSO) socket option skipped or unsupported by kernel"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if config.prefer_busy_poll {
+            use std::os::fd::AsRawFd;
+            let fd = sock.as_raw_fd();
+            const SO_PREFER_BUSY_POLL: libc::c_int = 69;
+            const SO_BUSY_POLL_BUDGET: libc::c_int = 70;
+            let val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_PREFER_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_PREFER_BUSY_POLL skipped on UDP socket"
+                    );
+                }
+                let budget: libc::c_int = 8;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_BUSY_POLL_BUDGET,
+                    &budget as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&budget) as libc::socklen_t,
+                );
+            }
+        }
+
         if let Some(recv_buf) = config.recv_buffer_size {
             let _ = sock.set_recv_buffer_size(recv_buf);
         }

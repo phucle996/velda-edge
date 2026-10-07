@@ -41,6 +41,21 @@ pub struct TcpAccelerationPath {
     /// Delays ephemeral source port selection until `connect(2)` (`IP_BIND_ADDRESS_NO_PORT`),
     /// eliminating the 64,000 ephemeral outbound port exhaustion ceiling on high-concurrency gateways.
     pub bind_address_no_port: bool,
+    /// Commands the kernel to rehash the IPv6 flow label / 4-tuple entropy hash on packet loss/RTO
+    /// (`SO_TXREHASH`, Linux >= 5.18), automatically steering flows away from degraded ECMP paths.
+    pub tx_rehash: bool,
+    /// Instructs kernel NAPI to suppress IRQ interrupts in favor of busy-polling (`SO_PREFER_BUSY_POLL`
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11), eliminating context-switch jitter.
+    pub prefer_busy_poll: bool,
+    /// Microsecond minimum retransmission timeout floor (`TCP_RTO_MIN_US`, Linux >= 6.9).
+    /// Replaces the default 200ms RTO floor with 5ms for sub-millisecond loss recovery on intra-VPC backends.
+    pub rto_min_us: Option<u32>,
+    /// Caps delayed ACK timer in microseconds (`TCP_DELACK_MAX_US`, Linux >= 6.9) down to 2ms,
+    /// eliminating 40ms delayed-ACK stalls without user-space `TCP_QUICKACK` polling.
+    pub delack_max_us: Option<u32>,
+    /// Caps maximum RTO in milliseconds (`TCP_RTO_MAX_MS`, Linux >= 6.9) down to 1000ms,
+    /// stopping exponential backoff from stalling partitioned backends for 120s.
+    pub rto_max_ms: Option<u32>,
 }
 
 impl Default for TcpAccelerationPath {
@@ -56,6 +71,11 @@ impl Default for TcpAccelerationPath {
             quickack: true,
             bbr: false,
             bind_address_no_port: false,
+            tx_rehash: false,
+            prefer_busy_poll: false,
+            rto_min_us: None,
+            delack_max_us: None,
+            rto_max_ms: None,
         }
     }
 }
@@ -115,6 +135,29 @@ impl TcpAccelerationPath {
         let bind_address_no_port =
             ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
 
+        let tx_rehash =
+            ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
+
+        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            );
+
+        let (rto_min_us, delack_max_us, rto_max_ms) =
+            if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
+                // For intra-VPC / cloud datacenter backend upstreams:
+                // 5ms min RTO (vs 200ms default) enables sub-millisecond recovery on dropped packets.
+                // 2ms max delayed ACK (vs 40ms default) eliminates ACK stalls without user-space quickack polling.
+                // 1000ms max RTO bounds exponential backoff freezes on partitioned backends.
+                (Some(5_000), Some(2_000), Some(1_000))
+            } else {
+                (None, None, None)
+            };
+
         Self {
             nodelay: true,
             fastopen,
@@ -126,6 +169,11 @@ impl TcpAccelerationPath {
             quickack,
             bbr,
             bind_address_no_port,
+            tx_rehash,
+            prefer_busy_poll,
+            rto_min_us,
+            delack_max_us,
+            rto_max_ms,
         }
     }
 
@@ -296,6 +344,94 @@ impl TcpAccelerationPath {
                     tracing::trace!(error = %std::io::Error::last_os_error(), "SO_BUSY_POLL skipped (unprivileged container)");
                 }
             }
+
+            // Linux 5.18+ SO_TXREHASH: Automatic ECMP flow label rehash upon loss/RTO
+            const SO_TXREHASH: libc::c_int = 74;
+            if self.tx_rehash {
+                let val: libc::c_int = 1;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_TXREHASH,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "SO_TXREHASH skipped");
+                }
+            }
+
+            // Linux 5.11+ SO_PREFER_BUSY_POLL & SO_BUSY_POLL_BUDGET
+            const SO_PREFER_BUSY_POLL: libc::c_int = 69;
+            const SO_BUSY_POLL_BUDGET: libc::c_int = 70;
+            if self.prefer_busy_poll {
+                let val: libc::c_int = 1;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_PREFER_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "SO_PREFER_BUSY_POLL skipped");
+                }
+                let budget: libc::c_int = 8;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_BUSY_POLL_BUDGET,
+                    &budget as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&budget) as libc::socklen_t,
+                );
+            }
+
+            // Linux 6.9+ TCP_RTO_MIN_US, TCP_DELACK_MAX_US, TCP_RTO_MAX_MS
+            const TCP_RTO_MAX_MS: libc::c_int = 44;
+            const TCP_RTO_MIN_US: libc::c_int = 45;
+            const TCP_DELACK_MAX_US: libc::c_int = 46;
+
+            if let Some(rto_min) = self.rto_min_us {
+                let val = rto_min as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_RTO_MIN_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_RTO_MIN_US skipped");
+                }
+            }
+
+            if let Some(delack) = self.delack_max_us {
+                let val = delack as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_DELACK_MAX_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_DELACK_MAX_US skipped");
+                }
+            }
+
+            if let Some(rto_max) = self.rto_max_ms {
+                let val = rto_max as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_RTO_MAX_MS,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_RTO_MAX_MS skipped");
+                }
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = fd;
@@ -416,5 +552,101 @@ impl TcpUpstream {
         pipe(stream).await.map_err(|e| {
             EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use velda_core::hardware::{AccelerationTier, HardwareTopology, KernelProfile, KernelVersion};
+    use velda_upstream::UpstreamTimeouts;
+
+    use super::*;
+
+    fn test_timeouts() -> UpstreamTimeouts {
+        UpstreamTimeouts {
+            connect: Duration::from_millis(500),
+            idle: Duration::from_secs(60),
+            request: Some(Duration::from_secs(5)),
+        }
+    }
+
+    #[test]
+    fn test_tcp_acceleration_ladder_linux_3_10() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(3, 10, 0),
+            AccelerationTier::Standard,
+            "test_legacy",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(8, 8 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let timeouts = test_timeouts();
+
+        let path = TcpAccelerationPath::for_topology(&topo, &timeouts, false);
+        assert!(!path.tx_rehash);
+        assert!(!path.prefer_busy_poll);
+        assert!(path.rto_min_us.is_none());
+        assert!(path.delack_max_us.is_none());
+        assert!(path.rto_max_ms.is_none());
+        assert!(!path.bind_address_no_port);
+    }
+
+    #[test]
+    fn test_tcp_acceleration_ladder_linux_5_11() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(5, 11, 0),
+            AccelerationTier::Standard,
+            "test_prefer_busy_poll",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let timeouts = test_timeouts();
+
+        let path = TcpAccelerationPath::for_topology(&topo, &timeouts, false);
+        assert!(path.prefer_busy_poll);
+        assert!(!path.tx_rehash);
+        assert!(path.rto_min_us.is_none());
+
+        // Verify that on Medium / constrained CPU (< 9 cores), busy polling is disabled to protect CPU budgets
+        let topo_medium = HardwareTopology::with_workers_and_memory(8, 8 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let path_medium = TcpAccelerationPath::for_topology(&topo_medium, &timeouts, false);
+        assert!(!path_medium.prefer_busy_poll);
+    }
+
+    #[test]
+    fn test_tcp_acceleration_ladder_linux_5_18() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(5, 18, 0),
+            AccelerationTier::Standard,
+            "test_txrehash",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let timeouts = test_timeouts();
+
+        let path = TcpAccelerationPath::for_topology(&topo, &timeouts, false);
+        assert!(path.prefer_busy_poll);
+        assert!(path.tx_rehash);
+        assert!(path.rto_min_us.is_none());
+    }
+
+    #[test]
+    fn test_tcp_acceleration_ladder_linux_6_9() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(6, 9, 0),
+            AccelerationTier::IoUringFastPath,
+            "test_microsecond_rto",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let timeouts = test_timeouts();
+
+        let path = TcpAccelerationPath::for_topology(&topo, &timeouts, false);
+        assert!(path.prefer_busy_poll);
+        assert!(path.tx_rehash);
+        assert_eq!(path.rto_min_us, Some(5_000));
+        assert_eq!(path.delack_max_us, Some(2_000));
+        assert_eq!(path.rto_max_ms, Some(1_000));
     }
 }

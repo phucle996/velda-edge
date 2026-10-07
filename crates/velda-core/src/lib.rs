@@ -69,10 +69,11 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
-    AccelerationTier, CoreSteeringTier, CpuProfile, CpuTier, DeadPeerTeardownTier,
+    AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, CpuTier, DeadPeerTeardownTier,
     HardwareTopology, KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile,
-    MemoryTier, MultiplexPacingTier, OutboundPortScalingTier, ParseTierError, UdpOffloadTier,
-    global_hardware_topology, init_hardware_topology, probe_cpu, probe_kernel, probe_memory,
+    MemoryTier, MultipathResilienceTier, MultiplexPacingTier, OutboundPortScalingTier,
+    ParseTierError, UdpEgressTier, UdpOffloadTier, global_hardware_topology,
+    init_hardware_topology, probe_cpu, probe_kernel, probe_memory,
 };
 pub use provenance::Provenance;
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

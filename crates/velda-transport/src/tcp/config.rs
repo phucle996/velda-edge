@@ -47,6 +47,13 @@ pub struct TcpListenerConfig {
     /// Enables non-local IP binding (`IP_FREEBIND`), allowing listeners to bind
     /// to floating VIPs and Anycast addresses prior to interface assignment during HA failovers.
     pub freebind: bool,
+    /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL`
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) on accepted sockets.
+    pub prefer_busy_poll: bool,
+    /// Microsecond minimum retransmission timeout floor (`TCP_RTO_MIN_US`, Linux >= 6.9) on accepted sockets.
+    pub rto_min_us: Option<u32>,
+    /// Caps delayed ACK timer in microseconds (`TCP_DELACK_MAX_US`, Linux >= 6.9) down to 2ms on accepted sockets.
+    pub delack_max_us: Option<u32>,
 }
 
 impl Default for TcpListenerConfig {
@@ -68,6 +75,9 @@ impl Default for TcpListenerConfig {
             notsent_lowat: None,
             user_timeout: None,
             freebind: false,
+            prefer_busy_poll: false,
+            rto_min_us: None,
+            delack_max_us: None,
         }
     }
 }
@@ -171,6 +181,24 @@ impl TcpListenerConfig {
     /// Sets whether to enable `IP_FREEBIND` on the listening socket (Linux).
     pub fn with_freebind(mut self, freebind: bool) -> Self {
         self.freebind = freebind;
+        self
+    }
+
+    /// Sets whether to enable `SO_PREFER_BUSY_POLL` (Linux).
+    pub fn with_prefer_busy_poll(mut self, enabled: bool) -> Self {
+        self.prefer_busy_poll = enabled;
+        self
+    }
+
+    /// Sets `TCP_RTO_MIN_US` minimum RTO in microseconds on accepted sockets (Linux).
+    pub fn with_rto_min_us(mut self, us: Option<u32>) -> Self {
+        self.rto_min_us = us;
+        self
+    }
+
+    /// Sets `TCP_DELACK_MAX_US` maximum delayed ACK timer in microseconds on accepted sockets (Linux).
+    pub fn with_delack_max_us(mut self, us: Option<u32>) -> Self {
+        self.delack_max_us = us;
         self
     }
 
@@ -301,6 +329,21 @@ impl TcpListenerConfig {
         }
         if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
             cfg.user_timeout = Some(Duration::from_secs(30));
+        }
+        if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
+            cfg.rto_min_us = Some(5_000);
+            cfg.delack_max_us = Some(2_000);
+        }
+        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            )
+        {
+            cfg.prefer_busy_poll = true;
         }
         cfg
     }
@@ -471,5 +514,33 @@ mod tests {
             TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Ultra),
             128 * 1024
         );
+    }
+
+    #[test]
+    fn test_tcp_evolutionary_ladder_for_topology() {
+        use velda_core::hardware::{
+            AccelerationTier, HardwareTopology, KernelProfile, KernelVersion,
+        };
+
+        let kernel_6_9 = KernelProfile::new(
+            KernelVersion::new(6, 9, 0),
+            AccelerationTier::IoUringFastPath,
+            "test_6_9",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel_6_9);
+
+        let cfg = TcpListenerConfig::for_topology(&topo);
+        assert!(cfg.prefer_busy_poll);
+        assert_eq!(cfg.rto_min_us, Some(5_000));
+        assert_eq!(cfg.delack_max_us, Some(2_000));
+
+        let builder_cfg = TcpListenerConfig::new()
+            .with_prefer_busy_poll(true)
+            .with_rto_min_us(Some(3_000))
+            .with_delack_max_us(Some(1_500));
+        assert!(builder_cfg.prefer_busy_poll);
+        assert_eq!(builder_cfg.rto_min_us, Some(3_000));
+        assert_eq!(builder_cfg.delack_max_us, Some(1_500));
     }
 }

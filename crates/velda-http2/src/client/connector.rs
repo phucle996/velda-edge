@@ -37,6 +37,16 @@ pub struct Http2AccelerationPath {
     /// Low-latency socket polling in kernel space (`SO_BUSY_POLL`) to bypass epoll sleep/wake
     /// context-switch latency spikes on high-core server tiers.
     pub busy_poll_us: Option<u32>,
+    /// Commands the kernel to rehash IPv6 flow label / 4-tuple on loss/RTO (`SO_TXREHASH`, Linux >= 5.18).
+    pub tx_rehash: bool,
+    /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL` + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11).
+    pub prefer_busy_poll: bool,
+    /// Microsecond minimum retransmission timeout floor (`TCP_RTO_MIN_US`, Linux >= 6.9).
+    pub rto_min_us: Option<u32>,
+    /// Caps delayed ACK timer in microseconds (`TCP_DELACK_MAX_US`, Linux >= 6.9) down to 2ms.
+    pub delack_max_us: Option<u32>,
+    /// Caps maximum RTO in milliseconds (`TCP_RTO_MAX_MS`, Linux >= 6.9) down to 1000ms.
+    pub rto_max_ms: Option<u32>,
 }
 
 impl Default for Http2AccelerationPath {
@@ -48,6 +58,11 @@ impl Default for Http2AccelerationPath {
             user_timeout: None,
             keepalive: None,
             busy_poll_us: None,
+            tx_rehash: false,
+            prefer_busy_poll: false,
+            rto_min_us: None,
+            delack_max_us: None,
+            rto_max_ms: None,
         }
     }
 }
@@ -96,6 +111,26 @@ impl Http2AccelerationPath {
             None
         };
 
+        let ladder = topo.acceleration_ladder();
+        let tx_rehash =
+            ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
+
+        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            );
+
+        let (rto_min_us, delack_max_us, rto_max_ms) =
+            if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
+                (Some(5_000), Some(2_000), Some(1_000))
+            } else {
+                (None, None, None)
+            };
+
         Self {
             nodelay: true,
             fastopen,
@@ -103,6 +138,11 @@ impl Http2AccelerationPath {
             user_timeout,
             keepalive,
             busy_poll_us,
+            tx_rehash,
+            prefer_busy_poll,
+            rto_min_us,
+            delack_max_us,
+            rto_max_ms,
         }
     }
 
@@ -202,6 +242,94 @@ impl Http2AccelerationPath {
                 );
                 if ret != 0 {
                     tracing::trace!(error = %std::io::Error::last_os_error(), "SO_BUSY_POLL skipped (unprivileged container)");
+                }
+            }
+
+            // Linux 5.18+ SO_TXREHASH
+            const SO_TXREHASH: libc::c_int = 74;
+            if self.tx_rehash {
+                let val: libc::c_int = 1;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_TXREHASH,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "SO_TXREHASH skipped");
+                }
+            }
+
+            // Linux 5.11+ SO_PREFER_BUSY_POLL & SO_BUSY_POLL_BUDGET
+            const SO_PREFER_BUSY_POLL: libc::c_int = 69;
+            const SO_BUSY_POLL_BUDGET: libc::c_int = 70;
+            if self.prefer_busy_poll {
+                let val: libc::c_int = 1;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_PREFER_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "SO_PREFER_BUSY_POLL skipped");
+                }
+                let budget: libc::c_int = 8;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_BUSY_POLL_BUDGET,
+                    &budget as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&budget) as libc::socklen_t,
+                );
+            }
+
+            // Linux 6.9+ TCP_RTO_MIN_US, TCP_DELACK_MAX_US, TCP_RTO_MAX_MS
+            const TCP_RTO_MAX_MS: libc::c_int = 44;
+            const TCP_RTO_MIN_US: libc::c_int = 45;
+            const TCP_DELACK_MAX_US: libc::c_int = 46;
+
+            if let Some(rto_min) = self.rto_min_us {
+                let val = rto_min as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_RTO_MIN_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_RTO_MIN_US skipped");
+                }
+            }
+
+            if let Some(delack) = self.delack_max_us {
+                let val = delack as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_DELACK_MAX_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_DELACK_MAX_US skipped");
+                }
+            }
+
+            if let Some(rto_max) = self.rto_max_ms {
+                let val = rto_max as libc::c_uint;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_RTO_MAX_MS,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_RTO_MAX_MS skipped");
                 }
             }
         }

@@ -23,9 +23,9 @@ use std::sync::OnceLock;
 
 pub use cpu::{CpuProfile, CpuTier, probe_cpu};
 pub use kernel::{
-    AccelerationTier, CoreSteeringTier, DeadPeerTeardownTier, KernelAccelerationLadder,
-    KernelProfile, KernelVersion, MultiplexPacingTier, OutboundPortScalingTier, UdpOffloadTier,
-    probe_kernel,
+    AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
+    KernelAccelerationLadder, KernelProfile, KernelVersion, MultipathResilienceTier,
+    MultiplexPacingTier, OutboundPortScalingTier, UdpEgressTier, UdpOffloadTier, probe_kernel,
 };
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
 

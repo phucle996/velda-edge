@@ -262,6 +262,14 @@ impl KernelProfile {
         self.version.is_at_least(4, 11)
     }
 
+    /// Evaluates if the kernel supports UDP Generic Segmentation Offload (`UDP_SEGMENT`, Linux >= 4.18).
+    ///
+    /// Transmits up to 64KB buffers in a single system call, offloading datagram segmentation to kernel or NIC hardware.
+    #[inline]
+    pub const fn supports_udp_segment(&self) -> bool {
+        self.version.is_at_least(4, 18)
+    }
+
     // --- Linux 5.x ---
 
     /// Evaluates if the kernel supports Generic Receive Offload for UDP (`UDP_GRO`, Linux >= 5.0).
@@ -272,11 +280,32 @@ impl KernelProfile {
         self.version.is_at_least(5, 0)
     }
 
+    /// Evaluates if the kernel supports IRQ-masked NAPI busy polling (`SO_PREFER_BUSY_POLL`, Linux >= 5.11).
+    #[inline]
+    pub const fn supports_so_prefer_busy_poll(&self) -> bool {
+        self.version.is_at_least(5, 11)
+    }
+
+    /// Evaluates if the kernel supports automatic ECMP path rehashing upon loss/RTO (`SO_TXREHASH`, Linux >= 5.18).
+    #[inline]
+    pub const fn supports_so_txrehash(&self) -> bool {
+        self.version.is_at_least(5, 18)
+    }
+
     /// Evaluates if the kernel version satisfies the minimum requirement for `io_uring`
     /// multishot networking and stable ring buffers (Linux >= 5.19).
     #[inline]
     pub const fn supports_io_uring(&self) -> bool {
         self.version.is_at_least(5, 19)
+    }
+
+    // --- Linux 6.x ---
+
+    /// Evaluates if the kernel supports microsecond-level RTO and delayed ACK tuning
+    /// (`TCP_RTO_MIN_US`, `TCP_DELACK_MAX_US`, `TCP_RTO_MAX_MS`, Linux >= 6.9).
+    #[inline]
+    pub const fn supports_tcp_microsecond_rto(&self) -> bool {
+        self.version.is_at_least(6, 9)
     }
 
     /// Detects if the process is running inside a containerized environment (Docker, Podman, K8s).
@@ -335,6 +364,15 @@ pub enum UdpOffloadTier {
     GenericReceiveOffload,
 }
 
+/// Classification of UDP / QUIC egress datagram segmentation generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UdpEgressTier {
+    /// Standard datagram-by-datagram sendto/sendmsg (Linux < 4.18).
+    Standard,
+    /// Generic Segmentation Offload (GSO) batching up to 64KB via UDP_SEGMENT (Linux >= 4.18).
+    GenericSegmentationOffload,
+}
+
 /// Classification of multiplexed write pacing generations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MultiplexPacingTier {
@@ -344,13 +382,35 @@ pub enum MultiplexPacingTier {
     NotsentLowat,
 }
 
-/// Classification of zombie connection teardown generations.
+/// Classification of silent peer disconnection and loss recovery generations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DeadPeerTeardownTier {
     /// Standard TCP keepalive probes (Linux >= 2.4).
     KeepaliveProbes,
     /// Explicit deadline enforcement via TCP_USER_TIMEOUT (Linux >= 2.6.37).
     UserTimeout,
+    /// Sub-millisecond loss detection & pacing via TCP_RTO_MIN_US + TCP_DELACK_MAX_US + TCP_RTO_MAX_MS (Linux >= 6.9).
+    MicrosecondPaced,
+}
+
+/// Classification of multi-path and ECMP route failure recovery generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MultipathResilienceTier {
+    /// Standard static routing across connection lifetime (Linux < 5.18).
+    Standard,
+    /// Automatic ECMP flow rehash on packet loss / timeout via SO_TXREHASH (Linux >= 5.18).
+    TxRehash,
+}
+
+/// Classification of NAPI busy polling generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BusyPollTier {
+    /// Standard epoll wait with thread sleep and hardware interrupts.
+    Standard,
+    /// Basic socket polling via SO_BUSY_POLL (Linux >= 3.11).
+    BasicBusyPoll,
+    /// IRQ-masked NAPI busy poll via SO_PREFER_BUSY_POLL & SO_BUSY_POLL_BUDGET (Linux >= 5.11).
+    PreferBusyPoll,
 }
 
 /// Evolutionary acceleration ladder resolving the highest supported kernel acceleration path
@@ -363,10 +423,16 @@ pub struct KernelAccelerationLadder {
     pub outbound_port_scaling: OutboundPortScalingTier,
     /// UDP receive batching and offload generation.
     pub udp_offload: UdpOffloadTier,
+    /// UDP egress segmentation offload generation.
+    pub udp_egress: UdpEgressTier,
     /// HTTP/2 and multiplexed stream write pacing generation.
     pub multiplex_pacing: MultiplexPacingTier,
-    /// Silent peer disconnection and blackhole teardown generation.
+    /// Silent peer disconnection and loss recovery generation.
     pub dead_peer_teardown: DeadPeerTeardownTier,
+    /// Multi-path and ECMP route failure recovery generation.
+    pub multipath_resilience: MultipathResilienceTier,
+    /// NAPI busy polling latency optimization generation.
+    pub busy_poll: BusyPollTier,
 }
 
 impl KernelAccelerationLadder {
@@ -396,24 +462,49 @@ impl KernelAccelerationLadder {
             UdpOffloadTier::Standard
         };
 
+        let udp_egress = if kernel.supports_udp_segment() {
+            UdpEgressTier::GenericSegmentationOffload
+        } else {
+            UdpEgressTier::Standard
+        };
+
         let multiplex_pacing = if kernel.supports_tcp_notsent_lowat() {
             MultiplexPacingTier::NotsentLowat
         } else {
             MultiplexPacingTier::DefaultBuffer
         };
 
-        let dead_peer_teardown = if kernel.supports_tcp_user_timeout() {
+        let dead_peer_teardown = if kernel.supports_tcp_microsecond_rto() {
+            DeadPeerTeardownTier::MicrosecondPaced
+        } else if kernel.supports_tcp_user_timeout() {
             DeadPeerTeardownTier::UserTimeout
         } else {
             DeadPeerTeardownTier::KeepaliveProbes
+        };
+
+        let multipath_resilience = if kernel.supports_so_txrehash() {
+            MultipathResilienceTier::TxRehash
+        } else {
+            MultipathResilienceTier::Standard
+        };
+
+        let busy_poll = if kernel.supports_so_prefer_busy_poll() {
+            BusyPollTier::PreferBusyPoll
+        } else if kernel.supports_busy_poll() {
+            BusyPollTier::BasicBusyPoll
+        } else {
+            BusyPollTier::Standard
         };
 
         Self {
             core_steering,
             outbound_port_scaling,
             udp_offload,
+            udp_egress,
             multiplex_pacing,
             dead_peer_teardown,
+            multipath_resilience,
+            busy_poll,
         }
     }
 }

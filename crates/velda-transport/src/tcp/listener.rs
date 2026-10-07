@@ -325,6 +325,84 @@ impl TcpListener {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if self.config.prefer_busy_poll {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            const SO_PREFER_BUSY_POLL: libc::c_int = 69;
+            const SO_BUSY_POLL_BUDGET: libc::c_int = 70;
+            let val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_PREFER_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_PREFER_BUSY_POLL skipped on accepted socket"
+                    );
+                }
+                let budget: libc::c_int = 8;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_BUSY_POLL_BUDGET,
+                    &budget as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&budget) as libc::socklen_t,
+                );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(rto_min) = self.config.rto_min_us {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            const TCP_RTO_MIN_US: libc::c_int = 45;
+            let val = rto_min as libc::c_uint;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_RTO_MIN_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_RTO_MIN_US skipped on accepted downstream socket"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(delack) = self.config.delack_max_us {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            const TCP_DELACK_MAX_US: libc::c_int = 46;
+            let val = delack as libc::c_uint;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    TCP_DELACK_MAX_US,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_DELACK_MAX_US skipped on accepted downstream socket"
+                    );
+                }
+            }
+        }
+
         // Avoid a getsockname() syscall if the bound address is already specific (non-unspecified).
         let local_addr = if self.local_addr.ip().is_unspecified() {
             stream.local_addr().unwrap_or(self.local_addr)

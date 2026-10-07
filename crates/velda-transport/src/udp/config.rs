@@ -18,6 +18,12 @@ pub struct UdpSocketConfig {
     pub gro: bool,
     /// Enables socket queue overflow monitoring (`SO_RXQ_OVFL`) to trace dropped datagrams.
     pub rxq_ovfl: bool,
+    /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL`
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) on high-core latency-critical tiers.
+    pub prefer_busy_poll: bool,
+    /// Enables Generic Segmentation Offload (`UDP_SEGMENT`, Linux >= 4.18),
+    /// offloading datagram segmentation up to 64KB to kernel or NIC hardware.
+    pub gso: bool,
 }
 
 impl Default for UdpSocketConfig {
@@ -30,6 +36,8 @@ impl Default for UdpSocketConfig {
             freebind: false,
             gro: false,
             rxq_ovfl: false,
+            prefer_busy_poll: false,
+            gso: false,
         }
     }
 }
@@ -70,6 +78,18 @@ impl UdpSocketConfig {
         self
     }
 
+    /// Sets whether to enable `SO_PREFER_BUSY_POLL` on UDP sockets (Linux).
+    pub fn with_prefer_busy_poll(mut self, enabled: bool) -> Self {
+        self.prefer_busy_poll = enabled;
+        self
+    }
+
+    /// Sets whether to enable `UDP_SEGMENT` (GSO) on UDP sockets (Linux).
+    pub fn with_gso(mut self, enabled: bool) -> Self {
+        self.gso = enabled;
+        self
+    }
+
     /// Sets whether to enable `SO_REUSEPORT`.
     pub fn with_reuseport(mut self, reuseport: bool) -> Self {
         self.reuseport = reuseport;
@@ -86,70 +106,19 @@ impl UdpSocketConfig {
     pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
         const KB: usize = 1024;
         const MB: usize = 1024 * KB;
-        match tier {
-            velda_core::MemoryTier::Constrained => Self {
-                recv_buffer_size: Some(256 * KB),
-                send_buffer_size: Some(256 * KB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::Small => Self {
-                recv_buffer_size: Some(512 * KB),
-                send_buffer_size: Some(512 * KB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::Medium => Self {
-                recv_buffer_size: Some(MB),
-                send_buffer_size: Some(MB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::Large => Self {
-                recv_buffer_size: Some(2 * MB),
-                send_buffer_size: Some(2 * MB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::XLarge => Self {
-                recv_buffer_size: Some(4 * MB),
-                send_buffer_size: Some(4 * MB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::TwoXLarge => Self {
-                recv_buffer_size: Some(8 * MB),
-                send_buffer_size: Some(8 * MB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
-            velda_core::MemoryTier::Ultra => Self {
-                recv_buffer_size: Some(16 * MB),
-                send_buffer_size: Some(16 * MB),
-                reuseport: cfg!(unix),
-                concurrency_shards: 1,
-                freebind: false,
-                gro: false,
-                rxq_ovfl: false,
-            },
+        let (recv, send) = match tier {
+            velda_core::MemoryTier::Constrained => (256 * KB, 256 * KB),
+            velda_core::MemoryTier::Small => (512 * KB, 512 * KB),
+            velda_core::MemoryTier::Medium => (MB, MB),
+            velda_core::MemoryTier::Large => (2 * MB, 2 * MB),
+            velda_core::MemoryTier::XLarge => (4 * MB, 4 * MB),
+            velda_core::MemoryTier::TwoXLarge => (8 * MB, 8 * MB),
+            velda_core::MemoryTier::Ultra => (16 * MB, 16 * MB),
+        };
+        Self {
+            recv_buffer_size: Some(recv),
+            send_buffer_size: Some(send),
+            ..Self::default()
         }
     }
 
@@ -177,6 +146,20 @@ impl UdpSocketConfig {
             cfg.rxq_ovfl = true;
         } else if ladder.udp_offload == velda_core::UdpOffloadTier::QueueMonitored {
             cfg.rxq_ovfl = true;
+        }
+        if ladder.udp_egress >= velda_core::UdpEgressTier::GenericSegmentationOffload {
+            cfg.gso = true;
+        }
+        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            )
+        {
+            cfg.prefer_busy_poll = true;
         }
         cfg
     }
@@ -224,5 +207,30 @@ mod tests {
 
         let ultra = UdpSocketConfig::for_tier(velda_core::MemoryTier::Ultra);
         assert_eq!(ultra.recv_buffer_size, Some(16 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_udp_evolutionary_ladder_for_topology() {
+        use velda_core::hardware::{
+            AccelerationTier, HardwareTopology, KernelProfile, KernelVersion,
+        };
+
+        let kernel_5_11 = KernelProfile::new(
+            KernelVersion::new(5, 11, 0),
+            AccelerationTier::Standard,
+            "test_5_11",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel_5_11);
+
+        let cfg = UdpSocketConfig::for_topology(&topo);
+        assert!(cfg.gso);
+        assert!(cfg.prefer_busy_poll);
+
+        let builder_cfg = UdpSocketConfig::new()
+            .with_gso(true)
+            .with_prefer_busy_poll(true);
+        assert!(builder_cfg.gso);
+        assert!(builder_cfg.prefer_busy_poll);
     }
 }

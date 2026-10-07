@@ -25,6 +25,12 @@ pub struct UdpAccelerationPath {
     pub recv_buffer_size: Option<usize>,
     /// Socket send buffer size hint (`SO_SNDBUF`).
     pub send_buffer_size: Option<usize>,
+    /// Generic Segmentation Offload segment size (`UDP_SEGMENT`, Linux >= 4.18),
+    /// offloading datagram fragmentation of up to 64KB buffers to kernel or NIC.
+    pub gso_segment: Option<u16>,
+    /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL`
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) on high-core latency-critical tiers.
+    pub prefer_busy_poll: bool,
 }
 
 impl UdpAccelerationPath {
@@ -37,6 +43,22 @@ impl UdpAccelerationPath {
 
         let gro = ladder.udp_offload >= velda_core::UdpOffloadTier::GenericReceiveOffload;
         let rxq_ovfl = ladder.udp_offload >= velda_core::UdpOffloadTier::QueueMonitored;
+
+        let gso_segment =
+            if ladder.udp_egress >= velda_core::UdpEgressTier::GenericSegmentationOffload {
+                Some(1472)
+            } else {
+                None
+            };
+
+        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            && matches!(
+                topo.cpu_tier(),
+                velda_core::CpuTier::Large
+                    | velda_core::CpuTier::XLarge
+                    | velda_core::CpuTier::TwoXLarge
+                    | velda_core::CpuTier::Ultra
+            );
 
         let busy_poll_us = if topo.kernel.supports_busy_poll()
             && matches!(
@@ -60,6 +82,8 @@ impl UdpAccelerationPath {
             busy_poll_us,
             recv_buffer_size: Some(recv_buffer_size),
             send_buffer_size: Some(send_buffer_size),
+            gso_segment,
+            prefer_busy_poll,
         }
     }
 
@@ -171,6 +195,53 @@ impl UdpAccelerationPath {
                         "SO_BUSY_POLL skipped on UDP upstream socket"
                     );
                 }
+            }
+
+            // Linux 4.18+ UDP Generic Segmentation Offload (GSO)
+            const UDP_SEGMENT: libc::c_int = 103;
+            if let Some(segment) = self.gso_segment {
+                let val = segment as libc::c_int;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_UDP,
+                    UDP_SEGMENT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        error = %std::io::Error::last_os_error(),
+                        "UDP_SEGMENT (GSO) skipped on UDP upstream socket"
+                    );
+                }
+            }
+
+            // Linux 5.11+ SO_PREFER_BUSY_POLL & SO_BUSY_POLL_BUDGET
+            const SO_PREFER_BUSY_POLL: libc::c_int = 69;
+            const SO_BUSY_POLL_BUDGET: libc::c_int = 70;
+            if self.prefer_busy_poll {
+                let val: libc::c_int = 1;
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_PREFER_BUSY_POLL,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        error = %std::io::Error::last_os_error(),
+                        "SO_PREFER_BUSY_POLL skipped on UDP upstream socket"
+                    );
+                }
+                let budget: libc::c_int = 8;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    SO_BUSY_POLL_BUDGET,
+                    &budget as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&budget) as libc::socklen_t,
+                );
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -294,6 +365,7 @@ impl UdpUpstream {
 mod tests {
     use super::*;
     use velda_core::HardwareTopology;
+    use velda_core::hardware::{AccelerationTier, KernelProfile, KernelVersion};
 
     #[test]
     fn test_udp_acceleration_path_for_topology() {
@@ -301,5 +373,47 @@ mod tests {
         let ale = UdpAccelerationPath::for_topology(&topo);
         assert!(ale.recv_buffer_size.is_some());
         assert!(ale.send_buffer_size.is_some());
+    }
+
+    #[test]
+    fn test_udp_acceleration_ladder_linux_3_10() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(3, 10, 0),
+            AccelerationTier::Standard,
+            "test_legacy",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(8, 8 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let ale = UdpAccelerationPath::for_topology(&topo);
+        assert!(ale.gso_segment.is_none());
+        assert!(!ale.prefer_busy_poll);
+    }
+
+    #[test]
+    fn test_udp_acceleration_ladder_linux_4_18() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(4, 18, 0),
+            AccelerationTier::Standard,
+            "test_gso",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(8, 8 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let ale = UdpAccelerationPath::for_topology(&topo);
+        assert_eq!(ale.gso_segment, Some(1472));
+        assert!(!ale.prefer_busy_poll);
+    }
+
+    #[test]
+    fn test_udp_acceleration_ladder_linux_5_11() {
+        let kernel = KernelProfile::new(
+            KernelVersion::new(5, 11, 0),
+            AccelerationTier::Standard,
+            "test_prefer_busy_poll",
+        );
+        let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
+            .with_kernel(kernel);
+        let ale = UdpAccelerationPath::for_topology(&topo);
+        assert_eq!(ale.gso_segment, Some(1472));
+        assert!(ale.prefer_busy_poll);
     }
 }
