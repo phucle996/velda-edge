@@ -568,3 +568,85 @@ fn test_expect_100_continue_detection() {
     assert!(head.is_expect_100_continue());
     assert_eq!(framing, Http1BodyFraming::ContentLength(10));
 }
+
+#[test]
+fn test_chunk_header_line_exceeding_4kb_rejected() {
+    let mut bad_chunk = Vec::new();
+    bad_chunk.extend_from_slice(b"1;ext=");
+    bad_chunk.resize(5000, b'a'); // 5KB chunk line without CRLF
+
+    let res = velda_http1::wire::parse_chunked_body(&bad_chunk, 1024 * 1024);
+    assert!(res.is_err(), "Must reject chunk header line exceeding 4KB");
+
+    let res_single = velda_http1::wire::parse_single_chunk(&bad_chunk);
+    assert!(
+        res_single.is_err(),
+        "parse_single_chunk must reject line > 4KB"
+    );
+}
+
+#[test]
+fn test_enrich_headers_strips_more_than_8_custom_x_forwarded() {
+    let mut headers = HeaderMap::new();
+    let uri = http::Uri::from_static("http://example.com/api");
+    let peer: std::net::SocketAddr = "1.2.3.4:12345".parse().unwrap();
+    let local: std::net::SocketAddr = "10.0.0.1:80".parse().unwrap();
+
+    for i in 1..=14 {
+        let name =
+            http::header::HeaderName::from_bytes(format!("x-forwarded-custom-{i}").as_bytes())
+                .unwrap();
+        headers.insert(name, http::HeaderValue::from_static("spoofed"));
+    }
+    headers.insert(
+        http::header::HeaderName::from_static("x-forwarded-for"),
+        http::HeaderValue::from_static("9.9.9.9"),
+    );
+
+    velda_http1::enrich_headers(&mut headers, &uri, peer, local, false);
+
+    assert_eq!(headers.get("x-forwarded-for").unwrap(), "1.2.3.4");
+    for i in 1..=14 {
+        assert!(
+            !headers.contains_key(format!("x-forwarded-custom-{i}").as_str()),
+            "x-forwarded-custom-{i} must be stripped"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_pipe_buffered_rejects_premature_upstream_eof() {
+    let (client_down, server_down) = tokio::io::duplex(4096);
+    let (client_up, mut server_up) = tokio::io::duplex(4096);
+
+    let mut conn = Http1ServerConnection::new(server_down, TEST_CONFIG);
+    let req = Http1ServerRequest::new(
+        http::Method::GET,
+        http::Uri::from_static("/test"),
+        Version::HTTP_11,
+        HeaderMap::new(),
+        Body::Empty,
+    );
+
+    let upstream_task = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = [0u8; 1024];
+        let _ = server_up.read(&mut buf).await.unwrap();
+        // Respond with Content-Length: 100, but only send 10 bytes and close socket!
+        server_up
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789")
+            .await
+            .unwrap();
+        drop(server_up);
+    });
+
+    let mut up_stream = client_up;
+    let res = velda_http1::pipe_buffered(&mut conn, req, &mut up_stream, &TEST_CONFIG).await;
+    let _ = upstream_task.await;
+    drop(client_down);
+
+    assert!(
+        res.is_err(),
+        "pipe_buffered must return error on premature upstream EOF"
+    );
+}

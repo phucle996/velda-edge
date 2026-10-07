@@ -51,15 +51,28 @@ pub fn matches_host(expected: Option<&str>, actual: Option<&str>) -> bool {
     let expected_clean = clean_host(expected);
 
     if let Some(suffix) = expected_clean.strip_prefix("*.") {
-        if actual_clean.len() > suffix.len() {
+        if actual_clean.len() > suffix.len() + 1 {
             let dot_idx = actual_clean.len() - suffix.len() - 1;
-            if actual_clean.as_bytes()[dot_idx] == b'.' {
+            if dot_idx > 0 && actual_clean.as_bytes()[dot_idx] == b'.' {
                 return actual_clean[dot_idx + 1..].eq_ignore_ascii_case(suffix);
             }
         }
         false
     } else {
         expected_clean.eq_ignore_ascii_case(actual_clean)
+    }
+}
+
+/// Returns the specificity rank for a host pattern to enforce deterministic precedence:
+/// - 2: Exact host (e.g. `"api.example.com"`)
+/// - 1: Suffix wildcard (e.g. `"*.example.com"`)
+/// - 0: Catch-all wildcard (`"*"` or `None`)
+#[inline]
+pub fn host_specificity(host: Option<&str>) -> u8 {
+    match host {
+        Some("*") | None => 0,
+        Some(h) if clean_host(h).starts_with("*.") => 1,
+        Some(_) => 2,
     }
 }
 
@@ -100,8 +113,14 @@ mod tests {
             Some("sub.api.velda.io:443")
         ));
         assert!(!matches_host(Some("*.velda.io"), Some("velda.io:443")));
+        assert!(!matches_host(Some("*.velda.io"), Some(".velda.io")));
         assert!(matches_host(Some("[::1]"), Some("[::1]:8080")));
         assert!(matches_host(Some("::1"), Some("[::1]:8080")));
+
+        assert_eq!(host_specificity(Some("api.velda.io")), 2);
+        assert_eq!(host_specificity(Some("*.velda.io")), 1);
+        assert_eq!(host_specificity(Some("*")), 0);
+        assert_eq!(host_specificity(None), 0);
     }
 
     #[test]

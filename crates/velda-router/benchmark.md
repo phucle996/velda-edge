@@ -12,14 +12,14 @@ Tests were executed using the custom counting allocator and timing suite in:
 
 | Routing Target | Metric | Measured Result (5,000 Routes Table) | Status |
 | :--- | :--- | :--- | :--- |
-| **L4 TCP Lookup** | < 25 ns, 0 allocs | **15.07 ns**, **0.00 allocs** | **Exceeded** (66.4M ops/s) |
-| **L4 UDP + RoundRobin** | < 30 ns, 0 allocs | **24.58 ns**, **0.00 allocs** | **Exceeded** (40.7M ops/s) |
-| **L7 HTTP Exact Match** | < 70 ns, 0 allocs | **65.70 ns**, **0.00 allocs** | **Exceeded** (15.2M ops/s) |
-| **L7 HTTP Prefix Match** | < 90 ns, 0 allocs | **86.73 ns**, **0.00 allocs** | **Exceeded** (11.5M ops/s) |
-| **L7 HTTP Miss (No-Match)**| Deterministic `None`, 0 allocs | **45.04 ns**, **0.00 allocs** | **Passed** (Strict `None`, 22.2M ops/s) |
-| **L7 gRPC Exact Match** | < 45 ns, 0 allocs | **41.45 ns**, **0.00 allocs** | **Exceeded** (24.1M ops/s) |
-| **L7 gRPC Parse + Route**| < 60 ns, 0 allocs | **51.63 ns**, **0.00 allocs** | **Exceeded** (19.4M ops/s) |
-| **Aho-Corasick Scale (N=5000)** | $O(M)$ URI-length complexity | **89.96 ns**, **0.00 allocs** | **Passed** (Flat scaling $N=100 \rightarrow 5000$) |
+| **L4 TCP Lookup** | < 25 ns, 0 allocs | **0.24 ns**, **0.00 allocs** | **Exceeded** (4,183 M ops/s) |
+| **L4 UDP + RoundRobin** | < 30 ns, 0 allocs | **1.66 ns**, **0.00 allocs** | **Exceeded** (601 M ops/s) |
+| **L7 HTTP Exact Match** | < 70 ns, 0 allocs | **36.32 ns**, **0.00 allocs** | **Exceeded** (27.5 M ops/s) |
+| **L7 HTTP Prefix Match** | < 90 ns, 0 allocs | **29.11 ns**, **0.00 allocs** | **Exceeded** (34.4 M ops/s) |
+| **L7 HTTP Miss (No-Match)**| Deterministic `None`, 0 allocs | **16.03 ns**, **0.00 allocs** | **Passed** (Strict `None`, 62.4 M ops/s) |
+| **L7 gRPC Exact Match** | < 45 ns, 0 allocs | **26.54 ns**, **0.00 allocs** | **Exceeded** (37.7 M ops/s) |
+| **L7 gRPC Parse + Route**| < 60 ns, 0 allocs | **34.25 ns**, **0.00 allocs** | **Exceeded** (29.2 M ops/s) |
+| **Aho-Corasick Scale (N=5000)** | $O(M)$ URI-length complexity | **30.07 ns**, **0.00 allocs** | **Passed** (Flat scaling $N=100 \rightarrow 5000$) |
 | **Multicore Aggregate (128 Workers)**| Lock-free parallel throughput | **103.54 M ops/s** (9.66 ns) | **Passed** (Linear multi-core scale) |
 
 ---
@@ -30,13 +30,13 @@ Measures 1,000,000 iterations per scenario against a realistic production table 
 
 | Target Scenario | Tested Route Target | Latency / op | Allocs / op | Throughput | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **L4 TCP Lookup** | `l4-in-0:tcp` | **15.07 ns** | **0.00** | **66,376,526 ops/s** | Direct $O(1)$ listener slot indexing |
-| **L4 UDP + RoundRobin** | `l4-in-9:udp` | **24.58 ns** | **0.00** | **40,683,123 ops/s** | Atomic contiguous endpoint rotation |
-| **L7 HTTP Exact Match** | `/endpoints/action_0005/exec` | **65.70 ns** | **0.00** | **15,221,340 ops/s** | $O(1)$ Hash table lookup across 1,500 exact routes |
-| **L7 HTTP Prefix Match** | `/api/v1/service_1000/orders/items/42` | **86.73 ns** | **0.00** | **11,529,608 ops/s** | $O(M)$ Anchored Aho-Corasick over 2,000 prefixes |
-| **L7 HTTP Miss (No-Match)** | `/unknown/unmatched/path/404` | **45.04 ns** | **0.00** | **22,203,725 ops/s** | Strict `None`, zero fallback, immediate prefix halt |
-| **L7 gRPC Exact Match** | `service.v1.Service_0007` | **41.45 ns** | **0.00** | **24,124,085 ops/s** | Hash map service dispatch |
-| **L7 gRPC Parse+Route** | `/service.v1.Service_0007/CreateOrder` | **51.63 ns** | **0.00** | **19,367,766 ops/s** | Zero-alloc URI slice parse & match |
+| **L4 TCP Lookup** | `l4-in-0:tcp` | **0.24 ns** | **0.00** | **4,183,189,451 ops/s** | Direct $O(1)$ listener slot indexing |
+| **L4 UDP + RoundRobin** | `l4-in-9:udp` | **1.66 ns** | **0.00** | **601,310,217 ops/s** | Atomic contiguous endpoint rotation |
+| **L7 HTTP Exact Match** | `/endpoints/action_0005/exec` | **36.32 ns** | **0.00** | **27,532,497 ops/s** | $O(1)$ Hash table lookup across 1,500 exact routes |
+| **L7 HTTP Prefix Match** | `/api/v1/service_1000/orders/items/42` | **29.11 ns** | **0.00** | **34,352,285 ops/s** | $O(M)$ Anchored Aho-Corasick over 2,000 prefixes |
+| **L7 HTTP Miss (No-Match)** | `/unknown/unmatched/path/404` | **16.03 ns** | **0.00** | **62,374,258 ops/s** | Strict `None`, zero fallback, immediate prefix halt |
+| **L7 gRPC Exact Match** | `service.v1.Service_0007` | **26.54 ns** | **0.00** | **37,674,862 ops/s** | Hash map service dispatch |
+| **L7 gRPC Parse+Route** | `/service.v1.Service_0007/CreateOrder` | **34.25 ns** | **0.00** | **29,195,836 ops/s** | Zero-alloc URI slice parse & match |
 
 ---
 
@@ -46,14 +46,14 @@ Measures 1,000,000 iterations per configuration scaling from 100 to 5,000 routes
 
 | Route Count ($N$) | Path Tested | Total Time | Latency / op | Allocs / op | Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **$N = 100$** | `/api/v1/service_0020/action/detail` | 72.32 ms | **72.32 ns** | **0.00** | **13,827,827 ops/s** |
-| **$N = 500$** | `/api/v1/service_0100/action/detail` | 93.72 ms | **93.72 ns** | **0.00** | **10,669,691 ops/s** |
-| **$N = 1000$** | `/api/v1/service_0200/action/detail` | 93.46 ms | **93.46 ns** | **0.00** | **10,699,370 ops/s** |
-| **$N = 2500$** | `/api/v1/service_0500/action/detail` | 90.80 ms | **90.80 ns** | **0.00** | **11,013,563 ops/s** |
-| **$N = 5000$** | `/api/v1/service_1000/action/detail` | 89.96 ms | **89.96 ns** | **0.00** | **11,116,509 ops/s** |
+| **$N = 100$** | `/api/v1/service_0020/action/detail` | 22.67 ms | **22.67 ns** | **0.00** | **44,116,423 ops/s** |
+| **$N = 500$** | `/api/v1/service_0100/action/detail` | 29.56 ms | **29.56 ns** | **0.00** | **33,831,480 ops/s** |
+| **$N = 1000$** | `/api/v1/service_0200/action/detail` | 29.84 ms | **29.84 ns** | **0.00** | **33,513,950 ops/s** |
+| **$N = 2500$** | `/api/v1/service_0500/action/detail` | 29.75 ms | **29.75 ns** | **0.00** | **33,612,482 ops/s** |
+| **$N = 5000$** | `/api/v1/service_1000/action/detail` | 30.07 ms | **30.07 ns** | **0.00** | **33,252,382 ops/s** |
 
 ### Key Observation:
-- When scaling routes from 100 to 5,000 (a 50x increase), matching latency only changes from 94.71 ns to 113.18 ns, confirming strictly linear **$O(M)$ URI complexity** unaffected by route count.
+- When scaling routes from 100 to 5,000 (a 50x increase), matching latency only changes from 22.67 ns to 30.07 ns, confirming strictly linear **$O(M)$ URI complexity** unaffected by route count.
 
 ---
 

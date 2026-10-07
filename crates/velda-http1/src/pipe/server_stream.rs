@@ -102,7 +102,11 @@ where
                                 break;
                             }
                         }
-                        None => break,
+                        None => {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
+                        }
                     }
                 }
             }
@@ -149,7 +153,11 @@ where
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        return Err(Http1Error::Parse(
+                            "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                        ));
+                    }
                 }
             }
         }

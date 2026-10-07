@@ -111,7 +111,7 @@ pub fn parse_chunked_body(
     max_body_size: usize,
 ) -> Result<Option<(usize, Body)>, Http1Error> {
     let mut offset = 0;
-    let mut total_body_len = 0;
+    let mut total_body_len: usize = 0;
     let mut memoized_chunks = [(0usize, 0usize); 16];
     let mut chunk_count = 0;
     let mut overflowed_chunks = false;
@@ -120,6 +120,16 @@ pub fn parse_chunked_body(
     loop {
         let remaining = &data[offset..];
         let Some(crlf_pos) = find_crlf(remaining) else {
+            if remaining.len() > 4096 {
+                return Err(cold_chunked_error(
+                    "Chunk header line exceeds 4KB limit without CRLF",
+                ));
+            }
+            if total_body_len.saturating_add(remaining.len()) > max_body_size.saturating_add(4096) {
+                return Err(Http1Error::PayloadTooLarge(
+                    total_body_len.saturating_add(remaining.len()),
+                ));
+            }
             return Ok(None);
         };
         let line = &remaining[..crlf_pos];
@@ -140,6 +150,11 @@ pub fn parse_chunked_body(
                 offset += pos + 4;
                 break;
             }
+            if trailer_data.len() > 8192 {
+                return Err(cold_chunked_error(
+                    "Chunk trailer fields exceed 8KB limit without double CRLF",
+                ));
+            }
             return Ok(None);
         }
 
@@ -149,6 +164,13 @@ pub fn parse_chunked_body(
         }
 
         if data[offset..].len() < chunk_size + 2 {
+            if total_body_len.saturating_add(data[offset..].len())
+                > max_body_size.saturating_add(4096)
+            {
+                return Err(Http1Error::PayloadTooLarge(
+                    total_body_len.saturating_add(data[offset..].len()),
+                ));
+            }
             return Ok(None);
         }
 
@@ -217,6 +239,11 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
         return Ok(None);
     }
     let Some(crlf_pos) = find_crlf(data) else {
+        if data.len() > 4096 {
+            return Err(cold_chunked_error(
+                "Chunk header line exceeds 4KB limit without CRLF",
+            ));
+        }
         return Ok(None);
     };
     let line = &data[..crlf_pos];
@@ -234,6 +261,11 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
         }
         if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
             return Ok(Some((header_len + pos + 4, &[], true)));
+        }
+        if trailer_data.len() > 8192 {
+            return Err(cold_chunked_error(
+                "Chunk trailer fields exceed 8KB limit without double CRLF",
+            ));
         }
         return Ok(None);
     }

@@ -156,6 +156,15 @@ impl ListenerGrpcRouter {
             }
         }
 
+        for list in service_map.values_mut() {
+            list.sort_by_key(|r| {
+                std::cmp::Reverse(crate::host::host_specificity(r.authority.as_deref()))
+            });
+        }
+        catch_all.sort_by_key(|r| {
+            std::cmp::Reverse(crate::host::host_specificity(r.authority.as_deref()))
+        });
+
         Ok(Self {
             service_routes: service_map,
             catch_all,

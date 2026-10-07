@@ -163,6 +163,17 @@ impl ListenerHttp1Router {
             }
         }
 
+        for list in exact_map.values_mut() {
+            list.sort_by_key(|r| {
+                std::cmp::Reverse(crate::host::host_specificity(r.host.as_deref()))
+            });
+        }
+        for list in prefix_map.values_mut() {
+            list.sort_by_key(|r| {
+                std::cmp::Reverse(crate::host::host_specificity(r.host.as_deref()))
+            });
+        }
+
         let mut trie = PrefixTrie::new();
         let mut prefix_routes = Vec::with_capacity(prefix_map.len());
 
@@ -322,5 +333,42 @@ mod tests {
         let r2 = router.route("listener-1", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
         assert_eq!(r2.upstream_name, "public-upstream");
+    }
+
+    #[test]
+    fn test_http1_exact_host_precedence_over_wildcard() {
+        // Register wildcard route FIRST, then exact route SECOND
+        let routes = vec![
+            Http1Route::new(
+                RouteId::new(1),
+                "listener-1",
+                "/api",
+                UpstreamId::new(10),
+                "wildcard-upstream",
+            )
+            .with_host("*.velda.io"),
+            Http1Route::new(
+                RouteId::new(2),
+                "listener-1",
+                "/api",
+                UpstreamId::new(20),
+                "exact-upstream",
+            )
+            .with_host("api.velda.io"),
+        ];
+
+        let router = Http1Router::new(routes).unwrap();
+
+        // Exact match for api.velda.io MUST route to exact-upstream (Route 2), not wildcard-upstream (Route 1)
+        let req = Http1RouteRequest::new("/api/data").with_host("api.velda.io");
+        let matched = router.route("listener-1", &req).unwrap();
+        assert_eq!(matched.id, RouteId::new(2));
+        assert_eq!(matched.upstream_name, "exact-upstream");
+
+        // Other subdomains route to wildcard-upstream (Route 1)
+        let req2 = Http1RouteRequest::new("/api/data").with_host("billing.velda.io");
+        let matched2 = router.route("listener-1", &req2).unwrap();
+        assert_eq!(matched2.id, RouteId::new(1));
+        assert_eq!(matched2.upstream_name, "wildcard-upstream");
     }
 }

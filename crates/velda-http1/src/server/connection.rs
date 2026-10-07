@@ -141,6 +141,10 @@ where
                 return Ok(body);
             }
 
+            if self.read_buf.len() > self.config.max_body_size.saturating_add(4096) {
+                return Err(Http1Error::PayloadTooLarge(self.read_buf.len()));
+            }
+
             let bytes_read =
                 match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
                     .await
@@ -181,6 +185,16 @@ where
                 }
 
                 return Ok(Some(req));
+            }
+
+            if self.read_buf.len()
+                > self
+                    .config
+                    .max_header_size
+                    .saturating_add(self.config.max_body_size)
+                    .saturating_add(4096)
+            {
+                return Err(Http1Error::PayloadTooLarge(self.read_buf.len()));
             }
 
             let timeout_duration = if self.read_buf.is_empty() {

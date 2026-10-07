@@ -15,8 +15,8 @@ Tests were executed using the custom counting allocator and timing harness acros
 | Target / Capability | Invariant / Target Metric | Measured Result | Status |
 | :--- | :--- | :--- | :--- |
 | **PathKind Resolution** | < 1.0 ns, 0 allocs | **0.25 ns**, **0.00 allocs** | **Exceeded** (~4.0 Billion ops/s) |
-| **Ingress Binding Resolution** | < 150 ns, deterministic | **54.25 ns**, **2.00 allocs** | **Exceeded** (~18.4 Million ops/s) |
-| **Connection ID Allocation (1T)** | < 5.0 ns, 0 allocs | **0.75 ns**, **0.00 allocs** | **Exceeded** (1.33 Billion ops/s) |
+| **Ingress Binding Resolution** | < 150 ns, deterministic | **40.68 ns**, **1.00 alloc** | **Exceeded** (~24.6 Million ops/s) |
+| **Connection ID Allocation (1T)** | < 5.0 ns, 0 allocs | **0.71 ns**, **0.00 allocs** | **Exceeded** (1.41 Billion ops/s) |
 | **Connection ID Scaling (12T)** | Linear multicore scaling | **4,371.69 M ops/s** | **Passed** (~4.4 Billion ops/s at topology capacity) |
 | **Connection ID Scaling (48T)** | Zero lock contention | **5,463.52 M ops/s** | **Passed** (Maintained under oversubscription) |
 | **Atomic Cache-Line Contention** | Detect & eliminate false sharing | **Adjacent: 84.04M vs Padded: 117.13M** | **+39.4% Boost** via `CacheAlignedAtomicU64` |
@@ -24,7 +24,7 @@ Tests were executed using the custom counting allocator and timing harness acros
 | **Hostile Protocol Injection** | Fail fast, zero memory corrupt | **54.02 - 122.16 ns**, deterministic | **Passed** (Deterministic rejection) |
 | **Adversarial Protocol Fuzzing** | > 5.0 M ops/s, 0 panics | **82.35 ns**, **12.14 M ops/s** | **Exceeded** (+63% throughput increase) |
 | **Dynamic Binding Flapping** | > 1.0 M updates/s | **200.18 ns**, **5.00 M updates/s** | **Passed** (10.01 ms for 50k updates) |
-| **Datagram Encapsulation (1200B)**| < 50 ns, single alloc | **36.55 ns**, **1.00 alloc** | **Passed** (27.4 M datagrams/s) |
+| **Datagram Encapsulation (1200B)**| < 50 ns, single alloc | **36.14 ns**, **1.00 alloc** | **Passed** (27.6 M datagrams/s) |
 | **Steady-State Serving (10M Ops)**| Net Heap Growth | **0 B (Zero Leak)** | **Passed** (Batched thread-local ranges) |
 | **UDP Handoff Reclamations (1M)** | 1.13 GB alloc / 1.13 GB freed | **0 B (Zero Retention)** | **Passed** (100% deallocated) |
 | **Concurrency Storm (64 Workers)**| 6,400,000 operations | **< 10 KB Heap Growth** | **Passed** (Clean worker task teardown) |
@@ -48,19 +48,19 @@ Measures configuration compilation and path resolution matching the user's decla
 
 | Binding Mode | Config Dimensions | Latency / op | Allocs / op | Throughput | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **L4 Direct TCP** | `transport=tcp, app=raw, tls=false` | **55.09 ns** | **2.00** | **18,153,704 ops/s** | **PASS (2x Faster)** |
-| **L7 HTTP TCP Cleartext** | `transport=tcp, app=http, tls=false` | **54.31 ns** | **2.00** | **18,411,605 ops/s** | **PASS (2x Faster)** |
-| **L7 HTTPS TCP over TLS** | `transport=tcp, app=http, tls=true` | **54.25 ns** | **2.00** | **18,433,624 ops/s** | **PASS (2x Faster)** |
-| **L4 Direct UDP** | `transport=udp, app=raw, tls=false` | **54.50 ns** | **2.00** | **18,349,896 ops/s** | **PASS (2x Faster)** |
-| **L7 HTTP/3 UDP Handoff** | `transport=udp, app=http3, tls=true` | **54.54 ns** | **2.00** | **18,336,508 ops/s** | **PASS (2x Faster)** |
-| **L7 gRPC Ingress Pipeline**| `transport=tcp, app=grpc, tls=true` | **54.63 ns** | **2.00** | **18,305,123 ops/s** | **PASS (2x Faster)** |
+| **L4 Direct TCP** | `transport=tcp, app=raw, tls=false` | **40.85 ns** | **1.00** | **24,479,804 ops/s** | **PASS (Single Alloc)** |
+| **L7 HTTP TCP Cleartext** | `transport=tcp, app=http, tls=false` | **40.68 ns** | **1.00** | **24,582,104 ops/s** | **PASS (Single Alloc)** |
+| **L7 HTTPS TCP over TLS** | `transport=tcp, app=http, tls=true` | **40.54 ns** | **1.00** | **24,667,000 ops/s** | **PASS (Single Alloc)** |
+| **L4 Direct UDP** | `transport=udp, app=raw, tls=false` | **40.69 ns** | **1.00** | **24,576,062 ops/s** | **PASS (Single Alloc)** |
+| **L7 HTTP/3 UDP Handoff** | `transport=udp, app=http3, tls=true` | **40.67 ns** | **1.00** | **24,588,148 ops/s** | **PASS (Single Alloc)** |
+| **L7 gRPC Ingress Pipeline**| `transport=tcp, app=grpc, tls=true` | **40.73 ns** | **1.00** | **24,551,927 ops/s** | **PASS (Single Alloc)** |
 
 ### 2.3 Connection ID Allocation Performance (`next_connection_id`)
 Measures thread-local batched allocation fetching 512 IDs per atomic fetch from the global monotonically increasing generator:
 
 | Scenario | Batch Size | Latency / op | Allocs / op | Throughput | Target Requirement |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Thread-Local Batched ID** | 512 IDs / batch | **0.75 ns** | **0.00** | **1,328,510,133 ops/s** | < 5.0 ns (Exceeded) |
+| **Thread-Local Batched ID** | 512 IDs / batch | **0.71 ns** | **0.00** | **1,408,450,704 ops/s** | < 5.0 ns (Exceeded) |
 
 ### 2.4 Connection & Datagram Lifecycle Decomposition
 

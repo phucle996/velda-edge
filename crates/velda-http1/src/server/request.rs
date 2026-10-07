@@ -387,6 +387,9 @@ pub fn decode_body(
             Ok(Some(body))
         }
         Http1BodyFraming::Chunked => {
+            if buf.len() > config.max_body_size.saturating_add(4096) {
+                return Err(Http1Error::PayloadTooLarge(buf.len()));
+            }
             match parse_chunked_body(buf.as_ref(), config.max_body_size)? {
                 Some((consumed_wire, body)) => {
                     buf.advance(consumed_wire);
@@ -433,6 +436,9 @@ pub fn decode_request(
         }
         Http1BodyFraming::Chunked => {
             let chunked_slice = &buf[header_len..];
+            if chunked_slice.len() > config.max_body_size.saturating_add(4096) {
+                return Err(Http1Error::PayloadTooLarge(chunked_slice.len()));
+            }
             match parse_chunked_body(chunked_slice, config.max_body_size)? {
                 Some((consumed_wire, body)) => {
                     buf.advance(header_len + consumed_wire);

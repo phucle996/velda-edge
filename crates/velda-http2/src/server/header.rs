@@ -32,16 +32,27 @@ pub fn enrich_headers(
     }
 
     // 3. Defensive sweep for custom "x-forwarded-*"
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
+    let mut custom_stack: [Option<HeaderName>; 16] = [const { None }; 16];
+    let mut custom_count = 0;
+    let mut custom_heap: Option<Vec<HeaderName>> = None;
+
     for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
+        if key.as_str().starts_with("x-forwarded-") {
+            if custom_count < custom_stack.len() {
+                custom_stack[custom_count] = Some(key.clone());
+                custom_count += 1;
+            } else {
+                custom_heap.get_or_insert_with(Vec::new).push(key.clone());
+            }
         }
     }
-    for name in custom_to_remove[..count].iter().flatten() {
+    for name in custom_stack[..custom_count].iter().flatten() {
         headers.remove(name);
+    }
+    if let Some(heap) = custom_heap {
+        for name in heap {
+            headers.remove(&name);
+        }
     }
 
     let client_ip = peer.ip();

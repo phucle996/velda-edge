@@ -163,6 +163,17 @@ impl ListenerHttp2Router {
             }
         }
 
+        for list in exact_map.values_mut() {
+            list.sort_by_key(|r| {
+                std::cmp::Reverse(crate::host::host_specificity(r.host.as_deref()))
+            });
+        }
+        for list in prefix_map.values_mut() {
+            list.sort_by_key(|r| {
+                std::cmp::Reverse(crate::host::host_specificity(r.host.as_deref()))
+            });
+        }
+
         let mut trie = PrefixTrie::new();
         let mut prefix_routes = Vec::with_capacity(prefix_map.len());
 

@@ -81,7 +81,11 @@ where
                     let needed = len - bytes.len();
                     match read_chunk_sized(upstream, &mut read_buf, needed).await? {
                         Some(c) => bytes.extend_from_slice(&c),
-                        None => break,
+                        None => {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
+                        }
                     }
                 }
                 Body::Bytes(bytes.freeze())
