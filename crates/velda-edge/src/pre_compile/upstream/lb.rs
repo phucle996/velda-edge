@@ -13,7 +13,7 @@ use velda_upstream::Upstream;
 pub enum LbAlgorithm {
     /// [PRE-COMPILED]: Monotonic atomic counter round-robin selection.
     RoundRobin(RoundRobin),
-    /// [PRE-COMPILED]: Nginx-style smooth weighted round-robin with thread-sharded state.
+    /// [PRE-COMPILED]: Smooth weighted round-robin with thread-sharded state.
     WeightedRoundRobin(WeightedRoundRobin),
     /// [PRE-COMPILED]: Lowest active connections selector reading zero-copy metrics slices.
     LeastConnections(LeastConnections),

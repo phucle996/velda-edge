@@ -111,13 +111,41 @@ impl Http2ServerResponse {
 #[derive(Debug)]
 pub struct Http2Responder {
     respond: SendResponse<Bytes>,
+    alt_svc: Option<HeaderValue>,
 }
 
 impl Http2Responder {
     /// Creates a new [`Http2Responder`] from an underlying H2 stream send handle.
     #[inline]
     pub fn new(respond: SendResponse<Bytes>) -> Self {
-        Self { respond }
+        Self {
+            respond,
+            alt_svc: None,
+        }
+    }
+
+    /// Sets an optional Alt-Svc header value to automatically advertise on downstream responses.
+    #[inline]
+    pub fn with_alt_svc(mut self, alt_svc: Option<HeaderValue>) -> Self {
+        self.alt_svc = alt_svc;
+        self
+    }
+
+    #[inline]
+    fn prepare_h2_response(
+        &self,
+        status: StatusCode,
+        headers: &HeaderMap,
+    ) -> Result<Response<()>, Http2Error> {
+        let mut response = build_h2_response(status, headers)?;
+        if let Some(ref alt_svc) = self.alt_svc
+            && !response.headers().contains_key(http::header::ALT_SVC)
+        {
+            response
+                .headers_mut()
+                .insert(http::header::ALT_SVC, alt_svc.clone());
+        }
+        Ok(response)
     }
 
     /// Returns the logical HTTP/2 stream ID associated with this responder.
@@ -148,7 +176,7 @@ impl Http2Responder {
             || response.status == StatusCode::NO_CONTENT
             || response.status == StatusCode::NOT_MODIFIED;
         let has_body = !is_no_body && !response.body.is_empty();
-        let http_response = build_h2_response(response.status, &response.headers)?;
+        let http_response = self.prepare_h2_response(response.status, &response.headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
         if has_body
@@ -187,7 +215,7 @@ impl Http2Responder {
             || status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !body.is_empty();
-        let http_response = build_h2_response(status, headers)?;
+        let http_response = self.prepare_h2_response(status, headers)?;
 
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
@@ -208,7 +236,7 @@ impl Http2Responder {
         headers: &HeaderMap,
         end_stream: bool,
     ) -> Result<SendStream<Bytes>, Http2Error> {
-        let http_response = build_h2_response(status, headers)?;
+        let http_response = self.prepare_h2_response(status, headers)?;
         let send_stream = self.respond.send_response(http_response, end_stream)?;
         Ok(send_stream)
     }

@@ -22,6 +22,8 @@ pub struct Http3Config {
     pub max_concurrent_uni_streams: u32,
     /// Maximum dynamic table capacity for QPACK header decompression in bytes.
     pub max_qpack_table_capacity: usize,
+    /// Maximum pending unauthenticated handshakes before activating defensive stateless Retry tokens (0 = unlimited).
+    pub max_pending_handshakes: u32,
 }
 
 impl Http3Config {
@@ -42,6 +44,7 @@ impl Http3Config {
                 max_concurrent_streams: 64,
                 max_concurrent_uni_streams: 16,
                 max_qpack_table_capacity: 4096,
+                max_pending_handshakes: 256,
             },
             MemoryTier::Small => Self {
                 max_body_size: 4 * 1024 * 1024,
@@ -51,6 +54,7 @@ impl Http3Config {
                 max_concurrent_streams: 128,
                 max_concurrent_uni_streams: 32,
                 max_qpack_table_capacity: 4096,
+                max_pending_handshakes: 512,
             },
             MemoryTier::Medium => Self {
                 max_body_size: 10 * 1024 * 1024,
@@ -60,6 +64,7 @@ impl Http3Config {
                 max_concurrent_streams: 256,
                 max_concurrent_uni_streams: 64,
                 max_qpack_table_capacity: 8192,
+                max_pending_handshakes: 1_024,
             },
             MemoryTier::Large => Self {
                 max_body_size: 16 * 1024 * 1024,
@@ -69,6 +74,7 @@ impl Http3Config {
                 max_concurrent_streams: 256,
                 max_concurrent_uni_streams: 64,
                 max_qpack_table_capacity: 16384,
+                max_pending_handshakes: 2_048,
             },
             MemoryTier::XLarge => Self {
                 max_body_size: 32 * 1024 * 1024,
@@ -78,6 +84,7 @@ impl Http3Config {
                 max_concurrent_streams: 512,
                 max_concurrent_uni_streams: 128,
                 max_qpack_table_capacity: 32768,
+                max_pending_handshakes: 4_096,
             },
             MemoryTier::TwoXLarge => Self {
                 max_body_size: 64 * 1024 * 1024,
@@ -87,6 +94,7 @@ impl Http3Config {
                 max_concurrent_streams: 512,
                 max_concurrent_uni_streams: 128,
                 max_qpack_table_capacity: 65536,
+                max_pending_handshakes: 8_192,
             },
             MemoryTier::Ultra => Self {
                 max_body_size: 128 * 1024 * 1024,
@@ -96,6 +104,7 @@ impl Http3Config {
                 max_concurrent_streams: 512,
                 max_concurrent_uni_streams: 256,
                 max_qpack_table_capacity: 65536,
+                max_pending_handshakes: 16_384,
             },
         }
     }
@@ -149,6 +158,13 @@ impl Http3Config {
         self
     }
 
+    /// Sets the maximum pending handshakes before activating defensive Retry tokens.
+    #[inline]
+    pub const fn with_max_pending_handshakes(mut self, n: u32) -> Self {
+        self.max_pending_handshakes = n;
+        self
+    }
+
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
     pub fn apply_to_transport(&self, transport: &mut quinn_proto::TransportConfig) {
         if let Ok(timeout) = quinn_proto::IdleTimeout::try_from(std::time::Duration::from_millis(
@@ -195,13 +211,16 @@ mod tests {
         let constrained = Http3Config::for_tier(MemoryTier::Constrained);
         assert_eq!(constrained.max_concurrent_streams, 64);
         assert_eq!(constrained.max_body_size, 2 * 1024 * 1024);
+        assert_eq!(constrained.max_pending_handshakes, 256);
 
         let medium = Http3Config::for_tier(MemoryTier::Medium);
         assert_eq!(medium.max_concurrent_streams, 256);
         assert_eq!(medium.max_body_size, 10 * 1024 * 1024);
+        assert_eq!(medium.max_pending_handshakes, 1_024);
 
         let ultra = Http3Config::for_tier(MemoryTier::Ultra);
         assert_eq!(ultra.max_concurrent_streams, 512);
         assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
+        assert_eq!(ultra.max_pending_handshakes, 16_384);
     }
 }

@@ -387,7 +387,7 @@ where
         self.close_requested
     }
 
-    /// Performs a lingering close on downstream stream (RFC 9112 / NGINX ngx_http_lingering_close).
+    /// Performs a lingering close on downstream stream (RFC 9112 lingering close).
     ///
     /// Shuts down the write half to transmit FIN, then drains any lingering unread incoming bytes
     /// within a short timeout (100ms) to prevent TCP RST from dropping downstream response data.

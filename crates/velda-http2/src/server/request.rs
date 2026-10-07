@@ -1,9 +1,126 @@
-//! HTTP/2 Downstream Ingress Request Entity (RFC 9113).
+//! HTTP/2 Downstream Ingress Request Entity (RFC 9113 & RFC 9218).
 //!
 //! Represents incoming requests initiated by downstream clients across multiplexed streams.
 
 use http::{HeaderMap, Method, Uri, Version};
+use std::sync::Arc;
 use velda_core::{Body, L7Request};
+
+use super::connection::Http2FloodTracker;
+
+/// Extensible HTTP Prioritization Scheme (RFC 9218).
+///
+/// Compact 2-byte representation (`#[repr(C)]`) representing stream urgency (`0..=7`)
+/// and incremental concurrency preference. Default urgency is 3, incremental is false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct Http2Priority {
+    /// Urgency level between 0 (highest) and 7 (lowest). Default: 3.
+    pub urgency: u8,
+    /// Whether incremental delivery is preferred (concurrency over serialization).
+    pub incremental: bool,
+}
+
+impl Default for Http2Priority {
+    #[inline]
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl Http2Priority {
+    /// Default HTTP priority according to RFC 9218 (urgency = 3, incremental = false).
+    pub const DEFAULT: Self = Self {
+        urgency: 3,
+        incremental: false,
+    };
+
+    /// Parses an RFC 9218 `Priority` header value directly from raw byte slice without heap allocation.
+    ///
+    /// Performs an in-place linear scan with zero heap allocations and branch-friendly parsing.
+    #[inline]
+    pub fn from_header_bytes(bytes: &[u8]) -> Self {
+        let mut urgency = 3u8;
+        let mut incremental = false;
+
+        let mut i = 0;
+        let len = bytes.len();
+
+        while i < len {
+            // Skip leading whitespace / delimiters
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b',') {
+                i += 1;
+            }
+            if i >= len {
+                break;
+            }
+
+            // Read parameter key
+            let key_start = i;
+            while i < len
+                && bytes[i] != b'='
+                && bytes[i] != b','
+                && bytes[i] != b' '
+                && bytes[i] != b'\t'
+            {
+                i += 1;
+            }
+            let key = &bytes[key_start..i];
+
+            // Skip whitespace after key
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+
+            let mut has_val = false;
+            if i < len && bytes[i] == b'=' {
+                i += 1; // skip '='
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    i += 1;
+                }
+                has_val = true;
+            }
+
+            if key == b"u" {
+                if has_val && i < len {
+                    let c = bytes[i];
+                    if c.is_ascii_digit() {
+                        let val = c - b'0';
+                        if val <= 7 {
+                            urgency = val;
+                        }
+                    }
+                }
+            } else if key == b"i" {
+                if !has_val {
+                    // Boolean parameter without value in Structured Fields means true
+                    incremental = true;
+                } else if i < len {
+                    if bytes[i] == b'?' && i + 1 < len {
+                        incremental = bytes[i + 1] == b'1';
+                    } else if bytes[i] == b'1' {
+                        incremental = true;
+                    } else if bytes[i] == b'0' {
+                        incremental = false;
+                    }
+                }
+            }
+
+            // Advance until next comma delimiter or end of input
+            while i < len && bytes[i] != b',' {
+                i += 1;
+            }
+            if i < len && bytes[i] == b',' {
+                i += 1;
+            }
+        }
+
+        Self {
+            urgency,
+            incremental,
+        }
+    }
+}
 
 /// Header metadata and stream identity for an incoming HTTP/2 server request.
 #[derive(Debug, Clone)]
@@ -18,6 +135,8 @@ pub struct Http2ServerRequestHead {
     pub headers: HeaderMap,
     /// Logical HTTP/2 stream identifier.
     pub stream_id: Option<h2::StreamId>,
+    /// RFC 9218 extensible HTTP stream priority parsed in-place.
+    pub priority: Http2Priority,
 }
 
 impl Http2ServerRequestHead {
@@ -28,12 +147,18 @@ impl Http2ServerRequestHead {
         headers: HeaderMap,
         stream_id: Option<h2::StreamId>,
     ) -> Self {
+        let priority = headers
+            .get("priority")
+            .map(|val| Http2Priority::from_header_bytes(val.as_bytes()))
+            .unwrap_or(Http2Priority::DEFAULT);
+
         Self {
             method,
             uri,
             version: Version::HTTP_2,
             headers,
             stream_id,
+            priority,
         }
     }
 
@@ -70,6 +195,17 @@ impl Http2ServerRequestHead {
         is_tls: bool,
     ) {
         super::header::enrich_headers(&mut self.headers, &self.uri, peer, local_addr, is_tls);
+    }
+
+    /// Returns the approximate wire size of request method, URI path, and headers.
+    #[inline]
+    pub fn estimated_header_bytes(&self) -> usize {
+        let headers_len: usize = self
+            .headers
+            .iter()
+            .map(|(k, v)| k.as_str().len() + v.as_bytes().len() + 4)
+            .sum();
+        headers_len + self.uri.path().len() + self.method.as_str().len() + 32
     }
 }
 
@@ -122,6 +258,7 @@ pub struct Http2StreamReceiver {
     body_stream: h2::RecvStream,
     max_body_size: usize,
     bytes_received: usize,
+    flood_tracker: Option<Arc<Http2FloodTracker>>,
 }
 
 impl Http2StreamReceiver {
@@ -132,7 +269,15 @@ impl Http2StreamReceiver {
             body_stream,
             max_body_size,
             bytes_received: 0,
+            flood_tracker: None,
         }
+    }
+
+    /// Attaches an [`Http2FloodTracker`] to count payload bytes read for anti-DoS accounting.
+    #[inline]
+    pub fn with_flood_tracker(mut self, tracker: Arc<Http2FloodTracker>) -> Self {
+        self.flood_tracker = Some(tracker);
+        self
     }
 
     /// Asynchronously receives the next DATA chunk from the incoming stream.
@@ -144,6 +289,10 @@ impl Http2StreamReceiver {
         let chunk = chunk_res?;
         let len = chunk.len();
         self.bytes_received += len;
+        if let Some(tracker) = &self.flood_tracker {
+            tracker.on_payload_read(len);
+        }
+
         if self.bytes_received > self.max_body_size {
             let _ = self.body_stream.flow_control().release_capacity(len);
             return Err(crate::error::Http2Error::PayloadTooLarge(
@@ -203,4 +352,72 @@ pub async fn decode_request(
     let body = receiver.consume_all().await?;
 
     Ok(Http2ServerRequest::new(head, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_priority_memory_layout() {
+        assert_eq!(std::mem::size_of::<Http2Priority>(), 2);
+        assert_eq!(std::mem::align_of::<Http2Priority>(), 1);
+    }
+
+    #[test]
+    fn test_priority_parsing_defaults() {
+        assert_eq!(
+            Http2Priority::from_header_bytes(b""),
+            Http2Priority::DEFAULT
+        );
+        assert_eq!(
+            Http2Priority::from_header_bytes(b"invalid"),
+            Http2Priority::DEFAULT
+        );
+    }
+
+    #[test]
+    fn test_priority_parsing_urgency() {
+        let p = Http2Priority::from_header_bytes(b"u=0");
+        assert_eq!(p.urgency, 0);
+        assert!(!p.incremental);
+
+        let p = Http2Priority::from_header_bytes(b"u=7");
+        assert_eq!(p.urgency, 7);
+        assert!(!p.incremental);
+
+        // Invalid urgency > 7 falls back to default 3
+        let p = Http2Priority::from_header_bytes(b"u=9");
+        assert_eq!(p.urgency, 3);
+    }
+
+    #[test]
+    fn test_priority_parsing_incremental() {
+        let p = Http2Priority::from_header_bytes(b"i");
+        assert_eq!(p.urgency, 3);
+        assert!(p.incremental);
+
+        let p = Http2Priority::from_header_bytes(b"i=?1");
+        assert_eq!(p.urgency, 3);
+        assert!(p.incremental);
+
+        let p = Http2Priority::from_header_bytes(b"i=?0");
+        assert_eq!(p.urgency, 3);
+        assert!(!p.incremental);
+    }
+
+    #[test]
+    fn test_priority_parsing_combined() {
+        let p = Http2Priority::from_header_bytes(b"u=1, i");
+        assert_eq!(p.urgency, 1);
+        assert!(p.incremental);
+
+        let p = Http2Priority::from_header_bytes(b"i=?1, u=2");
+        assert_eq!(p.urgency, 2);
+        assert!(p.incremental);
+
+        let p = Http2Priority::from_header_bytes(b"u=5, i=?0");
+        assert_eq!(p.urgency, 5);
+        assert!(!p.incremental);
+    }
 }

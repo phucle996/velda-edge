@@ -31,6 +31,9 @@ pub enum Http2Error {
 
     #[error("Streaming policy violation: {0}")]
     StreamingViolation(String),
+
+    #[error("HTTP/2 flood detected: control frame overhead exceeded safety threshold")]
+    FloodDetected,
 }
 
 impl Http2Error {

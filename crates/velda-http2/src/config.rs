@@ -37,6 +37,12 @@ pub struct Http2Config {
     pub max_pending_control_frames: u32,
     /// Maximum number of CONTINUATION frames permitted per header block (CONTINUATION flood mitigation).
     pub max_continuation_frames: u32,
+    /// Maximum requests served per downstream HTTP/2 connection before graceful draining via GOAWAY (0 = unlimited).
+    pub max_requests_per_connection: u32,
+    /// Maximum lifetime of downstream HTTP/2 connection in seconds before graceful draining via GOAWAY (0 = unlimited).
+    pub max_connection_duration_secs: u32,
+    /// Optional HTTP/3 UDP port advertised via the `Alt-Svc` response header (RFC 9114 §3.1 & RFC 7838).
+    pub alt_svc_port: Option<u16>,
 }
 
 impl Http2Config {
@@ -66,6 +72,9 @@ impl Http2Config {
                 max_consecutive_resets: 100,
                 max_pending_control_frames: 100,
                 max_continuation_frames: 8,
+                max_requests_per_connection: 5_000,
+                max_connection_duration_secs: 1800,
+                alt_svc_port: None,
             },
             MemoryTier::Small => Self {
                 max_body_size: 4 * 1024 * 1024,
@@ -82,6 +91,9 @@ impl Http2Config {
                 max_consecutive_resets: 200,
                 max_pending_control_frames: 200,
                 max_continuation_frames: 8,
+                max_requests_per_connection: 10_000,
+                max_connection_duration_secs: 3600,
+                alt_svc_port: None,
             },
             MemoryTier::Medium => Self {
                 max_body_size: 10 * 1024 * 1024,
@@ -98,6 +110,9 @@ impl Http2Config {
                 max_consecutive_resets: 500,
                 max_pending_control_frames: 200,
                 max_continuation_frames: 16,
+                max_requests_per_connection: 20_000,
+                max_connection_duration_secs: 3600,
+                alt_svc_port: None,
             },
             MemoryTier::Large => Self {
                 max_body_size: 16 * 1024 * 1024,
@@ -114,6 +129,9 @@ impl Http2Config {
                 max_consecutive_resets: 1_000,
                 max_pending_control_frames: 500,
                 max_continuation_frames: 16,
+                max_requests_per_connection: 50_000,
+                max_connection_duration_secs: 7200,
+                alt_svc_port: None,
             },
             MemoryTier::XLarge => Self {
                 max_body_size: 32 * 1024 * 1024,
@@ -130,6 +148,9 @@ impl Http2Config {
                 max_consecutive_resets: 2_000,
                 max_pending_control_frames: 500,
                 max_continuation_frames: 32,
+                max_requests_per_connection: 100_000,
+                max_connection_duration_secs: 7200,
+                alt_svc_port: None,
             },
             MemoryTier::TwoXLarge => Self {
                 max_body_size: 64 * 1024 * 1024,
@@ -146,6 +167,9 @@ impl Http2Config {
                 max_consecutive_resets: 5_000,
                 max_pending_control_frames: 1_000,
                 max_continuation_frames: 32,
+                max_requests_per_connection: 200_000,
+                max_connection_duration_secs: 14400,
+                alt_svc_port: None,
             },
             MemoryTier::Ultra => Self {
                 max_body_size: 128 * 1024 * 1024,
@@ -162,6 +186,9 @@ impl Http2Config {
                 max_consecutive_resets: 10_000,
                 max_pending_control_frames: 1_000,
                 max_continuation_frames: 32,
+                max_requests_per_connection: 500_000,
+                max_connection_duration_secs: 14400,
+                alt_svc_port: None,
             },
         }
     }
@@ -264,6 +291,40 @@ impl Http2Config {
         self.max_continuation_frames = n;
         self
     }
+
+    /// Sets the maximum requests served per connection before graceful draining.
+    #[inline]
+    pub const fn with_max_requests_per_connection(mut self, n: u32) -> Self {
+        self.max_requests_per_connection = n;
+        self
+    }
+
+    /// Sets the maximum connection duration in seconds before graceful draining.
+    #[inline]
+    pub const fn with_max_connection_duration_secs(mut self, secs: u32) -> Self {
+        self.max_connection_duration_secs = secs;
+        self
+    }
+
+    /// Configures an explicit HTTP/3 port to advertise via the `Alt-Svc` response header.
+    #[inline]
+    pub const fn with_alt_svc_port(mut self, port: u16) -> Self {
+        self.alt_svc_port = Some(port);
+        self
+    }
+
+    /// Returns the pre-computed Alt-Svc header value if an HTTP/3 port is configured.
+    #[inline]
+    pub fn alt_svc_header_value(&self) -> Option<http::HeaderValue> {
+        self.alt_svc_port.and_then(|port| match port {
+            443 => Some(http::HeaderValue::from_static("h3=\":443\"; ma=86400")),
+            8443 => Some(http::HeaderValue::from_static("h3=\":8443\"; ma=86400")),
+            other => {
+                let s = format!("h3=\":{other}\"; ma=86400");
+                http::HeaderValue::try_from(s).ok()
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +358,23 @@ mod tests {
         assert_eq!(ultra.initial_connection_window_size, 1024 * 1024);
         assert_eq!(ultra.initial_stream_window_size, 256 * 1024);
         assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_alt_svc_header_value() {
+        let config = Http2Config::auto();
+        assert_eq!(config.alt_svc_header_value(), None);
+
+        let config = config.with_alt_svc_port(443);
+        assert_eq!(
+            config.alt_svc_header_value().unwrap().to_str().unwrap(),
+            "h3=\":443\"; ma=86400"
+        );
+
+        let config = config.with_alt_svc_port(8443);
+        assert_eq!(
+            config.alt_svc_header_value().unwrap().to_str().unwrap(),
+            "h3=\":8443\"; ma=86400"
+        );
     }
 }

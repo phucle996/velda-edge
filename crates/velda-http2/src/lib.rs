@@ -29,7 +29,7 @@ pub use pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 pub use server::{
-    Http2Responder, Http2ServerConnection, Http2ServerRequest, Http2ServerRequestHead,
-    Http2ServerResponse, Http2ServerResponseHead, Http2StreamReceiver, Http2StreamSender,
-    build_h2_response, decode_request,
+    Http2FloodTracker, Http2Priority, Http2Responder, Http2ServerConnection, Http2ServerRequest,
+    Http2ServerRequestHead, Http2ServerResponse, Http2ServerResponseHead, Http2StreamReceiver,
+    Http2StreamSender, build_h2_response, decode_request,
 };

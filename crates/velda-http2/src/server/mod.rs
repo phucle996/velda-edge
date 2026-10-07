@@ -9,11 +9,11 @@ pub mod path;
 pub mod request;
 pub mod response;
 
-pub use connection::Http2ServerConnection;
+pub use connection::{Http2FloodTracker, Http2ServerConnection};
 pub use header::{enrich_headers, extract_host};
 pub use path::{is_clean_path, normalize_path};
 pub use request::{
-    Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver, decode_request,
+    Http2Priority, Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver, decode_request,
 };
 pub use response::{
     Http2Responder, Http2ServerResponse, Http2ServerResponseHead, Http2StreamSender,

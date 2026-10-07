@@ -7,6 +7,7 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::L7Response;
+use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
 use velda_http2::pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
@@ -114,12 +115,41 @@ pub async fn run_http2_loop<IO>(
     let mut consecutive_not_founds: u32 = 0;
     const MAX_CONSECUTIVE_NOT_FOUNDS: u32 = 100;
 
+    let conn_start = std::time::Instant::now();
+    let mut requests_served: u32 = 0;
+    let mut is_draining = false;
+
     match Http2ServerConnection::handshake(stream, config).await {
         Ok(mut conn) => loop {
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
                 Ok(Ok(Some((mut head, receiver, mut responder)))) => {
+                    requests_served = requests_served.saturating_add(1);
+
+                    // Graceful Connection Drain Check (keepalive requests & max connection duration)
+                    if !is_draining {
+                        let requests_exceeded = config.max_requests_per_connection > 0
+                            && requests_served >= config.max_requests_per_connection;
+
+                        // Amortized clock check: only sample VDSO Instant every 128 requests
+                        let time_exceeded = (requests_served & 0x7F == 0)
+                            && config.max_connection_duration_secs > 0
+                            && conn_start.elapsed().as_secs()
+                                >= config.max_connection_duration_secs as u64;
+
+                        if requests_exceeded || time_exceeded {
+                            is_draining = true;
+                            tracing::info!(
+                                listener = %meta.listener_id,
+                                peer = %meta.peer,
+                                requests_served,
+                                "Initiating graceful HTTP/2 connection drain via GOAWAY"
+                            );
+                            conn.graceful_shutdown();
+                        }
+                    }
+
                     if let Err(e) = velda_http2::server::path::normalize_path(&mut head.uri) {
                         tracing::warn!(
                             listener = %meta.listener_id,
@@ -212,7 +242,15 @@ pub async fn run_http2_loop<IO>(
                 }
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "HTTP/2 stream accept error");
+                    if matches!(e, Http2Error::FloodDetected) {
+                        tracing::warn!(
+                            listener = %meta.listener_id,
+                            peer = %meta.peer,
+                            "Aborting HTTP/2 connection: control frame flood detected"
+                        );
+                    } else {
+                        tracing::debug!(error = %e, "HTTP/2 stream accept error");
+                    }
                     break;
                 }
                 Err(_) => {

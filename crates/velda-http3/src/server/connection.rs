@@ -40,6 +40,8 @@ pub struct Http3RequestEvent {
     pub stream_id: StreamId,
     /// Parsed L7 request.
     pub request: L7Request,
+    /// Whether this request was transmitted in 0-RTT early data prior to handshake completion (RFC 8470).
+    pub is_early_data: bool,
 }
 
 /// High-performance, packet-driven HTTP/3 server engine.
@@ -372,10 +374,12 @@ impl Http3Engine {
         if stream_finished {
             stream_buffers.remove(&(handle, id));
             if let Some(req) = stream_requests.remove(&(handle, id)) {
+                let is_early_data = conn.is_handshaking();
                 ready_requests.push(Http3RequestEvent {
                     handle,
                     stream_id: id,
                     request: req,
+                    is_early_data,
                 });
             }
         }

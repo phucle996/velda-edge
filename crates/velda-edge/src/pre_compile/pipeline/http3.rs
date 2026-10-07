@@ -219,8 +219,49 @@ pub async fn handle_http3_udp(
                 method = %req_event.request.method,
                 path = %req_event.request.path(),
                 peer = %peer,
+                early_data = req_event.is_early_data,
                 "Decoded HTTP/3 request from UDP"
             );
+
+            // Fast-Fail: 0-RTT Replay Attack Defense (RFC 8470)
+            // Non-idempotent methods (POST, PUT, DELETE, PATCH) MUST NOT be processed in 0-RTT early data.
+            let is_mutation = matches!(
+                req_event.request.method,
+                http::Method::POST | http::Method::PUT | http::Method::DELETE | http::Method::PATCH
+            );
+            if req_event.is_early_data && is_mutation {
+                tracing::warn!(
+                    listener = %lid,
+                    method = %req_event.request.method,
+                    path = %req_event.request.path(),
+                    "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
+                );
+                let too_early = L7Response::from_bytes(
+                    StatusCode::TOO_EARLY,
+                    b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n"
+                        .to_vec(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                let resp_now = std::time::Instant::now();
+                let resp_pkts = {
+                    let mut engine = engine_lock.lock().await;
+                    engine.send_response(
+                        resp_now,
+                        req_event.handle,
+                        req_event.stream_id,
+                        &too_early,
+                    )
+                };
+                if let Ok(pkts) = resp_pkts {
+                    for pkt in pkts {
+                        let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                    }
+                }
+                return;
+            }
 
             let mut req = req_event.request;
             if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {

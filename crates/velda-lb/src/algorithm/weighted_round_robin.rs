@@ -1,6 +1,6 @@
 //! Smooth Weighted Round-Robin (SWRR) load balancing.
 //!
-//! Implements Nginx's smooth weighted round-robin selection algorithm,
+//! Implements smooth weighted round-robin selection algorithm,
 //! ensuring proportional distribution without clustering requests onto the highest-weight backend.
 
 use std::cell::Cell;
