@@ -15,13 +15,13 @@ use velda_core::{Body, L7Response};
 
 use crate::config::Http2Config;
 use crate::error::Http2Error;
-use crate::server::{Http2RequestHead, Http2Responder};
+use crate::server::{Http2Responder, Http2ServerRequestHead};
 
 /// Pipes a non-streaming HTTP/2 request between downstream responder and upstream client.
 ///
 /// Uses borrowed head and body to eliminate heap allocations on hot path and enable transparent self-healing.
 pub async fn pipe_buffered(
-    head: &Http2RequestHead,
+    head: &Http2ServerRequestHead,
     body: &Body,
     responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,

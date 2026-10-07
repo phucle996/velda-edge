@@ -17,7 +17,7 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use velda_core::{Body, MemoryTier};
 use velda_http1::{
-    Http1Config, Http1Request, Http1Response, Http1ServerConnection, decode_request,
+    Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse, decode_request,
     decode_response, encode_request, encode_response,
 };
 
@@ -163,7 +163,7 @@ fn bench_response_encoding() {
     let mut buf = BytesMut::with_capacity(128 * 1024);
 
     for (name, status, headers, body) in scenarios {
-        let res = Http1Response::new(status, Version::HTTP_11, headers, body);
+        let res = Http1ServerResponse::new(status, Version::HTTP_11, headers, body);
         let body_len = res.body.len();
 
         ALLOCATOR.reset();
@@ -214,7 +214,7 @@ fn bench_upstream_codec() {
             HeaderValue::from_static("velda-edge-upstream/1.0"),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let req = Http1Request::new(
+        let req = Http1ServerRequest::new(
             Method::POST,
             Uri::from_static("http://backend-svc:8080/v1/orders"),
             Version::HTTP_11,
@@ -299,7 +299,7 @@ async fn bench_pipelined_connection() {
         }
     });
 
-    let resp = Http1Response::new(
+    let resp = Http1ServerResponse::new(
         StatusCode::OK,
         Version::HTTP_11,
         HeaderMap::new(),

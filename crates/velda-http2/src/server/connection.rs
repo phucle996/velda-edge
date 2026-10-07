@@ -8,9 +8,10 @@ use h2::server::{Builder, Connection};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::L7Request;
 
-use super::decode::{Http2StreamReceiver, decode_request};
-use super::encode::Http2Responder;
-use super::request::{Http2Request, Http2RequestHead};
+use super::request::{
+    Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver, decode_request,
+};
+use super::response::Http2Responder;
 use crate::config::Http2Config;
 use crate::error::Http2Error;
 
@@ -51,13 +52,13 @@ where
         &self.config
     }
 
-    /// Accepts the next multiplexed request stream as a native [`Http2Request`].
+    /// Accepts the next multiplexed request stream as a native [`Http2ServerRequest`].
     ///
     /// Non-blocking for existing streams: each invocation retrieves a new stream
     /// and its dedicated [`Http2Responder`].
     pub async fn accept_h2_request(
         &mut self,
-    ) -> Result<Option<(Http2Request, Http2Responder)>, Http2Error> {
+    ) -> Result<Option<(Http2ServerRequest, Http2Responder)>, Http2Error> {
         let Some(res) = self.connection.accept().await else {
             return Ok(None);
         };
@@ -86,7 +87,8 @@ where
     /// SSE dispatching, or pass-through proxying) without buffering the entire body into memory.
     pub async fn accept_streaming_request(
         &mut self,
-    ) -> Result<Option<(Http2RequestHead, Http2StreamReceiver, Http2Responder)>, Http2Error> {
+    ) -> Result<Option<(Http2ServerRequestHead, Http2StreamReceiver, Http2Responder)>, Http2Error>
+    {
         let Some(res) = self.connection.accept().await else {
             return Ok(None);
         };
@@ -94,7 +96,8 @@ where
         let (request, respond) = res?;
         let stream_id = respond.stream_id();
         let (parts, body_stream) = request.into_parts();
-        let head = Http2RequestHead::new(parts.method, parts.uri, parts.headers, Some(stream_id));
+        let head =
+            Http2ServerRequestHead::new(parts.method, parts.uri, parts.headers, Some(stream_id));
         let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size);
         let responder = Http2Responder::new(respond);
 

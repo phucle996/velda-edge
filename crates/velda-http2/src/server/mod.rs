@@ -4,11 +4,18 @@
 //! stream response dispatch, and server connection lifecycle.
 
 pub mod connection;
-pub mod decode;
-pub mod encode;
+pub mod header;
+pub mod path;
 pub mod request;
+pub mod response;
 
 pub use connection::Http2ServerConnection;
-pub use decode::{Http2StreamReceiver, decode_request, decode_request_body};
-pub use encode::{Http2Responder, Http2StreamSender, build_h2_response};
-pub use request::{Http2Request, Http2RequestHead};
+pub use header::{enrich_headers, extract_host};
+pub use path::{is_clean_path, normalize_path};
+pub use request::{
+    Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver, decode_request,
+};
+pub use response::{
+    Http2Responder, Http2ServerResponse, Http2ServerResponseHead, Http2StreamSender,
+    build_h2_response,
+};

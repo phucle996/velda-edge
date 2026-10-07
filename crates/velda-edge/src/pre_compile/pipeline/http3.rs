@@ -168,148 +168,6 @@ pub fn get_or_init_h3_engine_for_peer(
         .map(|p| p.get_shard_for_peer(peer))
 }
 
-/// Enriches HTTP/3 request headers with RFC 7239 and standard proxy forwarding metadata.
-///
-/// Anti-Spoofing Invariant:
-/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
-/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
-/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
-/// protocol scheme, and verified host).
-/// Connection-specific RFC 9114 hop-by-hop headers are also stripped in-place.
-fn enrich_http3_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    host: Option<&str>,
-) {
-    use http::header::{HeaderName, HeaderValue};
-
-    // 1. Strip all standard client-supplied untrusted forwarding headers (Zero-alloc O(1) removals)
-    static UNTRUSTED_FORWARDED_HEADERS: [HeaderName; 6] = [
-        HeaderName::from_static("x-forwarded-for"),
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderName::from_static("x-forwarded-host"),
-        HeaderName::from_static("x-forwarded-port"),
-        HeaderName::from_static("x-real-ip"),
-        HeaderName::from_static("forwarded"),
-    ];
-    for name in &UNTRUSTED_FORWARDED_HEADERS {
-        headers.remove(name);
-    }
-
-    // 2. Defensive sweep: strip any custom "x-forwarded-*" headers without heap allocation
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
-        }
-    }
-    for name in custom_to_remove[..count].iter().flatten() {
-        headers.remove(name);
-    }
-
-    // 2. Strip RFC 9114 connection-specific hop-by-hop headers
-    static H3_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
-        http::header::CONNECTION,
-        HeaderName::from_static("keep-alive"),
-        HeaderName::from_static("proxy-connection"),
-        http::header::TRANSFER_ENCODING,
-        http::header::UPGRADE,
-    ];
-    for name in &H3_HOP_BY_HOP_NAMES {
-        headers.remove(name);
-    }
-    if let Some(te_val) = headers.get(http::header::TE) {
-        let is_trailers = te_val
-            .to_str()
-            .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
-        if !is_trailers {
-            headers.remove(http::header::TE);
-        }
-    }
-
-    let client_ip = peer.ip();
-    let proto = "https"; // HTTP/3 QUIC is always TLS 1.3 encrypted
-
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 3. Authoritative X-Forwarded-For
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
-    }
-
-    // 4. Authoritative X-Real-IP
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    // 5. Authoritative X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 6. Authoritative X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 7. Authoritative X-Forwarded-Host
-    if let Some(h) = host
-        && let Ok(val) = HeaderValue::from_str(h)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // 8. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(h) = host {
-            let _ = write!(cursor, ";host=\"{h}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
-
 /// Dispatches incoming UDP datagrams to the persistent HTTP/3 state machine.
 ///
 /// Ingests the packet, drives QUIC handshake/flow control, transmits outgoing datagrams,
@@ -365,13 +223,40 @@ pub async fn handle_http3_udp(
             );
 
             let mut req = req_event.request;
-            let host_hdr = req.headers.get(http::header::HOST).cloned();
-            let host_str = host_hdr
-                .as_ref()
-                .and_then(|h| h.to_str().ok())
-                .or_else(|| req.uri.authority().map(|a| a.as_str()))
-                .or_else(|| req.uri.host());
-            enrich_http3_forwarded_headers(&mut req.headers, peer, local_addr, host_str);
+            if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {
+                tracing::warn!(
+                    listener = %lid,
+                    error = %e,
+                    path = %req.path(),
+                    "Rejecting HTTP/3 request with unsafe URI path"
+                );
+                let bad_req = L7Response::from_bytes(
+                    StatusCode::BAD_REQUEST,
+                    b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                let resp_now = std::time::Instant::now();
+                let resp_pkts = {
+                    let mut engine = engine_lock.lock().await;
+                    engine.send_response(resp_now, req_event.handle, req_event.stream_id, &bad_req)
+                };
+                if let Ok(pkts) = resp_pkts {
+                    for pkt in pkts {
+                        let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                    }
+                }
+                return;
+            }
+
+            velda_http3::server::header::enrich_headers(
+                &mut req.headers,
+                &req.uri,
+                peer,
+                local_addr,
+            );
 
             let response = process_http3_request(&req, &lid, &runtime).await;
             let resp_now = std::time::Instant::now();
@@ -395,32 +280,8 @@ pub async fn process_http3_request(
     listener_id: &str,
     runtime: &SharedRuntime,
 ) -> L7Response {
-    let clean_path = match velda_router::normalize_path(req.path()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                listener = %listener_id,
-                error = %e,
-                path = %req.path(),
-                "Rejecting HTTP/3 request with unsafe URI path"
-            );
-            return L7Response::from_bytes(
-                StatusCode::BAD_REQUEST,
-                b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-        }
-    };
-
-    let host = req
-        .host()
-        .and_then(|h| h.to_str().ok())
-        .or_else(|| req.uri.host());
-
-    let mut http_req = Http3RouteRequest::new(&clean_path);
+    let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
+    let mut http_req = Http3RouteRequest::new(req.path());
     if let Some(h) = host {
         http_req = http_req.with_host(h);
     }
@@ -558,7 +419,16 @@ mod tests {
         let peer: SocketAddr = "192.0.2.30:60000".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
 
-        enrich_http3_forwarded_headers(&mut headers, peer, local, Some("quic.example.com"));
+        let mut req = L7Request::new(
+            http::Method::GET,
+            "https://quic.example.com/test".parse().unwrap(),
+            http::Version::HTTP_3,
+            headers,
+            velda_core::Body::Empty,
+        );
+
+        velda_http3::server::header::enrich_headers(&mut req.headers, &req.uri, peer, local);
+        let headers = req.headers;
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.30");

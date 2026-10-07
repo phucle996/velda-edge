@@ -8,7 +8,7 @@ use velda_core::{Body, L7Response};
 
 /// Header metadata and status code for an incoming HTTP/2 upstream response.
 #[derive(Debug, Clone)]
-pub struct Http2ResponseHead {
+pub struct Http2ClientResponseHead {
     /// HTTP status code (200, 404, 500, etc.).
     pub status: StatusCode,
     /// Protocol version (always HTTP/2.0).
@@ -17,8 +17,8 @@ pub struct Http2ResponseHead {
     pub headers: HeaderMap,
 }
 
-impl Http2ResponseHead {
-    /// Creates a new [`Http2ResponseHead`].
+impl Http2ClientResponseHead {
+    /// Creates a new [`Http2ClientResponseHead`].
     #[inline]
     pub fn new(status: StatusCode, headers: HeaderMap) -> Self {
         Self {
@@ -29,25 +29,25 @@ impl Http2ResponseHead {
     }
 }
 
-/// An incoming HTTP/2 response received from an upstream backend.
+/// An incoming HTTP/2 client response received from an upstream backend.
 #[derive(Debug, Clone)]
-pub struct Http2Response {
+pub struct Http2ClientResponse {
     /// Response head (status, headers, version).
-    pub head: Http2ResponseHead,
+    pub head: Http2ClientResponseHead,
     /// Response body payload received via DATA frame(s).
     pub body: Body,
 }
 
-impl Http2Response {
-    /// Creates a new [`Http2Response`] from parts.
+impl Http2ClientResponse {
+    /// Creates a new [`Http2ClientResponse`] from parts.
     #[inline]
-    pub fn new(head: Http2ResponseHead, body: Body) -> Self {
+    pub fn new(head: Http2ClientResponseHead, body: Body) -> Self {
         Self { head, body }
     }
 
     /// Creates an HTTP/2 response with a raw byte body.
     pub fn from_bytes(status: StatusCode, bytes: Vec<u8>) -> Self {
-        let head = Http2ResponseHead::new(status, HeaderMap::new());
+        let head = Http2ClientResponseHead::new(status, HeaderMap::new());
         let body = if bytes.is_empty() {
             Body::Empty
         } else {
@@ -60,7 +60,7 @@ impl Http2Response {
     #[inline]
     pub fn empty(status: StatusCode) -> Self {
         Self::new(
-            Http2ResponseHead::new(status, HeaderMap::new()),
+            Http2ClientResponseHead::new(status, HeaderMap::new()),
             Body::Empty,
         )
     }
@@ -104,7 +104,7 @@ impl Http2Response {
 
     /// Deconstructs the response into its constituent head and body parts.
     #[inline]
-    pub fn into_parts(self) -> (Http2ResponseHead, Body) {
+    pub fn into_parts(self) -> (Http2ClientResponseHead, Body) {
         (self.head, self.body)
     }
 
@@ -118,9 +118,53 @@ impl Http2Response {
         )
     }
 
-    /// Constructs an [`Http2Response`] from a canonical [`L7Response`].
+    /// Constructs an [`Http2ClientResponse`] from a canonical [`L7Response`].
     pub fn from_l7_response(resp: L7Response) -> Self {
-        let head = Http2ResponseHead::new(resp.status, resp.headers);
+        let head = Http2ClientResponseHead::new(resp.status, resp.headers);
         Self::new(head, resp.body)
+    }
+
+    /// Progressively consumes and decodes the response body from an incoming stream with flow-control.
+    pub async fn decode_body(
+        body_stream: &mut h2::RecvStream,
+        max_body_size: usize,
+    ) -> Result<Body, crate::error::Http2Error> {
+        if body_stream.is_end_stream() {
+            return Ok(Body::Empty);
+        }
+
+        let Some(first_chunk) = body_stream.data().await else {
+            return Ok(Body::Empty);
+        };
+
+        let data = first_chunk?;
+        let len = data.len();
+        if len > max_body_size {
+            let _ = body_stream.flow_control().release_capacity(len);
+            return Err(crate::error::Http2Error::PayloadTooLarge(len));
+        }
+        let _ = body_stream.flow_control().release_capacity(len);
+
+        if body_stream.is_end_stream() {
+            return Ok(Body::Bytes(data));
+        }
+
+        let mut body_buf = bytes::BytesMut::with_capacity(len * 2);
+        body_buf.extend_from_slice(&data);
+
+        while let Some(chunk) = body_stream.data().await {
+            let chunk_data = chunk?;
+            let chunk_len = chunk_data.len();
+            if body_buf.len() + chunk_len > max_body_size {
+                let _ = body_stream.flow_control().release_capacity(chunk_len);
+                return Err(crate::error::Http2Error::PayloadTooLarge(
+                    body_buf.len() + chunk_len,
+                ));
+            }
+            body_buf.extend_from_slice(&chunk_data);
+            let _ = body_stream.flow_control().release_capacity(chunk_len);
+        }
+
+        Ok(Body::Bytes(body_buf.freeze()))
     }
 }

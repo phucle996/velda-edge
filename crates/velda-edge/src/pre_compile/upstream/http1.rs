@@ -192,7 +192,7 @@ impl Http1Upstream {
                     }
                 }
 
-                let stream = velda_http1::client::connect_stream(
+                let stream = velda_http1::client::connect(
                     endpoint,
                     tls,
                     Some(&acceleration),
@@ -230,7 +230,7 @@ impl Http1Upstream {
         let (stream, endpoint) = self
             .inner
             .execute(|endpoint| async move {
-                let stream = velda_http1::client::connect_stream(
+                let stream = velda_http1::client::connect(
                     endpoint,
                     tls,
                     Some(&acceleration),

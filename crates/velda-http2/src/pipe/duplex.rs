@@ -11,11 +11,11 @@ use velda_core::{Body, L7Response};
 
 use crate::config::Http2Config;
 use crate::error::Http2Error;
-use crate::server::{Http2RequestHead, Http2Responder, Http2StreamReceiver};
+use crate::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
 /// Concurrently pipes both request and response streams between downstream and upstream.
 pub async fn pipe_duplex(
-    mut head: Http2RequestHead,
+    mut head: Http2ServerRequestHead,
     mut body_rx: Http2StreamReceiver,
     mut responder: Http2Responder,
     client: &mut SendRequest<Bytes>,

@@ -2,25 +2,27 @@
 //!
 //! Architectural Perspective (Góc nhìn Ingress):
 //! Owns the upstream communication lifecycle (Gateway <-> Backend Microservice):
-//! - `response`: Response entity model owned by ingress receiver.
-//! - `encode`: Outbound request serialization towards upstream targets.
-//! - `decode`: Stream buffer decoding and RFC 9112 wire parsing of responses.
-//! - `connector`: Forwarding request and receiving response on established streams.
+//! - `request`: Request entity model & wire serialization towards upstream targets.
+//! - `response`: Response entity model & stream decoding from backend targets.
+//! - `connector`: Upstream plain TCP and encrypted TLS stream handling and connection initiation.
+//! - `header`: Outbound header sanitization and SNI resolution.
 
 pub mod connector;
-pub mod decode;
-pub mod encode;
+pub mod header;
+pub mod request;
 pub mod response;
-pub mod stream;
 
 pub use connector::{
-    forward_request, read_chunk_sized, read_next_chunk, read_response_head, send_request,
-    send_request_head_chunked,
+    Http1AccelerationPath, UpstreamHttp1Stream, connect, notsent_lowat_for_mem_tier,
 };
-pub use decode::{
-    ParsedChunk, decode_response, decode_response_head, find_crlf, parse_ascii_digits,
-    parse_chunked_body, parse_hex_usize, parse_response_head, parse_single_chunk,
+pub use header::{extract_sni, resolve_sni, sanitize_headers, strip_port};
+pub use request::{
+    Http1ClientRequest, Http1ClientRequestHead, encode_headers, encode_request,
+    encode_request_head, encode_request_line, forward_request, send_request,
+    send_request_head_chunked, send_request_parts,
 };
-pub use encode::{encode_headers, encode_request, encode_request_head, encode_request_line};
-pub use response::{Http1Response, Http1ResponseHead};
-pub use stream::{Http1AccelerationPath, UpstreamHttp1Stream, connect_stream};
+pub use response::{
+    Http1ClientResponse, Http1ClientResponseHead, ParsedChunk, decode_response,
+    decode_response_head, find_crlf, parse_ascii_digits, parse_chunked_body, parse_hex_usize,
+    parse_response_head, parse_single_chunk, read_chunk_sized, read_next_chunk, read_response_head,
+};

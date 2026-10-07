@@ -18,7 +18,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use velda_core::{Body, MemoryTier};
 use velda_http1::{
-    Http1Config, Http1Response, Http1ServerConnection, decode_request, encode_response,
+    Http1Config, Http1ServerConnection, Http1ServerResponse, decode_request, encode_response,
 };
 
 #[tokio::main]
@@ -155,7 +155,7 @@ fn bench_multi_thread_response_encoding_scaling() {
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let res = Arc::new(Http1Response::new(
+    let res = Arc::new(Http1ServerResponse::new(
         StatusCode::OK,
         http::Version::HTTP_11,
         headers,
@@ -244,7 +244,7 @@ async fn bench_concurrent_connection_storm() {
         // Server handler
         tasks.push(tokio::spawn(async move {
             bar.wait().await;
-            let resp = Http1Response::new(
+            let resp = Http1ServerResponse::new(
                 StatusCode::OK,
                 http::Version::HTTP_11,
                 HeaderMap::new(),

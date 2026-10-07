@@ -8,6 +8,7 @@ pub mod tcp;
 pub mod udp;
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -15,6 +16,15 @@ use velda_transport::{Connection, Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
 use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
+
+/// Downstream connection metadata capturing network endpoints and listener identity.
+#[derive(Debug, Clone)]
+pub struct DownstreamMeta {
+    pub listener_id: Arc<str>,
+    pub peer: SocketAddr,
+    pub local_addr: SocketAddr,
+    pub is_tls: bool,
+}
 
 /// Boxed thread-safe future alias for pre-bound pipeline runners.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

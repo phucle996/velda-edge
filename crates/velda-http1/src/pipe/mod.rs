@@ -11,8 +11,6 @@ pub mod client_stream;
 pub mod duplex;
 pub mod server_stream;
 
-use http::HeaderMap;
-use http::header::HeaderName;
 use velda_core::StreamingMode;
 
 pub use buffered::pipe_buffered;
@@ -77,63 +75,12 @@ impl Http1PipeStrategy {
     }
 }
 
-/// Standard hop-by-hop headers that must be stripped by intermediaries (RFC 9112 Section 7.6.1).
-pub const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "proxy-connection",
-    "te",
-    "trailer",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-];
-
-const HOP_BY_HOP_NAMES: [HeaderName; 10] = [
-    http::header::CONNECTION,
-    HeaderName::from_static("keep-alive"),
-    http::header::PROXY_AUTHENTICATE,
-    http::header::PROXY_AUTHORIZATION,
-    HeaderName::from_static("proxy-connection"),
-    http::header::TE,
-    http::header::TRAILER,
-    HeaderName::from_static("trailers"),
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-];
-
-/// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
-pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let mut to_remove = Vec::new();
-
-    // Iterate across all Connection header entries (RFC 9110 Section 7.6.1)
-    for conn in headers.get_all(http::header::CONNECTION) {
-        if let Ok(conn_str) = conn.to_str() {
-            for part in conn_str.split(',') {
-                let trimmed = part.trim();
-                if !trimmed.is_empty()
-                    && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
-                {
-                    to_remove.push(name);
-                }
-            }
-        }
-    }
-
-    for name in &HOP_BY_HOP_NAMES {
-        headers.remove(name);
-    }
-
-    for name in &to_remove {
-        headers.remove(name);
-    }
-}
+pub use crate::client::header::{HOP_BY_HOP, sanitize_headers};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderMap;
 
     #[test]
     fn test_resolve_pipe_strategy() {
@@ -188,7 +135,7 @@ mod tests {
             "application/json".parse().unwrap(),
         );
 
-        sanitize_hop_by_hop_headers(&mut headers);
+        sanitize_headers(&mut headers);
 
         assert!(!headers.contains_key(http::header::CONNECTION));
         assert!(!headers.contains_key("keep-alive"));

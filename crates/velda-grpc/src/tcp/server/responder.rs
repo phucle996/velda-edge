@@ -13,6 +13,116 @@ use crate::frame::encode_grpc_frame;
 use crate::status::GrpcStatus;
 use crate::wire::GrpcWire;
 
+/// Downstream gRPC server response head metadata over TCP.
+#[derive(Debug, Clone)]
+pub struct GrpcServerResponseHead {
+    /// HTTP status code (typically 200 OK).
+    pub status: StatusCode,
+    /// Canonical gRPC status.
+    pub grpc_status: GrpcStatus,
+    /// Response headers.
+    pub headers: HeaderMap,
+    /// Response trailers.
+    pub trailers: HeaderMap,
+}
+
+impl GrpcServerResponseHead {
+    /// Creates a new gRPC server response head.
+    #[inline]
+    pub fn new(grpc_status: GrpcStatus, headers: HeaderMap, trailers: HeaderMap) -> Self {
+        Self {
+            status: StatusCode::OK,
+            grpc_status,
+            headers,
+            trailers,
+        }
+    }
+}
+
+/// Downstream protocol-owned gRPC server response over TCP.
+#[derive(Debug, Clone)]
+pub struct GrpcServerResponse {
+    /// Response head metadata.
+    pub head: GrpcServerResponseHead,
+    /// Response payload (LPM or raw bytes).
+    pub body: velda_core::Body,
+}
+
+impl GrpcServerResponse {
+    /// Creates a new gRPC server response.
+    #[inline]
+    pub fn new(
+        grpc_status: GrpcStatus,
+        headers: HeaderMap,
+        trailers: HeaderMap,
+        body: velda_core::Body,
+    ) -> Self {
+        Self {
+            head: GrpcServerResponseHead::new(grpc_status, headers, trailers),
+            body,
+        }
+    }
+
+    /// Creates a standard Unary response.
+    pub fn unary(
+        status: GrpcStatus,
+        payload: Option<Bytes>,
+        extra_headers: Option<HeaderMap>,
+    ) -> Self {
+        let headers = extra_headers.unwrap_or_default();
+        let trailers = status.to_trailers(None);
+        let body = match payload {
+            Some(b) => velda_core::Body::Bytes(b),
+            None => velda_core::Body::Empty,
+        };
+        Self::new(status, headers, trailers, body)
+    }
+
+    /// Creates a trailers-only gRPC response for errors or immediate completions.
+    pub fn trailers_only(status: GrpcStatus, message: Option<&str>) -> Self {
+        let trailers = status.to_trailers(message);
+        Self::new(status, HeaderMap::new(), trailers, velda_core::Body::Empty)
+    }
+
+    /// Sends this server response through the provided [`GrpcResponder`].
+    pub fn send_to(&self, responder: &mut GrpcResponder) -> Result<(), GrpcError> {
+        match &self.body {
+            velda_core::Body::Bytes(b) => responder.send_unary_response(
+                self.head.grpc_status,
+                Some(b),
+                Some(self.head.headers.clone()),
+            ),
+            _ => {
+                if self.head.grpc_status == GrpcStatus::Ok {
+                    responder.send_unary_response(
+                        self.head.grpc_status,
+                        None,
+                        Some(self.head.headers.clone()),
+                    )
+                } else {
+                    let msg = self
+                        .head
+                        .trailers
+                        .get("grpc-message")
+                        .and_then(|v| v.to_str().ok());
+                    responder.send_trailers_only(self.head.grpc_status, msg)
+                }
+            }
+        }
+    }
+
+    /// Converts into canonical [`velda_core::L7Response`].
+    pub fn into_l7_response(self) -> velda_core::L7Response {
+        let mut headers = self.head.headers;
+        for (name, val) in self.head.trailers {
+            if let Some(name) = name {
+                headers.append(name, val);
+            }
+        }
+        velda_core::L7Response::new(self.head.status, http::Version::HTTP_2, headers, self.body)
+    }
+}
+
 /// Streaming responder for an active downstream gRPC call.
 ///
 /// Encodes response payload or status, serializing headers, LPM data frames,

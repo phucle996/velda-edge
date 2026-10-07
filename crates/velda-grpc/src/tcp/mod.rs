@@ -8,3 +8,12 @@
 pub mod client;
 pub mod pipe;
 pub mod server;
+
+pub use client::{
+    GrpcAccelerationPath, GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse,
+    GrpcClientResponseHead, GrpcUpstreamConnector,
+};
+pub use server::{
+    GrpcResponder, GrpcServerConnection, GrpcServerRequest, GrpcServerRequestHead,
+    GrpcServerResponse, GrpcServerResponseHead, GrpcServerStream,
+};

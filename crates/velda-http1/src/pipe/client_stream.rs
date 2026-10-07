@@ -9,19 +9,20 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::Body;
 
-use super::sanitize_hop_by_hop_headers;
-use crate::client::connector::{read_chunk_sized, read_response_head, send_request_head_chunked};
-use crate::client::response::Http1Response;
+use super::sanitize_headers;
+use crate::client::request::send_request_head_chunked;
+use crate::client::response::{read_chunk_sized, read_response_head};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
-use crate::server::request::{Http1BodyFraming, Http1RequestHead};
+use crate::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use crate::server::response::Http1ServerResponse;
 use crate::wire::{send_chunk, send_chunked_end};
 
 /// Pipes a client-streaming HTTP/1.1 request (streaming upload, buffered response).
 pub async fn pipe_client_stream<DownIO, UpIO>(
     conn: &mut Http1ServerConnection<DownIO>,
-    mut head: Http1RequestHead,
+    mut head: Http1ServerRequestHead,
     upstream: &mut UpIO,
     config: &Http1Config,
 ) -> Result<(), Http1Error>
@@ -29,7 +30,7 @@ where
     DownIO: AsyncRead + AsyncWrite + Unpin,
     UpIO: AsyncRead + AsyncWrite + Unpin,
 {
-    sanitize_hop_by_hop_headers(&mut head.headers);
+    sanitize_headers(&mut head.headers);
 
     // 1. Send chunked request head upstream
     send_request_head_chunked(&head, upstream, config).await?;
@@ -43,7 +44,7 @@ where
     // 3. Read upstream response head
     let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
     let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
-    sanitize_hop_by_hop_headers(&mut resp_head.headers);
+    sanitize_headers(&mut resp_head.headers);
 
     // 4. Validate response framing (client streaming expects non-streaming response)
     if resp_framing == Http1BodyFraming::Chunked {
@@ -83,7 +84,8 @@ where
     };
 
     // 6. Send response downstream
-    let resp = Http1Response::from_parts(resp_head, body);
+    let resp =
+        Http1ServerResponse::new(resp_head.status, resp_head.version, resp_head.headers, body);
     conn.send_response(&resp).await?;
 
     Ok(())

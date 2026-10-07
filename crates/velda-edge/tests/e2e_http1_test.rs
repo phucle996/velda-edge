@@ -1124,3 +1124,318 @@ async fn test_http1_uri_normalization_and_path_security() {
     let _ = edge_task.await;
     backend_task.abort();
 }
+
+#[tokio::test]
+async fn test_http1_expect_100_continue_and_unrouted_fast_fail() {
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let backend_task = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = backend_listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap();
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+
+                if req_str.contains("POST /api/v1/orders")
+                    && req_str.contains("{\"item\":\"chair\"}")
+                {
+                    let resp = b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"status\":\"saved\"}";
+                    let _ = sock.write_all(resp).await;
+                } else {
+                    let resp = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                    let _ = sock.write_all(resp).await;
+                }
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_l7.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "http-in".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http1".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "order-backend".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http1".into(),
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: None,
+        pool: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "orders-route".into(),
+        kind: "l7".into(),
+        listener: "http-in".into(),
+        match_rule: RouteMatch {
+            protocol: None,
+            path_prefix: Some("/api/v1/orders".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "order-backend".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
+
+    let edge_cfg = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(edge_cfg).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Valid route with Expect: 100-continue receives 100 Continue then terminal 201 Created
+    {
+        let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+        // Send request head only with Expect: 100-continue
+        client
+            .write_all(
+                b"POST /api/v1/orders HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 16\r\nContent-Type: application/json\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        // Read 100 Continue
+        let mut interim_buf = [0u8; 128];
+        let n = client.read(&mut interim_buf).await.unwrap();
+        let interim_resp = String::from_utf8_lossy(&interim_buf[..n]);
+        assert!(
+            interim_resp.starts_with("HTTP/1.1 100 Continue"),
+            "Expected 100 Continue interim response, got: {interim_resp}"
+        );
+
+        // Now transmit body
+        client.write_all(b"{\"item\":\"chair\"}").await.unwrap();
+
+        // Read final terminal response
+        let mut final_buf = [0u8; 512];
+        let n = client.read(&mut final_buf).await.unwrap();
+        let final_resp = String::from_utf8_lossy(&final_buf[..n]);
+        assert!(
+            final_resp.starts_with("HTTP/1.1 201 Created"),
+            "Expected 201 Created, got: {final_resp}"
+        );
+        assert!(final_resp.contains("{\"status\":\"saved\"}"));
+    }
+
+    // 2. Unrouted path with Expect: 100-continue immediately receives 404 without 100 Continue
+    {
+        let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+        client
+            .write_all(
+                b"POST /api/v1/unrouted HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 1000\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            resp.starts_with("HTTP/1.1 404 Not Found"),
+            "Expected fast 404 Not Found rejection, got: {resp}"
+        );
+    }
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
+    backend_task.abort();
+}
+
+#[tokio::test]
+async fn test_http10_server_streaming_fallback() {
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let backend_task = tokio::spawn(async move {
+        let (mut sock, _) = backend_listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await.unwrap();
+
+        // Backend returns HTTP/1.1 chunked stream
+        let head =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+        sock.write_all(head).await.unwrap();
+        sock.flush().await.unwrap();
+
+        sock.write_all(b"5\r\nalpha\r\n").await.unwrap();
+        sock.flush().await.unwrap();
+
+        sock.write_all(b"4\r\nbeta\r\n").await.unwrap();
+        sock.flush().await.unwrap();
+
+        sock.write_all(b"0\r\n\r\n").await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_h10_stream.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "h10-stream-in".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http1".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::SERVER,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    let listeners_bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("listeners.bin"), listeners_bin).unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "h10-stream-up".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http1".into(),
+            streaming: velda_sync::StreamingMode::SERVER,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: None,
+        pool: None,
+    }];
+    let upstreams_bin = compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("upstreams.bin"), upstreams_bin).unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "h10-stream-route".into(),
+        kind: "l7".into(),
+        listener: "h10-stream-in".into(),
+        match_rule: RouteMatch {
+            path_prefix: Some("/stream".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "h10-stream-up".into(),
+        plugins: vec![],
+    }];
+    let routes_bin = compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap();
+    fs::write(runtime_dir.join("routes.bin"), routes_bin).unwrap();
+
+    let edge_cfg = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(edge_cfg).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // HTTP/1.0 Client request: must NOT receive Transfer-Encoding: chunked (RFC 9112 §7.1)
+    let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+    client
+        .write_all(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut full_output = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        full_output.extend_from_slice(&buf[..n]);
+    }
+
+    let output_str = String::from_utf8_lossy(&full_output);
+    assert!(output_str.starts_with("HTTP/1.0 200 OK"));
+    assert!(
+        !output_str
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "HTTP/1.0 response must not contain Transfer-Encoding: chunked"
+    );
+    assert!(
+        output_str
+            .to_ascii_lowercase()
+            .contains("connection: close"),
+        "HTTP/1.0 streaming response must close connection"
+    );
+    assert!(output_str.contains("alphabeta"));
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
+    backend_task.abort();
+}

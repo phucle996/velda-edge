@@ -1,17 +1,166 @@
-//! Downstream HTTP/1.1 Wire Serializer.
+//! Ingress Downstream HTTP/1.1 Response Entity and Wire Serializer (RFC 9112).
 //!
 //! Architectural Perspective (Góc nhìn Ingress):
 //! Handles serializing HTTP/1.1 responses and transmitting vectored I/O back to downstream clients.
-//! Uses static fast-path status lines and zero-copy streaming.
+//! Uses static fast-path status lines, zero-copy streaming, and RFC 9112 framing rules.
 
 use bytes::{BufMut, BytesMut};
-use http::header::CONTENT_LENGTH;
+use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use velda_core::Body;
+use velda_core::{Body, L7Response};
 
-use crate::client::response::{Http1Response, Http1ResponseHead};
 use crate::error::Http1Error;
+pub use crate::wire::{
+    encode_chunk, encode_chunked_end, encode_headers, send_chunk, send_chunked_end,
+};
+
+/// HTTP/1.1 downstream response head metadata.
+#[derive(Debug, Clone)]
+pub struct Http1ServerResponseHead {
+    /// HTTP status code.
+    pub status: StatusCode,
+    /// HTTP protocol version.
+    pub version: Version,
+    /// Response headers.
+    pub headers: HeaderMap,
+}
+
+impl Http1ServerResponseHead {
+    /// Creates a new HTTP/1.1 server response head.
+    #[inline]
+    pub fn new(status: StatusCode, version: Version, headers: HeaderMap) -> Self {
+        Self {
+            status,
+            version,
+            headers,
+        }
+    }
+
+    /// Fast-path lookup for content-length.
+    #[inline]
+    pub fn content_length(&self) -> Option<usize> {
+        self.headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|val| val.to_str().ok())
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// Returns `true` if response status indicates connection close or `Connection: close` is present.
+    #[inline]
+    pub fn is_close(&self) -> bool {
+        self.headers
+            .get(http::header::CONNECTION)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+    }
+}
+
+/// Downstream protocol-owned HTTP/1.1 response.
+#[derive(Debug, Clone)]
+pub struct Http1ServerResponse {
+    /// Status code.
+    pub status: StatusCode,
+    /// Protocol version.
+    pub version: Version,
+    /// Response headers.
+    pub headers: HeaderMap,
+    /// Response body.
+    pub body: Body,
+}
+
+impl Http1ServerResponse {
+    /// Creates a new HTTP/1.1 server response.
+    #[inline]
+    pub fn new(status: StatusCode, version: Version, headers: HeaderMap, body: Body) -> Self {
+        Self {
+            status,
+            version,
+            headers,
+            body,
+        }
+    }
+
+    /// Fast constructor from raw status code and byte payload.
+    #[inline]
+    pub fn from_bytes(status: StatusCode, body: Vec<u8>) -> Self {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&body.len().to_string()).unwrap(),
+        );
+        Self {
+            status,
+            version: Version::HTTP_11,
+            headers,
+            body: Body::Bytes(bytes::Bytes::from(body)),
+        }
+    }
+
+    /// Appends a header using a fluent builder pattern.
+    #[inline]
+    pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.insert(name, value);
+        self
+    }
+
+    /// Creates a response from head metadata and body.
+    #[inline]
+    pub fn from_parts(head: Http1ServerResponseHead, body: Body) -> Self {
+        Self {
+            status: head.status,
+            version: head.version,
+            headers: head.headers,
+            body,
+        }
+    }
+
+    /// Deconstructs response into head metadata and payload body.
+    #[inline]
+    pub fn into_parts(self) -> (Http1ServerResponseHead, Body) {
+        (
+            Http1ServerResponseHead {
+                status: self.status,
+                version: self.version,
+                headers: self.headers,
+            },
+            self.body,
+        )
+    }
+
+    /// Converts this protocol-owned response into canonical [`L7Response`].
+    pub fn into_l7_response(self) -> L7Response {
+        L7Response::new(self.status, self.version, self.headers, self.body)
+    }
+
+    /// Constructs an [`Http1ServerResponse`] from a canonical [`L7Response`].
+    pub fn from_l7_response(resp: L7Response) -> Self {
+        Self {
+            status: resp.status,
+            version: resp.version,
+            headers: resp.headers,
+            body: resp.body,
+        }
+    }
+
+    /// Serializes response head and body into the destination buffer.
+    pub fn encode(&self, dst: &mut BytesMut) {
+        encode_response(self, dst);
+    }
+
+    /// Writes this response directly to downstream async writer.
+    pub async fn send_to<W>(
+        &self,
+        stream: &mut W,
+        write_buf: &mut BytesMut,
+        force_close: bool,
+    ) -> Result<bool, Http1Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        send_response(stream, write_buf, self, force_close).await
+    }
+}
 
 /// Encodes an HTTP status line with fast-path static byte slices for common status codes.
 pub fn encode_status_line(version: Version, status: StatusCode, dst: &mut BytesMut) {
@@ -69,6 +218,10 @@ pub fn encode_status_line(version: Version, status: StatusCode, dst: &mut BytesM
                 dst.put_slice(b"HTTP/1.1 413 Payload Too Large\r\n");
                 return;
             }
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => {
+                dst.put_slice(b"HTTP/1.1 431 Request Header Fields Too Large\r\n");
+                return;
+            }
             StatusCode::INTERNAL_SERVER_ERROR => {
                 dst.put_slice(b"HTTP/1.1 500 Internal Server Error\r\n");
                 return;
@@ -99,15 +252,13 @@ pub fn encode_status_line(version: Version, status: StatusCode, dst: &mut BytesM
     dst.put_slice(b"\r\n");
 }
 
-pub use crate::wire::encode_headers;
-
-/// Serializes HTTP/1.1 response head metadata into the destination buffer.
-#[inline]
-pub fn encode_response_head(
+/// Serializes HTTP/1.1 response head with optional forced close flag and zero heap allocations.
+pub fn encode_response_head_ext(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
     body_len: Option<usize>,
+    force_close: bool,
     dst: &mut BytesMut,
 ) {
     let mut needed = 36;
@@ -117,14 +268,29 @@ pub fn encode_response_head(
     if body_len.is_some() {
         needed += 36;
     }
+    if force_close {
+        needed += 24;
+    }
     dst.reserve(needed);
 
     encode_status_line(version, status, dst);
+    let mut has_conn = false;
     for (name, val) in headers {
+        if name == http::header::CONNECTION {
+            has_conn = true;
+            if force_close {
+                dst.put_slice(b"connection: close\r\n");
+                continue;
+            }
+        }
         dst.put_slice(name.as_str().as_bytes());
         dst.put_slice(b": ");
         dst.put_slice(val.as_bytes());
         dst.put_slice(b"\r\n");
+    }
+
+    if force_close && !has_conn {
+        dst.put_slice(b"connection: close\r\n");
     }
 
     if let Some(len) = body_len
@@ -142,8 +308,20 @@ pub fn encode_response_head(
     dst.put_slice(b"\r\n");
 }
 
+/// Serializes HTTP/1.1 response head metadata into destination buffer.
+#[inline]
+pub fn encode_response_head(
+    version: Version,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body_len: Option<usize>,
+    dst: &mut BytesMut,
+) {
+    encode_response_head_ext(version, status, headers, body_len, false, dst);
+}
+
 /// Serializes an entire HTTP/1.1 response (head + body) into the destination buffer without heap cloning.
-pub fn encode_response(response: &Http1Response, dst: &mut BytesMut) {
+pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
     let body_len = match &response.body {
         Body::Empty => None,
         Body::Bytes(bytes) => Some(bytes.len()),
@@ -170,17 +348,19 @@ pub fn encode_response(response: &Http1Response, dst: &mut BytesMut) {
 pub async fn send_response<W>(
     stream: &mut W,
     write_buf: &mut BytesMut,
-    response: &Http1Response,
+    response: &Http1ServerResponse,
+    force_close: bool,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_response_head(
+    encode_response_head_ext(
         response.version,
         response.status,
         &response.headers,
         Some(response.body.len()),
+        force_close,
         write_buf,
     );
 
@@ -195,11 +375,12 @@ where
     }
     stream.flush().await?;
 
-    let close = response
-        .headers
-        .get(http::header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case("close"));
+    let close = force_close
+        || response
+            .headers
+            .get(http::header::CONNECTION)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.eq_ignore_ascii_case("close"));
 
     Ok(close)
 }
@@ -208,18 +389,20 @@ where
 pub async fn send_response_parts<W>(
     stream: &mut W,
     write_buf: &mut BytesMut,
-    head: &Http1ResponseHead,
+    head: &Http1ServerResponseHead,
     body: &Body,
+    force_close: bool,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_response_head(
+    encode_response_head_ext(
         head.version,
         head.status,
         &head.headers,
         Some(body.len()),
+        force_close,
         write_buf,
     );
 
@@ -234,16 +417,15 @@ where
     }
     stream.flush().await?;
 
-    let close = head
-        .headers
-        .get(http::header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case("close"));
+    let close = force_close
+        || head
+            .headers
+            .get(http::header::CONNECTION)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.eq_ignore_ascii_case("close"));
 
     Ok(close)
 }
-
-pub use crate::wire::{encode_chunk, encode_chunked_end, send_chunk, send_chunked_end};
 
 /// Serializes and writes only the HTTP/1.1 response head with `Transfer-Encoding: chunked`.
 pub async fn send_response_head_chunked<W>(
@@ -252,6 +434,7 @@ pub async fn send_response_head_chunked<W>(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
+    force_close: bool,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
@@ -260,17 +443,29 @@ where
     encode_status_line(version, status, write_buf);
 
     let mut has_te = false;
+    let mut has_conn = false;
     for (name, val) in headers {
         if name == http::header::CONTENT_LENGTH {
-            continue; // Chunked streaming supersedes Content-Length
+            continue;
         }
         if name == http::header::TRANSFER_ENCODING {
             has_te = true;
+        }
+        if name == http::header::CONNECTION {
+            has_conn = true;
+            if force_close {
+                write_buf.put_slice(b"connection: close\r\n");
+                continue;
+            }
         }
         write_buf.put_slice(name.as_str().as_bytes());
         write_buf.put_slice(b": ");
         write_buf.put_slice(val.as_bytes());
         write_buf.put_slice(b"\r\n");
+    }
+
+    if force_close && !has_conn {
+        write_buf.put_slice(b"connection: close\r\n");
     }
 
     if !has_te {
@@ -281,10 +476,11 @@ where
     stream.write_all(write_buf).await?;
     stream.flush().await?;
 
-    let close = headers
-        .get(http::header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case("close"));
+    let close = force_close
+        || headers
+            .get(http::header::CONNECTION)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.eq_ignore_ascii_case("close"));
 
     Ok(close)
 }

@@ -8,13 +8,14 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::Body;
 
-use super::sanitize_hop_by_hop_headers;
-use crate::client::connector::{read_chunk_sized, read_response_head, send_request};
-use crate::client::response::Http1Response;
+use super::sanitize_headers;
+use crate::client::request::send_request;
+use crate::client::response::{read_chunk_sized, read_response_head};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
-use crate::server::request::{Http1BodyFraming, Http1Request};
+use crate::server::request::{Http1BodyFraming, Http1ServerRequest};
+use crate::server::response::Http1ServerResponse;
 
 /// Pipes a non-streaming HTTP/1.1 request between downstream connection and upstream stream.
 ///
@@ -24,7 +25,7 @@ use crate::server::request::{Http1BodyFraming, Http1Request};
 /// - If upstream returns chunked encoding or SSE, returns [`Http1Error::StreamingViolation`].
 pub async fn pipe_buffered<DownIO, UpIO>(
     conn: &mut Http1ServerConnection<DownIO>,
-    mut req: Http1Request,
+    mut req: Http1ServerRequest,
     upstream: &mut UpIO,
     config: &Http1Config,
 ) -> Result<(), Http1Error>
@@ -32,7 +33,7 @@ where
     DownIO: AsyncRead + AsyncWrite + Unpin,
     UpIO: AsyncRead + AsyncWrite + Unpin,
 {
-    sanitize_hop_by_hop_headers(&mut req.headers);
+    sanitize_headers(&mut req.headers);
 
     // 1. Send complete request to upstream backend
     send_request(&req, upstream, config).await?;
@@ -40,7 +41,7 @@ where
     // 3. Read upstream response head
     let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
     let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
-    sanitize_hop_by_hop_headers(&mut resp_head.headers);
+    sanitize_headers(&mut resp_head.headers);
 
     // 4. Validate that upstream does not violate buffered mode invariant
     if resp_framing == Http1BodyFraming::Chunked {
@@ -89,8 +90,12 @@ where
         }
     };
 
-    // 6. Send response downstream
-    let resp = Http1Response::from_parts(resp_head, body);
+    // 6. Send response downstream (align response version with downstream request)
+    if req.version == http::Version::HTTP_10 {
+        resp_head.version = http::Version::HTTP_10;
+    }
+    let resp =
+        Http1ServerResponse::new(resp_head.status, resp_head.version, resp_head.headers, body);
     conn.send_response(&resp).await?;
 
     Ok(())

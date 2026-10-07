@@ -13,140 +13,18 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::{
-    Http1BodyFraming, Http1Config, Http1Error, Http1PipeStrategy, Http1Request, Http1Response,
-    Http1ServerConnection, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
+    Http1BodyFraming, Http1Config, Http1Error, Http1PipeStrategy, Http1ServerConnection,
+    Http1ServerRequest, Http1ServerResponse, pipe_buffered, pipe_client_stream, pipe_duplex,
+    pipe_server_stream,
 };
 use velda_router::Http1RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+use super::DownstreamMeta;
 use crate::runtime::SharedRuntime;
-
-/// Enriches HTTP/1.1 request headers with RFC 7239 and standard proxy forwarding metadata.
-///
-/// Anti-Spoofing Invariant:
-/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
-/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
-/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
-/// protocol scheme, and verified host).
-fn enrich_http1_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
-    host: Option<&str>,
-) {
-    use http::header::{HeaderName, HeaderValue};
-
-    // 1. Strip all standard client-supplied untrusted forwarding headers (Zero-alloc O(1) removals)
-    static UNTRUSTED_FORWARDED_HEADERS: [HeaderName; 6] = [
-        HeaderName::from_static("x-forwarded-for"),
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderName::from_static("x-forwarded-host"),
-        HeaderName::from_static("x-forwarded-port"),
-        HeaderName::from_static("x-real-ip"),
-        HeaderName::from_static("forwarded"),
-    ];
-    for name in &UNTRUSTED_FORWARDED_HEADERS {
-        headers.remove(name);
-    }
-
-    // 2. Defensive sweep: strip any custom "x-forwarded-*" headers without heap allocation
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
-        }
-    }
-    for name in custom_to_remove[..count].iter().flatten() {
-        headers.remove(name);
-    }
-
-    let client_ip = peer.ip();
-    let proto = if is_tls { "https" } else { "http" };
-
-    // Format peer IP directly into stack buffer
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 2. Authoritative X-Forwarded-For
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
-    }
-
-    // 3. Authoritative X-Real-IP
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    // 4. Authoritative X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 5. Authoritative X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 6. Authoritative X-Forwarded-Host
-    if let Some(h) = host
-        && let Ok(val) = HeaderValue::from_str(h)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // 7. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(h) = host {
-            let _ = write!(cursor, ";host=\"{h}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///
@@ -199,17 +77,13 @@ pub async fn handle_http1_stream(
                     return;
                 }
 
-                run_http1_loop(
-                    tls_stream,
+                let meta = DownstreamMeta {
                     listener_id,
                     peer,
                     local_addr,
-                    true,
-                    streaming,
-                    config,
-                    runtime,
-                )
-                .await;
+                    is_tls: true,
+                };
+                run_http1_loop(tls_stream, meta, streaming, config, runtime).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -221,81 +95,82 @@ pub async fn handle_http1_stream(
             }
         }
     } else {
-        run_http1_loop(
-            connection,
+        let meta = DownstreamMeta {
             listener_id,
             peer,
             local_addr,
-            false,
-            streaming,
-            config,
-            runtime,
-        )
-        .await;
+            is_tls: false,
+        };
+        run_http1_loop(connection, meta, streaming, config, runtime).await;
     }
 }
 
 /// Core HTTP/1.1 downstream request-response loop decoupled from transport layer.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_http1_loop<IO>(
     stream: IO,
-    listener_id: Arc<str>,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
+    meta: DownstreamMeta,
     streaming: velda_core::StreamingMode,
     config: Http1Config,
     runtime: SharedRuntime,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let header_timeout =
-        std::time::Duration::from_millis(config.header_read_timeout_ms.min(config.idle_timeout_ms));
     let mut conn = Http1ServerConnection::new(stream, config);
     let mut requests_served: u32 = 0;
 
     loop {
         // Phase 1: decode request head (fail-fast, header inspection, Slowloris protection)
-        let (mut head, framing) =
-            match tokio::time::timeout(header_timeout, conn.next_request_head()).await {
-                Ok(Ok(Some(parts))) => parts,
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "HTTP/1.1 request head decode error");
-                    let status = match e {
-                        Http1Error::HeaderTooLarge(_) | Http1Error::TooManyHeaders(_) => {
-                            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                        }
-                        Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-                        _ => StatusCode::BAD_REQUEST,
-                    };
-                    let err_resp =
-                        Http1Response::from_bytes(status, format!("{status}\n").into_bytes());
-                    let _ = conn.send_response(&err_resp).await;
-                    break;
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        listener = %listener_id,
-                        timeout_ms = config.header_read_timeout_ms,
-                        "HTTP/1.1 request head read timed out"
-                    );
-                    break;
-                }
-            };
+        let (mut head, framing) = match conn.next_request_head().await {
+            Ok(Some(parts)) => parts,
+            Ok(None) => break,
+            Err(Http1Error::Timeout) => {
+                tracing::debug!(
+                    listener = %meta.listener_id,
+                    timeout_ms = config.header_read_timeout_ms,
+                    "HTTP/1.1 request head read timed out (Slowloris protection)"
+                );
+                let err_resp = Http1ServerResponse::from_bytes(
+                    StatusCode::REQUEST_TIMEOUT,
+                    b"408 Request Timeout: header read timeout exceeded\n".to_vec(),
+                );
+                conn.mark_close();
+                let _ = conn.send_response(&err_resp).await;
+                conn.lingering_close().await;
+                break;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "HTTP/1.1 request head decode error");
+                let status = match e {
+                    Http1Error::HeaderTooLarge(_) | Http1Error::TooManyHeaders(_) => {
+                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                    }
+                    Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                let err_resp =
+                    Http1ServerResponse::from_bytes(status, format!("{status}\n").into_bytes());
+                conn.mark_close();
+                let _ = conn.send_response(&err_resp).await;
+                conn.lingering_close().await;
+                break;
+            }
+        };
 
         requests_served += 1;
         let reach_max_keepalive = requests_served >= config.max_keepalive_requests;
+        if reach_max_keepalive {
+            conn.mark_close();
+        }
         let rt = runtime.load();
 
         // Enforce Ingress Streaming Policy (Option A):
         // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
         if framing == Http1BodyFraming::Chunked && !streaming.client {
             tracing::warn!(
-                listener = %listener_id,
+                listener = %meta.listener_id,
                 "Rejecting chunked request: streaming upload is disabled on this listener"
             );
-            let rejected = Http1Response::from_bytes(
+            let rejected = Http1ServerResponse::from_bytes(
                 StatusCode::FORBIDDEN,
                 b"403 Forbidden: streaming upload is disabled on this listener\n".to_vec(),
             )
@@ -303,76 +178,48 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            conn.mark_close();
             let _ = conn.send_response(&rejected).await;
+            conn.lingering_close().await;
             break;
         }
 
-        if !velda_router::is_clean_path(head.path().as_bytes()) {
-            match velda_router::normalize_path(head.path()) {
-                Ok(normalized) => {
-                    let mut parts = head.uri.clone().into_parts();
-                    let new_path_and_query = match parts.path_and_query {
-                        Some(ref pq) => {
-                            if let Some(q) = pq.query() {
-                                format!("{normalized}?{q}")
-                                    .parse::<http::uri::PathAndQuery>()
-                                    .ok()
-                            } else {
-                                normalized.parse::<http::uri::PathAndQuery>().ok()
-                            }
-                        }
-                        None => normalized.parse::<http::uri::PathAndQuery>().ok(),
-                    };
-                    if let Some(pq) = new_path_and_query {
-                        parts.path_and_query = Some(pq);
-                        if let Ok(new_uri) = http::Uri::from_parts(parts) {
-                            head.uri = new_uri;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        listener = %listener_id,
-                        error = %e,
-                        path = %head.path(),
-                        "Rejecting HTTP/1.1 request with unsafe URI path"
-                    );
-                    let bad_req = Http1Response::from_bytes(
-                        StatusCode::BAD_REQUEST,
-                        b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
-                    )
-                    .with_header(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("text/plain; charset=utf-8"),
-                    );
-                    let _ = conn.send_response(&bad_req).await;
-                    break;
-                }
-            }
+        if let Err(e) = velda_http1::server::path::normalize_path(&mut head.uri) {
+            tracing::warn!(
+                listener = %meta.listener_id,
+                error = %e,
+                path = %head.uri.path(),
+                "Rejecting HTTP/1.1 request with unsafe URI path"
+            );
+            let bad_req = Http1ServerResponse::from_bytes(
+                StatusCode::BAD_REQUEST,
+                b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            conn.mark_close();
+            let _ = conn.send_response(&bad_req).await;
+            conn.lingering_close().await;
+            break;
         }
 
-        let clean_path = head.path();
-        let host_hdr = head.headers.get(http::header::HOST).cloned();
-        let host_str = host_hdr
-            .as_ref()
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| head.uri.host());
-
-        let mut http_req = Http1RouteRequest::new(clean_path);
-        if let Some(h) = host_str {
+        let mut http_req = Http1RouteRequest::new(head.uri.path());
+        if let Some(h) = velda_http1::server::header::extract_host(&head.headers, &head.uri) {
             http_req = http_req.with_host(h);
         }
         http_req = http_req.with_method(head.method.as_str());
 
-        let Some(route) = rt.router.route_http1(&listener_id, &http_req) else {
+        let Some(route) = rt.router.route_http1(&meta.listener_id, &http_req) else {
             tracing::debug!(
-                listener = %listener_id,
-                path = %head.path(),
-                host = ?host_str,
+                listener = %meta.listener_id,
+                path = %head.uri.path(),
+                host = ?velda_http1::server::header::extract_host(&head.headers, &head.uri),
                 method = %head.method,
                 "No HTTP/1.1 route matched"
             );
-            let not_found = Http1Response::from_bytes(
+            let not_found = Http1ServerResponse::from_bytes(
                 StatusCode::NOT_FOUND,
                 b"404 Not Found: no matching route\n".to_vec(),
             )
@@ -380,18 +227,20 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            conn.mark_close();
             let _ = conn.send_response(&not_found).await;
+            conn.lingering_close().await;
             break;
         };
 
         let Some(upstream) = rt.upstreams.http1.get(&route.upstream_name) else {
             tracing::error!(
-                listener = %listener_id,
+                listener = %meta.listener_id,
                 route = %route.id,
                 upstream = %route.upstream_name,
                 "No HTTP/1.1 upstream configured"
             );
-            let no_backend = Http1Response::from_bytes(
+            let no_backend = Http1ServerResponse::from_bytes(
                 StatusCode::SERVICE_UNAVAILABLE,
                 b"503 Service Unavailable: upstream not configured\n".to_vec(),
             )
@@ -399,13 +248,32 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            conn.mark_close();
             let _ = conn.send_response(&no_backend).await;
+            conn.lingering_close().await;
             break;
         };
 
         let strategy = upstream.strategy;
-        enrich_http1_forwarded_headers(&mut head.headers, peer, local_addr, is_tls, host_str);
+        velda_http1::server::header::enrich_headers(
+            &mut head.headers,
+            &head.uri,
+            meta.peer,
+            meta.local_addr,
+            meta.is_tls,
+        );
         let cfg = *conn.config();
+
+        // If downstream client sent `Expect: 100-continue`, transmit interim 100 Continue
+        // response before body read/forwarding to unblock transmission (RFC 9110 §10.1.1).
+        if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+            if let Err(e) = conn.send_100_continue().await {
+                tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
+                conn.lingering_close().await;
+                break;
+            }
+            head.headers.remove(http::header::EXPECT);
+        }
 
         // HTTP/1.1 Pipeline Invariant (RFC 9112 & AGENTS.md §2.3):
         // Stream mode dictates upstream lease lifecycle:
@@ -419,7 +287,7 @@ pub async fn run_http1_loop<IO>(
                 match conn.read_body(framing).await {
                     Ok(b) => Some(b),
                     Err(Http1Error::Timeout) => {
-                        let err_resp = Http1Response::from_bytes(
+                        let err_resp = Http1ServerResponse::from_bytes(
                             StatusCode::REQUEST_TIMEOUT,
                             b"408 Request Timeout: client body read idle timeout exceeded\n"
                                 .to_vec(),
@@ -428,11 +296,13 @@ pub async fn run_http1_loop<IO>(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         );
+                        conn.mark_close();
                         let _ = conn.send_response(&err_resp).await;
+                        conn.lingering_close().await;
                         break;
                     }
                     Err(e) => {
-                        let err_resp = Http1Response::from_bytes(
+                        let err_resp = Http1ServerResponse::from_bytes(
                             StatusCode::BAD_REQUEST,
                             format!("400 Bad Request: {e}\n").into_bytes(),
                         )
@@ -440,7 +310,9 @@ pub async fn run_http1_loop<IO>(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         );
+                        conn.mark_close();
                         let _ = conn.send_response(&err_resp).await;
+                        conn.lingering_close().await;
                         break;
                     }
                 }
@@ -456,7 +328,7 @@ pub async fn run_http1_loop<IO>(
                     upstream = %route.upstream_name,
                     "Failed to acquire upstream HTTP/1.1 connection"
                 );
-                let err_resp = Http1Response::from_bytes(
+                let err_resp = Http1ServerResponse::from_bytes(
                     StatusCode::BAD_GATEWAY,
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 )
@@ -464,18 +336,20 @@ pub async fn run_http1_loop<IO>(
                     CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 );
+                conn.mark_close();
                 let _ = conn.send_response(&err_resp).await;
+                conn.lingering_close().await;
                 break;
             }
         };
 
         let mut pipe_result = match (strategy, req_body.as_ref()) {
             (Http1PipeStrategy::Buffered, Some(body)) => {
-                let req = Http1Request::from_parts(head.clone(), body.clone());
+                let req = Http1ServerRequest::from_parts(head.clone(), body.clone());
                 pipe_buffered(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
             (Http1PipeStrategy::ServerStream, Some(body)) => {
-                let req = Http1Request::from_parts(head.clone(), body.clone());
+                let req = Http1ServerRequest::from_parts(head.clone(), body.clone());
                 pipe_server_stream(&mut conn, req, &mut *upstream_lease, &cfg).await
             }
             (Http1PipeStrategy::ClientStream, None) => {
@@ -510,7 +384,7 @@ pub async fn run_http1_loop<IO>(
             match upstream.acquire_fresh().await {
                 Ok(mut fresh_lease) => {
                     let body = req_body.as_ref().unwrap();
-                    let retry_req = Http1Request::from_parts(head, body.clone());
+                    let retry_req = Http1ServerRequest::from_parts(head, body.clone());
                     pipe_result = match strategy {
                         Http1PipeStrategy::Buffered => {
                             pipe_buffered(&mut conn, retry_req, &mut *fresh_lease, &cfg).await
@@ -543,7 +417,7 @@ pub async fn run_http1_loop<IO>(
                 strategy = ?strategy,
                 "HTTP/1.1 upstream stream pipe failed"
             );
-            let err_resp = Http1Response::from_bytes(
+            let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -551,17 +425,20 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
+            conn.lingering_close().await;
             break;
         }
 
         if reach_max_keepalive || conn.is_closed() {
             tracing::debug!(
-                listener = %listener_id,
+                listener = %meta.listener_id,
                 requests_served,
                 max = config.max_keepalive_requests,
                 "Closing HTTP/1.1 connection (reached max keepalive requests or connection closed)"
             );
+            conn.lingering_close().await;
             break;
         }
     }
@@ -569,8 +446,9 @@ pub async fn run_http1_loop<IO>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use http::HeaderMap;
+    use std::net::SocketAddr;
+    use velda_http1::Http1ServerRequestHead;
 
     #[test]
     fn test_enrich_forwarded_headers() {
@@ -589,7 +467,14 @@ mod tests {
         let peer: SocketAddr = "192.0.2.10:45678".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:8080".parse().unwrap();
 
-        enrich_http1_forwarded_headers(&mut headers, peer, local, false, Some("api.example.com"));
+        let mut head = Http1ServerRequestHead::new(
+            http::Method::GET,
+            http::Uri::from_static("http://api.example.com/test"),
+            http::Version::HTTP_11,
+            headers,
+        );
+        head.enrich_forwarded_headers(peer, local, false);
+        let headers = head.headers;
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.10");

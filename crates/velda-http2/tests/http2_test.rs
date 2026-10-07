@@ -3,7 +3,7 @@ use http::{Method, StatusCode};
 use tokio::io::duplex;
 use tokio::net::TcpListener;
 use velda_core::{Body, MemoryTier};
-use velda_http2::client::{self, Http2Response};
+use velda_http2::client::{self, Http2ClientResponse};
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
 use velda_http2::server::Http2ServerConnection;
@@ -101,8 +101,8 @@ async fn test_http2_multiplexing_concurrent_streams() {
             let path = h2_req.head.path().to_string();
             let id = path.trim_start_matches("/stream/");
             let resp_bytes = format!("response-{id}").into_bytes();
-            let resp = Http2Response::from_bytes(StatusCode::OK, resp_bytes);
-            responder.send_h2_response(&resp).unwrap();
+            let resp = Http2ClientResponse::from_bytes(StatusCode::OK, resp_bytes);
+            responder.send_client_response(&resp).unwrap();
         });
     }
 
@@ -321,8 +321,8 @@ async fn test_http2_client_streaming_upload() {
                 "part-1;part-2;part-3;"
             );
 
-            let resp = Http2Response::empty(StatusCode::CREATED);
-            responder.send_h2_response(&resp).unwrap();
+            let resp = Http2ClientResponse::empty(StatusCode::CREATED);
+            responder.send_client_response(&resp).unwrap();
         });
 
         // Drive the connection while chunks arrive

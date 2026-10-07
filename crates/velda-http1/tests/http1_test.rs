@@ -6,8 +6,8 @@ use velda_core::Body;
 use velda_core::hardware::MemoryTier;
 use velda_http1::error::Http1Error;
 use velda_http1::{
-    Http1BodyFraming, Http1Config, Http1Request, Http1Response, Http1ResponseHead,
-    Http1ServerConnection, decode_body, decode_request, decode_request_head, decode_response,
+    Http1BodyFraming, Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse,
+    Http1ServerResponseHead, decode_body, decode_request, decode_request_head, decode_response,
     decode_response_head, encode_response, forward_request,
 };
 
@@ -45,7 +45,7 @@ async fn test_http1_upstream_connector() {
             .unwrap();
     });
 
-    let req = Http1Request::new(
+    let req = Http1ServerRequest::new(
         Method::GET,
         Uri::from_static("http://localhost/health"),
         Version::HTTP_11,
@@ -225,7 +225,7 @@ async fn test_http10_keep_alive_negotiated() {
 
 #[test]
 fn test_http10_response_encoding() {
-    let resp = Http1Response::new(
+    let resp = Http1ServerResponse::new(
         StatusCode::OK,
         Version::HTTP_10,
         HeaderMap::new(),
@@ -297,7 +297,8 @@ async fn test_phased_server_connection_head_and_body() {
     assert_eq!(body.len(), 5);
 
     // Egress: send response parts
-    let resp_head = Http1ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
+    let resp_head =
+        Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
     let resp_body = Body::Bytes(bytes::Bytes::from_static(b"WORLD"));
     conn.send_response_parts(&resp_head, &resp_body)
         .await
@@ -340,7 +341,8 @@ async fn test_progressive_chunked_server_streaming() {
         let (head, _framing) = conn.next_request_head().await.unwrap().unwrap();
         assert_eq!(head.method, Method::GET);
 
-        let resp_head = Http1ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
+        let resp_head =
+            Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
         conn.send_response_head_chunked(&resp_head).await.unwrap();
 
         conn.send_chunk(b"data: first token\n\n").await.unwrap();
@@ -518,7 +520,7 @@ fn test_sanitize_proxy_connection_and_unlimited_nominated() {
         headers.insert(name, http::HeaderValue::from_static("secret"));
     }
 
-    velda_http1::sanitize_hop_by_hop_headers(&mut headers);
+    velda_http1::sanitize_headers(&mut headers);
     assert!(!headers.contains_key("proxy-connection"));
     assert!(!headers.contains_key("connection"));
     for i in 1..=10 {
@@ -527,4 +529,42 @@ fn test_sanitize_proxy_connection_and_unlimited_nominated() {
             "x-h{i} should have been stripped"
         );
     }
+}
+
+#[test]
+fn test_decode_response_skips_1xx_informational() {
+    let mut buf = BytesMut::from(
+        "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    let resp = decode_response(&mut buf, &TEST_CONFIG).unwrap().unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, Body::Bytes(bytes::Bytes::from_static(b"hello")));
+}
+
+#[test]
+fn test_encode_response_head_ext_force_close() {
+    let headers = HeaderMap::new();
+    let mut dst = BytesMut::new();
+    velda_http1::encode_response_head_ext(
+        Version::HTTP_11,
+        StatusCode::OK,
+        &headers,
+        Some(10),
+        true,
+        &mut dst,
+    );
+    let str_val = std::str::from_utf8(&dst).unwrap();
+    assert!(str_val.contains("connection: close\r\n"));
+    assert!(str_val.contains("content-length: 10\r\n"));
+}
+
+#[test]
+fn test_expect_100_continue_detection() {
+    let raw = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n";
+    let mut buf = BytesMut::from(&raw[..]);
+    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG)
+        .unwrap()
+        .unwrap();
+    assert!(head.is_expect_100_continue());
+    assert_eq!(framing, Http1BodyFraming::ContentLength(10));
 }

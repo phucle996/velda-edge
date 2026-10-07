@@ -17,6 +17,9 @@ pub enum Http3Error {
     #[error("HTTP error: {0}")]
     Http(#[from] http::Error),
 
+    #[error("Invalid URI path: {0}")]
+    InvalidPath(String),
+
     #[error("Payload too large: {0} bytes exceeds max_body_size")]
     PayloadTooLarge(usize),
 

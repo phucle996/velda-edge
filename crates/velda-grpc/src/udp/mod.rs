@@ -11,11 +11,16 @@ pub mod pipe;
 pub mod server;
 pub mod wire;
 
-pub use client::{GrpcUdpClient, connect as connect_udp, default_client_config};
+pub use client::{
+    GrpcUdpClient, GrpcUdpClientRequest, GrpcUdpClientRequestHead, GrpcUdpClientResponse,
+    GrpcUdpClientResponseHead, connect as connect_udp, default_client_config,
+};
 pub use pipe::{
     GrpcUdpPipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 pub use quinn_proto;
 pub use server::{
-    GrpcUdpEngine, GrpcUdpRequestEvent, GrpcUdpResponder, GrpcUdpServerStream, OutgoingDatagram,
+    GrpcUdpEngine, GrpcUdpRequestEvent, GrpcUdpResponder, GrpcUdpServerRequest,
+    GrpcUdpServerRequestHead, GrpcUdpServerResponse, GrpcUdpServerResponseHead,
+    GrpcUdpServerStream, OutgoingDatagram,
 };

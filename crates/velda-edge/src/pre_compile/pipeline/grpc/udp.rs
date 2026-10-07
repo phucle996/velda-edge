@@ -16,7 +16,7 @@ use velda_grpc::udp::pipe::{
     GrpcUdpPipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 use velda_grpc::udp::quinn_proto;
-use velda_grpc::udp::server::GrpcUdpEngine;
+use velda_grpc::udp::server::{GrpcUdpEngine, GrpcUdpServerStream};
 use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::{Datagram, UdpSocket};
@@ -136,144 +136,6 @@ pub fn get_or_init_grpc_udp_engine_for_peer(
         .map(|p| p.get_shard_for_peer(peer))
 }
 
-/// Enriches gRPC over UDP request headers with RFC 7239 and standard proxy forwarding metadata.
-///
-/// Anti-Spoofing Invariant:
-/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
-/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
-/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
-/// protocol scheme, and verified authority).
-/// Connection-specific RFC 9113 hop-by-hop headers are also stripped in-place.
-fn enrich_grpc_udp_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    authority: Option<&str>,
-) {
-    use http::header::{HeaderName, HeaderValue};
-
-    // 1. Strip all client-supplied untrusted forwarding headers
-    if headers.keys().any(|k| {
-        let s = k.as_str();
-        s.starts_with("x-forwarded-")
-            || s.eq_ignore_ascii_case("x-real-ip")
-            || s.eq_ignore_ascii_case("forwarded")
-    }) {
-        let to_remove: Vec<HeaderName> = headers
-            .keys()
-            .filter(|k| {
-                let s = k.as_str();
-                s.starts_with("x-forwarded-")
-                    || s.eq_ignore_ascii_case("x-real-ip")
-                    || s.eq_ignore_ascii_case("forwarded")
-            })
-            .cloned()
-            .collect();
-        for name in to_remove {
-            headers.remove(&name);
-        }
-    }
-
-    // 2. Strip RFC 9113 connection-specific hop-by-hop headers
-    static GRPC_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
-        http::header::CONNECTION,
-        HeaderName::from_static("keep-alive"),
-        HeaderName::from_static("proxy-connection"),
-        http::header::TRANSFER_ENCODING,
-        http::header::UPGRADE,
-    ];
-    for name in &GRPC_HOP_BY_HOP_NAMES {
-        headers.remove(name);
-    }
-    if let Some(te_val) = headers.get(http::header::TE) {
-        let is_trailers = te_val
-            .to_str()
-            .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
-        if !is_trailers {
-            headers.remove(http::header::TE);
-        }
-    }
-
-    let client_ip = peer.ip();
-    let proto = "https"; // gRPC over UDP runs over QUIC, always TLS 1.3 encrypted
-
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 3. Authoritative X-Forwarded-For
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
-    }
-
-    // 4. Authoritative X-Real-IP
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    // 5. Authoritative X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 6. Authoritative X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 7. Authoritative X-Forwarded-Host
-    if let Some(auth) = authority
-        && let Ok(val) = HeaderValue::from_str(auth)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // 8. Authoritative Standard: RFC 7239
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(auth) = authority {
-            let _ = write!(cursor, ";host=\"{auth}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
-
 /// Dispatches incoming UDP datagrams for gRPC over UDP to the persistent state machine.
 pub async fn handle_grpc_udp(
     listener_id: Arc<str>,
@@ -327,23 +189,20 @@ pub async fn handle_grpc_udp(
                 "Decoded gRPC request from UDP"
             );
 
-            let mut req = req_event.request;
-            let authority_hdr = req.headers.get(":authority").cloned();
-            let host_hdr = req.headers.get(http::header::HOST).cloned();
-            let authority = authority_hdr
-                .as_ref()
-                .and_then(|v| v.to_str().ok())
-                .or_else(|| host_hdr.as_ref().and_then(|h| h.to_str().ok()))
-                .or_else(|| req.uri.authority().map(|a| a.as_str()));
+            let mut stream = GrpcUdpServerStream::new(
+                req_event.handle,
+                req_event.stream_id,
+                req_event.request,
+                peer,
+            );
+            stream.enrich_forwarded_headers(local_addr);
 
-            enrich_grpc_udp_forwarded_headers(&mut req.headers, peer, local_addr, authority);
-
-            let response = process_grpc_udp_request(&req, &lid, &cfg, &runtime).await;
+            let response = process_grpc_udp_request(&stream.request, &lid, &cfg, &runtime).await;
 
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
                 let mut engine = engine_lock.lock().await;
-                engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
+                engine.send_response(resp_now, stream.handle, stream.stream_id, &response)
             };
 
             if let Ok(pkts) = resp_pkts {
@@ -446,6 +305,7 @@ pub async fn process_grpc_udp_request(
 mod tests {
     use super::*;
     use http::HeaderMap;
+    use velda_grpc::udp::server::enrich_headers;
 
     #[test]
     fn test_enrich_forwarded_headers() {
@@ -463,7 +323,7 @@ mod tests {
         let peer: SocketAddr = "192.0.2.50:50052".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
 
-        enrich_grpc_udp_forwarded_headers(&mut headers, peer, local, Some("grpc-udp.example.com"));
+        enrich_headers(&mut headers, peer, local, Some("grpc-udp.example.com"));
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.50");

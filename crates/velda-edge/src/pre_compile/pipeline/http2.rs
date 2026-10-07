@@ -12,139 +12,16 @@ use velda_http2::pipe::{
     Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
 };
 use velda_http2::server::{
-    Http2RequestHead, Http2Responder, Http2ServerConnection, Http2StreamReceiver,
+    Http2Responder, Http2ServerConnection, Http2ServerRequestHead, Http2StreamReceiver,
 };
 use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+use super::DownstreamMeta;
 use crate::runtime::SharedRuntime;
-
-/// Enriches HTTP/2 request headers with RFC 7239 and standard proxy forwarding metadata.
-///
-/// Anti-Spoofing Invariant:
-/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
-/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
-/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
-/// protocol scheme, and verified host).
-fn enrich_http2_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
-    host: Option<&str>,
-) {
-    use http::header::{HeaderName, HeaderValue};
-
-    // 1. Strip all standard client-supplied untrusted forwarding headers (Zero-alloc O(1) removals)
-    static UNTRUSTED_FORWARDED_HEADERS: [HeaderName; 6] = [
-        HeaderName::from_static("x-forwarded-for"),
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderName::from_static("x-forwarded-host"),
-        HeaderName::from_static("x-forwarded-port"),
-        HeaderName::from_static("x-real-ip"),
-        HeaderName::from_static("forwarded"),
-    ];
-    for name in &UNTRUSTED_FORWARDED_HEADERS {
-        headers.remove(name);
-    }
-
-    // 2. Defensive sweep: strip any custom "x-forwarded-*" headers without heap allocation
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
-        }
-    }
-    for name in custom_to_remove[..count].iter().flatten() {
-        headers.remove(name);
-    }
-
-    let client_ip = peer.ip();
-    let proto = if is_tls { "https" } else { "http" };
-
-    // Format peer IP directly into stack buffer
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 2. Authoritative X-Forwarded-For
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
-    }
-
-    // 3. Authoritative X-Real-IP
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    // 4. Authoritative X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 5. Authoritative X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 6. Authoritative X-Forwarded-Host
-    if let Some(h) = host
-        && let Ok(val) = HeaderValue::from_str(h)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // 7. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(h) = host {
-            let _ = write!(cursor, ";host=\"{h}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
 
 /// Asynchronous stream worker dispatching incoming HTTP/2 connections.
 ///
@@ -196,16 +73,13 @@ pub async fn handle_http2_stream(
                     return;
                 }
 
-                run_http2_loop(
-                    tls_stream,
+                let meta = DownstreamMeta {
                     listener_id,
                     peer,
                     local_addr,
-                    true,
-                    config,
-                    runtime,
-                )
-                .await;
+                    is_tls: true,
+                };
+                run_http2_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -217,26 +91,20 @@ pub async fn handle_http2_stream(
             }
         }
     } else {
-        run_http2_loop(
-            connection,
+        let meta = DownstreamMeta {
             listener_id,
             peer,
             local_addr,
-            false,
-            config,
-            runtime,
-        )
-        .await;
+            is_tls: false,
+        };
+        run_http2_loop(connection, meta, config, runtime).await;
     }
 }
 
 /// Core HTTP/2 downstream request-response loop decoupled from transport layer.
 pub async fn run_http2_loop<IO>(
     stream: IO,
-    listener_id: Arc<str>,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
+    meta: DownstreamMeta,
     config: Http2Config,
     runtime: SharedRuntime,
 ) where
@@ -252,66 +120,36 @@ pub async fn run_http2_loop<IO>(
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
                 Ok(Ok(Some((mut head, receiver, mut responder)))) => {
-                    if !velda_router::is_clean_path(head.path().as_bytes()) {
-                        match velda_router::normalize_path(head.path()) {
-                            Ok(normalized) => {
-                                let mut parts = head.uri.clone().into_parts();
-                                let new_path_and_query = match parts.path_and_query {
-                                    Some(ref pq) => {
-                                        if let Some(q) = pq.query() {
-                                            format!("{normalized}?{q}")
-                                                .parse::<http::uri::PathAndQuery>()
-                                                .ok()
-                                        } else {
-                                            normalized.parse::<http::uri::PathAndQuery>().ok()
-                                        }
-                                    }
-                                    None => normalized.parse::<http::uri::PathAndQuery>().ok(),
-                                };
-                                if let Some(pq) = new_path_and_query {
-                                    parts.path_and_query = Some(pq);
-                                    if let Ok(new_uri) = http::Uri::from_parts(parts) {
-                                        head.uri = new_uri;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    listener = %listener_id,
-                                    error = %e,
-                                    path = %head.path(),
-                                    "Rejecting HTTP/2 request with unsafe URI path"
-                                );
-                                let bad_req = L7Response::from_bytes(
-                                    StatusCode::BAD_REQUEST,
-                                    b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
-                                )
-                                .with_header(
-                                    CONTENT_TYPE,
-                                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                                );
-                                let _ = responder.send_response(&bad_req);
-                                continue;
-                            }
-                        }
+                    if let Err(e) = velda_http2::server::path::normalize_path(&mut head.uri) {
+                        tracing::warn!(
+                            listener = %meta.listener_id,
+                            error = %e,
+                            path = %head.uri.path(),
+                            "Rejecting HTTP/2 request with unsafe URI path"
+                        );
+                        let bad_req = L7Response::from_bytes(
+                            StatusCode::BAD_REQUEST,
+                            b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+                        )
+                        .with_header(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        );
+                        let _ = responder.send_response(&bad_req);
+                        continue;
                     }
 
-                    let clean_path = head.path();
-                    let host_hdr = head.headers.get(http::header::HOST).cloned();
-                    let host_str = host_hdr
-                        .as_ref()
-                        .and_then(|v| v.to_str().ok())
-                        .or_else(|| head.uri.authority().map(|a| a.as_str()))
-                        .or_else(|| head.uri.host());
-
-                    let mut http_req = Http2RouteRequest::new(clean_path);
-                    if let Some(h) = host_str {
+                    let mut http_req = Http2RouteRequest::new(head.uri.path());
+                    if let Some(h) =
+                        velda_http2::server::header::extract_host(&head.headers, &head.uri)
+                    {
                         http_req = http_req.with_host(h);
                     }
                     http_req = http_req.with_method(head.method.as_str());
 
                     let rt = runtime.load();
-                    let matched_route = rt.router.route_http2(&listener_id, &http_req).cloned();
+                    let matched_route =
+                        rt.router.route_http2(&meta.listener_id, &http_req).cloned();
 
                     // ========================================================
                     // FAST-PATH 404 EVALUATION (Zero Tokio Task Allocation)
@@ -324,8 +162,8 @@ pub async fn run_http2_loop<IO>(
                         consecutive_not_founds += 1;
                         if consecutive_not_founds > MAX_CONSECUTIVE_NOT_FOUNDS {
                             tracing::warn!(
-                                listener = %listener_id,
-                                peer = %peer,
+                                listener = %meta.listener_id,
+                                peer = %meta.peer,
                                 consecutive = consecutive_not_founds,
                                 "Aborting HTTP/2 connection: excessive consecutive non-matching routes (possible scan/flood)"
                             );
@@ -362,13 +200,12 @@ pub async fn run_http2_loop<IO>(
                     };
 
                     consecutive_not_founds = 0;
-                    let lid_clone = listener_id.clone();
+                    let meta_clone = meta.clone();
                     let rt_clone = runtime.clone();
                     let cfg_clone = config;
                     tokio::spawn(async move {
                         serve_http2_stream(
-                            head, receiver, responder, lid_clone, peer, local_addr, is_tls,
-                            cfg_clone, rt_clone, route,
+                            head, receiver, responder, meta_clone, cfg_clone, rt_clone, route,
                         )
                         .await;
                     });
@@ -380,7 +217,7 @@ pub async fn run_http2_loop<IO>(
                 }
                 Err(_) => {
                     tracing::debug!(
-                        listener = %listener_id,
+                        listener = %meta.listener_id,
                         timeout_ms = config.idle_timeout_ms,
                         "HTTP/2 stream accept timed out"
                     );
@@ -395,15 +232,11 @@ pub async fn run_http2_loop<IO>(
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
-#[allow(clippy::too_many_arguments)]
 async fn serve_http2_stream(
-    mut head: Http2RequestHead,
+    mut head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
-    listener_id: Arc<str>,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
+    meta: DownstreamMeta,
     config: Http2Config,
     runtime: SharedRuntime,
     route: velda_router::Http2Route,
@@ -411,7 +244,7 @@ async fn serve_http2_stream(
     let rt = runtime.load();
     let Some(upstream) = rt.upstreams.http2.get(&route.upstream_name) else {
         tracing::error!(
-            listener = %listener_id,
+            listener = %meta.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for HTTP/2 upstream"
@@ -433,15 +266,13 @@ async fn serve_http2_stream(
     };
 
     let strategy = upstream.strategy;
-    let host_hdr = head.headers.get(http::header::HOST).cloned();
-    let host_str = host_hdr
-        .as_ref()
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| head.uri.authority().map(|a| a.as_str()))
-        .or_else(|| head.uri.host());
-
-    enrich_http2_forwarded_headers(&mut head.headers, peer, local_addr, is_tls, host_str);
-    velda_http2::headers::sanitize_h2_headers(&mut head.headers);
+    velda_http2::server::header::enrich_headers(
+        &mut head.headers,
+        &head.uri,
+        meta.peer,
+        meta.local_addr,
+        meta.is_tls,
+    );
 
     // Fail-fast: Acquire upstream multiplexed connection before reading downstream body
     let upstream_cfg = config;
@@ -588,38 +419,50 @@ async fn serve_http2_stream(
 mod tests {
     use super::*;
     use http::HeaderMap;
+    use std::net::SocketAddr;
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut head = Http2ServerRequestHead::new(
+            http::Method::GET,
+            "http://secure.example.com/api".parse().unwrap(),
+            HeaderMap::new(),
+            None,
+        );
         // Client attempts to spoof their IP, host, and SSL status
-        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        headers.insert("x-forwarded-proto", "http".parse().unwrap());
-        headers.insert("x-forwarded-ssl", "off".parse().unwrap());
-        headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+        head.headers
+            .insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
+        head.headers
+            .insert("x-real-ip", "203.0.113.195".parse().unwrap());
+        head.headers
+            .insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        head.headers
+            .insert("x-forwarded-proto", "http".parse().unwrap());
+        head.headers
+            .insert("x-forwarded-ssl", "off".parse().unwrap());
+        head.headers
+            .insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
 
         let peer: SocketAddr = "192.0.2.20:54321".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:8443".parse().unwrap();
 
-        enrich_http2_forwarded_headers(&mut headers, peer, local, true, Some("secure.example.com"));
+        head.enrich_forwarded_headers(peer, local, true);
 
         // Client spoofed values MUST be completely replaced with authoritative values
-        assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.20");
-        assert_eq!(headers.get("x-real-ip").unwrap(), "192.0.2.20");
-        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
-        assert_eq!(headers.get("x-forwarded-port").unwrap(), "8443");
+        assert_eq!(head.headers.get("x-forwarded-for").unwrap(), "192.0.2.20");
+        assert_eq!(head.headers.get("x-real-ip").unwrap(), "192.0.2.20");
+        assert_eq!(head.headers.get("x-forwarded-proto").unwrap(), "https");
+        assert_eq!(head.headers.get("x-forwarded-port").unwrap(), "8443");
         assert_eq!(
-            headers.get("x-forwarded-host").unwrap(),
+            head.headers.get("x-forwarded-host").unwrap(),
             "secure.example.com"
         );
         assert_eq!(
-            headers.get("forwarded").unwrap(),
+            head.headers.get("forwarded").unwrap(),
             "for=192.0.2.20;proto=https;by=10.0.0.1;host=\"secure.example.com\""
         );
         // Untrusted extra x-forwarded-* headers MUST be stripped
-        assert!(headers.get("x-forwarded-ssl").is_none());
+        assert!(head.headers.get("x-forwarded-ssl").is_none());
     }
 
     #[test]

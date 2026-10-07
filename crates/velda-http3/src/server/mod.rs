@@ -4,7 +4,15 @@
 //! frame parsing, zero-alloc QPACK decoding, and egress response transmission.
 
 pub mod connection;
+pub mod header;
+pub mod path;
+pub mod request;
 pub mod response;
 
 pub use connection::{Http3Engine, Http3RequestEvent, OutgoingDatagram};
-pub use response::{build_edge_response_frames, send_response};
+pub use header::{enrich_headers, extract_host};
+pub use path::{is_clean_path, normalize_path};
+pub use request::{Http3ServerRequest, Http3ServerRequestHead};
+pub use response::{
+    Http3ServerResponse, Http3ServerResponseHead, build_edge_response_frames, send_response,
+};

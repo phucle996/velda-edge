@@ -47,6 +47,16 @@ impl Http3Client {
         reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
     }
 
+    /// Dispatches an upstream [`Http3ClientRequest`] over a new multiplexed bidirectional stream on this connection.
+    pub async fn send_client_request(
+        &self,
+        req: super::request::Http3ClientRequest,
+    ) -> Result<super::response::Http3ClientResponse, Http3Error> {
+        let l7_req = req.into_l7();
+        let l7_resp = self.send_request(l7_req).await?;
+        Ok(super::response::Http3ClientResponse::from_l7(l7_resp))
+    }
+
     /// Dispatches a borrowed [`L7Request`] by cloning it, useful when the caller retains ownership.
     #[inline]
     pub async fn send_request_ref(&self, req: &L7Request) -> Result<L7Response, Http3Error> {
@@ -229,142 +239,11 @@ pub async fn forward_request(
     client.send_request_ref(req).await
 }
 
-/// Extracts the server name (SNI) from an HTTP request or falls back to the target IP address.
-///
-/// Precedence:
-/// 1. Request URI host (`req.uri.host()`)
-/// 2. Request `Host` header (stripping `:port` if present)
-/// 3. Target IP address string (`target.ip().to_string()`)
-pub fn extract_sni<'a>(req: &'a L7Request, target: &SocketAddr) -> std::borrow::Cow<'a, str> {
-    if let Some(host) = req.uri.host().filter(|h| !h.trim().is_empty()) {
-        return std::borrow::Cow::Borrowed(host.trim());
-    }
-
-    if let Some(host_hdr) = req
-        .headers
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        return std::borrow::Cow::Borrowed(strip_port(host_hdr));
-    }
-
-    std::borrow::Cow::Owned(target.ip().to_string())
-}
-
-/// Strips the port component from a host string (e.g., `example.com:8443` -> `example.com`,
-/// `[::1]:8443` -> `::1`).
-#[inline]
-pub fn strip_port(host: &str) -> &str {
-    if let Some(stripped) = host.strip_prefix('[')
-        && let Some(end_bracket) = stripped.find(']')
-    {
-        return &stripped[..end_bracket];
-    }
-
-    if let Some(colon_idx) = host.rfind(':') {
-        if host[..colon_idx].contains(':') {
-            host
-        } else {
-            &host[..colon_idx]
-        }
-    } else {
-        host
-    }
-}
-
-/// Resolves the upstream TLS SNI / ServerName for an HTTP/3 outbound connection.
-///
-/// Precedence:
-/// 1. Explicit upstream configuration `explicit_sni` (e.g. from upstream TLS target_sni)
-/// 2. Request URI host (`req.uri.host()`)
-/// 3. Request `Host` header (stripping `:port` if present)
-/// 4. Target IP address string (`target.ip().to_string()`)
-pub fn resolve_sni<'a>(
-    req: &'a L7Request,
-    target: &SocketAddr,
-    explicit_sni: Option<&'a str>,
-) -> std::borrow::Cow<'a, str> {
-    if let Some(sni) = explicit_sni.filter(|s| !s.trim().is_empty()) {
-        return std::borrow::Cow::Borrowed(sni.trim());
-    }
-    extract_sni(req, target)
-}
+pub use super::header::{extract_sni, resolve_sni, strip_port};
 
 /// Builds default QUIC client configuration for HTTP/3 upstream.
 pub fn default_client_config() -> Result<ClientConfig, Http3Error> {
     let rustls_client = velda_tls::client::build_insecure_tls13_client_config(vec![b"h3".to_vec()]);
     velda_tls::client::build_quic_client_config(rustls_client)
         .map_err(|e| Http3Error::H3(format!("QUIC crypto config error: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
-    use velda_core::Body;
-
-    #[test]
-    fn test_strip_port() {
-        assert_eq!(strip_port("example.com"), "example.com");
-        assert_eq!(strip_port("example.com:8443"), "example.com");
-        assert_eq!(strip_port("192.168.1.100"), "192.168.1.100");
-        assert_eq!(strip_port("192.168.1.100:443"), "192.168.1.100");
-        assert_eq!(strip_port("[::1]:8443"), "::1");
-        assert_eq!(strip_port("[2001:db8::1]:443"), "2001:db8::1");
-        assert_eq!(strip_port("::1"), "::1");
-    }
-
-    #[test]
-    fn test_resolve_sni_precedence() {
-        let target: SocketAddr = "10.0.0.1:4433".parse().unwrap();
-
-        // 1. Explicit SNI overrides everything
-        let req1 = L7Request::new(
-            Method::GET,
-            "https://uri-host.internal/api".parse::<Uri>().unwrap(),
-            Version::HTTP_3,
-            {
-                let mut h = HeaderMap::new();
-                h.insert(http::header::HOST, "header-host.com:8443".parse().unwrap());
-                h
-            },
-            Body::Empty,
-        );
-        assert_eq!(
-            resolve_sni(&req1, &target, Some("explicit-backend.internal")),
-            "explicit-backend.internal"
-        );
-
-        // 2. URI host takes precedence when explicit SNI is None
-        assert_eq!(resolve_sni(&req1, &target, None), "uri-host.internal");
-
-        // 3. Host header with port stripped takes precedence when URI host is absent
-        let req2 = L7Request::new(
-            Method::GET,
-            "/api/v1/orders".parse::<Uri>().unwrap(),
-            Version::HTTP_3,
-            {
-                let mut h = HeaderMap::new();
-                h.insert(
-                    http::header::HOST,
-                    "my-service.internal:9443".parse().unwrap(),
-                );
-                h
-            },
-            Body::Empty,
-        );
-        assert_eq!(resolve_sni(&req2, &target, None), "my-service.internal");
-
-        // 4. Target IP fallback when no SNI, URI host, or Host header exists (no hardcoded "localhost")
-        let req3 = L7Request::new(
-            Method::GET,
-            "/health".parse::<Uri>().unwrap(),
-            Version::HTTP_3,
-            HeaderMap::new(),
-            Body::Empty,
-        );
-        assert_eq!(resolve_sni(&req3, &target, None), "10.0.0.1");
-    }
 }

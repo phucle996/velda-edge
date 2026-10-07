@@ -5,15 +5,18 @@
 //! body extraction, keep-alive state transitions, buffer compaction, and response flushing.
 
 use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 
-use super::decode::{decode_body, decode_request, decode_request_head};
-use super::encode::{
-    send_chunk, send_chunked_end, send_response, send_response_head_chunked, send_response_parts,
+use super::request::{
+    Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead, decode_body, decode_request,
+    decode_request_head,
 };
-use super::request::{Http1BodyFraming, Http1Request, Http1RequestHead};
-use crate::client::response::{Http1Response, Http1ResponseHead};
+use super::response::{
+    Http1ServerResponse, Http1ServerResponseHead, send_chunk, send_chunked_end, send_response,
+    send_response_head_chunked, send_response_parts,
+};
+use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 
@@ -65,7 +68,7 @@ where
     /// headers and reject malicious or unauthorized requests before reading any body bytes.
     pub async fn next_request_head(
         &mut self,
-    ) -> Result<Option<(Http1RequestHead, Http1BodyFraming)>, Http1Error> {
+    ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
         if self.close_requested {
             return Ok(None);
         }
@@ -92,7 +95,27 @@ where
                 return Ok(Some((head, framing)));
             }
 
-            let bytes_read = self.stream.read_buf(&mut self.read_buf).await?;
+            let timeout_duration = if self.read_buf.is_empty() {
+                std::time::Duration::from_millis(self.config.idle_timeout_ms)
+            } else {
+                std::time::Duration::from_millis(self.config.header_read_timeout_ms)
+            };
+
+            let bytes_read = match tokio::time::timeout(
+                timeout_duration,
+                self.stream.read_buf(&mut self.read_buf),
+            )
+            .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    if self.read_buf.is_empty() {
+                        return Ok(None);
+                    } else {
+                        return Err(Http1Error::Timeout);
+                    }
+                }
+            };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);
@@ -134,7 +157,7 @@ where
     }
 
     /// Reads and decodes the next full HTTP/1.1 request (head + body).
-    pub async fn next_request(&mut self) -> Result<Option<Http1Request>, Http1Error> {
+    pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Error> {
         if self.close_requested {
             return Ok(None);
         }
@@ -160,7 +183,27 @@ where
                 return Ok(Some(req));
             }
 
-            let bytes_read = self.stream.read_buf(&mut self.read_buf).await?;
+            let timeout_duration = if self.read_buf.is_empty() {
+                std::time::Duration::from_millis(self.config.idle_timeout_ms)
+            } else {
+                std::time::Duration::from_millis(self.config.header_read_timeout_ms)
+            };
+
+            let bytes_read = match tokio::time::timeout(
+                timeout_duration,
+                self.stream.read_buf(&mut self.read_buf),
+            )
+            .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    if self.read_buf.is_empty() {
+                        return Ok(None);
+                    } else {
+                        return Err(Http1Error::Timeout);
+                    }
+                }
+            };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);
@@ -173,11 +216,20 @@ where
         }
     }
 
-    /// Serializes and flushes an HTTP/1.1 response back to the downstream stream.
+    /// Serializes and flushes an HTTP/1.1 downstream response back to the client.
     ///
     /// Automatically streams the response body with zero-copy transmission.
-    pub async fn send_response(&mut self, response: &Http1Response) -> Result<(), Http1Error> {
-        let close = send_response(&mut self.stream, &mut self.write_buf, response).await?;
+    pub async fn send_response(
+        &mut self,
+        response: &Http1ServerResponse,
+    ) -> Result<(), Http1Error> {
+        let close = send_response(
+            &mut self.stream,
+            &mut self.write_buf,
+            response,
+            self.close_requested,
+        )
+        .await?;
 
         if close {
             self.close_requested = true;
@@ -186,13 +238,34 @@ where
         Ok(())
     }
 
+    /// Serializes and flushes an upstream client response directly downstream.
+    pub async fn send_client_response(
+        &mut self,
+        response: &Http1ClientResponse,
+    ) -> Result<(), Http1Error> {
+        let server_resp = Http1ServerResponse::new(
+            response.status,
+            response.version,
+            response.headers.clone(),
+            response.body.clone(),
+        );
+        self.send_response(&server_resp).await
+    }
+
     /// Serializes and flushes response head and body separately.
     pub async fn send_response_parts(
         &mut self,
-        head: &Http1ResponseHead,
+        head: &Http1ServerResponseHead,
         body: &Body,
     ) -> Result<(), Http1Error> {
-        let close = send_response_parts(&mut self.stream, &mut self.write_buf, head, body).await?;
+        let close = send_response_parts(
+            &mut self.stream,
+            &mut self.write_buf,
+            head,
+            body,
+            self.close_requested,
+        )
+        .await?;
 
         if close {
             self.close_requested = true;
@@ -206,7 +279,7 @@ where
     /// Sets `Transfer-Encoding: chunked` and immediately flushes the head to the client.
     pub async fn send_response_head_chunked(
         &mut self,
-        head: &Http1ResponseHead,
+        head: &Http1ServerResponseHead,
     ) -> Result<(), Http1Error> {
         let close = send_response_head_chunked(
             &mut self.stream,
@@ -214,6 +287,7 @@ where
             head.version,
             head.status,
             &head.headers,
+            self.close_requested,
         )
         .await?;
 
@@ -221,6 +295,23 @@ where
             self.close_requested = true;
         }
 
+        Ok(())
+    }
+
+    /// Sends the HTTP/1.1 response head configured for progressive chunked streaming from upstream client head.
+    pub async fn send_client_response_head_chunked(
+        &mut self,
+        head: &Http1ClientResponseHead,
+    ) -> Result<(), Http1Error> {
+        let server_head =
+            Http1ServerResponseHead::new(head.status, head.version, head.headers.clone());
+        self.send_response_head_chunked(&server_head).await
+    }
+
+    /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).
+    pub async fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), Http1Error> {
+        self.stream.write_all(bytes).await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -239,7 +330,7 @@ where
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
-        use super::decode::parse_single_chunk;
+        use super::request::parse_single_chunk;
         use bytes::Buf;
 
         loop {
@@ -273,9 +364,44 @@ where
         }
     }
 
+    /// Transmits `HTTP/1.1 100 Continue\r\n\r\n` to downstream stream (RFC 9110 §10.1.1).
+    ///
+    /// Unblocks clients that paused transmission waiting for server confirmation before sending body.
+    #[inline]
+    pub async fn send_100_continue(&mut self) -> Result<(), Http1Error> {
+        static HTTP_100_CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+        self.stream.write_all(HTTP_100_CONTINUE).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    /// Marks this connection to close cleanly after the current response is finished.
+    #[inline]
+    pub fn mark_close(&mut self) {
+        self.close_requested = true;
+    }
+
     /// Returns whether this connection was flagged to close.
     #[inline]
     pub const fn is_closed(&self) -> bool {
         self.close_requested
+    }
+
+    /// Performs a lingering close on downstream stream (RFC 9112 / NGINX ngx_http_lingering_close).
+    ///
+    /// Shuts down the write half to transmit FIN, then drains any lingering unread incoming bytes
+    /// within a short timeout (100ms) to prevent TCP RST from dropping downstream response data.
+    pub async fn lingering_close(&mut self) {
+        let _ = self.stream.shutdown().await;
+        let mut discard = [0u8; 1024];
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            loop {
+                match self.stream.read(&mut discard).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await;
     }
 }

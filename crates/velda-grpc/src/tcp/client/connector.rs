@@ -3,10 +3,9 @@
 //! Owns connection establishment, HTTP/2 client framing, and both Unary
 //! and Streaming request dispatch to physical backend endpoints.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use h2::SendStream;
 use h2::client::{ResponseFuture, SendRequest};
-use http::Version;
 use std::net::SocketAddr;
 use velda_core::{Body, L7Request, L7Response};
 use velda_tls::TlsClientEngine;
@@ -352,6 +351,28 @@ impl GrpcUpstreamConnector {
             .map_err(GrpcError::H2)
     }
 
+    /// Dispatches an upstream [`super::request::GrpcClientRequest`] and returns a [`super::response::GrpcClientResponse`].
+    pub async fn invoke_client_request(
+        &mut self,
+        req: &super::request::GrpcClientRequest,
+        config: &GrpcConfig,
+    ) -> Result<super::response::GrpcClientResponse, GrpcError> {
+        let (http_req, end_of_stream) = req.encode_http_request()?;
+        let (response_future, mut send_stream) = self.open_stream(http_req, end_of_stream)?;
+
+        if let Body::Bytes(ref data) = req.body {
+            send_stream
+                .send_data(data.clone(), true)
+                .map_err(GrpcError::H2)?;
+        }
+
+        super::response::GrpcClientResponse::decode_from_future(
+            response_future,
+            config.max_message_size,
+        )
+        .await
+    }
+
     /// Invokes a Unary gRPC request and returns the upstream `L7Response`.
     ///
     /// Seamlessly forwards request payload, waits for response headers, reads response LPM frame,
@@ -362,80 +383,9 @@ impl GrpcUpstreamConnector {
         req: &L7Request,
         config: &GrpcConfig,
     ) -> Result<L7Response, GrpcError> {
-        let mut request_builder = http::Request::builder()
-            .method(&req.method)
-            .uri(&req.uri)
-            .version(Version::HTTP_2);
-
-        for (name, val) in &req.headers {
-            request_builder = request_builder.header(name, val);
-        }
-
-        let end_of_stream = !req.has_body();
-        let http_req = request_builder.body(()).map_err(GrpcError::Http)?;
-
-        let (response_future, mut send_stream) = self.open_stream(http_req, end_of_stream)?;
-
-        if let Body::Bytes(ref data) = req.body {
-            send_stream
-                .send_data(data.clone(), true)
-                .map_err(GrpcError::H2)?;
-        }
-
-        let response = response_future.await.map_err(GrpcError::H2)?;
-        let (parts, mut body_stream) = response.into_parts();
-        let max_body = config.max_message_size;
-
-        // Zero-allocation fast path for single-chunk Unary responses
-        let body = if body_stream.is_end_stream() {
-            Body::Empty
-        } else if let Some(first_chunk) = body_stream.data().await {
-            let chunk = first_chunk.map_err(GrpcError::H2)?;
-            let len = chunk.len();
-            if len > max_body {
-                let _ = body_stream.flow_control().release_capacity(len);
-                return Err(GrpcError::PayloadTooLarge(len));
-            }
-            let _ = body_stream.flow_control().release_capacity(len);
-
-            if body_stream.is_end_stream() {
-                Body::Bytes(chunk)
-            } else {
-                let mut resp_body = BytesMut::with_capacity(len * 2);
-                resp_body.extend_from_slice(&chunk);
-
-                while let Some(chunk_res) = body_stream.data().await {
-                    let chunk = chunk_res.map_err(GrpcError::H2)?;
-                    let len = chunk.len();
-                    if resp_body.len() + len > max_body {
-                        let _ = body_stream.flow_control().release_capacity(len);
-                        return Err(GrpcError::PayloadTooLarge(resp_body.len() + len));
-                    }
-                    resp_body.extend_from_slice(&chunk);
-                    let _ = body_stream.flow_control().release_capacity(len);
-                }
-
-                Body::Bytes(resp_body.freeze())
-            }
-        } else {
-            Body::Empty
-        };
-
-        let mut headers = parts.headers;
-        if let Some(trailers) = body_stream.trailers().await.map_err(GrpcError::H2)? {
-            for (name, val) in trailers {
-                if let Some(name) = name {
-                    headers.append(name, val);
-                }
-            }
-        }
-
-        Ok(L7Response::new(
-            parts.status,
-            Version::HTTP_2,
-            headers,
-            body,
-        ))
+        let client_req = super::request::GrpcClientRequest::from_l7(req);
+        let resp = self.invoke_client_request(&client_req, config).await?;
+        Ok(resp.into_l7())
     }
 }
 

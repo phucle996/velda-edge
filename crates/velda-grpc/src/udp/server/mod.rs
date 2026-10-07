@@ -6,9 +6,13 @@
 //! - `stream`: Downstream UDP stream representation (`GrpcUdpServerStream`).
 
 pub mod engine;
+pub mod header;
+pub mod path;
 pub mod responder;
 pub mod stream;
 
 pub use engine::{GrpcUdpEngine, GrpcUdpRequestEvent, OutgoingDatagram};
-pub use responder::GrpcUdpResponder;
-pub use stream::GrpcUdpServerStream;
+pub use header::{enrich_headers, extract_authority};
+pub use path::{parse_grpc_path, validate_grpc_path};
+pub use responder::{GrpcUdpResponder, GrpcUdpServerResponse, GrpcUdpServerResponseHead};
+pub use stream::{GrpcUdpServerRequest, GrpcUdpServerRequestHead, GrpcUdpServerStream};

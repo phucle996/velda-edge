@@ -4,7 +4,6 @@
 //! with `transport = "tcp"` and `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing,
 //! and full bidirectional streaming.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -18,146 +17,8 @@ use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
 
+use crate::pre_compile::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
-
-/// Enriches gRPC request headers with RFC 7239 and standard proxy forwarding metadata.
-///
-/// Anti-Spoofing Invariant:
-/// Untrusted downstream clients must NEVER be permitted to spoof client IP or proxy forwarding metadata.
-/// Any client-supplied `X-Forwarded-*`, `X-Real-IP`, or RFC 7239 `Forwarded` headers are stripped in-place
-/// and replaced strictly with authoritative edge connection metadata (`peer.ip()`, `local_addr.port()`,
-/// protocol scheme, and verified authority).
-/// Connection-specific RFC 9113 hop-by-hop headers are also stripped in-place.
-fn enrich_grpc_forwarded_headers(
-    headers: &mut http::HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
-    authority: Option<&str>,
-) {
-    use http::header::{HeaderName, HeaderValue};
-
-    // 1. Strip all client-supplied untrusted forwarding headers
-    if headers.keys().any(|k| {
-        let s = k.as_str();
-        s.starts_with("x-forwarded-")
-            || s.eq_ignore_ascii_case("x-real-ip")
-            || s.eq_ignore_ascii_case("forwarded")
-    }) {
-        let to_remove: Vec<HeaderName> = headers
-            .keys()
-            .filter(|k| {
-                let s = k.as_str();
-                s.starts_with("x-forwarded-")
-                    || s.eq_ignore_ascii_case("x-real-ip")
-                    || s.eq_ignore_ascii_case("forwarded")
-            })
-            .cloned()
-            .collect();
-        for name in to_remove {
-            headers.remove(&name);
-        }
-    }
-
-    // 2. Strip RFC 9113 connection-specific hop-by-hop headers
-    static GRPC_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
-        http::header::CONNECTION,
-        HeaderName::from_static("keep-alive"),
-        HeaderName::from_static("proxy-connection"),
-        http::header::TRANSFER_ENCODING,
-        http::header::UPGRADE,
-    ];
-    for name in &GRPC_HOP_BY_HOP_NAMES {
-        headers.remove(name);
-    }
-    if let Some(te_val) = headers.get(http::header::TE) {
-        let is_trailers = te_val
-            .to_str()
-            .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
-        if !is_trailers {
-            headers.remove(http::header::TE);
-        }
-    }
-
-    let client_ip = peer.ip();
-    let proto = if is_tls { "https" } else { "http" };
-
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    // 3. Authoritative X-Forwarded-For
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val);
-    }
-
-    // 4. Authoritative X-Real-IP
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    // 5. Authoritative X-Forwarded-Proto
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    // 6. Authoritative X-Forwarded-Port
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
-
-    // 7. Authoritative X-Forwarded-Host
-    if let Some(auth) = authority
-        && let Ok(val) = HeaderValue::from_str(auth)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // 8. Authoritative Standard: RFC 7239 (Official IETF "Forwarded" HTTP Extension)
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
-        }
-        if let Some(auth) = authority {
-            let _ = write!(cursor, ";host=\"{auth}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
 
 /// Asynchronous stream worker dispatching incoming gRPC connections over TCP.
 ///
@@ -209,16 +70,13 @@ pub async fn handle_grpc_tcp(
                     return;
                 }
 
-                run_grpc_tcp_loop(
-                    tls_stream,
+                let meta = DownstreamMeta {
                     listener_id,
                     peer,
                     local_addr,
-                    true,
-                    config,
-                    runtime,
-                )
-                .await;
+                    is_tls: true,
+                };
+                run_grpc_tcp_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -230,26 +88,20 @@ pub async fn handle_grpc_tcp(
             }
         }
     } else {
-        run_grpc_tcp_loop(
-            connection,
+        let meta = DownstreamMeta {
             listener_id,
             peer,
             local_addr,
-            false,
-            config,
-            runtime,
-        )
-        .await;
+            is_tls: false,
+        };
+        run_grpc_tcp_loop(connection, meta, config, runtime).await;
     }
 }
 
 /// Core gRPC downstream stream worker loop over TCP decoupled from transport layer.
 pub async fn run_grpc_tcp_loop<IO>(
     stream: IO,
-    listener_id: Arc<str>,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
+    meta: DownstreamMeta,
     config: GrpcConfig,
     runtime: SharedRuntime,
 ) where
@@ -260,7 +112,7 @@ pub async fn run_grpc_tcp_loop<IO>(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                listener = %listener_id,
+                listener = %meta.listener_id,
                 "Failed downstream gRPC server handshake"
             );
             return;
@@ -272,21 +124,12 @@ pub async fn run_grpc_tcp_loop<IO>(
     while let Ok(accept_result) = tokio::time::timeout(timeout_duration, conn.accept()).await {
         match accept_result {
             Ok(Some(server_stream)) => {
-                let lid = listener_id.clone();
+                let meta = meta.clone();
                 let rt = runtime.clone();
                 let cfg = config;
 
                 tokio::spawn(async move {
-                    dispatch_grpc_tcp_request_stream(
-                        server_stream,
-                        peer,
-                        local_addr,
-                        is_tls,
-                        &lid,
-                        &cfg,
-                        &rt,
-                    )
-                    .await;
+                    dispatch_grpc_tcp_request_stream(server_stream, meta, &cfg, &rt).await;
                 });
             }
             Ok(None) => break,
@@ -301,27 +144,13 @@ pub async fn run_grpc_tcp_loop<IO>(
 /// Dispatches a single downstream gRPC request stream through the router to upstream backend.
 async fn dispatch_grpc_tcp_request_stream(
     mut server_stream: GrpcServerStream,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
-    is_tls: bool,
-    listener_id: &str,
+    meta: DownstreamMeta,
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
+    server_stream.enrich_forwarded_headers(meta.peer, meta.local_addr, meta.is_tls);
+    let authority_str = server_stream.authority();
     let path = server_stream.parts.uri.path();
-    let authority_hdr = server_stream.parts.headers.get(":authority").cloned();
-    let authority_str = authority_hdr
-        .as_ref()
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| server_stream.parts.uri.authority().map(|a| a.as_str()));
-
-    enrich_grpc_forwarded_headers(
-        &mut server_stream.parts.headers,
-        peer,
-        local_addr,
-        is_tls,
-        authority_str,
-    );
 
     let Some(grpc_req) = GrpcRouteRequest::from_path(path, authority_str) else {
         let _ = server_stream.respond.send_trailers_only(
@@ -332,7 +161,7 @@ async fn dispatch_grpc_tcp_request_stream(
     };
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_grpc(listener_id, &grpc_req) else {
+    let Some(route) = rt.router.route_grpc(&meta.listener_id, &grpc_req) else {
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
@@ -342,7 +171,7 @@ async fn dispatch_grpc_tcp_request_stream(
 
     let Some(upstream) = rt.upstreams.grpc_tcp.get(&route.upstream_name) else {
         tracing::error!(
-            listener = %listener_id,
+            listener = %meta.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             "No healthy backend endpoints available for gRPC upstream"
@@ -370,7 +199,7 @@ async fn dispatch_grpc_tcp_request_stream(
     };
 
     tracing::debug!(
-        listener = %listener_id,
+        listener = %meta.listener_id,
         route = %route.id,
         upstream = %route.upstream_name,
         strategy = ?strategy,
@@ -447,8 +276,10 @@ async fn dispatch_grpc_tcp_request_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use http::HeaderMap;
+    use std::net::SocketAddr;
+    use velda_grpc::GrpcStatus;
+    use velda_grpc::tcp::server::enrich_headers;
 
     #[test]
     fn test_enrich_forwarded_headers() {
@@ -466,7 +297,7 @@ mod tests {
         let peer: SocketAddr = "192.0.2.40:50051".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
 
-        enrich_grpc_forwarded_headers(&mut headers, peer, local, true, Some("grpc.example.com"));
+        enrich_headers(&mut headers, peer, local, true, Some("grpc.example.com"));
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.40");
