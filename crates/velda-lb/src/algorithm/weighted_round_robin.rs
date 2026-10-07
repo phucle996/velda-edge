@@ -96,6 +96,11 @@ impl LoadBalancer for WeightedRoundRobin {
         }
 
         let total_weight: i64 = endpoints.iter().map(|e| e.weight as i64).sum();
+        if total_weight <= 0 {
+            static FALLBACK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+            return Some(FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed) % endpoints.len());
+        }
+
         let mut best_idx = 0;
         let mut max_weight = i64::MIN;
 
@@ -190,5 +195,19 @@ mod tests {
             assert_eq!(swrr.shards.len(), workers.next_power_of_two());
             assert!(swrr.select(&endpoints, &ctx).is_some());
         }
+    }
+
+    #[test]
+    fn test_swrr_zero_weight_fallback() {
+        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let endpoints = vec![Endpoint::new("e1", ep1, 0), Endpoint::new("e2", ep2, 0)];
+        let balancer = WeightedRoundRobin::new();
+        let ctx = SelectionContext::NONE;
+
+        let res1 = balancer.select_index(&endpoints, &ctx);
+        let res2 = balancer.select_index(&endpoints, &ctx);
+        assert!(res1.is_some());
+        assert!(res2.is_some());
     }
 }

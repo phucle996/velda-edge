@@ -83,6 +83,7 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
+    "proxy-connection",
     "te",
     "trailer",
     "trailers",
@@ -90,11 +91,12 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-const HOP_BY_HOP_NAMES: [HeaderName; 9] = [
+const HOP_BY_HOP_NAMES: [HeaderName; 10] = [
     http::header::CONNECTION,
     HeaderName::from_static("keep-alive"),
     http::header::PROXY_AUTHENTICATE,
     http::header::PROXY_AUTHORIZATION,
+    HeaderName::from_static("proxy-connection"),
     http::header::TE,
     http::header::TRAILER,
     HeaderName::from_static("trailers"),
@@ -104,20 +106,18 @@ const HOP_BY_HOP_NAMES: [HeaderName; 9] = [
 
 /// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let mut to_remove = [const { HeaderName::from_static("connection") }; 8];
-    let mut count = 0;
+    let mut to_remove = Vec::new();
 
-    if let Some(conn) = headers.get(http::header::CONNECTION)
-        && let Ok(conn_str) = conn.to_str()
-    {
-        for part in conn_str.split(',') {
-            let trimmed = part.trim();
-            if !trimmed.is_empty()
-                && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
-                && count < 8
-            {
-                to_remove[count] = name;
-                count += 1;
+    // Iterate across all Connection header entries (RFC 9110 Section 7.6.1)
+    for conn in headers.get_all(http::header::CONNECTION) {
+        if let Ok(conn_str) = conn.to_str() {
+            for part in conn_str.split(',') {
+                let trimmed = part.trim();
+                if !trimmed.is_empty()
+                    && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
+                {
+                    to_remove.push(name);
+                }
             }
         }
     }
@@ -126,7 +126,7 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap) {
         headers.remove(name);
     }
 
-    for name in &to_remove[..count] {
+    for name in &to_remove {
         headers.remove(name);
     }
 }

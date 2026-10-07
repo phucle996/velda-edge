@@ -958,3 +958,169 @@ async fn test_http1_unexpected_chunked_502() {
     shutdown_tx.send(true).unwrap();
     let _ = edge_task.await;
 }
+
+#[tokio::test]
+async fn test_http1_uri_normalization_and_path_security() {
+    let backend_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let backend_task = tokio::spawn(async move {
+        backend_listener.set_nonblocking(true).unwrap();
+        let tokio_l = tokio::net::TcpListener::from_std(backend_listener).unwrap();
+        loop {
+            let (mut stream, _) = match tokio_l.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                if n > 0 {
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    if req_str.contains("/api/v1/users") {
+                        let resp =
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+                        let _ = stream.write_all(resp).await;
+                    }
+                }
+            });
+        }
+    });
+
+    let gateway_addr: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let tmp = tempdir().unwrap();
+    let storage_dir = tmp.path().join("storage");
+    let runtime_dir = storage_dir.join("runtime");
+    let socket_path = tmp.path().join("edge_norm.sock");
+    fs::create_dir_all(&runtime_dir).unwrap();
+
+    let listeners = vec![ListenerConfig {
+        id: "http-norm".into(),
+        address: gateway_addr.to_string(),
+        transport: ListenerTransportConfig {
+            protocol: "tcp".into(),
+        },
+        application: ListenerApplicationConfig {
+            protocol: "http1".into(),
+            version: None,
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        tls: ListenerTlsConfig { enabled: false },
+        http1: None,
+        http2: None,
+        grpc: None,
+        http3: None,
+        raw: None,
+    }];
+    fs::write(
+        runtime_dir.join("listeners.bin"),
+        compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap(),
+    )
+    .unwrap();
+
+    let upstreams = vec![UpstreamConfig {
+        id: "norm-backend".into(),
+        mode: "endpoints".into(),
+        protocol: UpstreamProtocolConfig {
+            transport: "tcp".into(),
+            application: "http1".into(),
+            streaming: velda_sync::StreamingMode::DISABLED,
+        },
+        target: None,
+        resolver: None,
+        endpoints: vec![EndpointConfig {
+            address: backend_addr.to_string(),
+            weight: 100,
+        }],
+        load_balancer: LoadBalancerConfig {
+            algorithm: "round_robin".into(),
+        },
+        timeouts: UpstreamTimeouts {
+            connect_ms: 1000,
+            idle_ms: 10000,
+            request_ms: None,
+        },
+        health_check: None,
+        tls: None,
+        pool: None,
+    }];
+    fs::write(
+        runtime_dir.join("upstreams.bin"),
+        compile_upstreams_to_binary(&upstreams, 1, [0u8; 32]).unwrap(),
+    )
+    .unwrap();
+
+    let routes = vec![RouteConfig {
+        id: "api-v1-norm".into(),
+        kind: "l7".into(),
+        listener: "http-norm".into(),
+        match_rule: RouteMatch {
+            protocol: None,
+            path_prefix: Some("/api/v1".into()),
+            ..Default::default()
+        },
+        timeouts: RouteTimeouts::default(),
+        upstream: "norm-backend".into(),
+        plugins: vec![],
+    }];
+    fs::write(
+        runtime_dir.join("routes.bin"),
+        compile_routes_to_binary(&routes, 1, [0u8; 32]).unwrap(),
+    )
+    .unwrap();
+
+    let config = EdgeConfig::new(&storage_dir, &socket_path);
+    let supervisor = EdgeSupervisor::bootstrap(config).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let edge_task = tokio::spawn(async move { supervisor.run(shutdown_rx).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Slashes merged: /api//v1///users -> normalized to /api/v1/users -> 200 OK
+    {
+        let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /api//v1///users HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    // 2. Relative dot segments: /api/v1/../v1/users -> normalized to /api/v1/users -> 200 OK
+    {
+        let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /api/v1/../v1/users HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    // 3. Root breakout attempt: /api/../../etc/passwd -> 400 Bad Request
+    {
+        let mut client = TcpStream::connect(gateway_addr).await.unwrap();
+        client.write_all(b"GET /api/../../etc/passwd HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut buf = [0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 400 Bad Request"));
+    }
+
+    shutdown_tx.send(true).unwrap();
+    let _ = edge_task.await;
+    backend_task.abort();
+}

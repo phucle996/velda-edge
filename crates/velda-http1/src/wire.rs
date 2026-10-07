@@ -37,52 +37,70 @@ pub fn find_crlf(data: &[u8]) -> Option<usize> {
 }
 
 /// Parses hex chunk size directly from ASCII byte slice without UTF-8 or String allocations.
+///
+/// Strictly adheres to RFC 9112 Section 7.1 (`chunk-size = 1*HEXDIG`).
+/// Leading and trailing whitespace before chunk extensions are trimmed, but
+/// whitespace between digits is strictly rejected to prevent smuggling evasion.
 #[inline]
 pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
+    let mut start = 0;
+    while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let trimmed = &bytes[start..end];
+    if trimmed.is_empty() {
+        return Err(cold_chunked_error("Empty chunk size line"));
+    }
+
     let mut val: usize = 0;
-    let mut empty = true;
-    for &b in bytes {
+    for &b in trimmed {
         let digit = match b {
             b'0'..=b'9' => (b - b'0') as usize,
             b'a'..=b'f' => (b - b'a' + 10) as usize,
             b'A'..=b'F' => (b - b'A' + 10) as usize,
-            b' ' | b'\t' => continue,
             _ => {
                 return Err(cold_chunked_error("Invalid hex chunk size character"));
             }
         };
-        empty = false;
         val = val
             .checked_shl(4)
             .and_then(|v| v.checked_add(digit))
             .ok_or_else(|| cold_chunked_error("Chunk size integer overflow"))?;
     }
-    if empty {
-        return Err(cold_chunked_error("Empty chunk size line"));
-    }
     Ok(val)
 }
 
 /// Parses ASCII decimal digits directly from byte slice without UTF-8 validation or allocations.
+///
+/// Leading and trailing whitespace are trimmed, but inner whitespace is rejected.
 #[inline]
 pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Error> {
+    let mut start = 0;
+    while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let trimmed = &bytes[start..end];
+    if trimmed.is_empty() {
+        return Err(cold_parse_error("Empty Content-Length header"));
+    }
+
     let mut val: usize = 0;
-    let mut empty = true;
-    for &b in bytes {
-        if b == b' ' || b == b'\t' {
-            continue;
-        }
+    for &b in trimmed {
         if !b.is_ascii_digit() {
             return Err(cold_parse_error("Invalid non-digit in Content-Length"));
         }
-        empty = false;
         val = val
             .checked_mul(10)
             .and_then(|v| v.checked_add((b - b'0') as usize))
             .ok_or_else(|| cold_parse_error("Content-Length integer overflow"))?;
-    }
-    if empty {
-        return Err(cold_parse_error("Empty Content-Length header"));
     }
     Ok(val)
 }

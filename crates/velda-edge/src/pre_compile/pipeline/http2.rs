@@ -39,26 +39,30 @@ fn enrich_http2_forwarded_headers(
 ) {
     use http::header::{HeaderName, HeaderValue};
 
-    // 1. Strip all client-supplied untrusted forwarding headers
-    if headers.keys().any(|k| {
-        let s = k.as_str();
-        s.starts_with("x-forwarded-")
-            || s.eq_ignore_ascii_case("x-real-ip")
-            || s.eq_ignore_ascii_case("forwarded")
-    }) {
-        let to_remove: Vec<HeaderName> = headers
-            .keys()
-            .filter(|k| {
-                let s = k.as_str();
-                s.starts_with("x-forwarded-")
-                    || s.eq_ignore_ascii_case("x-real-ip")
-                    || s.eq_ignore_ascii_case("forwarded")
-            })
-            .cloned()
-            .collect();
-        for name in to_remove {
-            headers.remove(&name);
+    // 1. Strip all standard client-supplied untrusted forwarding headers (Zero-alloc O(1) removals)
+    static UNTRUSTED_FORWARDED_HEADERS: [HeaderName; 6] = [
+        HeaderName::from_static("x-forwarded-for"),
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderName::from_static("x-forwarded-host"),
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderName::from_static("x-real-ip"),
+        HeaderName::from_static("forwarded"),
+    ];
+    for name in &UNTRUSTED_FORWARDED_HEADERS {
+        headers.remove(name);
+    }
+
+    // 2. Defensive sweep: strip any custom "x-forwarded-*" headers without heap allocation
+    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
+    let mut count = 0;
+    for key in headers.keys() {
+        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
+            custom_to_remove[count] = Some(key.clone());
+            count += 1;
         }
+    }
+    for name in custom_to_remove[..count].iter().flatten() {
+        headers.remove(name);
     }
 
     let client_ip = peer.ip();
@@ -247,7 +251,52 @@ pub async fn run_http2_loop<IO>(
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
             match accept_result {
-                Ok(Ok(Some((head, receiver, mut responder)))) => {
+                Ok(Ok(Some((mut head, receiver, mut responder)))) => {
+                    if !velda_router::is_clean_path(head.path().as_bytes()) {
+                        match velda_router::normalize_path(head.path()) {
+                            Ok(normalized) => {
+                                let mut parts = head.uri.clone().into_parts();
+                                let new_path_and_query = match parts.path_and_query {
+                                    Some(ref pq) => {
+                                        if let Some(q) = pq.query() {
+                                            format!("{normalized}?{q}")
+                                                .parse::<http::uri::PathAndQuery>()
+                                                .ok()
+                                        } else {
+                                            normalized.parse::<http::uri::PathAndQuery>().ok()
+                                        }
+                                    }
+                                    None => normalized.parse::<http::uri::PathAndQuery>().ok(),
+                                };
+                                if let Some(pq) = new_path_and_query {
+                                    parts.path_and_query = Some(pq);
+                                    if let Ok(new_uri) = http::Uri::from_parts(parts) {
+                                        head.uri = new_uri;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    listener = %listener_id,
+                                    error = %e,
+                                    path = %head.path(),
+                                    "Rejecting HTTP/2 request with unsafe URI path"
+                                );
+                                let bad_req = L7Response::from_bytes(
+                                    StatusCode::BAD_REQUEST,
+                                    b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+                                )
+                                .with_header(
+                                    CONTENT_TYPE,
+                                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                                );
+                                let _ = responder.send_response(&bad_req);
+                                continue;
+                            }
+                        }
+                    }
+
+                    let clean_path = head.path();
                     let host_hdr = head.headers.get(http::header::HOST).cloned();
                     let host_str = host_hdr
                         .as_ref()
@@ -255,7 +304,7 @@ pub async fn run_http2_loop<IO>(
                         .or_else(|| head.uri.authority().map(|a| a.as_str()))
                         .or_else(|| head.uri.host());
 
-                    let mut http_req = Http2RouteRequest::new(head.path());
+                    let mut http_req = Http2RouteRequest::new(clean_path);
                     if let Some(h) = host_str {
                         http_req = http_req.with_host(h);
                     }

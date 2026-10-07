@@ -109,4 +109,89 @@ impl GrpcStatus {
         }
         resp
     }
+
+    /// Maps an HTTP status code to a canonical `GrpcStatus` according to the
+    /// official gRPC HTTP-to-gRPC status mapping specification:
+    /// https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md
+    pub fn from_http_status(status: StatusCode) -> Self {
+        match status.as_u16() {
+            200 => Self::Ok,
+            400 => Self::Internal,
+            401 => Self::Unauthenticated,
+            403 => Self::PermissionDenied,
+            404 => Self::Unimplemented,
+            429 | 502 | 503 | 504 => Self::Unavailable,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Maps a canonical `GrpcStatus` to a standard HTTP status code according to the
+    /// official Google Cloud API design specification:
+    /// https://cloud.google.com/apis/design/errors#handling_errors
+    pub fn to_http_status(self) -> StatusCode {
+        match self {
+            Self::Ok => StatusCode::OK,
+            Self::Cancelled => StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+            Self::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::InvalidArgument => StatusCode::BAD_REQUEST,
+            Self::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::AlreadyExists => StatusCode::CONFLICT,
+            Self::PermissionDenied => StatusCode::FORBIDDEN,
+            Self::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+            Self::FailedPrecondition => StatusCode::BAD_REQUEST,
+            Self::Aborted => StatusCode::CONFLICT,
+            Self::OutOfRange => StatusCode::BAD_REQUEST,
+            Self::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::DataLoss => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_grpc_status_http_mapping_roundtrip() {
+        assert_eq!(GrpcStatus::from_http_status(StatusCode::OK), GrpcStatus::Ok);
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::BAD_REQUEST),
+            GrpcStatus::Internal
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::UNAUTHORIZED),
+            GrpcStatus::Unauthenticated
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::FORBIDDEN),
+            GrpcStatus::PermissionDenied
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::NOT_FOUND),
+            GrpcStatus::Unimplemented
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::BAD_GATEWAY),
+            GrpcStatus::Unavailable
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::SERVICE_UNAVAILABLE),
+            GrpcStatus::Unavailable
+        );
+        assert_eq!(
+            GrpcStatus::from_http_status(StatusCode::GATEWAY_TIMEOUT),
+            GrpcStatus::Unavailable
+        );
+
+        assert_eq!(GrpcStatus::Ok.to_http_status(), StatusCode::OK);
+        assert_eq!(GrpcStatus::NotFound.to_http_status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            GrpcStatus::Unavailable.to_http_status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

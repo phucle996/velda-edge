@@ -10,6 +10,7 @@ pub mod error;
 pub mod host;
 pub mod l4;
 pub mod l7;
+pub mod path;
 pub mod router;
 
 pub use error::RouterError;
@@ -18,4 +19,5 @@ pub use l7::{
     GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router,
     Http2Route, Http2RouteRequest, Http2Router, Http3Route, Http3RouteRequest, Http3Router,
 };
+pub use path::{is_clean_path, normalize_path};
 pub use router::{Router, RouterBuilder};

@@ -192,6 +192,7 @@ pub fn parse_request_head(
     let mut content_length: Option<usize> = None;
     let mut is_chunked = false;
     let mut has_transfer_encoding = false;
+    let mut host_count = 0;
 
     for h in req.headers.iter() {
         if h.name.is_empty() {
@@ -201,7 +202,12 @@ pub fn parse_request_head(
         let value = HeaderValue::from_bytes(h.value)
             .map_err(|e| Http1Error::InvalidHeader(e.to_string()))?;
 
-        if name == CONTENT_LENGTH {
+        if name == http::header::HOST {
+            host_count += 1;
+            if host_count > 1 {
+                return Err(cold_smuggling_error("Multiple Host headers in request"));
+            }
+        } else if name == CONTENT_LENGTH {
             content_length_count += 1;
             let parsed_cl = parse_ascii_digits(h.value)?;
 
@@ -232,6 +238,12 @@ pub fn parse_request_head(
         }
 
         header_map.append(name, value);
+    }
+
+    // RFC 9112 Section 7.1 / RFC 9110 Section 7.2:
+    // HTTP/1.1 requires exactly one valid Host header field.
+    if version == Version::HTTP_11 && host_count == 0 {
+        return Err(cold_parse_error("Missing Host header in HTTP/1.1 request"));
     }
 
     // RFC 9112 Section 6.1: Simultaneous CL and TE is a smuggling vector -> fast fail reject

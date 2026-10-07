@@ -184,26 +184,30 @@ fn enrich_http3_forwarded_headers(
 ) {
     use http::header::{HeaderName, HeaderValue};
 
-    // 1. Strip all client-supplied untrusted forwarding headers
-    if headers.keys().any(|k| {
-        let s = k.as_str();
-        s.starts_with("x-forwarded-")
-            || s.eq_ignore_ascii_case("x-real-ip")
-            || s.eq_ignore_ascii_case("forwarded")
-    }) {
-        let to_remove: Vec<HeaderName> = headers
-            .keys()
-            .filter(|k| {
-                let s = k.as_str();
-                s.starts_with("x-forwarded-")
-                    || s.eq_ignore_ascii_case("x-real-ip")
-                    || s.eq_ignore_ascii_case("forwarded")
-            })
-            .cloned()
-            .collect();
-        for name in to_remove {
-            headers.remove(&name);
+    // 1. Strip all standard client-supplied untrusted forwarding headers (Zero-alloc O(1) removals)
+    static UNTRUSTED_FORWARDED_HEADERS: [HeaderName; 6] = [
+        HeaderName::from_static("x-forwarded-for"),
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderName::from_static("x-forwarded-host"),
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderName::from_static("x-real-ip"),
+        HeaderName::from_static("forwarded"),
+    ];
+    for name in &UNTRUSTED_FORWARDED_HEADERS {
+        headers.remove(name);
+    }
+
+    // 2. Defensive sweep: strip any custom "x-forwarded-*" headers without heap allocation
+    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
+    let mut count = 0;
+    for key in headers.keys() {
+        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
+            custom_to_remove[count] = Some(key.clone());
+            count += 1;
         }
+    }
+    for name in custom_to_remove[..count].iter().flatten() {
+        headers.remove(name);
     }
 
     // 2. Strip RFC 9114 connection-specific hop-by-hop headers
@@ -391,12 +395,32 @@ pub async fn process_http3_request(
     listener_id: &str,
     runtime: &SharedRuntime,
 ) -> L7Response {
+    let clean_path = match velda_router::normalize_path(req.path()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                listener = %listener_id,
+                error = %e,
+                path = %req.path(),
+                "Rejecting HTTP/3 request with unsafe URI path"
+            );
+            return L7Response::from_bytes(
+                StatusCode::BAD_REQUEST,
+                b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+        }
+    };
+
     let host = req
         .host()
         .and_then(|h| h.to_str().ok())
         .or_else(|| req.uri.host());
 
-    let mut http_req = Http3RouteRequest::new(req.path());
+    let mut http_req = Http3RouteRequest::new(&clean_path);
     if let Some(h) = host {
         http_req = http_req.with_host(h);
     }

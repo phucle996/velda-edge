@@ -12,4 +12,8 @@ pub enum RouterError {
     /// Route configuration was invalid or missing required parameters.
     #[error("invalid route configuration: {detail}")]
     InvalidRoute { detail: String },
+
+    /// Request URI path was unsafe or invalid (e.g. null bytes, root escape).
+    #[error("invalid URI path: {detail}")]
+    InvalidPath { detail: String },
 }

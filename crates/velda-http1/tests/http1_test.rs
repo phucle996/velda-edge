@@ -465,3 +465,66 @@ fn test_chunked_body_with_trailers() {
     assert_eq!(payload.len(), 0);
     assert_eq!(term_len, term_raw.len());
 }
+
+#[tokio::test]
+async fn test_http1_missing_and_duplicate_host_validation() {
+    let (mut client, server_stream) = tokio::io::duplex(1024);
+    let mut conn = Http1ServerConnection::new(server_stream, Http1Config::auto());
+
+    // 1. Missing Host header in HTTP/1.1 MUST be rejected with 400
+    client
+        .write_all(b"GET /index.html HTTP/1.1\r\nUser-Agent: test\r\n\r\n")
+        .await
+        .unwrap();
+    let res = conn.next_request_head().await;
+    assert!(res.is_err());
+
+    // 2. Duplicate Host header in HTTP/1.1 MUST be rejected as smuggling attempt
+    let (mut client2, server_stream2) = tokio::io::duplex(1024);
+    let mut conn2 = Http1ServerConnection::new(server_stream2, Http1Config::auto());
+    client2
+        .write_all(b"GET /index.html HTTP/1.1\r\nHost: legitimate.com\r\nHost: evil.com\r\n\r\n")
+        .await
+        .unwrap();
+    let res2 = conn2.next_request_head().await;
+    assert!(res2.is_err());
+}
+
+#[test]
+fn test_chunk_size_inner_whitespace_rejected() {
+    // Inner whitespace in chunk size must be rejected (RFC 9112 Section 7.1)
+    let raw = b"1 0\r\n1234567890123456\r\n0\r\n\r\n";
+    let res = velda_http1::parse_chunked_body(raw, 1024);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sanitize_proxy_connection_and_unlimited_nominated() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::HeaderName::from_static("proxy-connection"),
+        http::HeaderValue::from_static("keep-alive"),
+    );
+    headers.append(
+        http::header::CONNECTION,
+        http::HeaderValue::from_static("close, x-h1, x-h2, x-h3, x-h4"),
+    );
+    headers.append(
+        http::header::CONNECTION,
+        http::HeaderValue::from_static("x-h5, x-h6, x-h7, x-h8, x-h9, x-h10"),
+    );
+    for i in 1..=10 {
+        let name = http::header::HeaderName::from_bytes(format!("x-h{i}").as_bytes()).unwrap();
+        headers.insert(name, http::HeaderValue::from_static("secret"));
+    }
+
+    velda_http1::sanitize_hop_by_hop_headers(&mut headers);
+    assert!(!headers.contains_key("proxy-connection"));
+    assert!(!headers.contains_key("connection"));
+    for i in 1..=10 {
+        assert!(
+            !headers.contains_key(format!("x-h{i}").as_str()),
+            "x-h{i} should have been stripped"
+        );
+    }
+}

@@ -9,6 +9,7 @@ velda-core = { path = "../velda-core" }
 rustc-hash = "2.1"
 thiserror = "2.0"
 tracing = "0.1"
+memchr = "2.7"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
