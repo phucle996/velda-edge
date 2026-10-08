@@ -22,6 +22,7 @@ use velda_transport::Connection;
 use std::sync::Arc;
 
 use super::DownstreamMeta;
+use crate::pre_compile::upstream::{Http1Upstream, Http2Upstream, HttpUpstream};
 use crate::runtime::SharedRuntime;
 
 /// Asynchronous stream worker dispatching incoming HTTP/2 connections.
@@ -283,8 +284,8 @@ pub async fn run_http2_loop<IO>(
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
 async fn serve_http2_stream(
-    mut head: Http2ServerRequestHead,
-    mut receiver: Http2StreamReceiver,
+    head: Http2ServerRequestHead,
+    receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: DownstreamMeta,
     config: Http2Config,
@@ -292,12 +293,12 @@ async fn serve_http2_stream(
     route: velda_router::Http2Route,
 ) {
     let rt = runtime.load();
-    let Some(upstream) = rt.upstreams.http2.get(&route.upstream_name) else {
+    let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
         tracing::error!(
             listener = %meta.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
-            "No healthy backend endpoints available for HTTP/2 upstream"
+            "No healthy backend endpoints available for HTTP upstream"
         );
         let no_backend = L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -315,6 +316,37 @@ async fn serve_http2_stream(
         return;
     };
 
+    match upstream_target.as_ref() {
+        HttpUpstream::Http2(upstream) => {
+            serve_http2_to_http2(head, receiver, responder, meta, config, upstream, &route).await;
+        }
+        HttpUpstream::Http1(upstream) => {
+            serve_http2_to_http1_bridge(head, receiver, responder, meta, upstream, &route).await;
+        }
+        HttpUpstream::Http3(_) => {
+            let not_impl = L7Response::from_bytes(
+                StatusCode::NOT_IMPLEMENTED,
+                b"501 Not Implemented: HTTP/2 to HTTP/3 bridging not supported\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = responder.send_response(&not_impl);
+        }
+    }
+}
+
+/// Forwards an HTTP/2 downstream stream to an HTTP/2 upstream multiplexed backend.
+async fn serve_http2_to_http2(
+    mut head: Http2ServerRequestHead,
+    mut receiver: Http2StreamReceiver,
+    mut responder: Http2Responder,
+    meta: DownstreamMeta,
+    config: Http2Config,
+    upstream: &Arc<Http2Upstream>,
+    route: &velda_router::Http2Route,
+) {
     // ========================================================================
     // [PHASE 4: Pre-Upstream Hook Placeholder]
     // Flat workflow execution after route/upstream resolution, before stream lease.
@@ -478,6 +510,153 @@ async fn serve_http2_stream(
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
         let _ = responder.send_response(&err_resp);
+    }
+}
+
+/// Bridges an incoming HTTP/2 downstream stream to an HTTP/1.1 upstream backend.
+///
+/// Implements RFC 9113 §8 (HTTP/2 to HTTP/1 translation):
+/// - Decodes HTTP/2 HEADERS + DATA from downstream.
+/// - Acquires an active connection from the HTTP/1 keep-alive pool.
+/// - Forwards the request formatted as RFC 9112 text stream.
+/// - Reads the backend response and frames it into HTTP/2 HEADERS + DATA frames to client.
+async fn serve_http2_to_http1_bridge(
+    mut head: Http2ServerRequestHead,
+    mut receiver: Http2StreamReceiver,
+    mut responder: Http2Responder,
+    meta: DownstreamMeta,
+    upstream: &Arc<Http1Upstream>,
+    route: &velda_router::Http2Route,
+) {
+    let body = match receiver.consume_all().await {
+        Ok(b) => b,
+        Err(e) => {
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_REQUEST,
+                format!("400 Bad Request: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
+        }
+    };
+
+    velda_http2::server::header::enrich_headers(
+        &mut head.headers,
+        &head.uri,
+        meta.peer,
+        meta.local_addr,
+        meta.is_tls,
+    );
+
+    let mut lease = match upstream.acquire().await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                upstream = %route.upstream_name,
+                "Failed to acquire upstream HTTP/1.1 connection for HTTP/2 bridge"
+            );
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
+        }
+    };
+
+    let cfg = velda_http1::config::Http1Config::auto();
+    let send_res = velda_http1::client::send_request_parts(
+        &head.method,
+        &head.uri,
+        &head.headers,
+        &body,
+        &mut *lease,
+        &cfg,
+    )
+    .await;
+
+    if let Err(e) = send_res {
+        lease.mark_closed();
+        tracing::warn!(
+            error = %e,
+            upstream = %route.upstream_name,
+            "Failed to send bridged HTTP/1.1 request to upstream"
+        );
+        let err_resp = L7Response::from_bytes(
+            StatusCode::BAD_GATEWAY,
+            format!("502 Bad Gateway: {e}\n").into_bytes(),
+        )
+        .with_header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        let _ = responder.send_response(&err_resp);
+        return;
+    }
+
+    let mut read_buf = bytes::BytesMut::with_capacity(cfg.upstream_read_capacity);
+    loop {
+        match tokio::io::AsyncReadExt::read_buf(&mut *lease, &mut read_buf).await {
+            Ok(0) => {
+                if let Ok(Some(resp)) = velda_http1::client::decode_response(&mut read_buf, &cfg) {
+                    let l7_resp = resp.into_l7_response();
+                    let _ = responder.send_response(&l7_resp);
+                } else {
+                    lease.mark_closed();
+                    let err_resp = L7Response::from_bytes(
+                        StatusCode::BAD_GATEWAY,
+                        b"502 Bad Gateway: upstream closed connection prematurely\n".to_vec(),
+                    );
+                    let _ = responder.send_response(&err_resp);
+                }
+                break;
+            }
+            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, &cfg) {
+                Ok(Some(resp)) => {
+                    let l7_resp = resp.into_l7_response();
+                    let _ = responder.send_response(&l7_resp);
+                    break;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    lease.mark_closed();
+                    tracing::warn!(
+                        error = %e,
+                        upstream = %route.upstream_name,
+                        "Failed to decode upstream HTTP/1.1 response"
+                    );
+                    let err_resp = L7Response::from_bytes(
+                        StatusCode::BAD_GATEWAY,
+                        format!("502 Bad Gateway: {e}\n").into_bytes(),
+                    );
+                    let _ = responder.send_response(&err_resp);
+                    break;
+                }
+            },
+            Err(e) => {
+                lease.mark_closed();
+                tracing::warn!(
+                    error = %e,
+                    upstream = %route.upstream_name,
+                    "Error reading upstream HTTP/1.1 response"
+                );
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                );
+                let _ = responder.send_response(&err_resp);
+                break;
+            }
+        }
     }
 }
 

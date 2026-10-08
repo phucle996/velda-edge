@@ -169,13 +169,18 @@ pub async fn handle_l4_udp(
         return;
     };
 
-    let Some(up) = rt.upstreams.udp.get(&route.upstream_name) else {
+    let Some(up) = rt
+        .upstreams
+        .raw
+        .get(&route.upstream_name)
+        .and_then(|u| u.as_udp())
+    else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %datagram.peer(),
-            "No backend upstream available in UDP upstream table; dropping datagram"
+            "No backend upstream available in Raw UDP upstream table; dropping datagram"
         );
         return;
     };

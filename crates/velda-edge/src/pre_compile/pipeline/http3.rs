@@ -347,7 +347,12 @@ pub async fn process_http3_request(
         );
     };
 
-    let Some(upstream) = rt.upstreams.http3.get(&route.upstream_name) else {
+    let Some(upstream) = rt
+        .upstreams
+        .http
+        .get(&route.upstream_name)
+        .and_then(|u| u.as_http3())
+    else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,

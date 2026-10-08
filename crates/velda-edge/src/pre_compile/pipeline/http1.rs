@@ -245,7 +245,12 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
-        let Some(upstream) = rt.upstreams.http1.get(&route.upstream_name) else {
+        let Some(upstream) = rt
+            .upstreams
+            .http
+            .get(&route.upstream_name)
+            .and_then(|u| u.as_http1())
+        else {
             tracing::error!(
                 listener = %meta.listener_id,
                 route = %route.id,

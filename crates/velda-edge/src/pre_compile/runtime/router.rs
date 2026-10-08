@@ -36,13 +36,17 @@ pub fn build_router(
 
             // Validate cross-protocol compatibility between L4 route and targeted upstream
             if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
-                let up_app = up.protocol.application.to_ascii_lowercase();
-                let up_trans = up.protocol.transport.to_ascii_lowercase();
-                if up_app != "raw" || up_trans != protocol_str {
+                let up_family = velda_core::ProtocolFamily::parse(&up.protocol.application)
+                    .or_else(|| velda_core::ProtocolFamily::parse(&up.protocol.transport));
+                if up_family != Some(velda_core::ProtocolFamily::Raw) {
                     return Err(EdgeError::InvalidConfig {
                         detail: format!(
                             "Cross-protocol violation: L4 {} route '{}' targets upstream '{}' with incompatible protocol '{}/{}'",
-                            protocol_str, route.id, up.id, up_app, up_trans
+                            protocol_str,
+                            route.id,
+                            up.id,
+                            up.protocol.application,
+                            up.protocol.transport
                         ),
                     });
                 }
@@ -104,6 +108,7 @@ pub fn build_router(
                             ),
                         })?;
                     match listener.application.protocol.to_ascii_lowercase().as_str() {
+                        "http" => "http",
                         "http1" => "http1",
                         "http2" => "http2",
                         "http3" => "http3",
@@ -127,18 +132,86 @@ pub fn build_router(
 
             // Validate cross-protocol compatibility between L7 route and targeted upstream
             if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
-                let up_app = up.protocol.application.to_ascii_lowercase();
-                if up_app != protocol_str {
+                let route_family = velda_core::ProtocolFamily::parse(protocol_str);
+                let up_family = velda_core::ProtocolFamily::parse(&up.protocol.application);
+                if route_family != up_family {
                     return Err(EdgeError::InvalidConfig {
                         detail: format!(
-                            "Cross-protocol violation: L7 {} route '{}' targets upstream '{}' with incompatible protocol '{}'",
-                            protocol_str, route.id, up.id, up_app
+                            "Cross-protocol violation: L7 {:?} route '{}' targets upstream '{}' with incompatible protocol family {:?}",
+                            route_family, route.id, up.id, up_family
                         ),
                     });
                 }
             }
 
             match protocol_str {
+                "http" => {
+                    let (http1_route, http2_route) = if let Some(ref exact) = route.match_rule.path
+                    {
+                        (
+                            Http1Route::new_exact(
+                                route_id,
+                                &route.listener,
+                                exact.clone(),
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                            Http2Route::new_exact(
+                                route_id,
+                                &route.listener,
+                                exact.clone(),
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                        )
+                    } else if let Some(ref prefix) = route.match_rule.path_prefix {
+                        (
+                            Http1Route::new(
+                                route_id,
+                                &route.listener,
+                                prefix.clone(),
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                            Http2Route::new(
+                                route_id,
+                                &route.listener,
+                                prefix.clone(),
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                        )
+                    } else {
+                        (
+                            Http1Route::new(
+                                route_id,
+                                &route.listener,
+                                "/",
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                            Http2Route::new(
+                                route_id,
+                                &route.listener,
+                                "/",
+                                upstream_id,
+                                &route.upstream,
+                            ),
+                        )
+                    };
+
+                    let mut http1_route = http1_route.with_plugins(route.plugins.clone());
+                    let mut http2_route = http2_route.with_plugins(route.plugins.clone());
+
+                    if let Some(ref host) = route.match_rule.host {
+                        http1_route = http1_route.with_host(host.clone());
+                        http2_route = http2_route.with_host(host.clone());
+                    }
+
+                    builder = builder
+                        .add_http1_route(http1_route)
+                        .add_http2_route(http2_route);
+                }
                 "grpc" => {
                     let service = route
                         .match_rule

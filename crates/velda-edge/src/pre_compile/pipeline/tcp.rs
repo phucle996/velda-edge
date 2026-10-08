@@ -24,13 +24,18 @@ pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime
         return;
     };
 
-    let Some(upstream) = rt.upstreams.tcp.get(&route.upstream_name) else {
+    let Some(upstream) = rt
+        .upstreams
+        .raw
+        .get(&route.upstream_name)
+        .and_then(|u| u.as_tcp())
+    else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %peer,
-            "No backend upstream available in TCP upstream table; dropping connection"
+            "No backend upstream available in Raw TCP upstream table; dropping connection"
         );
         return;
     };

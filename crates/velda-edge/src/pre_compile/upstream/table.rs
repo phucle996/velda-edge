@@ -78,46 +78,136 @@ impl<T> SubUpstreamTable<T> {
     }
 }
 
-/// Pre-compiled upstream table divided strictly into 7 protocol-isolated tables.
+/// Upstream variant in the Layer 4 Raw family (TCP byte stream / UDP datagram).
+#[derive(Clone, Debug)]
+pub enum RawUpstream {
+    Tcp(Arc<TcpUpstream>),
+    Udp(Arc<UdpUpstream>),
+}
+
+impl RawUpstream {
+    #[inline]
+    pub fn as_tcp(&self) -> Option<&Arc<TcpUpstream>> {
+        match self {
+            Self::Tcp(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_udp(&self) -> Option<&Arc<UdpUpstream>> {
+        match self {
+            Self::Udp(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// Upstream variant in the Layer 7 HTTP family (HTTP/1.1, HTTP/2, HTTP/3).
+#[derive(Clone, Debug)]
+pub enum HttpUpstream {
+    Http1(Arc<Http1Upstream>),
+    Http2(Arc<Http2Upstream>),
+    Http3(Arc<Http3Upstream>),
+}
+
+impl HttpUpstream {
+    #[inline]
+    pub fn as_http1(&self) -> Option<&Arc<Http1Upstream>> {
+        match self {
+            Self::Http1(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_http2(&self) -> Option<&Arc<Http2Upstream>> {
+        match self {
+            Self::Http2(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_http3(&self) -> Option<&Arc<Http3Upstream>> {
+        match self {
+            Self::Http3(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// Upstream variant in the Layer 7 gRPC family (gRPC over TCP / gRPC over UDP).
+#[derive(Clone, Debug)]
+pub enum GrpcUpstream {
+    Tcp(Arc<GrpcTcpUpstream>),
+    Udp(Arc<GrpcUdpUpstream>),
+}
+
+impl GrpcUpstream {
+    #[inline]
+    pub fn as_tcp(&self) -> Option<&Arc<GrpcTcpUpstream>> {
+        match self {
+            Self::Tcp(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_udp(&self) -> Option<&Arc<GrpcUdpUpstream>> {
+        match self {
+            Self::Udp(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// Pre-compiled upstream table grouped strictly by ProtocolFamily.
 ///
 /// Guaranteed zero cross-protocol lookup overhead and zero dynamic casting on the request serving hot path.
 #[derive(Clone, Default, Debug)]
 pub struct UpstreamTable {
-    /// [PRE-COMPILED]: Protocol table for L4 raw TCP stream forwarding.
-    pub tcp: SubUpstreamTable<TcpUpstream>,
-    /// [PRE-COMPILED]: Protocol table for L4 raw UDP datagram forwarding.
-    pub udp: SubUpstreamTable<UdpUpstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 HTTP/1.1 backend pipelines.
-    pub http1: SubUpstreamTable<Http1Upstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 HTTP/2 multiplexed streams.
-    pub http2: SubUpstreamTable<Http2Upstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 HTTP/3 QUIC streams.
-    pub http3: SubUpstreamTable<Http3Upstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 gRPC over TCP RPC endpoints.
-    pub grpc_tcp: SubUpstreamTable<GrpcTcpUpstream>,
-    /// [PRE-COMPILED]: Protocol table for L7 gRPC over UDP RPC endpoints.
-    pub grpc_udp: SubUpstreamTable<GrpcUdpUpstream>,
+    /// [PRE-COMPILED]: Protocol table for L4 Raw streams and datagrams (ProtocolFamily::Raw).
+    pub raw: SubUpstreamTable<RawUpstream>,
+    /// [PRE-COMPILED]: Protocol table for L7 HTTP web traffic (ProtocolFamily::Http).
+    pub http: SubUpstreamTable<HttpUpstream>,
+    /// [PRE-COMPILED]: Protocol table for L7 gRPC RPC endpoints (ProtocolFamily::Grpc).
+    pub grpc: SubUpstreamTable<GrpcUpstream>,
 }
 
 impl UpstreamTable {
-    /// Returns total number of upstreams across all protocol tables.
+    /// Returns total number of upstreams across all protocol families.
+    #[inline]
     pub fn len(&self) -> usize {
-        self.tcp.len()
-            + self.udp.len()
-            + self.http1.len()
-            + self.http2.len()
-            + self.http3.len()
-            + self.grpc_tcp.len()
-            + self.grpc_udp.len()
+        self.raw.len() + self.http.len() + self.grpc.len()
     }
 
     /// Returns true if all protocol tables are empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Retrieves an upstream processor in the Raw family.
+    #[inline]
+    pub fn get_raw(&self, id: &str) -> Option<&Arc<RawUpstream>> {
+        self.raw.get(id)
+    }
+
+    /// Retrieves an upstream processor in the HTTP family.
+    #[inline]
+    pub fn get_http(&self, id: &str) -> Option<&Arc<HttpUpstream>> {
+        self.http.get(id)
+    }
+
+    /// Retrieves an upstream processor in the gRPC family.
+    #[inline]
+    pub fn get_grpc(&self, id: &str) -> Option<&Arc<GrpcUpstream>> {
+        self.grpc.get(id)
+    }
 }
 
-/// Compiles declarative UpstreamConfig entries into protocol-isolated [`UpstreamTable`].
+/// Compiles declarative UpstreamConfig entries into protocol-family partitioned [`UpstreamTable`].
 ///
 /// Pre-bakes upstream TLS client engines and streaming strategies into each Upstream instance
 /// to guarantee zero runtime lookups on the request serving hot path.
@@ -129,13 +219,9 @@ pub fn build_upstreams(
     tls_client: Option<&TlsClientEngine>,
     dns_config: &DnsResolverConfig,
 ) -> UpstreamTable {
-    let mut tcp_map = FxHashMap::default();
-    let mut udp_map = FxHashMap::default();
-    let mut http1_map = FxHashMap::default();
-    let mut http2_map = FxHashMap::default();
-    let mut http3_map = FxHashMap::default();
-    let mut grpc_tcp_map = FxHashMap::default();
-    let mut grpc_udp_map = FxHashMap::default();
+    let mut raw_map = FxHashMap::default();
+    let mut http_map = FxHashMap::default();
+    let mut grpc_map = FxHashMap::default();
 
     let shared_tls_client = tls_client.map(|c| Arc::new(c.clone()));
 
@@ -363,15 +449,15 @@ pub fn build_upstreams(
             "grpc" => {
                 if transport == "udp" {
                     let Some(sni) = target_sni else { continue };
-                    grpc_udp_map.insert(
+                    grpc_map.insert(
                         config.id.clone(),
-                        Arc::new(GrpcUdpUpstream::new(
+                        Arc::new(GrpcUpstream::Udp(Arc::new(GrpcUdpUpstream::new(
                             inner,
                             sni,
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
-                        )),
+                        )))),
                     );
                 } else {
                     let grpc_acceleration =
@@ -381,30 +467,30 @@ pub fn build_upstreams(
                             timeouts.idle,
                             is_tls,
                         );
-                    grpc_tcp_map.insert(
+                    grpc_map.insert(
                         config.id.clone(),
-                        Arc::new(GrpcTcpUpstream::new(
+                        Arc::new(GrpcUpstream::Tcp(Arc::new(GrpcTcpUpstream::new(
                             inner,
                             tls,
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
                             grpc_acceleration,
-                        )),
+                        )))),
                     );
                 }
             }
             "http3" => {
                 let Some(sni) = target_sni else { continue };
-                http3_map.insert(
+                http_map.insert(
                     config.id.clone(),
-                    Arc::new(Http3Upstream::new(
+                    Arc::new(HttpUpstream::Http3(Arc::new(Http3Upstream::new(
                         inner,
                         sni,
                         config.protocol.streaming,
                         shard_count,
                         max_streams,
-                    )),
+                    )))),
                 );
             }
             "http2" => {
@@ -414,50 +500,56 @@ pub fn build_upstreams(
                     timeouts.idle,
                     is_tls,
                 );
-                http2_map.insert(
+                http_map.insert(
                     config.id.clone(),
-                    Arc::new(Http2Upstream::new(
+                    Arc::new(HttpUpstream::Http2(Arc::new(Http2Upstream::new(
                         inner,
                         tls,
                         config.protocol.streaming,
                         shard_count,
                         max_streams,
                         http2_acceleration,
-                    )),
+                    )))),
                 );
             }
-            "http1" => {
+            "http" | "http1" => {
                 let http1_acceleration = velda_http1::Http1AccelerationPath::for_topology(
                     topology,
                     timeouts.connect,
                     timeouts.idle,
                     is_tls,
                 );
-                http1_map.insert(
+                http_map.insert(
                     config.id.clone(),
-                    Arc::new(Http1Upstream::new(
+                    Arc::new(HttpUpstream::Http1(Arc::new(Http1Upstream::new(
                         inner,
                         tls,
                         config.protocol.streaming,
                         pool_config,
                         shard_count,
                         http1_acceleration,
-                    )),
+                    )))),
                 );
             }
             "raw" | "udp" if transport == "udp" => {
                 let udp_acceleration = super::udp::UdpAccelerationPath::for_topology(topology);
-                udp_map.insert(
+                raw_map.insert(
                     config.id.clone(),
-                    Arc::new(UdpUpstream::new(inner, udp_acceleration)),
+                    Arc::new(RawUpstream::Udp(Arc::new(UdpUpstream::new(
+                        inner,
+                        udp_acceleration,
+                    )))),
                 );
             }
             "raw" | "tcp" => {
                 let tcp_acceleration =
                     super::tcp::TcpAccelerationPath::for_topology(topology, &timeouts, is_tls);
-                tcp_map.insert(
+                raw_map.insert(
                     config.id.clone(),
-                    Arc::new(TcpUpstream::new(inner, tcp_acceleration)),
+                    Arc::new(RawUpstream::Tcp(Arc::new(TcpUpstream::new(
+                        inner,
+                        tcp_acceleration,
+                    )))),
                 );
             }
             other => {
@@ -471,13 +563,9 @@ pub fn build_upstreams(
     }
 
     UpstreamTable {
-        tcp: SubUpstreamTable::new(tcp_map),
-        udp: SubUpstreamTable::new(udp_map),
-        http1: SubUpstreamTable::new(http1_map),
-        http2: SubUpstreamTable::new(http2_map),
-        http3: SubUpstreamTable::new(http3_map),
-        grpc_tcp: SubUpstreamTable::new(grpc_tcp_map),
-        grpc_udp: SubUpstreamTable::new(grpc_udp_map),
+        raw: SubUpstreamTable::new(raw_map),
+        http: SubUpstreamTable::new(http_map),
+        grpc: SubUpstreamTable::new(grpc_map),
     }
 }
 
@@ -567,14 +655,28 @@ mod tests {
 
         let table = build_upstreams_default(&configs, None);
         assert_eq!(table.len(), 7);
-        assert!(table.http1.get("u1").is_some());
-        assert!(table.http2.get("u2").is_some());
-        assert!(table.grpc_tcp.get("u3").is_some());
-        assert!(table.grpc_udp.get("u_grpc_udp").is_some());
-        assert!(table.udp.get("u_udp").is_some());
-        assert!(table.tcp.get("u_tcp").is_some());
-        assert!(table.http3.get("u_h3").is_some());
-        assert_eq!(&*table.http3.get("u_h3").unwrap().target_sni, "h3.internal");
+        assert!(table.http.get("u1").and_then(|u| u.as_http1()).is_some());
+        assert!(table.http.get("u2").and_then(|u| u.as_http2()).is_some());
+        assert!(table.grpc.get("u3").and_then(|u| u.as_tcp()).is_some());
+        assert!(
+            table
+                .grpc
+                .get("u_grpc_udp")
+                .and_then(|u| u.as_udp())
+                .is_some()
+        );
+        assert!(table.raw.get("u_udp").and_then(|u| u.as_udp()).is_some());
+        assert!(table.raw.get("u_tcp").and_then(|u| u.as_tcp()).is_some());
+        assert!(table.http.get("u_h3").and_then(|u| u.as_http3()).is_some());
+        assert_eq!(
+            &*table
+                .http
+                .get("u_h3")
+                .and_then(|u| u.as_http3())
+                .unwrap()
+                .target_sni,
+            "h3.internal"
+        );
     }
 
     #[test]
@@ -618,8 +720,8 @@ mod tests {
 
         let engine = test_engine("h2.internal");
         let table = build_upstreams_default(&[h2, grpc], Some(&engine));
-        assert!(table.http2.get("h2").is_some());
-        assert!(table.grpc_tcp.get("grpc").is_some());
+        assert!(table.http.get("h2").and_then(|u| u.as_http2()).is_some());
+        assert!(table.grpc.get("grpc").and_then(|u| u.as_tcp()).is_some());
     }
 
     #[test]
@@ -660,7 +762,11 @@ mod tests {
 
         let table = build_upstreams(&[u_dns], None, &dns_config);
         assert_eq!(table.len(), 1);
-        let http1 = table.http1.get("u_dns").expect("u_dns registered");
+        let http1 = table
+            .http
+            .get("u_dns")
+            .and_then(|u| u.as_http1())
+            .expect("u_dns registered");
         assert_eq!(http1.id(), "u_dns");
     }
 
@@ -682,10 +788,18 @@ mod tests {
         let u_default = make_test_upstream("u_default", "http2", "endpoints");
 
         let table = build_upstreams_default(&[u_override, u_default], None);
-        let h2_override = table.http2.get("u_override").unwrap();
+        let h2_override = table
+            .http
+            .get("u_override")
+            .and_then(|u| u.as_http2())
+            .unwrap();
         assert_eq!(h2_override.max_concurrent_streams, 333);
 
-        let h2_default = table.http2.get("u_default").unwrap();
+        let h2_default = table
+            .http
+            .get("u_default")
+            .and_then(|u| u.as_http2())
+            .unwrap();
         let mem_tier = velda_core::global_hardware_topology().memory_tier();
         let expected_streams = velda_connection_pool::max_concurrent_streams_for_mem_tier(mem_tier);
         assert_eq!(h2_default.max_concurrent_streams, expected_streams);
