@@ -25,7 +25,7 @@ use crate::server::response::Http1ServerResponse;
 /// - If upstream returns chunked encoding or SSE, returns [`Http1Error::StreamingViolation`].
 pub async fn pipe_buffered<DownIO, UpIO>(
     conn: &mut Http1ServerConnection<DownIO>,
-    mut req: Http1ServerRequest,
+    req: &mut Http1ServerRequest,
     upstream: &mut UpIO,
     config: &Http1Config,
 ) -> Result<(), Http1Error>
@@ -36,7 +36,7 @@ where
     sanitize_headers(&mut req.headers);
 
     // 1. Send complete request to upstream backend
-    send_request(&req, upstream, config).await?;
+    send_request(req, upstream, config).await?;
 
     // 3. Read upstream response head
     let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);

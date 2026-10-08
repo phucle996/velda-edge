@@ -30,7 +30,7 @@ pub use wire::{
 
 // Downstream Server re-exports
 pub use server::connection::Http1ServerConnection;
-pub use server::header::{UNTRUSTED_HEADERS, enrich_headers, extract_host, match_header_name};
+pub use server::header::{enrich_headers, extract_host, match_header_name};
 pub use server::path::{is_clean_path, normalize_path};
 pub use server::request::{
     Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead, decode_body, decode_request,

@@ -586,32 +586,31 @@ fn test_chunk_header_line_exceeding_4kb_rejected() {
 }
 
 #[test]
-fn test_enrich_headers_strips_more_than_8_custom_x_forwarded() {
+fn test_enrich_headers_overwrites_forwarded_headers() {
     let mut headers = HeaderMap::new();
     let uri = http::Uri::from_static("http://example.com/api");
     let peer: std::net::SocketAddr = "1.2.3.4:12345".parse().unwrap();
     let local: std::net::SocketAddr = "10.0.0.1:80".parse().unwrap();
 
-    for i in 1..=14 {
-        let name =
-            http::header::HeaderName::from_bytes(format!("x-forwarded-custom-{i}").as_bytes())
-                .unwrap();
-        headers.insert(name, http::HeaderValue::from_static("spoofed"));
-    }
     headers.insert(
         http::header::HeaderName::from_static("x-forwarded-for"),
         http::HeaderValue::from_static("9.9.9.9"),
+    );
+    headers.insert(
+        http::header::HeaderName::from_static("x-real-ip"),
+        http::HeaderValue::from_static("8.8.8.8"),
+    );
+    headers.insert(
+        http::header::HeaderName::from_static("x-forwarded-proto"),
+        http::HeaderValue::from_static("fake-proto"),
     );
 
     velda_http1::enrich_headers(&mut headers, &uri, peer, local, false);
 
     assert_eq!(headers.get("x-forwarded-for").unwrap(), "1.2.3.4");
-    for i in 1..=14 {
-        assert!(
-            !headers.contains_key(format!("x-forwarded-custom-{i}").as_str()),
-            "x-forwarded-custom-{i} must be stripped"
-        );
-    }
+    assert_eq!(headers.get("x-real-ip").unwrap(), "1.2.3.4");
+    assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
+    assert_eq!(headers.get("x-forwarded-port").unwrap(), "80");
 }
 
 #[tokio::test]
@@ -641,7 +640,8 @@ async fn test_pipe_buffered_rejects_premature_upstream_eof() {
     });
 
     let mut up_stream = client_up;
-    let res = velda_http1::pipe_buffered(&mut conn, req, &mut up_stream, &TEST_CONFIG).await;
+    let mut req = req;
+    let res = velda_http1::pipe_buffered(&mut conn, &mut req, &mut up_stream, &TEST_CONFIG).await;
     let _ = upstream_task.await;
     drop(client_down);
 

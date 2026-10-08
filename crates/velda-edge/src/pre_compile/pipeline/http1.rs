@@ -368,72 +368,103 @@ pub async fn run_http1_loop<IO>(
             }
         };
 
-        let mut pipe_result = match (strategy, req_body.as_ref()) {
-            (Http1PipeStrategy::Buffered, Some(body)) => {
-                let req = Http1ServerRequest::from_parts(head.clone(), body.clone());
-                pipe_buffered(&mut conn, req, &mut *upstream_lease, &cfg).await
-            }
-            (Http1PipeStrategy::ServerStream, Some(body)) => {
-                let req = Http1ServerRequest::from_parts(head.clone(), body.clone());
-                pipe_server_stream(&mut conn, req, &mut *upstream_lease, &cfg).await
-            }
-            (Http1PipeStrategy::ClientStream, None) => {
-                pipe_client_stream(&mut conn, head.clone(), &mut *upstream_lease, &cfg).await
-            }
-            (Http1PipeStrategy::Duplex, None) => {
-                pipe_duplex(&mut conn, head.clone(), &mut *upstream_lease, &cfg).await
-            }
-            _ => unreachable!(),
-        };
+        let pipe_result = match strategy {
+            Http1PipeStrategy::Buffered => {
+                let mut req =
+                    Http1ServerRequest::from_parts(head, req_body.expect("buffered requires body"));
+                let mut res = pipe_buffered(&mut conn, &mut req, &mut *upstream_lease, &cfg).await;
 
-        // Self-Healing Retry (RFC 9112):
-        // If a reused connection failed due to a stale keep-alive connection race,
-        // and the request payload is in RAM (Buffered or ServerStream), transparently
-        // acquire a fresh upstream connection and retry once.
-        if let Err(ref e) = pipe_result
-            && upstream_lease.is_reused()
-            && e.is_stale_connection()
-            && matches!(
-                strategy,
-                Http1PipeStrategy::Buffered | Http1PipeStrategy::ServerStream
-            )
-        {
-            upstream_lease.mark_closed();
-            drop(upstream_lease);
+                // Self-Healing Retry (RFC 9112):
+                if let Err(ref e) = res
+                    && upstream_lease.is_reused()
+                    && e.is_stale_connection()
+                {
+                    upstream_lease.mark_closed();
+                    drop(upstream_lease);
 
-            tracing::debug!(
-                upstream = %route.upstream_name,
-                "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
-            );
-
-            match upstream.acquire_fresh().await {
-                Ok(mut fresh_lease) => {
-                    let body = req_body.as_ref().unwrap();
-                    let retry_req = Http1ServerRequest::from_parts(head, body.clone());
-                    pipe_result = match strategy {
-                        Http1PipeStrategy::Buffered => {
-                            pipe_buffered(&mut conn, retry_req, &mut *fresh_lease, &cfg).await
-                        }
-                        Http1PipeStrategy::ServerStream => {
-                            pipe_server_stream(&mut conn, retry_req, &mut *fresh_lease, &cfg).await
-                        }
-                        _ => unreachable!(),
-                    };
-                    if pipe_result.is_err() {
-                        fresh_lease.mark_closed();
-                    }
-                }
-                Err(fresh_err) => {
-                    tracing::warn!(
-                        error = %fresh_err,
+                    tracing::debug!(
                         upstream = %route.upstream_name,
-                        "Failed to acquire fresh connection for self-healing retry"
+                        "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
                     );
+
+                    match upstream.acquire_fresh().await {
+                        Ok(mut fresh_lease) => {
+                            res = pipe_buffered(&mut conn, &mut req, &mut *fresh_lease, &cfg).await;
+                            if res.is_err() {
+                                fresh_lease.mark_closed();
+                            }
+                        }
+                        Err(fresh_err) => {
+                            tracing::warn!(
+                                error = %fresh_err,
+                                upstream = %route.upstream_name,
+                                "Failed to acquire fresh connection for self-healing retry"
+                            );
+                        }
+                    }
+                } else if res.is_err() {
+                    upstream_lease.mark_closed();
                 }
+                res
             }
-        } else if pipe_result.is_err() {
-            upstream_lease.mark_closed();
-        }
+            Http1PipeStrategy::ServerStream => {
+                let mut req = Http1ServerRequest::from_parts(
+                    head,
+                    req_body.expect("server_stream requires body"),
+                );
+                let mut res =
+                    pipe_server_stream(&mut conn, &mut req, &mut *upstream_lease, &cfg).await;
+
+                // Self-Healing Retry (RFC 9112):
+                if let Err(ref e) = res
+                    && upstream_lease.is_reused()
+                    && e.is_stale_connection()
+                {
+                    upstream_lease.mark_closed();
+                    drop(upstream_lease);
+
+                    tracing::debug!(
+                        upstream = %route.upstream_name,
+                        "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
+                    );
+
+                    match upstream.acquire_fresh().await {
+                        Ok(mut fresh_lease) => {
+                            res = pipe_server_stream(&mut conn, &mut req, &mut *fresh_lease, &cfg)
+                                .await;
+                            if res.is_err() {
+                                fresh_lease.mark_closed();
+                            }
+                        }
+                        Err(fresh_err) => {
+                            tracing::warn!(
+                                error = %fresh_err,
+                                upstream = %route.upstream_name,
+                                "Failed to acquire fresh connection for self-healing retry"
+                            );
+                        }
+                    }
+                } else if res.is_err() {
+                    upstream_lease.mark_closed();
+                }
+                res
+            }
+            Http1PipeStrategy::ClientStream => {
+                let res =
+                    pipe_client_stream(&mut conn, &mut head, &mut *upstream_lease, &cfg).await;
+                if res.is_err() {
+                    upstream_lease.mark_closed();
+                }
+                res
+            }
+            Http1PipeStrategy::Duplex => {
+                let res = pipe_duplex(&mut conn, &mut head, &mut *upstream_lease, &cfg).await;
+                if res.is_err() {
+                    upstream_lease.mark_closed();
+                }
+                res
+            }
+        };
 
         if let Err(e) = pipe_result {
             tracing::warn!(

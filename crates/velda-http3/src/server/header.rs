@@ -5,18 +5,10 @@ use std::net::SocketAddr;
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
-/// Standard client-supplied untrusted forwarding headers to strip upon ingress.
-pub const UNTRUSTED_HEADERS: [HeaderName; 6] = [
-    HeaderName::from_static("x-forwarded-for"),
-    HeaderName::from_static("x-forwarded-proto"),
-    HeaderName::from_static("x-forwarded-host"),
-    HeaderName::from_static("x-forwarded-port"),
-    HeaderName::from_static("x-real-ip"),
-    HeaderName::from_static("forwarded"),
-];
-
 /// Enriches headers in-place with authoritative proxy forwarding headers
 /// and sanitizes RFC 9114 prohibited hop-by-hop headers.
+///
+/// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`, `forwarded`) directly with authoritative values.
 pub fn enrich_headers(
     headers: &mut HeaderMap,
     uri: &Uri,
@@ -26,24 +18,7 @@ pub fn enrich_headers(
     // 1. Strip prohibited connection-specific headers per RFC 9114 Section 4.2
     crate::headers::sanitize_headers(headers);
 
-    // 2. Strip standard client-supplied untrusted forwarding headers
-    for name in &UNTRUSTED_HEADERS {
-        headers.remove(name);
-    }
-
-    // 3. Defensive sweep for custom "x-forwarded-*"
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
-        }
-    }
-    for name in custom_to_remove[..count].iter().flatten() {
-        headers.remove(name);
-    }
-
+    // 2. Inject authoritative client IP (directly overwriting spoofed headers)
     let client_ip = peer.ip();
     // HTTP/3 QUIC is always TLS 1.3 encrypted
     let proto = "https";
@@ -67,16 +42,10 @@ pub fn enrich_headers(
         HeaderValue::from_static(proto),
     );
 
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderValue::from(local_addr.port()),
+    );
 
     let host_hdr = headers.get(http::header::HOST).cloned();
     let host_str = host_hdr
@@ -168,7 +137,6 @@ mod tests {
             headers.get("forwarded").unwrap(),
             "for=192.0.2.20;proto=https;by=10.0.0.1;host=\"secure.example.com\""
         );
-        assert!(headers.get("x-forwarded-ssl").is_none());
         assert!(headers.get("connection").is_none());
     }
 }

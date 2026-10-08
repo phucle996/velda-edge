@@ -23,7 +23,7 @@ use crate::wire::{send_chunk, send_chunked_end};
 /// Pipes a bidirectional streaming HTTP/1.1 request (streaming upload and streaming response).
 pub async fn pipe_duplex<DownIO, UpIO>(
     conn: &mut Http1ServerConnection<DownIO>,
-    mut head: Http1ServerRequestHead,
+    head: &mut Http1ServerRequestHead,
     upstream: &mut UpIO,
     config: &Http1Config,
 ) -> Result<(), Http1Error>
@@ -34,7 +34,7 @@ where
     sanitize_headers(&mut head.headers);
 
     // 1. Send chunked request head upstream
-    send_request_head_chunked(&head, upstream, config).await?;
+    send_request_head_chunked(head, upstream, config).await?;
 
     // 2. Pump request body chunks from client to upstream
     while let Some(chunk) = conn.read_next_chunk().await? {

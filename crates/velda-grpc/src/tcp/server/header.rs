@@ -5,16 +5,6 @@ use std::net::SocketAddr;
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
-/// Standard client-supplied untrusted forwarding headers to strip upon ingress.
-pub const UNTRUSTED_HEADERS: [HeaderName; 6] = [
-    HeaderName::from_static("x-forwarded-for"),
-    HeaderName::from_static("x-forwarded-proto"),
-    HeaderName::from_static("x-forwarded-host"),
-    HeaderName::from_static("x-forwarded-port"),
-    HeaderName::from_static("x-real-ip"),
-    HeaderName::from_static("forwarded"),
-];
-
 /// Prohibited connection-specific hop-by-hop headers per RFC 9113 Section 8.2.2.
 pub const HOP_BY_HOP: [HeaderName; 5] = [
     http::header::CONNECTION,
@@ -25,7 +15,9 @@ pub const HOP_BY_HOP: [HeaderName; 5] = [
 ];
 
 /// Enriches gRPC headers with authoritative proxy forwarding headers and strips
-/// untrusted client-supplied headers and RFC 9113 hop-by-hop headers.
+/// RFC 9113 hop-by-hop headers.
+///
+/// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
 pub fn enrich_headers(
     headers: &mut HeaderMap,
     peer: SocketAddr,
@@ -33,25 +25,7 @@ pub fn enrich_headers(
     is_tls: bool,
     authority: Option<&str>,
 ) {
-    // 1. Strip all client-supplied untrusted forwarding headers
-    for name in &UNTRUSTED_HEADERS {
-        headers.remove(name);
-    }
-
-    // Defensive sweep for custom "x-forwarded-*"
-    let mut custom_to_remove: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut count = 0;
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") && count < custom_to_remove.len() {
-            custom_to_remove[count] = Some(key.clone());
-            count += 1;
-        }
-    }
-    for name in custom_to_remove[..count].iter().flatten() {
-        headers.remove(name);
-    }
-
-    // 2. Strip RFC 9113 connection-specific hop-by-hop headers
+    // 1. Strip RFC 9113 connection-specific hop-by-hop headers
     for name in &HOP_BY_HOP {
         headers.remove(name);
     }
@@ -64,6 +38,7 @@ pub fn enrich_headers(
         }
     }
 
+    // 2. Inject authoritative client IP (directly overwriting spoofed headers)
     let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
 
@@ -86,16 +61,10 @@ pub fn enrich_headers(
         HeaderValue::from_static(proto),
     );
 
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderValue::from(local_addr.port()),
+    );
 
     if let Some(auth) = authority
         && let Ok(val) = HeaderValue::from_str(auth)

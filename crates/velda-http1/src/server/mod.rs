@@ -15,7 +15,7 @@ pub mod request;
 pub mod response;
 
 pub use connection::Http1ServerConnection;
-pub use header::{UNTRUSTED_HEADERS, enrich_headers, extract_host, match_header_name};
+pub use header::{enrich_headers, extract_host, match_header_name};
 pub use path::{is_clean_path, normalize_path};
 pub use request::{
     Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead, ParsedChunk, decode_body,

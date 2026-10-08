@@ -242,8 +242,21 @@ pub async fn send_request_parts<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    let body_len = match body {
+        Body::Empty => None,
+        Body::Bytes(b) => Some(b.len()),
+    };
     let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
-    encode_request_head(method, uri, headers, Some(body.len()), &mut write_buf);
+    encode_request_head(method, uri, headers, body_len, &mut write_buf);
+
+    if let Body::Bytes(bytes) = body
+        && bytes.len() <= 16384
+    {
+        write_buf.extend_from_slice(bytes);
+        stream.write_all(&write_buf).await?;
+        stream.flush().await?;
+        return Ok(());
+    }
 
     stream.write_all(&write_buf).await?;
     if let Body::Bytes(bytes) = body {

@@ -13,17 +13,9 @@ use http::{HeaderMap, Uri};
 
 use crate::error::Http1Error;
 
-/// List of standard client-supplied untrusted forwarding headers to strip upon ingress.
-pub const UNTRUSTED_HEADERS: [HeaderName; 6] = [
-    HeaderName::from_static("x-forwarded-for"),
-    HeaderName::from_static("x-forwarded-proto"),
-    HeaderName::from_static("x-forwarded-host"),
-    HeaderName::from_static("x-forwarded-port"),
-    HeaderName::from_static("x-real-ip"),
-    HeaderName::from_static("forwarded"),
-];
-
-/// Enriches HTTP/1.1 request headers with RFC 7239 and standard proxy forwarding metadata.
+/// Enriches HTTP/1.1 request headers with authoritative proxy forwarding metadata.
+///
+/// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
 pub fn enrich_headers(
     headers: &mut HeaderMap,
     uri: &Uri,
@@ -31,38 +23,7 @@ pub fn enrich_headers(
     local_addr: SocketAddr,
     is_tls: bool,
 ) {
-    // 1. Strip untrusted client forwarding headers
-    for name in &UNTRUSTED_HEADERS {
-        headers.remove(name);
-    }
-
-    // Defensive sweep for custom "x-forwarded-*" headers:
-    // Stack-first (16 slots) with heap fallback to guarantee 100% removal
-    // even against adversarial requests with > 16 headers.
-    let mut custom_stack: [Option<HeaderName>; 16] = [const { None }; 16];
-    let mut custom_count = 0;
-    let mut custom_heap: Option<Vec<HeaderName>> = None;
-
-    for key in headers.keys() {
-        if key.as_str().starts_with("x-forwarded-") {
-            if custom_count < custom_stack.len() {
-                custom_stack[custom_count] = Some(key.clone());
-                custom_count += 1;
-            } else {
-                custom_heap.get_or_insert_with(Vec::new).push(key.clone());
-            }
-        }
-    }
-    for name in custom_stack[..custom_count].iter().flatten() {
-        headers.remove(name);
-    }
-    if let Some(heap) = custom_heap {
-        for name in heap {
-            headers.remove(&name);
-        }
-    }
-
-    // 2. Inject authoritative client IP
+    // 1. Inject authoritative client IP (directly overwriting any client-supplied spoofed values)
     let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
 
@@ -85,16 +46,10 @@ pub fn enrich_headers(
         HeaderValue::from_static(proto),
     );
 
-    let mut port_buf = [0u8; 8];
-    let port_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut port_buf[..]);
-        let _ = write!(cursor, "{}", local_addr.port());
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&port_buf[..port_len]) {
-        headers.insert(HeaderName::from_static("x-forwarded-port"), val);
-    }
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderValue::from(local_addr.port()),
+    );
 
     let host_hdr = headers.get(http::header::HOST).cloned();
     let host_str = host_hdr
