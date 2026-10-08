@@ -51,7 +51,8 @@ pub struct ListenerTransportConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerApplicationConfig {
-    pub protocol: String, // "raw", "http1", "http2", "http3", "grpc"
+    #[serde(alias = "family")]
+    pub protocol: String, // Canonical Protocol Family: "http", "grpc", "raw" (supports alias "family")
     #[serde(default)]
     pub version: Option<String>,
     pub streaming: velda_core::StreamingMode,
@@ -351,7 +352,7 @@ fn probe_socket_conflict(addr: std::net::SocketAddr, proto: L4Protocol) -> bool 
 
 /// Validates listener rules strictly without silent fallbacks:
 /// 1. Schema integrity & string trimming.
-/// 2. Protocol validity (transport: "tcp" or "udp"; application: "raw", "http1", "http2", "http3", or "grpc").
+/// 2. Protocol validity (transport: "tcp" or "udp"; application: "raw", "http", "http1", "http2", "http3", or "grpc").
 /// 3. TLS profile configuration completeness.
 /// 4. Internal port collisions among configured listeners (preventing overlapping bindings).
 /// 5. Host OS port conflict detection (verifying port availability against host services).
@@ -745,6 +746,185 @@ pub fn validate_listeners_with_lkg(
                     }
                 }
             }
+            "http" => {
+                if listener.grpc.is_some() || listener.raw.is_some() {
+                    return Err(SyncError::Validation {
+                        domain: "listeners".into(),
+                        reason: format!(
+                            "Listener '{}' has protocol 'http' but configures conflicting protocol blocks (must not specify grpc or raw)",
+                            listener.id
+                        ),
+                    });
+                }
+                if let Some(ref h1) = listener.http1 {
+                    if let Some(0) = h1.max_header_size {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_header_size 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h1.max_headers {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_headers 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h1.idle_timeout_ms {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid idle_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h1.max_keepalive_requests {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_keepalive_requests 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h1.header_read_timeout_ms {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid header_read_timeout_ms 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                }
+                if let Some(ref h2) = listener.http2 {
+                    if let Some(0) = h2.max_header_size {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_header_size 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_headers {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_headers 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.idle_timeout_ms {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid idle_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_concurrent_streams {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_concurrent_streams 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_consecutive_resets {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_consecutive_resets 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_pending_control_frames {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_pending_control_frames 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_continuation_frames {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_continuation_frames 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                }
+                if let Some(ref h3) = listener.http3 {
+                    if let Some(0) = h3.max_header_size {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_header_size 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h3.max_headers {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_headers 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h3.idle_timeout_ms {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid idle_timeout_ms 0; must be > 0 to prevent indefinite connection hold",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h3.max_concurrent_streams {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_concurrent_streams 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h3.max_concurrent_uni_streams {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_concurrent_uni_streams 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h3.max_qpack_table_capacity {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_qpack_table_capacity 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                }
+            }
             "raw" => {
                 if listener.http1.is_some()
                     || listener.http2.is_some()
@@ -784,7 +964,7 @@ pub fn validate_listeners_with_lkg(
                 return Err(SyncError::Validation {
                     domain: "listeners".into(),
                     reason: format!(
-                        "Listener '{}' has unsupported application protocol '{other}'; must be 'raw', 'http1', 'http2', 'http3', or 'grpc'",
+                        "Listener '{}' has unsupported application protocol '{other}'; must be 'raw', 'http', 'http1', 'http2', 'http3', or 'grpc'",
                         listener.id
                     ),
                 });
@@ -1235,5 +1415,65 @@ mod tests {
         let mut valid_h2 = vec![cfg("h2-stream", "127.0.0.1:18091", "tcp", "http2")];
         valid_h2[0].application.streaming = velda_core::StreamingMode::SERVER;
         assert!(validate_listeners(&mut valid_h2).is_ok());
+    }
+
+    #[test]
+    fn test_http_family_listener_validation() {
+        let json = r#"{
+            "schema_version": 1,
+            "listeners": [{
+                "id": "web-in",
+                "address": "127.0.0.1:61443",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "http", "streaming": ["server"] },
+                "tls": { "enabled": true },
+                "http1": {
+                    "max_body_size": 10485760,
+                    "max_header_size": 65536
+                },
+                "http2": {
+                    "max_body_size": 10485760,
+                    "max_concurrent_streams": 256
+                }
+            }]
+        }"#;
+
+        let mut listeners = parse_listeners(json.as_bytes()).unwrap();
+        assert_eq!(listeners.len(), 1);
+        assert!(validate_listeners(&mut listeners).is_ok());
+        assert_eq!(listeners[0].application.protocol, "http");
+        assert!(listeners[0].http1.is_some());
+        assert!(listeners[0].http2.is_some());
+
+        // Conflicting block with grpc should fail
+        let invalid_json = r#"{
+            "schema_version": 1,
+            "listeners": [{
+                "id": "web-bad",
+                "address": "127.0.0.1:61443",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "http", "streaming": [] },
+                "tls": { "enabled": true },
+                "grpc": { "max_message_size": 8388608 }
+            }]
+        }"#;
+        let mut bad_listeners = parse_listeners(invalid_json.as_bytes()).unwrap();
+        let err = validate_listeners(&mut bad_listeners).unwrap_err();
+        assert!(err.to_string().contains("conflicting protocol blocks"));
+    }
+
+    #[test]
+    fn test_parse_example_listeners_json() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir).join("example/listeners.json");
+        let content = std::fs::read(&path).expect("example/listeners.json must exist");
+        let mut listeners = parse_listeners(&content).expect("must parse listeners.json");
+        assert_eq!(listeners.len(), 5);
+        validate_listeners(&mut listeners).expect("example/listeners.json must be valid");
+        assert_eq!(listeners[0].application.protocol, "http");
+        assert_eq!(listeners[1].application.protocol, "http");
+        assert_eq!(listeners[2].application.protocol, "grpc");
+        assert_eq!(listeners[3].application.protocol, "http");
+        assert_eq!(listeners[4].application.protocol, "raw");
     }
 }

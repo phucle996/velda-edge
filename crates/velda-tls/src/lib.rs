@@ -22,9 +22,9 @@ pub use client::{
 pub use engine::TlsEngine;
 pub use error::TlsError;
 pub use server::{
-    ServerTlsConfig, SniResolver, TlsHandshakeInfo, TlsServerEngine, TlsServerParams,
-    WILDCARD_PREFIX, build_quic_server_config, extract_handshake_info, is_alpn_compatible,
-    is_protocol_alpn_compatible, normalize_alpn_bytes,
+    ServerTlsConfig, SniConfigResolver, SniResolver, TlsHandshakeInfo, TlsServerEngine,
+    TlsServerParams, WILDCARD_PREFIX, build_quic_server_config, extract_handshake_info,
+    is_alpn_compatible, is_protocol_alpn_compatible, normalize_alpn_bytes,
 };
 pub use tokio_rustls::client::TlsStream;
 pub use version::resolve_protocol_versions;

@@ -229,3 +229,95 @@ async fn test_version_enforcement() {
     );
     let _ = srv_task3.await;
 }
+
+#[tokio::test]
+async fn test_multi_domain_sni_alpn_isolation() {
+    // Domain 1: api.example.com -> configured strictly for HTTP/2 ("h2")
+    let (cert_pem_h2, key_pem_h2) = make_test_cert(vec!["api.example.com".into()]);
+    let server_config_h2 = ServerTlsConfig {
+        sni: vec!["api.example.com".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: cert_pem_h2.clone(),
+        key_pem: key_pem_h2,
+        client_ca_pem: None,
+    };
+
+    // Domain 2: legacy.example.com -> configured strictly for HTTP/1.1 ("http/1.1")
+    let (cert_pem_h1, key_pem_h1) = make_test_cert(vec!["legacy.example.com".into()]);
+    let server_config_h1 = ServerTlsConfig {
+        sni: vec!["legacy.example.com".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["http/1.1".into()],
+        cert_pem: cert_pem_h1.clone(),
+        key_pem: key_pem_h1,
+        client_ca_pem: None,
+    };
+
+    // Server engine holding both domain configurations on the same port
+    let server_engine = TlsServerEngine::new(&[server_config_h2, server_config_h1]).unwrap();
+    assert!(
+        server_engine.sni_configs().is_some(),
+        "Multi-server engine must compile SniConfigResolver"
+    );
+
+    // Standard modern browser client advertising both ["h2", "http/1.1"]
+    // Client for api.example.com trust store
+    let client_connector_h2 = make_client_connector(&cert_pem_h2, Some(vec!["h2", "http/1.1"]));
+    // Client for legacy.example.com trust store
+    let client_connector_h1 = make_client_connector(&cert_pem_h1, Some(vec!["h2", "http/1.1"]));
+
+    // 1. Client connects to api.example.com -> must negotiate "h2"
+    {
+        let (client_io, server_io) = duplex(65536);
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move {
+            let tls_stream = s_engine.accept(server_io).await.unwrap();
+            let info = TlsServerEngine::extract_handshake_info(&tls_stream);
+            assert_eq!(info.sni.as_deref(), Some("api.example.com"));
+            assert_eq!(
+                info.alpn.as_deref(),
+                Some("h2"),
+                "api.example.com must negotiate h2"
+            );
+            tls_stream
+        });
+
+        let server_name = ServerName::try_from("api.example.com".to_string()).unwrap();
+        let client_stream = client_connector_h2
+            .connect(server_name, client_io)
+            .await
+            .unwrap();
+        let (_, client_conn) = client_stream.get_ref();
+        assert_eq!(client_conn.alpn_protocol(), Some(b"h2".as_slice()));
+
+        let _server_tls = server_task.await.unwrap();
+    }
+
+    // 2. Client connects to legacy.example.com -> must negotiate "http/1.1"
+    {
+        let (client_io, server_io) = duplex(65536);
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move {
+            let tls_stream = s_engine.accept(server_io).await.unwrap();
+            let info = TlsServerEngine::extract_handshake_info(&tls_stream);
+            assert_eq!(info.sni.as_deref(), Some("legacy.example.com"));
+            assert_eq!(
+                info.alpn.as_deref(),
+                Some("http/1.1"),
+                "legacy.example.com must negotiate http/1.1"
+            );
+            tls_stream
+        });
+
+        let server_name = ServerName::try_from("legacy.example.com".to_string()).unwrap();
+        let client_stream = client_connector_h1
+            .connect(server_name, client_io)
+            .await
+            .unwrap();
+        let (_, client_conn) = client_stream.get_ref();
+        assert_eq!(client_conn.alpn_protocol(), Some(b"http/1.1".as_slice()));
+
+        let _server_tls = server_task.await.unwrap();
+    }
+}

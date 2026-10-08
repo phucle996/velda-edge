@@ -198,6 +198,65 @@ impl ServerTlsConfig {
 
         Ok(Arc::new(server_config))
     }
+
+    /// Compiles a single `ServerTlsConfig` definition into an `Arc<ServerConfig>`
+    /// configured strictly with this certificate's specific ALPN protocols and versions.
+    pub fn build_single(&self, params: &TlsServerParams) -> Result<Arc<ServerConfig>, TlsError> {
+        let mut sni_resolver = SniResolver::new();
+        let certs = parse_certs_pem(&self.cert_pem)?;
+        let key = parse_private_key_pem(&self.key_pem)?;
+        sni_resolver.add_certificate(&self.sni, certs, key)?;
+
+        let mut client_root_store = rustls::RootCertStore::empty();
+        let mut requires_client_auth = false;
+
+        if let Some(ca_pem) = &self.client_ca_pem {
+            let ca_certs = parse_certs_pem(ca_pem)?;
+            for cert in ca_certs {
+                client_root_store
+                    .add(cert)
+                    .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
+            }
+            requires_client_auth = true;
+        }
+
+        let alpn_protocols: Vec<Vec<u8>> =
+            self.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
+        let protocol_versions = crate::version::resolve_protocol_versions(&self.versions)?;
+
+        let builder = ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&protocol_versions)
+        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+
+        let mut server_config = if requires_client_auth {
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_root_store),
+                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            )
+            .build()
+            .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
+            builder
+                .with_client_cert_verifier(verifier)
+                .with_cert_resolver(Arc::new(sni_resolver))
+        } else {
+            builder
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(sni_resolver))
+        };
+
+        server_config.alpn_protocols = alpn_protocols;
+        server_config.max_early_data_size = params.max_early_data_size;
+        server_config.send_tls13_tickets = params.send_tls13_tickets;
+        server_config.session_storage =
+            crate::server::session::ShardedServerSessionCache::with_shards(
+                params.session_cache_capacity,
+                params.session_shards,
+            );
+
+        Ok(Arc::new(server_config))
+    }
 }
 
 #[cfg(test)]

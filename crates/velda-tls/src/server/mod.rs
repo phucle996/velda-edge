@@ -16,5 +16,5 @@ pub use handshake::{
     normalize_alpn_bytes,
 };
 pub use quic::build_quic_server_config;
-pub use resolver::{SniResolver, WILDCARD_PREFIX};
+pub use resolver::{SniConfigResolver, SniResolver, WILDCARD_PREFIX};
 pub use session::ShardedServerSessionCache;

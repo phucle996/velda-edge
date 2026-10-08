@@ -137,3 +137,83 @@ impl ResolvesServerCert for SniResolver {
         self.lookup(server_name)
     }
 }
+
+/// In-memory SNI server configuration resolver for domain-level TLS & ALPN isolation.
+#[derive(Clone, Debug)]
+pub struct SniConfigResolver {
+    exact_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+    wildcard_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+    pub default_config: Arc<rustls::ServerConfig>,
+}
+
+impl SniConfigResolver {
+    /// Creates a new `SniConfigResolver` with a fallback default configuration.
+    pub fn new(default_config: Arc<rustls::ServerConfig>) -> Self {
+        Self {
+            exact_configs: HashMap::new(),
+            wildcard_configs: HashMap::new(),
+            default_config,
+        }
+    }
+
+    /// Adds an `Arc<ServerConfig>` mapped under the given SNI domain names.
+    pub fn add_config(&mut self, snis: &[String], config: Arc<rustls::ServerConfig>) {
+        for sni in snis {
+            let s = sni.trim().to_ascii_lowercase();
+            if s.is_empty() {
+                continue;
+            }
+            if s.starts_with(WILDCARD_PREFIX) {
+                let suffix = s.trim_start_matches(WILDCARD_PREFIX).to_string();
+                self.wildcard_configs.insert(suffix, config.clone());
+            } else {
+                self.exact_configs.insert(s, config.clone());
+            }
+        }
+    }
+
+    /// Resolves the specific `ServerConfig` for the given SNI name.
+    pub fn lookup(&self, sni: &str) -> Option<&Arc<rustls::ServerConfig>> {
+        let trimmed = sni.trim();
+        if !trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+            if let Some(cfg) = self.exact_configs.get(trimmed) {
+                return Some(cfg);
+            }
+            if let Some(idx) = trimmed.find('.') {
+                let parent = &trimmed[idx + 1..];
+                if let Some(cfg) = self.wildcard_configs.get(parent) {
+                    return Some(cfg);
+                }
+            }
+        } else {
+            let lower = trimmed.to_ascii_lowercase();
+            if let Some(cfg) = self.exact_configs.get(&lower) {
+                return Some(cfg);
+            }
+            if let Some(idx) = lower.find('.') {
+                let parent = &lower[idx + 1..];
+                if let Some(cfg) = self.wildcard_configs.get(parent) {
+                    return Some(cfg);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolves the matching `ServerConfig`, falling back to `default_config` if not found or SNI is absent.
+    pub fn resolve(&self, sni: Option<&str>) -> Arc<rustls::ServerConfig> {
+        sni.and_then(|s| self.lookup(s))
+            .unwrap_or(&self.default_config)
+            .clone()
+    }
+
+    /// Returns the number of exact configurations.
+    pub fn exact_len(&self) -> usize {
+        self.exact_configs.len()
+    }
+
+    /// Returns the number of wildcard configurations.
+    pub fn wildcard_len(&self) -> usize {
+        self.wildcard_configs.len()
+    }
+}
