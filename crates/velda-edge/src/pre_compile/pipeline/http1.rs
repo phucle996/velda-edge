@@ -205,12 +205,24 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
+        // ========================================================================
+        // [PHASE 2: Pre-Route Hook Placeholder]
+        // Flat workflow execution before entering the narrow Router waist.
+        // Extension point for velda-plugin: IP whitelist/blacklist, DDoS shield,
+        // and early path/header inspection.
+        // Contract: Action::Continue | Action::Respond(L7Response) | Action::Reject
+        // ========================================================================
+
         let mut http_req = Http1RouteRequest::new(head.uri.path());
         if let Some(h) = velda_http1::server::header::extract_host(&head.headers, &head.uri) {
             http_req = http_req.with_host(h);
         }
         http_req = http_req.with_method(head.method.as_str());
 
+        // ========================================================================
+        // [PHASE 3: Narrow Waist Router Lookup]
+        // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
+        // ========================================================================
         let Some(route) = rt.router.route_http1(&meta.listener_id, &http_req) else {
             tracing::debug!(
                 listener = %meta.listener_id,
@@ -253,6 +265,14 @@ pub async fn run_http1_loop<IO>(
             conn.lingering_close().await;
             break;
         };
+
+        // ========================================================================
+        // [PHASE 4: Pre-Upstream Hook Placeholder]
+        // Flat workflow execution after route/upstream resolution, before lease/forward.
+        // Extension point for velda-plugin: JWT/OAuth2 verification, Distributed
+        // Tracing span injection, and header mutation.
+        // Contract: Action::Continue | Action::Respond(L7Response) | Action::Reject
+        // ========================================================================
 
         let strategy = upstream.strategy;
         velda_http1::server::header::enrich_headers(
@@ -430,6 +450,14 @@ pub async fn run_http1_loop<IO>(
             conn.lingering_close().await;
             break;
         }
+
+        // ========================================================================
+        // [PHASE 6: Post-Response Hook Placeholder]
+        // Flat workflow execution after successful upstream response delivery.
+        // Extension point for velda-plugin: CORS header injection, compression,
+        // and audit access logging.
+        // Contract: Action::Continue | Action::Respond(L7Response)
+        // ========================================================================
 
         if reach_max_keepalive || conn.is_closed() {
             tracing::debug!(

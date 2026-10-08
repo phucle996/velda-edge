@@ -169,6 +169,14 @@ pub async fn run_http2_loop<IO>(
                         continue;
                     }
 
+                    // ========================================================
+                    // [PHASE 2: Pre-Route Hook Placeholder]
+                    // Flat workflow execution before entering narrow Router waist.
+                    // Extension point for velda-plugin: IP access control,
+                    // rate limiting, and early security filtering.
+                    // Contract: Action::Continue | Action::Respond(L7Response) | Action::Reject
+                    // ========================================================
+
                     let mut http_req = Http2RouteRequest::new(head.uri.path());
                     if let Some(h) =
                         velda_http2::server::header::extract_host(&head.headers, &head.uri)
@@ -177,6 +185,10 @@ pub async fn run_http2_loop<IO>(
                     }
                     http_req = http_req.with_method(head.method.as_str());
 
+                    // ========================================================
+                    // [PHASE 3: Narrow Waist Router Lookup]
+                    // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
+                    // ========================================================
                     let rt = runtime.load();
                     let matched_route =
                         rt.router.route_http2(&meta.listener_id, &http_req).cloned();
@@ -302,6 +314,14 @@ async fn serve_http2_stream(
         }
         return;
     };
+
+    // ========================================================================
+    // [PHASE 4: Pre-Upstream Hook Placeholder]
+    // Flat workflow execution after route/upstream resolution, before stream lease.
+    // Extension point for velda-plugin: JWT/OAuth2 token claims inspection,
+    // tracing context propagation, and request header transformation.
+    // Contract: Action::Continue | Action::Respond(L7Response) | Action::Reject
+    // ========================================================================
 
     let strategy = upstream.strategy;
     velda_http2::server::header::enrich_headers(
@@ -434,6 +454,14 @@ async fn serve_http2_stream(
             res
         }
     };
+
+    // ========================================================================
+    // [PHASE 6: Post-Response Hook Placeholder]
+    // Flat workflow execution after successful upstream response delivery.
+    // Extension point for velda-plugin: CORS header injection, compression,
+    // and stream metrics recording.
+    // Contract: Action::Continue | Action::Respond(L7Response)
+    // ========================================================================
 
     if let Err(e) = pipe_res {
         tracing::warn!(

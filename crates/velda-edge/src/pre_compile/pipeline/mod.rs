@@ -78,6 +78,30 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 })
             })
         }
+        Some(TcpPipeline::HttpAuto {
+            tls_enabled,
+            streaming,
+            http1_config,
+            http2_config,
+        }) => {
+            let lid = Arc::clone(&lid);
+            Arc::new(move |connection: Connection| {
+                let rt = runtime.clone();
+                let lid = Arc::clone(&lid);
+                Box::pin(async move {
+                    handle_http_auto_stream(
+                        connection,
+                        lid,
+                        http1_config,
+                        http2_config,
+                        tls_enabled,
+                        streaming,
+                        rt,
+                    )
+                    .await;
+                })
+            })
+        }
         Some(TcpPipeline::Grpc {
             config,
             tls_enabled,
@@ -154,6 +178,92 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                     })
                 },
             )
+        }
+    }
+}
+
+/// Unified HTTP stream worker for listeners declaring the `http` family.
+///
+/// Under TLS, negotiates ALPN strictly within the HTTP family ("h2" -> HTTP/2, "http/1.1" -> HTTP/1.1).
+/// Under cleartext, falls back directly to the HTTP/1.1 stream loop.
+async fn handle_http_auto_stream(
+    connection: Connection,
+    listener_id: Arc<str>,
+    http1_config: velda_http1::Http1Config,
+    http2_config: velda_http2::Http2Config,
+    tls_enabled: bool,
+    streaming: velda_core::StreamingMode,
+    runtime: SharedRuntime,
+) {
+    if !tls_enabled {
+        http1::handle_http1_stream(
+            connection,
+            listener_id,
+            http1_config,
+            false,
+            streaming,
+            runtime,
+        )
+        .await;
+        return;
+    }
+
+    let rt = runtime.load();
+    let peer = connection.peer();
+    let local_addr = connection.local_addr();
+
+    let Some(tls_server) = rt.tls_server.as_ref() else {
+        tracing::error!(
+            listener = %listener_id,
+            peer = %peer,
+            "TLS required for HTTP family listener, but no TLS server engine is compiled; dropping connection"
+        );
+        return;
+    };
+
+    match tls_server.accept_with_timeout(connection).await {
+        Ok(tls_stream) => {
+            let handshake_info = velda_tls::TlsServerEngine::extract_handshake_info(&tls_stream);
+            tracing::debug!(
+                listener = %listener_id,
+                peer = %peer,
+                sni = ?handshake_info.sni,
+                alpn = ?handshake_info.alpn,
+                "Downstream TLS handshake succeeded for HTTP family"
+            );
+
+            let meta = DownstreamMeta {
+                listener_id,
+                peer,
+                local_addr,
+                is_tls: true,
+            };
+
+            // ALPN demuxing strictly within the HTTP protocol family
+            match handshake_info.alpn.as_deref() {
+                Some("h2") => {
+                    http2::run_http2_loop(tls_stream, meta, http2_config, runtime).await;
+                }
+                Some("http/1.1") | None => {
+                    http1::run_http1_loop(tls_stream, meta, streaming, http1_config, runtime).await;
+                }
+                Some(other_alpn) => {
+                    tracing::warn!(
+                        listener = %meta.listener_id,
+                        peer = %peer,
+                        alpn = other_alpn,
+                        "Dropping connection: ALPN negotiated outside the HTTP protocol family"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                listener = %listener_id,
+                peer = %peer,
+                error = %e,
+                "Downstream TLS handshake failed for HTTP family"
+            );
         }
     }
 }

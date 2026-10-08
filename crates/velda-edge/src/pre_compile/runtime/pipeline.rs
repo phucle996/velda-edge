@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashMap;
 
-use velda_core::{MemoryTier, StreamingMode};
+use velda_core::{MemoryTier, ProtocolFamily, StreamingMode};
 use velda_grpc::GrpcConfig;
 use velda_http1::Http1Config;
 use velda_http2::Http2Config;
@@ -22,6 +22,8 @@ pub enum TcpProtocol {
     Http1,
     /// HTTP/2 stream worker.
     Http2,
+    /// Dual-ALPN HTTP family stream worker ("h2", "http/1.1").
+    HttpAuto,
     /// gRPC stream worker.
     Grpc,
 }
@@ -33,7 +35,17 @@ impl TcpProtocol {
         match self {
             Self::Http1 => "http1",
             Self::Http2 => "http2",
+            Self::HttpAuto => "http",
             Self::Grpc => "grpc",
+        }
+    }
+
+    /// Associated canonical protocol family.
+    #[inline]
+    pub const fn family(&self) -> ProtocolFamily {
+        match self {
+            Self::Http1 | Self::Http2 | Self::HttpAuto => ProtocolFamily::Http,
+            Self::Grpc => ProtocolFamily::Grpc,
         }
     }
 }
@@ -56,6 +68,15 @@ impl UdpProtocol {
             Self::Grpc => "grpc",
         }
     }
+
+    /// Associated canonical protocol family.
+    #[inline]
+    pub const fn family(&self) -> ProtocolFamily {
+        match self {
+            Self::Http3 => ProtocolFamily::Http,
+            Self::Grpc => ProtocolFamily::Grpc,
+        }
+    }
 }
 
 /// Fully compiled TCP listener pipeline containing protocol-specific configuration.
@@ -71,6 +92,12 @@ pub enum TcpPipeline {
         streaming: StreamingMode,
         config: Http2Config,
     },
+    HttpAuto {
+        tls_enabled: bool,
+        streaming: StreamingMode,
+        http1_config: Http1Config,
+        http2_config: Http2Config,
+    },
     Grpc {
         tls_enabled: bool,
         streaming: StreamingMode,
@@ -84,8 +111,14 @@ impl TcpPipeline {
         match self {
             Self::Http1 { .. } => TcpProtocol::Http1,
             Self::Http2 { .. } => TcpProtocol::Http2,
+            Self::HttpAuto { .. } => TcpProtocol::HttpAuto,
             Self::Grpc { .. } => TcpProtocol::Grpc,
         }
+    }
+
+    #[inline]
+    pub const fn protocol_family(&self) -> ProtocolFamily {
+        self.protocol().family()
     }
 
     #[inline]
@@ -93,6 +126,7 @@ impl TcpPipeline {
         match self {
             Self::Http1 { tls_enabled, .. } => *tls_enabled,
             Self::Http2 { tls_enabled, .. } => *tls_enabled,
+            Self::HttpAuto { tls_enabled, .. } => *tls_enabled,
             Self::Grpc { tls_enabled, .. } => *tls_enabled,
         }
     }
@@ -102,6 +136,7 @@ impl TcpPipeline {
         match self {
             Self::Http1 { streaming, .. } => *streaming,
             Self::Http2 { streaming, .. } => *streaming,
+            Self::HttpAuto { streaming, .. } => *streaming,
             Self::Grpc { streaming, .. } => *streaming,
         }
     }
@@ -129,6 +164,11 @@ impl UdpPipeline {
             Self::Http3 { .. } => UdpProtocol::Http3,
             Self::Grpc { .. } => UdpProtocol::Grpc,
         }
+    }
+
+    #[inline]
+    pub const fn protocol_family(&self) -> ProtocolFamily {
+        self.protocol().family()
     }
 
     #[inline]
@@ -189,7 +229,7 @@ impl PipelineTable {
 
             if transport == "udp" {
                 match app.as_str() {
-                    "http3" => {
+                    "http" | "http3" => {
                         let config = resolve_http3_config(listener, tier);
                         udp.insert(
                             listener.id.clone(),
@@ -214,7 +254,7 @@ impl PipelineTable {
                     _ => {
                         return Err(EdgeError::InvalidConfig {
                             detail: format!(
-                                "listener '{}': unsupported UDP application protocol '{}'; must be 'http3' or 'grpc'",
+                                "listener '{}': unsupported UDP application protocol '{}'; must be 'http', 'http3', or 'grpc'",
                                 listener.id, app
                             ),
                         });
@@ -222,6 +262,30 @@ impl PipelineTable {
                 }
             } else {
                 match app.as_str() {
+                    "http" => {
+                        let http1_config = resolve_http1_config(listener, tier);
+                        let http2_config = resolve_http2_config(listener, tier);
+                        if is_tls {
+                            tcp.insert(
+                                listener.id.clone(),
+                                TcpPipeline::HttpAuto {
+                                    tls_enabled: true,
+                                    streaming,
+                                    http1_config,
+                                    http2_config,
+                                },
+                            );
+                        } else {
+                            tcp.insert(
+                                listener.id.clone(),
+                                TcpPipeline::Http1 {
+                                    tls_enabled: false,
+                                    streaming,
+                                    config: http1_config,
+                                },
+                            );
+                        }
+                    }
                     "http1" => {
                         let config = resolve_http1_config(listener, tier);
                         tcp.insert(
@@ -266,7 +330,7 @@ impl PipelineTable {
                     _ => {
                         return Err(EdgeError::InvalidConfig {
                             detail: format!(
-                                "listener '{}': unsupported application protocol '{}'; must be 'http1', 'http2', 'http3', or 'grpc'",
+                                "listener '{}': unsupported application protocol '{}'; must be 'http', 'http1', 'http2', 'http3', or 'grpc'",
                                 listener.id, app
                             ),
                         });
@@ -467,20 +531,24 @@ mod tests {
 
         let h1 = table.tcp_pipeline("h1-clear").unwrap();
         assert_eq!(h1.protocol(), TcpProtocol::Http1);
+        assert_eq!(h1.protocol_family(), ProtocolFamily::Http);
         assert!(!h1.tls_enabled());
         assert_eq!(h1.protocol().as_str(), "http1");
 
         let h2 = table.tcp_pipeline("h2-tls").unwrap();
         assert_eq!(h2.protocol(), TcpProtocol::Http2);
+        assert_eq!(h2.protocol_family(), ProtocolFamily::Http);
         assert!(h2.tls_enabled());
         assert_eq!(h2.protocol().as_str(), "http2");
 
         let grpc = table.tcp_pipeline("grpc-clear").unwrap();
         assert_eq!(grpc.protocol(), TcpProtocol::Grpc);
+        assert_eq!(grpc.protocol_family(), ProtocolFamily::Grpc);
         assert!(!grpc.tls_enabled());
 
         let h3 = table.udp_pipeline("h3-udp").unwrap();
         assert_eq!(h3.protocol(), UdpProtocol::Http3);
+        assert_eq!(h3.protocol_family(), ProtocolFamily::Http);
         assert!(!h3.tls_enabled());
 
         assert!(table.tcp_pipeline("raw-tcp").is_none());
@@ -488,14 +556,31 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_generic_http() {
+    fn test_http_family_dual_alpn() {
         let listeners = vec![
-            cfg("web-h1", "tcp", "http", Some("1.1"), false),
-            cfg("web-bad", "tcp", "http", None, false),
+            cfg("web-tls", "tcp", "http", None, true),
+            cfg("web-clear", "tcp", "http", None, false),
+            cfg("web-udp", "udp", "http", None, true),
         ];
 
-        // Generic "http" protocol is rejected — explicit protocol (http1, http2, etc.) is mandatory!
-        assert!(PipelineTable::build(&listeners).is_err());
+        let table = PipelineTable::build(&listeners).unwrap();
+
+        // TLS HTTP family listener compiles to HttpAuto with Dual-ALPN
+        let web_tls = table.tcp_pipeline("web-tls").unwrap();
+        assert_eq!(web_tls.protocol(), TcpProtocol::HttpAuto);
+        assert_eq!(web_tls.protocol_family(), ProtocolFamily::Http);
+        assert!(web_tls.tls_enabled());
+
+        // Cleartext HTTP family listener compiles to Http1
+        let web_clear = table.tcp_pipeline("web-clear").unwrap();
+        assert_eq!(web_clear.protocol(), TcpProtocol::Http1);
+        assert_eq!(web_clear.protocol_family(), ProtocolFamily::Http);
+        assert!(!web_clear.tls_enabled());
+
+        // UDP HTTP family listener compiles to Http3
+        let web_udp = table.udp_pipeline("web-udp").unwrap();
+        assert_eq!(web_udp.protocol(), UdpProtocol::Http3);
+        assert_eq!(web_udp.protocol_family(), ProtocolFamily::Http);
     }
 
     #[test]

@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use velda_connection_pool::{ConnectionKey, PoolManager, PoolableResource, ShardTable, SubPool};
+use velda_connection_pool::{
+    ConnectionKey, PoolConfig, PoolManager, PoolableResource, ShardTable, SubPool,
+};
 
 struct TrackingAllocator {
     alloc_count: AtomicU64,
@@ -233,10 +235,14 @@ fn verify_shard_table_zero_leak() {
 fn verify_acquire_release_lifecycle_zero_leak() {
     let addr: SocketAddr = "10.0.1.1:8080".parse().unwrap();
     let key = ConnectionKey::tcp(addr);
+    let test_config = PoolConfig {
+        max_idle_per_key: 32,
+        ..PoolConfig::default()
+    };
 
     // Warm up
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::new();
+        let pool = PoolManager::<ConnectionKey, HeapResource>::with_config(test_config);
         pool.release(&key, HeapResource::new(2048), true, false);
         let _ = pool.acquire(&key, Duration::from_secs(60));
     }
@@ -244,7 +250,7 @@ fn verify_acquire_release_lifecycle_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::new();
+        let pool = PoolManager::<ConnectionKey, HeapResource>::with_config(test_config);
 
         // Prime with 16 connections
         for _ in 0..16 {
@@ -284,10 +290,16 @@ fn verify_acquire_release_lifecycle_zero_leak() {
 fn verify_pool_lease_raii_drop_zero_leak() {
     let addr: SocketAddr = "10.0.2.1:8080".parse().unwrap();
     let key = ConnectionKey::tcp(addr);
+    let test_config = PoolConfig {
+        max_idle_per_key: 32,
+        ..PoolConfig::default()
+    };
 
     // Warm up
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::new());
+        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::with_config(
+            test_config,
+        ));
         pool.release(&key, HeapResource::new(1024), true, false);
         let _ = pool.acquire_lease(&key, Duration::from_secs(60));
     }
@@ -295,7 +307,9 @@ fn verify_pool_lease_raii_drop_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::new());
+        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::with_config(
+            test_config,
+        ));
 
         // Prime with 8 connections
         for _ in 0..8 {
