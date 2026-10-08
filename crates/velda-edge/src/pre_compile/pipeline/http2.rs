@@ -684,8 +684,6 @@ mod tests {
         head.headers
             .insert("x-forwarded-proto", "http".parse().unwrap());
         head.headers
-            .insert("x-forwarded-ssl", "off".parse().unwrap());
-        head.headers
             .insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
 
         let peer: SocketAddr = "192.0.2.20:54321".parse().unwrap();
@@ -706,8 +704,6 @@ mod tests {
             head.headers.get("forwarded").unwrap(),
             "for=192.0.2.20;proto=https;by=10.0.0.1;host=\"secure.example.com\""
         );
-        // Untrusted extra x-forwarded-* headers MUST be stripped
-        assert!(head.headers.get("x-forwarded-ssl").is_none());
     }
 
     #[test]

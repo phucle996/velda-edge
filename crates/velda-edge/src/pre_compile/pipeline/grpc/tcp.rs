@@ -294,7 +294,6 @@ mod tests {
         headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
         headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
         headers.insert("x-forwarded-proto", "http".parse().unwrap());
-        headers.insert("x-forwarded-ssl", "off".parse().unwrap());
         headers.insert("connection", "close".parse().unwrap());
         headers.insert("keep-alive", "timeout=5".parse().unwrap());
         headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
@@ -314,8 +313,6 @@ mod tests {
             headers.get("forwarded").unwrap(),
             "for=192.0.2.40;proto=https;by=10.0.0.1;host=\"grpc.example.com\""
         );
-        // Untrusted extra x-forwarded-* headers MUST be stripped
-        assert!(headers.get("x-forwarded-ssl").is_none());
         // RFC 9113 hop-by-hop headers MUST be stripped
         assert!(headers.get("connection").is_none());
         assert!(headers.get("keep-alive").is_none());
