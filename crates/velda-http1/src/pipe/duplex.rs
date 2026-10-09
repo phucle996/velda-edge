@@ -84,7 +84,7 @@ where
         Http1BodyFraming::ContentLength(total_len) => {
             let mut remaining = total_len;
             while remaining > 0 {
-                let to_read = remaining.min(16384);
+                let to_read = remaining.min(65536);
                 match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                     Some(chunk) => {
                         remaining = remaining.saturating_sub(chunk.len());

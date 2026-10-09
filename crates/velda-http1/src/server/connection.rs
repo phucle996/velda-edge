@@ -360,18 +360,21 @@ where
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
-        use crate::wire::parse_single_chunk;
+        use crate::wire::parse_single_chunk_offsets;
         use bytes::Buf;
 
         loop {
-            if let Some((wire_len, payload, is_terminal)) = parse_single_chunk(&self.read_buf)? {
-                let bytes = if is_terminal || payload.is_empty() {
-                    None
-                } else {
-                    Some(bytes::Bytes::copy_from_slice(payload))
-                };
-                self.read_buf.advance(wire_len);
-                return Ok(bytes);
+            if let Some((header_len, chunk_size, wire_len, is_terminal)) =
+                parse_single_chunk_offsets(&self.read_buf)?
+            {
+                if is_terminal {
+                    self.read_buf.advance(wire_len);
+                    return Ok(None);
+                }
+                self.read_buf.advance(header_len);
+                let chunk = self.read_buf.split_to(chunk_size).freeze();
+                self.read_buf.advance(2);
+                return Ok(Some(chunk));
             }
 
             let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);

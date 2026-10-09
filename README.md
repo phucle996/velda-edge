@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-51%2F51%20passing-brightgreen.svg)]()
 
-[Architecture Specification](ARCHITECTURE.md) • [Contributing Guide](CONTRIBUTING.md) • [Security Policy](SECURITY.md) • [Engineering Rules](AGENTS.md)
+[Architecture Specification](ARCHITECTURE.md) • [Benchmarks & Comparisons](COMPARE.md) • [Contributing Guide](CONTRIBUTING.md) • [Security Policy](SECURITY.md) • [Engineering Rules](AGENTS.md)
 
 </div>
 

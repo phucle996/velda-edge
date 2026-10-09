@@ -16,7 +16,6 @@ use crate::error::Http1Error;
 use crate::server::request::Http1BodyFraming;
 use crate::wire::{
     cold_parse_error, cold_smuggling_error, parse_ascii_digits, parse_chunked_body,
-    parse_single_chunk,
 };
 
 /// Fast length-partitioned header name matching for common HTTP/1.1 upstream response headers.
@@ -417,21 +416,21 @@ pub async fn read_next_chunk<IO>(
 where
     IO: AsyncRead + Unpin,
 {
+    use crate::wire::parse_single_chunk_offsets;
+    use bytes::Buf;
+
     loop {
-        if let Some((consumed, payload, is_terminal)) = parse_single_chunk(read_buf.as_ref())? {
-            let chunk_data = if !payload.is_empty() {
-                Some(bytes::Bytes::copy_from_slice(payload))
-            } else {
-                None
-            };
-            read_buf.advance(consumed);
+        if let Some((header_len, chunk_size, wire_len, is_terminal)) =
+            parse_single_chunk_offsets(read_buf.as_ref())?
+        {
             if is_terminal {
+                read_buf.advance(wire_len);
                 return Ok(None);
             }
-            if let Some(chunk) = chunk_data {
-                return Ok(Some(chunk));
-            }
-            continue;
+            read_buf.advance(header_len);
+            let chunk = read_buf.split_to(chunk_size).freeze();
+            read_buf.advance(2);
+            return Ok(Some(chunk));
         }
 
         let n = stream.read_buf(read_buf).await?;

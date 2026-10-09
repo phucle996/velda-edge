@@ -225,16 +225,11 @@ pub fn parse_chunked_body(
 /// Parsed single progressive chunk item: `(total_wire_len, chunk_payload, is_terminal)`.
 pub type ParsedChunk<'a> = (usize, &'a [u8], bool);
 
-/// Parses a single progressive chunk from an immutable byte slice.
-///
-/// Returns:
-/// - `Ok(Some((total_wire_len, chunk_payload, is_terminal)))`:
-///   A complete chunk was parsed. `total_wire_len` is the number of wire bytes
-///   consumed (including chunk-size line, CRLF, payload, and trailing CRLF).
-///   If `is_terminal` is true (chunk size == 0), this is the terminal chunk.
-/// - `Ok(None)`: Not enough bytes in `data` to form a complete chunk.
-/// - `Err(Http1Error)`: Invalid chunked framing or encoding error.
-pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Error> {
+/// Parsed single progressive chunk offsets: `(header_len, chunk_size, total_wire_len, is_terminal)`.
+#[inline]
+pub fn parse_single_chunk_offsets(
+    data: &[u8],
+) -> Result<Option<(usize, usize, usize, bool)>, Http1Error> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -257,10 +252,10 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
     if chunk_size == 0 {
         let trailer_data = &data[header_len..];
         if trailer_data.starts_with(b"\r\n") {
-            return Ok(Some((header_len + 2, &[], true)));
+            return Ok(Some((header_len, 0, header_len + 2, true)));
         }
         if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
-            return Ok(Some((header_len + pos + 4, &[], true)));
+            return Ok(Some((header_len, 0, header_len + pos + 4, true)));
         }
         if trailer_data.len() > 8192 {
             return Err(cold_chunked_error(
@@ -281,8 +276,30 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
         ));
     }
 
-    let payload = &data[header_len..header_len + chunk_size];
-    Ok(Some((needed, payload, false)))
+    Ok(Some((header_len, chunk_size, needed, false)))
+}
+
+/// Parses a single progressive chunk from an immutable byte slice.
+///
+/// Returns:
+/// - `Ok(Some((total_wire_len, chunk_payload, is_terminal)))`:
+///   A complete chunk was parsed. `total_wire_len` is the number of wire bytes
+///   consumed (including chunk-size line, CRLF, payload, and trailing CRLF).
+///   If `is_terminal` is true (chunk size == 0), this is the terminal chunk.
+/// - `Ok(None)`: Not enough bytes in `data` to form a complete chunk.
+/// - `Err(Http1Error)`: Invalid chunked framing or encoding error.
+pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Error> {
+    match parse_single_chunk_offsets(data)? {
+        Some((header_len, chunk_size, needed, is_terminal)) => {
+            if is_terminal {
+                Ok(Some((needed, &[], true)))
+            } else {
+                let payload = &data[header_len..header_len + chunk_size];
+                Ok(Some((needed, payload, false)))
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 /// Encodes HTTP headers into the destination buffer with a single capacity reservation.
@@ -344,7 +361,6 @@ where
     stream.write_all(&header[..header_len]).await?;
     stream.write_all(chunk).await?;
     stream.write_all(b"\r\n").await?;
-    stream.flush().await?;
     Ok(())
 }
 
