@@ -574,13 +574,14 @@ async fn serve_http2_to_http1_bridge(
     };
 
     let cfg = velda_http1::config::Http1Config::auto();
+    let mut write_buf = bytes::BytesMut::with_capacity(cfg.upstream_write_base);
     let send_res = velda_http1::client::send_request_parts(
         &head.method,
         &head.uri,
         &head.headers,
         &body,
         &mut *lease,
-        &cfg,
+        &mut write_buf,
     )
     .await;
 

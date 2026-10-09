@@ -5,7 +5,6 @@
 //! - Upstream streams response body progressively using chunked transfer encoding.
 //! - Cleanly propagates client disconnects to cancel active upstream stream.
 
-use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use velda_core::Body;
@@ -33,8 +32,8 @@ where
 {
     sanitize_headers(&mut head.headers);
 
-    // 1. Send chunked request head upstream
-    send_request_head_chunked(head, upstream, config).await?;
+    // 1. Send chunked request head upstream reusing scratch buffer
+    send_request_head_chunked(head, upstream, &mut conn.upstream_write_buf).await?;
 
     // 2. Pump request body chunks from client to upstream
     while let Some(chunk) = conn.read_next_chunk().await? {
@@ -42,9 +41,9 @@ where
     }
     send_chunked_end(upstream).await?;
 
-    // 3. Read upstream response head
-    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
-    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
+    // 3. Read upstream response head reusing connection read buffer
+    let (mut resp_head, resp_framing) =
+        read_response_head(upstream, &mut conn.upstream_read_buf, config).await?;
     sanitize_headers(&mut resp_head.headers);
 
     // 4. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
@@ -71,7 +70,7 @@ where
     let mut client_disconnected = false;
     match resp_framing {
         Http1BodyFraming::Chunked => {
-            while let Some(chunk) = read_next_chunk(upstream, &mut read_buf).await? {
+            while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
                 if let Err(e) = conn.send_chunk(&chunk).await {
                     tracing::debug!(
                         error = %e,
@@ -86,7 +85,7 @@ where
             let mut remaining = total_len;
             while remaining > 0 {
                 let to_read = remaining.min(16384);
-                match read_chunk_sized(upstream, &mut read_buf, to_read).await? {
+                match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                     Some(chunk) => {
                         remaining = remaining.saturating_sub(chunk.len());
                         if let Err(e) = conn.send_chunk(&chunk).await {

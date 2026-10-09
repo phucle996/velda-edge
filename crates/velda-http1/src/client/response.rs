@@ -14,11 +14,10 @@ pub use velda_core::{Body, L7Response};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::request::Http1BodyFraming;
-pub use crate::wire::{
-    ParsedChunk, find_crlf, parse_ascii_digits, parse_chunked_body, parse_hex_usize,
+use crate::wire::{
+    cold_parse_error, cold_smuggling_error, parse_ascii_digits, parse_chunked_body,
     parse_single_chunk,
 };
-use crate::wire::{cold_parse_error, cold_smuggling_error};
 
 /// Fast length-partitioned header name matching for common HTTP/1.1 upstream response headers.
 #[inline]
@@ -70,24 +69,6 @@ impl Http1ClientResponseHead {
             version,
             headers,
         }
-    }
-
-    /// Fast-path lookup for content-length.
-    #[inline]
-    pub fn content_length(&self) -> Option<usize> {
-        self.headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|val| val.to_str().ok())
-            .and_then(|s| s.parse().ok())
-    }
-
-    /// Returns `true` if response status indicates connection close or `Connection: close` is present.
-    #[inline]
-    pub fn is_close(&self) -> bool {
-        self.headers
-            .get(http::header::CONNECTION)
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|s| s.eq_ignore_ascii_case("close"))
     }
 }
 

@@ -35,12 +35,12 @@ where
 {
     sanitize_headers(&mut req.headers);
 
-    // 1. Send complete request to upstream backend
-    send_request(req, upstream, config).await?;
+    // 1. Send complete request to upstream backend reusing scratch buffer
+    send_request(req, upstream, &mut conn.upstream_write_buf).await?;
 
-    // 3. Read upstream response head
-    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
-    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
+    // 3. Read upstream response head reusing connection read buffer
+    let (mut resp_head, resp_framing) =
+        read_response_head(upstream, &mut conn.upstream_read_buf, config).await?;
     sanitize_headers(&mut resp_head.headers);
 
     // 4. Validate that upstream does not violate buffered mode invariant
@@ -76,19 +76,25 @@ where
                 if len > config.max_body_size {
                     return Err(Http1Error::PayloadTooLarge(len));
                 }
-                let mut bytes = BytesMut::with_capacity(len);
-                while bytes.len() < len {
-                    let needed = len - bytes.len();
-                    match read_chunk_sized(upstream, &mut read_buf, needed).await? {
-                        Some(c) => bytes.extend_from_slice(&c),
-                        None => {
-                            return Err(Http1Error::Parse(
-                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                            ));
+                if conn.upstream_read_buf.len() >= len {
+                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
+                } else {
+                    let mut bytes = BytesMut::with_capacity(len);
+                    while bytes.len() < len {
+                        let needed = len - bytes.len();
+                        match read_chunk_sized(upstream, &mut conn.upstream_read_buf, needed)
+                            .await?
+                        {
+                            Some(c) => bytes.extend_from_slice(&c),
+                            None => {
+                                return Err(Http1Error::Parse(
+                                    "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                                ));
+                            }
                         }
                     }
+                    Body::Bytes(bytes.freeze())
                 }
-                Body::Bytes(bytes.freeze())
             }
             Http1BodyFraming::Chunked => unreachable!(),
         }

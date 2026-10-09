@@ -14,7 +14,6 @@ use crate::client::response::{Http1ClientResponse, decode_response};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::request::{Http1ServerRequest, Http1ServerRequestHead};
-pub use crate::wire::encode_headers;
 
 /// HTTP/1.1 client request head metadata.
 #[derive(Debug, Clone)]
@@ -148,22 +147,6 @@ impl Http1ClientRequest {
             dst.extend_from_slice(bytes);
         }
     }
-
-    /// Serializes and writes this request directly to upstream async stream.
-    pub async fn send_to<IO>(&self, stream: &mut IO, config: &Http1Config) -> Result<(), Http1Error>
-    where
-        IO: AsyncRead + AsyncWrite + Unpin,
-    {
-        send_request_parts(
-            &self.method,
-            &self.uri,
-            &self.headers,
-            &self.body,
-            stream,
-            config,
-        )
-        .await
-    }
 }
 
 /// Encodes an HTTP/1.1 request line (method, path and query, version).
@@ -230,14 +213,14 @@ pub fn encode_request(req: &Http1ServerRequest, dst: &mut BytesMut) {
     }
 }
 
-/// Serializes and writes request parts directly to upstream stream.
+/// Serializes and writes request parts directly to upstream stream using provided write buffer.
 pub async fn send_request_parts<IO>(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &Body,
     stream: &mut IO,
-    config: &Http1Config,
+    write_buf: &mut BytesMut,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -246,31 +229,29 @@ where
         Body::Empty => None,
         Body::Bytes(b) => Some(b.len()),
     };
-    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
-    encode_request_head(method, uri, headers, body_len, &mut write_buf);
+    write_buf.clear();
+    encode_request_head(method, uri, headers, body_len, write_buf);
 
     if let Body::Bytes(bytes) = body
         && bytes.len() <= 16384
     {
         write_buf.extend_from_slice(bytes);
-        stream.write_all(&write_buf).await?;
-        stream.flush().await?;
+        stream.write_all(write_buf).await?;
         return Ok(());
     }
 
-    stream.write_all(&write_buf).await?;
+    stream.write_all(write_buf).await?;
     if let Body::Bytes(bytes) = body {
         stream.write_all(bytes).await?;
     }
-    stream.flush().await?;
     Ok(())
 }
 
-/// Serializes and writes an entire HTTP/1.1 request to the upstream stream.
+/// Serializes and writes an entire HTTP/1.1 request to the upstream stream using provided write buffer.
 pub async fn send_request<IO>(
     req: &Http1ServerRequest,
     stream: &mut IO,
-    config: &Http1Config,
+    write_buf: &mut BytesMut,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -281,22 +262,22 @@ where
         &req.headers,
         &req.body,
         stream,
-        config,
+        write_buf,
     )
     .await
 }
 
-/// Serializes and writes an HTTP/1.1 request head configured for chunked streaming to upstream.
+/// Serializes and writes an HTTP/1.1 request head configured for chunked streaming to upstream using provided write buffer.
 pub async fn send_request_head_chunked<IO>(
     head: &Http1ServerRequestHead,
     stream: &mut IO,
-    config: &Http1Config,
+    write_buf: &mut BytesMut,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
-    encode_request_line(&head.method, &head.uri, &mut write_buf);
+    write_buf.clear();
+    encode_request_line(&head.method, &head.uri, write_buf);
 
     let mut has_te = false;
     for (name, val) in &head.headers {
@@ -316,8 +297,7 @@ where
     }
     write_buf.put_slice(b"\r\n");
 
-    stream.write_all(&write_buf).await?;
-    stream.flush().await?;
+    stream.write_all(write_buf).await?;
     Ok(())
 }
 
@@ -330,7 +310,8 @@ pub async fn forward_request<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    send_request(req, stream, config).await?;
+    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
+    send_request(req, stream, &mut write_buf).await?;
 
     let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
 

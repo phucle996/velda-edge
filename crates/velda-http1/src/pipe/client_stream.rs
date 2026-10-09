@@ -32,8 +32,8 @@ where
 {
     sanitize_headers(&mut head.headers);
 
-    // 1. Send chunked request head upstream
-    send_request_head_chunked(head, upstream, config).await?;
+    // 1. Send chunked request head upstream reusing scratch buffer
+    send_request_head_chunked(head, upstream, &mut conn.upstream_write_buf).await?;
 
     // 2. Pump request body chunks from client to upstream
     while let Some(chunk) = conn.read_next_chunk().await? {
@@ -41,9 +41,9 @@ where
     }
     send_chunked_end(upstream).await?;
 
-    // 3. Read upstream response head
-    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
-    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
+    // 3. Read upstream response head reusing connection read buffer
+    let (mut resp_head, resp_framing) =
+        read_response_head(upstream, &mut conn.upstream_read_buf, config).await?;
     sanitize_headers(&mut resp_head.headers);
 
     // 4. Validate response framing (client streaming expects non-streaming response)
@@ -69,15 +69,25 @@ where
                 if len > config.max_body_size {
                     return Err(Http1Error::PayloadTooLarge(len));
                 }
-                let mut bytes = BytesMut::with_capacity(len);
-                while bytes.len() < len {
-                    let needed = len - bytes.len();
-                    match read_chunk_sized(upstream, &mut read_buf, needed).await? {
-                        Some(c) => bytes.extend_from_slice(&c),
-                        None => break,
+                if conn.upstream_read_buf.len() >= len {
+                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
+                } else {
+                    let mut bytes = BytesMut::with_capacity(len);
+                    while bytes.len() < len {
+                        let needed = len - bytes.len();
+                        match read_chunk_sized(upstream, &mut conn.upstream_read_buf, needed)
+                            .await?
+                        {
+                            Some(c) => bytes.extend_from_slice(&c),
+                            None => {
+                                return Err(Http1Error::Parse(
+                                    "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                                ));
+                            }
+                        }
                     }
+                    Body::Bytes(bytes.freeze())
                 }
-                Body::Bytes(bytes.freeze())
             }
             Http1BodyFraming::Chunked => unreachable!(),
         }

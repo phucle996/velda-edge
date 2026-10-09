@@ -13,18 +13,21 @@ use super::request::{
     decode_request_head,
 };
 use super::response::{
-    Http1ServerResponse, Http1ServerResponseHead, send_chunk, send_chunked_end, send_response,
-    send_response_head_chunked, send_response_parts,
+    Http1ServerResponse, Http1ServerResponseHead, send_response, send_response_head_chunked,
+    send_response_parts,
 };
 use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
+use crate::wire::{send_chunk, send_chunked_end};
 
 /// An active HTTP/1.1 connection over an asynchronous downstream stream.
 pub struct Http1ServerConnection<IO> {
     stream: IO,
     read_buf: BytesMut,
     write_buf: BytesMut,
+    pub upstream_read_buf: BytesMut,
+    pub upstream_write_buf: BytesMut,
     close_requested: bool,
     config: Http1Config,
 }
@@ -39,6 +42,8 @@ where
             stream,
             read_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
             write_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
+            upstream_read_buf: BytesMut::with_capacity(config.upstream_read_capacity),
+            upstream_write_buf: BytesMut::with_capacity(config.upstream_write_base),
             close_requested: false,
             config,
         }
@@ -59,6 +64,17 @@ where
         }
         if self.write_buf.is_empty() && self.write_buf.capacity() > self.config.shrink_threshold {
             self.write_buf = BytesMut::with_capacity(self.config.initial_buffer_capacity);
+        }
+        if self.upstream_read_buf.is_empty()
+            && (self.upstream_read_buf.capacity() < self.config.upstream_read_capacity
+                || self.upstream_read_buf.capacity() > self.config.shrink_threshold)
+        {
+            self.upstream_read_buf = BytesMut::with_capacity(self.config.upstream_read_capacity);
+        }
+        if self.upstream_write_buf.is_empty()
+            && self.upstream_write_buf.capacity() > self.config.shrink_threshold
+        {
+            self.upstream_write_buf = BytesMut::with_capacity(self.config.upstream_write_base);
         }
     }
 
@@ -344,7 +360,7 @@ where
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
-        use super::request::parse_single_chunk;
+        use crate::wire::parse_single_chunk;
         use bytes::Buf;
 
         loop {

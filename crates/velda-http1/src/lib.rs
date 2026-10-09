@@ -38,7 +38,7 @@ pub use server::request::{
 };
 pub use server::response::{
     Http1ServerResponse, Http1ServerResponseHead, encode_response, encode_response_head,
-    encode_response_head_ext, encode_status_line, send_response, send_response_head_chunked,
+    encode_response_head_chunked, encode_status_line, send_response, send_response_head_chunked,
     send_response_parts,
 };
 

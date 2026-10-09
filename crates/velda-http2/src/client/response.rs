@@ -72,36 +72,6 @@ impl Http2ClientResponse {
         self
     }
 
-    /// Returns the HTTP status code.
-    #[inline]
-    pub fn status(&self) -> StatusCode {
-        self.head.status
-    }
-
-    /// Returns a reference to the response headers.
-    #[inline]
-    pub fn headers(&self) -> &HeaderMap {
-        &self.head.headers
-    }
-
-    /// Returns a mutable reference to the response headers.
-    #[inline]
-    pub fn headers_mut(&mut self) -> &mut HeaderMap {
-        &mut self.head.headers
-    }
-
-    /// Returns a reference to the response body.
-    #[inline]
-    pub fn body(&self) -> &Body {
-        &self.body
-    }
-
-    /// Returns whether this response has a non-empty body.
-    #[inline]
-    pub fn has_body(&self) -> bool {
-        !self.body.is_empty()
-    }
-
     /// Deconstructs the response into its constituent head and body parts.
     #[inline]
     pub fn into_parts(self) -> (Http2ClientResponseHead, Body) {

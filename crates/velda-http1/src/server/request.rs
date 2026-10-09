@@ -13,11 +13,7 @@ use velda_core::{Body, L7Request};
 
 use crate::config::Http1Config;
 use crate::error::Http1Error;
-pub use crate::wire::{
-    ParsedChunk, find_crlf, parse_ascii_digits, parse_chunked_body, parse_hex_usize,
-    parse_single_chunk,
-};
-use crate::wire::{cold_parse_error, cold_smuggling_error};
+use crate::wire::{cold_parse_error, cold_smuggling_error, parse_ascii_digits, parse_chunked_body};
 
 /// Message body framing mechanism for HTTP/1.1 request payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,27 +51,6 @@ impl Http1ServerRequestHead {
         }
     }
 
-    /// Fast-path lookup for the `Host` header.
-    #[inline]
-    pub fn host(&self) -> Option<&HeaderValue> {
-        self.headers.get(http::header::HOST)
-    }
-
-    /// Fast-path lookup for the `Host` header as string.
-    #[inline]
-    pub fn host_str(&self) -> Option<&str> {
-        self.headers
-            .get(http::header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| self.uri.host())
-    }
-
-    /// Fast-path lookup for request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
-
     /// Checks whether downstream specified `Expect: 100-continue` (RFC 9110 Section 10.1.1).
     #[inline]
     pub fn is_expect_100_continue(&self) -> bool {
@@ -83,12 +58,6 @@ impl Http1ServerRequestHead {
             .get(http::header::EXPECT)
             .and_then(|val| val.to_str().ok())
             .is_some_and(|s| s.eq_ignore_ascii_case("100-continue"))
-    }
-
-    /// Normalizes and secures the HTTP/1.1 request URI path in-place (RFC 3986 & RFC 9112).
-    #[inline]
-    pub fn normalize_path(&mut self) -> Result<(), Http1Error> {
-        super::path::normalize_path(&mut self.uri)
     }
 
     /// Enriches HTTP/1.1 request headers with RFC 7239 and standard proxy forwarding metadata.
@@ -182,11 +151,6 @@ impl Http1ServerRequest {
             headers: req.headers,
             body: req.body,
         }
-    }
-
-    /// Decodes an entire HTTP/1.1 request from the downstream read buffer.
-    pub fn decode(buf: &mut BytesMut, config: &Http1Config) -> Result<Option<Self>, Http1Error> {
-        decode_request(buf, config)
     }
 }
 

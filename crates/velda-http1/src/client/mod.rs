@@ -17,12 +17,11 @@ pub use connector::{
 };
 pub use header::{extract_sni, resolve_sni, sanitize_headers, strip_port};
 pub use request::{
-    Http1ClientRequest, Http1ClientRequestHead, encode_headers, encode_request,
-    encode_request_head, encode_request_line, forward_request, send_request,
-    send_request_head_chunked, send_request_parts,
+    Http1ClientRequest, Http1ClientRequestHead, encode_request, encode_request_head,
+    encode_request_line, forward_request, send_request, send_request_head_chunked,
+    send_request_parts,
 };
 pub use response::{
-    Http1ClientResponse, Http1ClientResponseHead, ParsedChunk, decode_response,
-    decode_response_head, find_crlf, parse_ascii_digits, parse_chunked_body, parse_hex_usize,
-    parse_response_head, parse_single_chunk, read_chunk_sized, read_next_chunk, read_response_head,
+    Http1ClientResponse, Http1ClientResponseHead, decode_response, decode_response_head,
+    parse_response_head, read_chunk_sized, read_next_chunk, read_response_head,
 };

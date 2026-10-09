@@ -5,7 +5,6 @@
 //! - Upstream response chunks are pumped downstream immediately with zero intermediate buffering.
 //! - Downstream client disconnect cleanly aborts the upstream stream to stop wasting backend resources.
 
-use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use velda_core::Body;
@@ -35,12 +34,12 @@ where
 {
     sanitize_headers(&mut req.headers);
 
-    // 1. Send complete request to upstream backend
-    send_request(req, upstream, config).await?;
+    // 1. Send complete request to upstream backend reusing scratch buffer
+    send_request(req, upstream, &mut conn.upstream_write_buf).await?;
 
-    // 3. Read upstream response head
-    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
-    let (mut resp_head, resp_framing) = read_response_head(upstream, &mut read_buf, config).await?;
+    // 3. Read upstream response head reusing connection read buffer
+    let (mut resp_head, resp_framing) =
+        read_response_head(upstream, &mut conn.upstream_read_buf, config).await?;
     sanitize_headers(&mut resp_head.headers);
 
     // 4. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
@@ -75,7 +74,9 @@ where
         let mut client_disconnected = false;
         match resp_framing {
             Http1BodyFraming::Chunked => {
-                while let Some(chunk) = read_next_chunk(upstream, &mut read_buf).await? {
+                while let Some(chunk) =
+                    read_next_chunk(upstream, &mut conn.upstream_read_buf).await?
+                {
                     if let Err(e) = conn.send_raw_bytes(&chunk).await {
                         tracing::debug!(
                             error = %e,
@@ -90,7 +91,7 @@ where
                 let mut remaining = total_len;
                 while remaining > 0 {
                     let to_read = remaining.min(16384);
-                    match read_chunk_sized(upstream, &mut read_buf, to_read).await? {
+                    match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                         Some(chunk) => {
                             remaining = remaining.saturating_sub(chunk.len());
                             if let Err(e) = conn.send_raw_bytes(&chunk).await {
@@ -126,7 +127,7 @@ where
     let mut client_disconnected = false;
     match resp_framing {
         Http1BodyFraming::Chunked => {
-            while let Some(chunk) = read_next_chunk(upstream, &mut read_buf).await? {
+            while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
                 if let Err(e) = conn.send_chunk(&chunk).await {
                     tracing::debug!(
                         error = %e,
@@ -141,7 +142,7 @@ where
             let mut remaining = total_len;
             while remaining > 0 {
                 let to_read = remaining.min(16384);
-                match read_chunk_sized(upstream, &mut read_buf, to_read).await? {
+                match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                     Some(chunk) => {
                         remaining = remaining.saturating_sub(chunk.len());
                         if let Err(e) = conn.send_chunk(&chunk).await {

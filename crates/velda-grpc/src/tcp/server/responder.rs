@@ -84,33 +84,6 @@ impl GrpcServerResponse {
         Self::new(status, HeaderMap::new(), trailers, velda_core::Body::Empty)
     }
 
-    /// Sends this server response through the provided [`GrpcResponder`].
-    pub fn send_to(&self, responder: &mut GrpcResponder) -> Result<(), GrpcError> {
-        match &self.body {
-            velda_core::Body::Bytes(b) => responder.send_unary_response(
-                self.head.grpc_status,
-                Some(b),
-                Some(self.head.headers.clone()),
-            ),
-            _ => {
-                if self.head.grpc_status == GrpcStatus::Ok {
-                    responder.send_unary_response(
-                        self.head.grpc_status,
-                        None,
-                        Some(self.head.headers.clone()),
-                    )
-                } else {
-                    let msg = self
-                        .head
-                        .trailers
-                        .get("grpc-message")
-                        .and_then(|v| v.to_str().ok());
-                    responder.send_trailers_only(self.head.grpc_status, msg)
-                }
-            }
-        }
-    }
-
     /// Converts into canonical [`velda_core::L7Response`].
     pub fn into_l7_response(self) -> velda_core::L7Response {
         let mut headers = self.head.headers;

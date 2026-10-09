@@ -162,30 +162,6 @@ impl Http2ServerRequestHead {
         }
     }
 
-    /// Returns the request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
-
-    /// Returns the target host from the `Host` header or URI authority component.
-    ///
-    /// In HTTP/2, the `:authority` pseudo-header is extracted by `h2` into `Uri::authority()`
-    /// and is not present in `HeaderMap`. This method checks both sources.
-    #[inline]
-    pub fn host(&self) -> Option<&str> {
-        self.headers
-            .get(http::header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| self.uri.authority().map(|a| a.as_str()))
-    }
-
-    /// Normalizes and secures the HTTP/2 request URI path in-place (RFC 3986 & RFC 9113).
-    #[inline]
-    pub fn normalize_path(&mut self) -> Result<(), crate::error::Http2Error> {
-        super::path::normalize_path(&mut self.uri)
-    }
-
     /// Enriches HTTP/2 request headers with RFC 7239 and standard proxy forwarding metadata.
     #[inline]
     pub fn enrich_forwarded_headers(

@@ -11,7 +11,6 @@ use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Response, StatusCode, Version};
 use velda_core::{Body, L7Response};
 
-use crate::client::response::Http2ClientResponse;
 use crate::error::Http2Error;
 
 #[cold]
@@ -100,11 +99,6 @@ impl Http2ServerResponse {
         self.headers.insert(name, val);
         self
     }
-
-    /// Sends this response through the given responder.
-    pub fn send_to(&self, responder: &mut Http2Responder) -> Result<(), Http2Error> {
-        responder.send_parts(self.status, &self.headers, &self.body)
-    }
 }
 
 /// Responder handle for an active HTTP/2 multiplexed stream.
@@ -159,14 +153,6 @@ impl Http2Responder {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
-    /// Sends a downstream server response.
-    pub fn send_server_response(
-        &mut self,
-        response: &Http2ServerResponse,
-    ) -> Result<(), Http2Error> {
-        self.send_parts(response.status, &response.headers, &response.body)
-    }
-
     /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.
     pub fn send_response_and_cancel_upload(
         &mut self,
@@ -193,14 +179,6 @@ impl Http2Responder {
     #[inline]
     pub fn send_reset(&mut self, reason: h2::Reason) {
         self.respond.send_reset(reason);
-    }
-
-    /// Sends an upstream response using the protocol-owned [`Http2ClientResponse`] type.
-    pub fn send_client_response(
-        &mut self,
-        response: &Http2ClientResponse,
-    ) -> Result<(), Http2Error> {
-        self.send_parts(response.head.status, &response.head.headers, &response.body)
     }
 
     /// Sends an HTTP/2 response given discrete parts.

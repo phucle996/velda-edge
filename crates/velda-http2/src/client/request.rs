@@ -2,9 +2,6 @@
 //!
 //! Encodes outgoing HTTP/2 requests towards upstream backends across multiplexed streams.
 
-use bytes::Bytes;
-use h2::SendStream;
-use h2::client::{ResponseFuture, SendRequest};
 use http::{HeaderMap, Method, Request, Uri, Version};
 use velda_core::{Body, L7Request};
 
@@ -78,25 +75,6 @@ impl Http2ClientRequest {
         builder
             .body(())
             .map_err(|e| Http2Error::Parse(e.to_string()))
-    }
-
-    /// Submits this request to the upstream client connection over a multiplexed stream.
-    pub fn send_to(
-        &self,
-        client: &mut SendRequest<Bytes>,
-    ) -> Result<(ResponseFuture, SendStream<Bytes>), Http2Error> {
-        let has_body = !self.body.is_empty();
-        let http_req = self.to_http_request()?;
-        let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
-
-        if has_body
-            && let Body::Bytes(b) = &self.body
-            && !b.is_empty()
-        {
-            send_stream.send_data(b.clone(), true)?;
-        }
-
-        Ok((response_fut, send_stream))
     }
 
     /// Converts into canonical [`L7Request`].

@@ -98,11 +98,13 @@ async fn test_http2_multiplexing_concurrent_streams() {
     for _ in 0..4 {
         let (h2_req, mut responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
         tasks.spawn(async move {
-            let path = h2_req.head.path().to_string();
+            let path = h2_req.head.uri.path().to_string();
             let id = path.trim_start_matches("/stream/");
             let resp_bytes = format!("response-{id}").into_bytes();
             let resp = Http2ClientResponse::from_bytes(StatusCode::OK, resp_bytes);
-            responder.send_client_response(&resp).unwrap();
+            responder
+                .send_parts(resp.head.status, &resp.head.headers, &resp.body)
+                .unwrap();
         });
     }
 
@@ -322,7 +324,9 @@ async fn test_http2_client_streaming_upload() {
             );
 
             let resp = Http2ClientResponse::empty(StatusCode::CREATED);
-            responder.send_client_response(&resp).unwrap();
+            responder
+                .send_parts(resp.head.status, &resp.head.headers, &resp.body)
+                .unwrap();
         });
 
         // Drive the connection while chunks arrive

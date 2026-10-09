@@ -3,8 +3,6 @@ use std::net::SocketAddr;
 use http::{HeaderMap, Uri};
 use velda_core::L7Request;
 
-use crate::error::Http3Error;
-
 /// Downstream HTTP/3 request head metadata.
 #[derive(Debug, Clone)]
 pub struct Http3ServerRequestHead {
@@ -28,24 +26,6 @@ impl Http3ServerRequestHead {
             version: http::Version::HTTP_3,
             headers,
         }
-    }
-
-    /// Fast-path lookup for request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
-
-    /// Fast-path lookup for target host / authority.
-    #[inline]
-    pub fn host(&self) -> Option<&str> {
-        super::header::extract_host(&self.headers, &self.uri)
-    }
-
-    /// Normalizes path in-place.
-    #[inline]
-    pub fn normalize_path(&mut self) -> Result<(), Http3Error> {
-        super::path::normalize_path(&mut self.uri)
     }
 
     /// Enriches proxy forwarding headers.

@@ -289,7 +289,7 @@ async fn test_phased_server_connection_head_and_body() {
     // Phase 1: next_request_head
     let (head, framing) = conn.next_request_head().await.unwrap().unwrap();
     assert_eq!(head.method, Method::POST);
-    assert_eq!(head.path(), "/api/v1/data");
+    assert_eq!(head.uri.path(), "/api/v1/data");
     assert_eq!(framing, Http1BodyFraming::ContentLength(5));
 
     // Phase 2: read_body
@@ -315,7 +315,7 @@ fn test_phased_decode_request_head_and_body() {
         .unwrap()
         .unwrap();
     assert_eq!(head.method, Method::GET);
-    assert_eq!(head.path(), "/search");
+    assert_eq!(head.uri.path(), "/search");
     assert_eq!(framing, Http1BodyFraming::ContentLength(4));
 
     // Buffer now contains only body
@@ -542,10 +542,10 @@ fn test_decode_response_skips_1xx_informational() {
 }
 
 #[test]
-fn test_encode_response_head_ext_force_close() {
+fn test_encode_response_head_force_close() {
     let headers = HeaderMap::new();
     let mut dst = BytesMut::new();
-    velda_http1::encode_response_head_ext(
+    velda_http1::encode_response_head(
         Version::HTTP_11,
         StatusCode::OK,
         &headers,

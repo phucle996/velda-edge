@@ -26,12 +26,6 @@ impl GrpcServerRequestHead {
             headers,
         }
     }
-
-    /// Fast-path lookup for request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
 }
 
 /// Downstream protocol-owned gRPC server request over TCP.
