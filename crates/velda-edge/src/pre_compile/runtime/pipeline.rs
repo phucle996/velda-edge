@@ -376,6 +376,9 @@ fn resolve_http1_config(listener: &ListenerConfig, tier: MemoryTier) -> Http1Con
         if let Some(v) = h1.header_read_timeout_ms {
             config.header_read_timeout_ms = v;
         }
+        if let Some(v) = h1.client_body_buffer_size {
+            config.client_body_buffer_size = v;
+        }
     }
     config
 }

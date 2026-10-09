@@ -345,9 +345,15 @@ async fn test_progressive_chunked_server_streaming() {
             Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
         conn.send_response_head_chunked(&resp_head).await.unwrap();
 
-        velda_http1::send_chunk(&mut conn.stream, b"data: first token\n\n").await.unwrap();
-        velda_http1::send_chunk(&mut conn.stream, b"data: second token\n\n").await.unwrap();
-        velda_http1::send_chunked_end(&mut conn.stream).await.unwrap();
+        velda_http1::send_chunk(&mut conn.stream, b"data: first token\n\n")
+            .await
+            .unwrap();
+        velda_http1::send_chunk(&mut conn.stream, b"data: second token\n\n")
+            .await
+            .unwrap();
+        velda_http1::send_chunked_end(&mut conn.stream)
+            .await
+            .unwrap();
     });
 
     client
@@ -648,5 +654,144 @@ async fn test_pipe_buffered_rejects_premature_upstream_eof() {
     assert!(
         res.is_err(),
         "pipe_buffered must return error on premature upstream EOF"
+    );
+}
+
+#[tokio::test]
+async fn test_send_coalesced_chunks_single_wire_block() {
+    use tokio::io::duplex;
+    use velda_http1::send_coalesced_chunks;
+
+    let (mut reader, mut writer) = duplex(4096);
+    let chunks = vec![
+        bytes::Bytes::from_static(b"hello "),
+        bytes::Bytes::from_static(b"world "),
+        bytes::Bytes::from_static(b"!"),
+    ];
+    // Total len = 6 + 6 + 1 = 13 (0xD)
+
+    send_coalesced_chunks(&mut writer, &chunks).await.unwrap();
+
+    let mut buf = [0u8; 64];
+    let n = reader.read(&mut buf).await.unwrap();
+    let wire_output = std::str::from_utf8(&buf[..n]).unwrap();
+
+    assert_eq!(wire_output, "D\r\nhello world !\r\n");
+}
+
+#[tokio::test]
+async fn test_pipe_client_stream_with_coalescing() {
+    use tokio::io::duplex;
+
+    let (mut client_down, server_down) = duplex(8192);
+    let (client_up, mut server_up) = duplex(8192);
+
+    let mut conn = Http1ServerConnection::new(server_down, TEST_CONFIG);
+
+    // Client uploads 3 chunks in one burst: "aaa", "bbb", "ccc"
+    tokio::spawn(async move {
+        client_down
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Send 3 chunks plus terminal chunk
+        client_down
+            .write_all(b"3\r\naaa\r\n3\r\nbbb\r\n3\r\nccc\r\n0\r\n\r\n")
+            .await
+            .unwrap();
+
+        // Read 200 response from gateway
+        let mut resp_buf = [0u8; 256];
+        let n = client_down.read(&mut resp_buf).await.unwrap();
+        assert!(
+            std::str::from_utf8(&resp_buf[..n])
+                .unwrap()
+                .contains("200 OK")
+        );
+    });
+
+    let upstream_task = tokio::spawn(async move {
+        // Read request from gateway
+        let mut req_buf = BytesMut::with_capacity(4096);
+        let mut read_raw = [0u8; 1024];
+
+        // Loop until terminal chunk is received
+        let mut payload_accum = Vec::new();
+        while !req_buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+            let n = server_up.read(&mut read_raw).await.unwrap();
+            req_buf.extend_from_slice(&read_raw[..n]);
+        }
+
+        // Parse chunks from upstream
+        let body_start = memchr::memmem::find(&req_buf, b"\r\n\r\n").unwrap() + 4;
+        let mut chunk_data = &req_buf[body_start..];
+        while let Some((wire_len, payload, is_term)) =
+            velda_http1::parse_single_chunk(chunk_data).unwrap()
+        {
+            if is_term {
+                break;
+            }
+            payload_accum.extend_from_slice(payload);
+            chunk_data = &chunk_data[wire_len..];
+        }
+
+        assert_eq!(payload_accum, b"aaabbbccc");
+
+        // Respond with 200 OK
+        server_up
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .await
+            .unwrap();
+    });
+
+    let (mut head, _framing) = conn.next_request_head().await.unwrap().unwrap();
+    let mut up_stream = client_up;
+    velda_http1::pipe_client_stream(&mut conn, &mut head, &mut up_stream, &TEST_CONFIG)
+        .await
+        .unwrap();
+
+    upstream_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_pipe_client_stream_max_body_size_security_guard() {
+    use tokio::io::duplex;
+
+    let (mut client_down, server_down) = duplex(8192);
+    let (client_up, mut server_up) = duplex(8192);
+
+    // Limit body size to 10 bytes
+    let tight_config = TEST_CONFIG.with_max_body_size(10);
+    let mut conn = Http1ServerConnection::new(server_down, tight_config);
+
+    tokio::spawn(async move {
+        client_down
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Send two 8-byte chunks (total 16 bytes > 10 bytes limit)
+        client_down
+            .write_all(b"8\r\n12345678\r\n8\r\n12345678\r\n0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let _ = server_up.read(&mut buf).await;
+    });
+
+    let (mut head, _framing) = conn.next_request_head().await.unwrap().unwrap();
+    let mut up_stream = client_up;
+    let res =
+        velda_http1::pipe_client_stream(&mut conn, &mut head, &mut up_stream, &tight_config).await;
+
+    assert!(
+        matches!(res, Err(Http1Error::PayloadTooLarge(_))),
+        "Must reject streaming upload exceeding max_body_size with PayloadTooLarge"
     );
 }

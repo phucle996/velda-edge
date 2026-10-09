@@ -343,7 +343,11 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
         ));
     }
 
-    Ok(Some((needed, &data[header_len..header_len + chunk_size], false)))
+    Ok(Some((
+        needed,
+        &data[header_len..header_len + chunk_size],
+        false,
+    )))
 }
 
 /// Encodes HTTP headers into the destination buffer with a single capacity reservation.
@@ -418,10 +422,7 @@ where
             stream.write_vectored(&active).await?
         } else if written < header_len + chunk.len() {
             let chunk_offset = written - header_len;
-            let active = [
-                IoSlice::new(&chunk[chunk_offset..]),
-                IoSlice::new(b"\r\n"),
-            ];
+            let active = [IoSlice::new(&chunk[chunk_offset..]), IoSlice::new(b"\r\n")];
             stream.write_vectored(&active).await?
         } else {
             let crlf_offset = written - (header_len + chunk.len());
@@ -446,5 +447,88 @@ where
 {
     stream.write_all(b"0\r\n\r\n").await?;
     stream.flush().await?;
+    Ok(())
+}
+
+/// Writes multiple progressive chunks coalesced into a single chunked transfer coding block.
+///
+/// Uses scatter-gather vectored I/O (`write_vectored`) to send a single hex header,
+/// followed by all chunk payload slices, followed by a single CRLF trailer.
+/// Eliminates N-1 socket write syscalls and framing overhead when multiple chunks
+/// are already present in memory.
+pub async fn send_coalesced_chunks<W>(
+    stream: &mut W,
+    chunks: &[bytes::Bytes],
+) -> Result<(), Http1Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    if chunks.len() == 1 {
+        return send_chunk(stream, &chunks[0]).await;
+    }
+
+    use std::io::{IoSlice, Write};
+
+    for batch in chunks.chunks(16) {
+        let total_payload_len: usize = batch.iter().map(|c| c.len()).sum();
+        if total_payload_len == 0 {
+            continue;
+        }
+
+        let mut header = [0u8; 32];
+        let mut cursor = std::io::Cursor::new(&mut header[..]);
+        write!(cursor, "{:X}\r\n", total_payload_len).map_err(Http1Error::Io)?;
+        let header_len = cursor.position() as usize;
+
+        let total_wire_len = header_len + total_payload_len + 2;
+        let mut written = 0;
+
+        let mut slices = [IoSlice::new(&[]); 18];
+
+        while written < total_wire_len {
+            let mut slice_count = 0;
+            let mut cursor_offset = 0;
+
+            if written < header_len {
+                slices[slice_count] = IoSlice::new(&header[written..header_len]);
+                slice_count += 1;
+            }
+            cursor_offset += header_len;
+
+            for chunk in batch {
+                let chunk_end = cursor_offset + chunk.len();
+                if written < chunk_end {
+                    let start = written.saturating_sub(cursor_offset);
+                    slices[slice_count] = IoSlice::new(&chunk[start..]);
+                    slice_count += 1;
+                }
+                cursor_offset = chunk_end;
+            }
+
+            if written < total_wire_len {
+                let start = written.saturating_sub(cursor_offset);
+                if start < 2 {
+                    slices[slice_count] = IoSlice::new(&b"\r\n"[start..]);
+                    slice_count += 1;
+                }
+            }
+
+            if slice_count == 0 {
+                break;
+            }
+
+            let n = stream.write_vectored(&slices[..slice_count]).await?;
+            if n == 0 {
+                return Err(Http1Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                )));
+            }
+            written += n;
+        }
+    }
     Ok(())
 }

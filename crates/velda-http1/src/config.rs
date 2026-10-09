@@ -28,6 +28,9 @@ pub struct Http1Config {
     pub initial_buffer_capacity: usize,
     /// Capacity threshold above which idle buffers are shrunk back to `initial_buffer_capacity`.
     pub shrink_threshold: usize,
+    /// Read buffer size for client upload bodies (equivalent to Nginx's `client_body_buffer_size`).
+    /// Determines the capacity reserved for reading payload chunks from the downstream socket into RAM.
+    pub client_body_buffer_size: usize,
     /// Initial read buffer capacity for upstream response reading (bytes).
     pub upstream_read_capacity: usize,
     /// Base write buffer capacity for upstream request encoding (bytes).
@@ -49,6 +52,7 @@ impl Http1Config {
                 header_read_timeout_ms: 10_000,
                 initial_buffer_capacity: 2 * KB,
                 shrink_threshold: 8 * KB,
+                client_body_buffer_size: 32 * KB,
                 upstream_read_capacity: 2 * KB,
                 upstream_write_base: 512,
             },
@@ -61,6 +65,7 @@ impl Http1Config {
                 header_read_timeout_ms: 10_000,
                 initial_buffer_capacity: 4 * KB,
                 shrink_threshold: 16 * KB,
+                client_body_buffer_size: 64 * KB,
                 upstream_read_capacity: 4 * KB,
                 upstream_write_base: KB,
             },
@@ -73,6 +78,7 @@ impl Http1Config {
                 header_read_timeout_ms: 10_000,
                 initial_buffer_capacity: 4 * KB,
                 shrink_threshold: 16 * KB,
+                client_body_buffer_size: 128 * KB,
                 upstream_read_capacity: 4 * KB,
                 upstream_write_base: KB,
             },
@@ -85,6 +91,7 @@ impl Http1Config {
                 header_read_timeout_ms: 15_000,
                 initial_buffer_capacity: 8 * KB,
                 shrink_threshold: 32 * KB,
+                client_body_buffer_size: 128 * KB,
                 upstream_read_capacity: 8 * KB,
                 upstream_write_base: 2 * KB,
             },
@@ -97,6 +104,7 @@ impl Http1Config {
                 header_read_timeout_ms: 15_000,
                 initial_buffer_capacity: 8 * KB,
                 shrink_threshold: 64 * KB,
+                client_body_buffer_size: 256 * KB,
                 upstream_read_capacity: 8 * KB,
                 upstream_write_base: 2 * KB,
             },
@@ -109,6 +117,7 @@ impl Http1Config {
                 header_read_timeout_ms: 20_000,
                 initial_buffer_capacity: 16 * KB,
                 shrink_threshold: 64 * KB,
+                client_body_buffer_size: 256 * KB,
                 upstream_read_capacity: 16 * KB,
                 upstream_write_base: 4 * KB,
             },
@@ -121,6 +130,7 @@ impl Http1Config {
                 header_read_timeout_ms: 20_000,
                 initial_buffer_capacity: 16 * KB,
                 shrink_threshold: 128 * KB,
+                client_body_buffer_size: 256 * KB,
                 upstream_read_capacity: 16 * KB,
                 upstream_write_base: 4 * KB,
             },
@@ -188,6 +198,13 @@ impl Http1Config {
         self.shrink_threshold = threshold;
         self
     }
+
+    /// Sets the client body buffer window capacity in bytes.
+    #[inline]
+    pub const fn with_client_body_buffer_size(mut self, size: usize) -> Self {
+        self.client_body_buffer_size = size;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +220,7 @@ mod tests {
         assert_eq!(cfg.idle_timeout_ms, 15_000);
         assert_eq!(cfg.initial_buffer_capacity, 2 * 1024);
         assert_eq!(cfg.shrink_threshold, 8 * 1024);
+        assert_eq!(cfg.client_body_buffer_size, 32 * 1024);
     }
 
     #[test]
@@ -214,6 +232,7 @@ mod tests {
         assert_eq!(cfg.idle_timeout_ms, 30_000);
         assert_eq!(cfg.initial_buffer_capacity, 4 * 1024);
         assert_eq!(cfg.shrink_threshold, 16 * 1024);
+        assert_eq!(cfg.client_body_buffer_size, 128 * 1024);
     }
 
     #[test]
@@ -225,6 +244,7 @@ mod tests {
         assert_eq!(cfg.idle_timeout_ms, 60_000);
         assert_eq!(cfg.initial_buffer_capacity, 16 * 1024);
         assert_eq!(cfg.shrink_threshold, 128 * 1024);
+        assert_eq!(cfg.client_body_buffer_size, 256 * 1024);
     }
 
     #[test]
@@ -256,6 +276,14 @@ mod tests {
                 next.max_body_size,
                 window[0],
                 prev.max_body_size,
+            );
+            assert!(
+                next.client_body_buffer_size >= prev.client_body_buffer_size,
+                "client body buffer size: {:?} ({}) < {:?} ({})",
+                window[1],
+                next.client_body_buffer_size,
+                window[0],
+                prev.client_body_buffer_size,
             );
         }
     }

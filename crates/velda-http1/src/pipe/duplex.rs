@@ -17,7 +17,7 @@ use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use crate::server::response::Http1ServerResponse;
-use crate::wire::{send_chunk, send_chunked_end};
+use crate::wire::{decode_chunk, send_chunk, send_chunked_end, send_coalesced_chunks};
 
 /// Pipes a bidirectional streaming HTTP/1.1 request (streaming upload and streaming response).
 pub async fn pipe_duplex<DownIO, UpIO>(
@@ -35,9 +35,50 @@ where
     // 1. Send chunked request head upstream reusing scratch buffer
     send_request_head_chunked(head, upstream, &mut conn.upstream_write_buf).await?;
 
-    // 2. Pump request body chunks from client to upstream
-    while let Some(chunk) = conn.read_next_chunk().await? {
-        send_chunk(upstream, &chunk).await?;
+    // 2. Pump request body chunks from client to upstream (opportunistic chunk coalescing)
+    let mut total_req_bytes = 0usize;
+    let mut req_chunk_batch = [const { bytes::Bytes::new() }; 16];
+
+    loop {
+        let Some(first_chunk) = conn.read_next_chunk().await? else {
+            break;
+        };
+        req_chunk_batch[0] = first_chunk;
+        let mut count = 1;
+        let mut batch_bytes = req_chunk_batch[0].len();
+        let mut reached_terminal = false;
+
+        while count < 16 {
+            match decode_chunk(&mut conn.read_buf)? {
+                Some(Some(next_chunk)) => {
+                    batch_bytes += next_chunk.len();
+                    req_chunk_batch[count] = next_chunk;
+                    count += 1;
+                }
+                Some(None) => {
+                    reached_terminal = true;
+                    break;
+                }
+                None => break,
+            }
+        }
+
+        total_req_bytes = total_req_bytes
+            .checked_add(batch_bytes)
+            .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+        if total_req_bytes > config.max_body_size {
+            return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+        }
+
+        if count == 1 {
+            send_chunk(upstream, &req_chunk_batch[0]).await?;
+        } else {
+            send_coalesced_chunks(upstream, &req_chunk_batch[..count]).await?;
+        }
+
+        if reached_terminal {
+            break;
+        }
     }
     send_chunked_end(upstream).await?;
 
@@ -70,13 +111,58 @@ where
     let mut client_disconnected = false;
     match resp_framing {
         Http1BodyFraming::Chunked => {
-            while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
-                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+            let mut total_resp_bytes = 0usize;
+            let mut resp_chunk_batch = [const { bytes::Bytes::new() }; 16];
+
+            loop {
+                let Some(first_chunk) =
+                    read_next_chunk(upstream, &mut conn.upstream_read_buf).await?
+                else {
+                    break;
+                };
+                resp_chunk_batch[0] = first_chunk;
+                let mut count = 1;
+                let mut batch_bytes = resp_chunk_batch[0].len();
+                let mut reached_terminal = false;
+
+                while count < 16 {
+                    match decode_chunk(&mut conn.upstream_read_buf)? {
+                        Some(Some(next_chunk)) => {
+                            batch_bytes += next_chunk.len();
+                            resp_chunk_batch[count] = next_chunk;
+                            count += 1;
+                        }
+                        Some(None) => {
+                            reached_terminal = true;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+
+                total_resp_bytes = total_resp_bytes
+                    .checked_add(batch_bytes)
+                    .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                if total_resp_bytes > config.max_body_size {
+                    return Err(Http1Error::PayloadTooLarge(total_resp_bytes));
+                }
+
+                let send_res = if count == 1 {
+                    send_chunk(&mut conn.stream, &resp_chunk_batch[0]).await
+                } else {
+                    send_coalesced_chunks(&mut conn.stream, &resp_chunk_batch[..count]).await
+                };
+
+                if let Err(e) = send_res {
                     tracing::debug!(
                         error = %e,
                         "Downstream client disconnected during duplex response streaming"
                     );
                     client_disconnected = true;
+                    break;
+                }
+
+                if reached_terminal {
                     break;
                 }
             }

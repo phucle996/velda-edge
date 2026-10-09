@@ -14,9 +14,7 @@ pub use velda_core::{Body, L7Response};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::request::Http1BodyFraming;
-use crate::wire::{
-    cold_parse_error, cold_smuggling_error, parse_ascii_digits, parse_chunked_body,
-};
+use crate::wire::{cold_parse_error, cold_smuggling_error, parse_ascii_digits, parse_chunked_body};
 
 /// Fast length-partitioned header name matching for common HTTP/1.1 upstream response headers.
 #[inline]

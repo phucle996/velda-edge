@@ -26,7 +26,7 @@ pub use velda_core::Body;
 pub use wire::{
     ParsedChunk, decode_chunk, encode_chunk, encode_chunked_end, encode_headers, find_crlf,
     parse_ascii_digits, parse_chunked_body, parse_hex_usize, parse_single_chunk, send_chunk,
-    send_chunked_end,
+    send_chunked_end, send_coalesced_chunks,
 };
 
 // Downstream Server re-exports

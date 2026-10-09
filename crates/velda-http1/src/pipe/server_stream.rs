@@ -17,7 +17,7 @@ use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1ServerRequest};
 use crate::server::response::{Http1ServerResponse, Http1ServerResponseHead};
-use crate::wire::{send_chunk, send_chunked_end};
+use crate::wire::{decode_chunk, send_chunk, send_chunked_end, send_coalesced_chunks};
 
 /// Pipes a server-streaming HTTP/1.1 request (buffered request, streaming response).
 ///
@@ -128,13 +128,60 @@ where
     let mut client_disconnected = false;
     match resp_framing {
         Http1BodyFraming::Chunked => {
-            while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
-                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+            let mut total_body_bytes = 0usize;
+            let mut chunk_batch = [const { bytes::Bytes::new() }; 16];
+
+            loop {
+                let Some(first_chunk) =
+                    read_next_chunk(upstream, &mut conn.upstream_read_buf).await?
+                else {
+                    break;
+                };
+                chunk_batch[0] = first_chunk;
+                let mut count = 1;
+                let mut batch_bytes = chunk_batch[0].len();
+                let mut reached_terminal = false;
+
+                // Opportunistically drain remaining chunks already parsed in RAM (up to 16 chunks)
+                while count < 16 {
+                    match decode_chunk(&mut conn.upstream_read_buf)? {
+                        Some(Some(next_chunk)) => {
+                            batch_bytes += next_chunk.len();
+                            chunk_batch[count] = next_chunk;
+                            count += 1;
+                        }
+                        Some(None) => {
+                            reached_terminal = true;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+
+                // Security Invariant (RFC 9112 & DoS Protection): Enforce max_body_size limit
+                total_body_bytes = total_body_bytes
+                    .checked_add(batch_bytes)
+                    .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                if total_body_bytes > config.max_body_size {
+                    return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+                }
+
+                let send_res = if count == 1 {
+                    send_chunk(&mut conn.stream, &chunk_batch[0]).await
+                } else {
+                    send_coalesced_chunks(&mut conn.stream, &chunk_batch[..count]).await
+                };
+
+                if let Err(e) = send_res {
                     tracing::debug!(
                         error = %e,
                         "Downstream client disconnected during chunked server streaming"
                     );
                     client_disconnected = true;
+                    break;
+                }
+
+                if reached_terminal {
                     break;
                 }
             }

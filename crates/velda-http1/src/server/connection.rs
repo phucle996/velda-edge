@@ -23,8 +23,8 @@ use crate::error::Http1Error;
 /// An active HTTP/1.1 connection over an asynchronous downstream stream.
 pub struct Http1ServerConnection<IO> {
     pub stream: IO,
-    read_buf: BytesMut,
-    write_buf: BytesMut,
+    pub read_buf: BytesMut,
+    pub write_buf: BytesMut,
     pub upstream_read_buf: BytesMut,
     pub upstream_write_buf: BytesMut,
     close_requested: bool,
@@ -158,6 +158,17 @@ where
 
             if self.read_buf.len() > self.config.max_body_size.saturating_add(4096) {
                 return Err(Http1Error::PayloadTooLarge(self.read_buf.len()));
+            }
+
+            let target_reserve = match framing {
+                Http1BodyFraming::ContentLength(total) => {
+                    let remaining = total.saturating_sub(self.read_buf.len());
+                    remaining.min(self.config.client_body_buffer_size)
+                }
+                _ => self.config.client_body_buffer_size,
+            };
+            if self.read_buf.capacity() - self.read_buf.len() < target_reserve {
+                self.read_buf.reserve(target_reserve);
             }
 
             let bytes_read =
@@ -355,8 +366,9 @@ where
             }
 
             let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
-            if self.read_buf.capacity() - self.read_buf.len() < 65536 {
-                self.read_buf.reserve(65536);
+            let target_reserve = self.config.client_body_buffer_size;
+            if self.read_buf.capacity() - self.read_buf.len() < target_reserve {
+                self.read_buf.reserve(target_reserve);
             }
             let bytes_read =
                 match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
