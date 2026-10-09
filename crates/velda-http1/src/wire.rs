@@ -225,11 +225,78 @@ pub fn parse_chunked_body(
 /// Parsed single progressive chunk item: `(total_wire_len, chunk_payload, is_terminal)`.
 pub type ParsedChunk<'a> = (usize, &'a [u8], bool);
 
-/// Parsed single progressive chunk offsets: `(header_len, chunk_size, total_wire_len, is_terminal)`.
-#[inline]
-pub fn parse_single_chunk_offsets(
-    data: &[u8],
-) -> Result<Option<(usize, usize, usize, bool)>, Http1Error> {
+/// Decodes a single progressive chunk from `buf` zero-copy.
+///
+/// Returns:
+/// - `Ok(Some(Some(chunk)))`: extracted chunk payload bytes, advances `buf` past chunk and CRLF.
+/// - `Ok(Some(None))`: terminal chunk (`0\r\n\r\n`) reached and consumed, stream concluded.
+/// - `Ok(None)`: buffer incomplete, need more data from stream.
+pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, Http1Error> {
+    use bytes::Buf;
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let Some(crlf_pos) = find_crlf(buf) else {
+        if buf.len() > 4096 {
+            return Err(cold_chunked_error(
+                "Chunk header line exceeds 4KB limit without CRLF",
+            ));
+        }
+        return Ok(None);
+    };
+    let line = &buf[..crlf_pos];
+    let size_part = match memchr::memchr(b';', line) {
+        Some(semi) => &line[..semi],
+        None => line,
+    };
+    let chunk_size = parse_hex_usize(size_part)?;
+    let header_len = crlf_pos + 2;
+
+    if chunk_size == 0 {
+        let trailer_data = &buf[header_len..];
+        if trailer_data.starts_with(b"\r\n") {
+            buf.advance(header_len + 2);
+            return Ok(Some(None));
+        }
+        if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
+            buf.advance(header_len + pos + 4);
+            return Ok(Some(None));
+        }
+        if trailer_data.len() > 8192 {
+            return Err(cold_chunked_error(
+                "Chunk trailer fields exceed 8KB limit without double CRLF",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let needed = header_len + chunk_size + 2;
+    if buf.len() < needed {
+        return Ok(None);
+    }
+
+    if &buf[header_len + chunk_size..needed] != b"\r\n" {
+        return Err(Http1Error::InvalidChunkedEncoding(
+            "Missing CRLF after chunk data".into(),
+        ));
+    }
+
+    buf.advance(header_len);
+    let chunk = buf.split_to(chunk_size).freeze();
+    buf.advance(2);
+    Ok(Some(Some(chunk)))
+}
+
+/// Parses a single progressive chunk from an immutable byte slice.
+///
+/// Returns:
+/// - `Ok(Some((total_wire_len, chunk_payload, is_terminal)))`:
+///   A complete chunk was parsed. `total_wire_len` is the number of wire bytes
+///   consumed (including chunk-size line, CRLF, payload, and trailing CRLF).
+///   If `is_terminal` is true (chunk size == 0), this is the terminal chunk.
+/// - `Ok(None)`: Not enough bytes in `data` to form a complete chunk.
+/// - `Err(Http1Error)`: Invalid chunked framing or encoding error.
+pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Error> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -252,10 +319,10 @@ pub fn parse_single_chunk_offsets(
     if chunk_size == 0 {
         let trailer_data = &data[header_len..];
         if trailer_data.starts_with(b"\r\n") {
-            return Ok(Some((header_len, 0, header_len + 2, true)));
+            return Ok(Some((header_len + 2, &[], true)));
         }
         if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
-            return Ok(Some((header_len, 0, header_len + pos + 4, true)));
+            return Ok(Some((header_len + pos + 4, &[], true)));
         }
         if trailer_data.len() > 8192 {
             return Err(cold_chunked_error(
@@ -276,30 +343,7 @@ pub fn parse_single_chunk_offsets(
         ));
     }
 
-    Ok(Some((header_len, chunk_size, needed, false)))
-}
-
-/// Parses a single progressive chunk from an immutable byte slice.
-///
-/// Returns:
-/// - `Ok(Some((total_wire_len, chunk_payload, is_terminal)))`:
-///   A complete chunk was parsed. `total_wire_len` is the number of wire bytes
-///   consumed (including chunk-size line, CRLF, payload, and trailing CRLF).
-///   If `is_terminal` is true (chunk size == 0), this is the terminal chunk.
-/// - `Ok(None)`: Not enough bytes in `data` to form a complete chunk.
-/// - `Err(Http1Error)`: Invalid chunked framing or encoding error.
-pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Error> {
-    match parse_single_chunk_offsets(data)? {
-        Some((header_len, chunk_size, needed, is_terminal)) => {
-            if is_terminal {
-                Ok(Some((needed, &[], true)))
-            } else {
-                let payload = &data[header_len..header_len + chunk_size];
-                Ok(Some((needed, payload, false)))
-            }
-        }
-        None => Ok(None),
-    }
+    Ok(Some((needed, &data[header_len..header_len + chunk_size], false)))
 }
 
 /// Encodes HTTP headers into the destination buffer with a single capacity reservation.
@@ -345,6 +389,9 @@ pub fn encode_chunked_end(dst: &mut BytesMut) {
 }
 
 /// Writes a chunk of body bytes formatted as chunked transfer coding to the stream.
+///
+/// Uses vectored I/O (`write_vectored` / `writev`) to coalesce chunk framing and payload
+/// into a single atomic kernel socket write without intermediate heap allocation.
 pub async fn send_chunk<W>(stream: &mut W, chunk: &[u8]) -> Result<(), Http1Error>
 where
     W: AsyncWrite + Unpin,
@@ -352,15 +399,43 @@ where
     if chunk.is_empty() {
         return Ok(());
     }
-    use std::io::Write;
+    use std::io::{IoSlice, Write};
     let mut header = [0u8; 32];
     let mut cursor = std::io::Cursor::new(&mut header[..]);
     write!(cursor, "{:X}\r\n", chunk.len()).map_err(Http1Error::Io)?;
     let header_len = cursor.position() as usize;
 
-    stream.write_all(&header[..header_len]).await?;
-    stream.write_all(chunk).await?;
-    stream.write_all(b"\r\n").await?;
+    let total_len = header_len + chunk.len() + 2;
+    let mut written = 0;
+
+    while written < total_len {
+        let n = if written < header_len {
+            let active = [
+                IoSlice::new(&header[written..header_len]),
+                IoSlice::new(chunk),
+                IoSlice::new(b"\r\n"),
+            ];
+            stream.write_vectored(&active).await?
+        } else if written < header_len + chunk.len() {
+            let chunk_offset = written - header_len;
+            let active = [
+                IoSlice::new(&chunk[chunk_offset..]),
+                IoSlice::new(b"\r\n"),
+            ];
+            stream.write_vectored(&active).await?
+        } else {
+            let crlf_offset = written - (header_len + chunk.len());
+            stream.write(&b"\r\n"[crlf_offset..]).await?
+        };
+
+        if n == 0 {
+            return Err(Http1Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write whole buffer",
+            )));
+        }
+        written += n;
+    }
     Ok(())
 }
 

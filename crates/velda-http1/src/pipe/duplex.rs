@@ -71,7 +71,7 @@ where
     match resp_framing {
         Http1BodyFraming::Chunked => {
             while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
-                if let Err(e) = conn.send_chunk(&chunk).await {
+                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
                     tracing::debug!(
                         error = %e,
                         "Downstream client disconnected during duplex response streaming"
@@ -88,7 +88,7 @@ where
                 match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                     Some(chunk) => {
                         remaining = remaining.saturating_sub(chunk.len());
-                        if let Err(e) = conn.send_chunk(&chunk).await {
+                        if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
                             tracing::debug!(
                                 error = %e,
                                 "Downstream client disconnected during sized duplex response streaming"
@@ -108,6 +108,6 @@ where
         return Err(Http1Error::ConnectionClosed);
     }
 
-    let _ = conn.send_chunked_end().await;
+    let _ = send_chunked_end(&mut conn.stream).await;
     Ok(())
 }

@@ -24,8 +24,9 @@ pub use velda_core::Body;
 
 // RFC 9112 Wire Framing & Codec re-exports
 pub use wire::{
-    ParsedChunk, encode_chunk, encode_chunked_end, encode_headers, find_crlf, parse_ascii_digits,
-    parse_chunked_body, parse_hex_usize, parse_single_chunk, send_chunk, send_chunked_end,
+    ParsedChunk, decode_chunk, encode_chunk, encode_chunked_end, encode_headers, find_crlf,
+    parse_ascii_digits, parse_chunked_body, parse_hex_usize, parse_single_chunk, send_chunk,
+    send_chunked_end,
 };
 
 // Downstream Server re-exports

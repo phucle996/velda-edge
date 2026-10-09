@@ -345,9 +345,9 @@ async fn test_progressive_chunked_server_streaming() {
             Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
         conn.send_response_head_chunked(&resp_head).await.unwrap();
 
-        conn.send_chunk(b"data: first token\n\n").await.unwrap();
-        conn.send_chunk(b"data: second token\n\n").await.unwrap();
-        conn.send_chunked_end().await.unwrap();
+        velda_http1::send_chunk(&mut conn.stream, b"data: first token\n\n").await.unwrap();
+        velda_http1::send_chunk(&mut conn.stream, b"data: second token\n\n").await.unwrap();
+        velda_http1::send_chunked_end(&mut conn.stream).await.unwrap();
     });
 
     client

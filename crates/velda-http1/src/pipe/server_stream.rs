@@ -17,6 +17,7 @@ use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1ServerRequest};
 use crate::server::response::{Http1ServerResponse, Http1ServerResponseHead};
+use crate::wire::{send_chunk, send_chunked_end};
 
 /// Pipes a server-streaming HTTP/1.1 request (buffered request, streaming response).
 ///
@@ -128,7 +129,7 @@ where
     match resp_framing {
         Http1BodyFraming::Chunked => {
             while let Some(chunk) = read_next_chunk(upstream, &mut conn.upstream_read_buf).await? {
-                if let Err(e) = conn.send_chunk(&chunk).await {
+                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
                     tracing::debug!(
                         error = %e,
                         "Downstream client disconnected during chunked server streaming"
@@ -145,7 +146,7 @@ where
                 match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
                     Some(chunk) => {
                         remaining = remaining.saturating_sub(chunk.len());
-                        if let Err(e) = conn.send_chunk(&chunk).await {
+                        if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
                             tracing::debug!(
                                 error = %e,
                                 "Downstream client disconnected during sized server streaming"
@@ -169,6 +170,6 @@ where
         return Err(Http1Error::ConnectionClosed);
     }
 
-    let _ = conn.send_chunked_end().await;
+    let _ = send_chunked_end(&mut conn.stream).await;
     Ok(())
 }

@@ -5,13 +5,12 @@
 //! - Upstream receives chunks in real-time without gateway buffering the entire upload in RAM.
 //! - Response from upstream is expected to be finite and buffered (e.g. 201 Created or JSON receipt).
 
-use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use velda_core::Body;
 
 use super::sanitize_headers;
 use crate::client::request::send_request_head_chunked;
-use crate::client::response::{read_chunk_sized, read_response_head};
+use crate::client::response::read_response_head;
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
@@ -69,25 +68,19 @@ where
                 if len > config.max_body_size {
                     return Err(Http1Error::PayloadTooLarge(len));
                 }
-                if conn.upstream_read_buf.len() >= len {
-                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
-                } else {
-                    let mut bytes = BytesMut::with_capacity(len);
-                    while bytes.len() < len {
-                        let needed = len - bytes.len();
-                        match read_chunk_sized(upstream, &mut conn.upstream_read_buf, needed)
-                            .await?
-                        {
-                            Some(c) => bytes.extend_from_slice(&c),
-                            None => {
-                                return Err(Http1Error::Parse(
-                                    "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                                ));
-                            }
+                if conn.upstream_read_buf.len() < len {
+                    let needed = len - conn.upstream_read_buf.len();
+                    conn.upstream_read_buf.reserve(needed);
+                    while conn.upstream_read_buf.len() < len {
+                        let n = upstream.read_buf(&mut conn.upstream_read_buf).await?;
+                        if n == 0 {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
                         }
                     }
-                    Body::Bytes(bytes.freeze())
                 }
+                Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
             }
             Http1BodyFraming::Chunked => unreachable!(),
         }

@@ -416,23 +416,14 @@ pub async fn read_next_chunk<IO>(
 where
     IO: AsyncRead + Unpin,
 {
-    use crate::wire::parse_single_chunk_offsets;
-    use bytes::Buf;
-
     loop {
-        if let Some((header_len, chunk_size, wire_len, is_terminal)) =
-            parse_single_chunk_offsets(read_buf.as_ref())?
-        {
-            if is_terminal {
-                read_buf.advance(wire_len);
-                return Ok(None);
-            }
-            read_buf.advance(header_len);
-            let chunk = read_buf.split_to(chunk_size).freeze();
-            read_buf.advance(2);
-            return Ok(Some(chunk));
+        if let Some(res) = crate::wire::decode_chunk(read_buf)? {
+            return Ok(res);
         }
 
+        if read_buf.capacity() - read_buf.len() < 65536 {
+            read_buf.reserve(65536);
+        }
         let n = stream.read_buf(read_buf).await?;
         if n == 0 {
             return Err(Http1Error::ConnectionClosed);

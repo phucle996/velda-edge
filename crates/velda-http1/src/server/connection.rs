@@ -19,11 +19,10 @@ use super::response::{
 use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
-use crate::wire::{send_chunk, send_chunked_end};
 
 /// An active HTTP/1.1 connection over an asynchronous downstream stream.
 pub struct Http1ServerConnection<IO> {
-    stream: IO,
+    pub stream: IO,
     read_buf: BytesMut,
     write_buf: BytesMut,
     pub upstream_read_buf: BytesMut,
@@ -345,39 +344,20 @@ where
         Ok(())
     }
 
-    /// Sends a single data chunk to the downstream client formatted with chunked transfer coding.
-    pub async fn send_chunk(&mut self, chunk: &[u8]) -> Result<(), Http1Error> {
-        send_chunk(&mut self.stream, chunk).await
-    }
-
-    /// Sends the terminal zero chunk (`0\r\n\r\n`) to cleanly conclude a chunked response.
-    pub async fn send_chunked_end(&mut self) -> Result<(), Http1Error> {
-        send_chunked_end(&mut self.stream).await
-    }
-
     /// Reads the next progressive chunk from the downstream client if the body is chunked.
     ///
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
-        use crate::wire::parse_single_chunk_offsets;
-        use bytes::Buf;
-
         loop {
-            if let Some((header_len, chunk_size, wire_len, is_terminal)) =
-                parse_single_chunk_offsets(&self.read_buf)?
-            {
-                if is_terminal {
-                    self.read_buf.advance(wire_len);
-                    return Ok(None);
-                }
-                self.read_buf.advance(header_len);
-                let chunk = self.read_buf.split_to(chunk_size).freeze();
-                self.read_buf.advance(2);
-                return Ok(Some(chunk));
+            if let Some(res) = crate::wire::decode_chunk(&mut self.read_buf)? {
+                return Ok(res);
             }
 
             let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
+            if self.read_buf.capacity() - self.read_buf.len() < 65536 {
+                self.read_buf.reserve(65536);
+            }
             let bytes_read =
                 match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
                     .await
