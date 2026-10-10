@@ -23,8 +23,7 @@ pub use engine::{EngineConfig, EngineHandle, TrafficEngine};
 pub use error::{Result, TransportError};
 pub use ingress::{IngressBinding, TcpBinding, TcpIngress, UdpBinding, UdpIngress};
 pub use tcp::{
-    TcpListener, TcpListenerConfig, TransferStats, connect_and_forward, forward_bidirectional,
-    forward_bidirectional_with_sizes, forward_connection, forward_connection_with_size,
+    TcpListener, TcpListenerConfig, TransferStats, forward_bidirectional, forward_connection,
     forward_connection_with_timeout,
 };
-pub use udp::{Datagram, UdpSocket, UdpSocketConfig, forward_datagram, forward_udp_flow};
+pub use udp::{Datagram, UdpSocket, UdpSocketConfig};

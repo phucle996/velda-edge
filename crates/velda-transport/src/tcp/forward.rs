@@ -1,6 +1,5 @@
 //! Bidirectional byte forwarding for L4 stream proxying.
 
-use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
@@ -33,38 +32,22 @@ impl TransferStats {
     }
 }
 
-/// Forwards bytes bidirectionally between two asynchronous streams using custom buffer sizes.
-pub async fn forward_bidirectional_with_sizes<C, S>(
+/// Forwards bytes bidirectionally between two asynchronous streams using [`tokio::io::copy_bidirectional_with_sizes`].
+pub async fn forward_bidirectional<C, S>(
     client: &mut C,
     server: &mut S,
-    client_buf_size: usize,
-    server_buf_size: usize,
+    buffer_size: usize,
 ) -> Result<TransferStats>
 where
     C: AsyncRead + AsyncWrite + Unpin + ?Sized,
     S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
     let (client_to_server, server_to_client) =
-        tokio::io::copy_bidirectional_with_sizes(client, server, client_buf_size, server_buf_size)
+        tokio::io::copy_bidirectional_with_sizes(client, server, buffer_size, buffer_size)
             .await
             .map_err(TransportError::Forward)?;
 
-    Ok(TransferStats {
-        client_to_server_bytes: client_to_server,
-        server_to_client_bytes: server_to_client,
-    })
-}
-
-/// Forwards bytes bidirectionally between two asynchronous streams using
-/// [`tokio::io::copy_bidirectional`] with automatic half-close (TCP FIN) handling.
-///
-/// Uses standard 64 KB buffers for high-bandwidth L4 stream forwarding.
-pub async fn forward_bidirectional<C, S>(client: &mut C, server: &mut S) -> Result<TransferStats>
-where
-    C: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
-{
-    forward_bidirectional_with_sizes(client, server, 65536, 65536).await
+    Ok(TransferStats::new(client_to_server, server_to_client))
 }
 
 #[cfg(target_os = "linux")]
@@ -194,16 +177,7 @@ async fn splice_stream_to_stream(
 ///
 /// Keeps data entirely within kernel pipe buffers without copying into user-space RAM.
 #[cfg(target_os = "linux")]
-pub async fn splice_bidirectional(
-    client: &mut TcpStream,
-    server: &mut TcpStream,
-    chunk_size: usize,
-) -> std::io::Result<TransferStats> {
-    splice_bidirectional_inner(client, server, chunk_size, None, std::time::Instant::now()).await
-}
-
-#[cfg(target_os = "linux")]
-async fn splice_bidirectional_inner(
+async fn splice_bidirectional(
     client: &mut TcpStream,
     server: &mut TcpStream,
     chunk_size: usize,
@@ -262,7 +236,10 @@ async fn splice_bidirectional_inner(
 
 /// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`]
 /// using the specified buffer size and an optional idle timeout enforced via a low-overhead Sleeping Watchdog.
-pub async fn forward_connection_with_timeout(
+///
+/// On Linux, attempts kernel-space zero-copy splicing via `splice(2)`.
+/// Gracefully falls back to asynchronous user-space copy if splicing is unavailable or unsupported.
+pub async fn forward_connection(
     mut client: Connection,
     mut server: TcpStream,
     buffer_size: usize,
@@ -279,7 +256,7 @@ pub async fn forward_connection_with_timeout(
     let forward_fut = async {
         #[cfg(target_os = "linux")]
         {
-            match splice_bidirectional_inner(
+            match splice_bidirectional(
                 client.stream_mut(),
                 &mut server,
                 buffer_size,
@@ -298,8 +275,7 @@ pub async fn forward_connection_with_timeout(
             }
         }
 
-        forward_bidirectional_with_sizes(client.stream_mut(), &mut server, buffer_size, buffer_size)
-            .await
+        forward_bidirectional(client.stream_mut(), &mut server, buffer_size).await
     };
 
     let stats = if let Some(timeout) = idle_timeout {
@@ -330,42 +306,8 @@ pub async fn forward_connection_with_timeout(
     Ok(stats)
 }
 
-/// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`]
-/// using the specified buffer size (e.g. from [`super::config::TcpListenerConfig::copy_buffer_size`]).
-///
-/// On Linux, attempts kernel-space zero-copy splicing via [`splice_bidirectional`].
-/// Gracefully falls back to asynchronous user-space copy if splicing is unavailable or unsupported.
-pub async fn forward_connection_with_size(
-    client: Connection,
-    server: TcpStream,
-    buffer_size: usize,
-) -> Result<TransferStats> {
-    forward_connection_with_timeout(client, server, buffer_size, None).await
-}
-
-/// Forwards bytes bidirectionally between an active [`Connection`] and an upstream [`TcpStream`].
-///
-/// Updates the internal byte counters of the client [`Connection`].
-pub async fn forward_connection(client: Connection, server: TcpStream) -> Result<TransferStats> {
-    forward_connection_with_timeout(client, server, 65536, None).await
-}
-
-/// Connects to a target upstream address and pumps bytes bidirectionally with the client connection.
-pub async fn connect_and_forward(
-    client: Connection,
-    upstream_addr: SocketAddr,
-) -> Result<TransferStats> {
-    let server = TcpStream::connect(upstream_addr)
-        .await
-        .map_err(|e| TransportError::Connect {
-            addr: upstream_addr,
-            source: e,
-        })?;
-
-    let _ = server.set_nodelay(true);
-
-    forward_connection_with_size(client, server, 65536).await
-}
+/// Canonical alias maintaining backwards compatibility.
+pub use forward_connection as forward_connection_with_timeout;
 
 #[cfg(test)]
 mod tests {

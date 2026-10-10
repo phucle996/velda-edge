@@ -22,7 +22,7 @@ use crate::error::{Result, TransportError};
 #[derive(Debug)]
 pub struct Connection {
     pub id: ConnectionId,
-    stream: TcpStream,
+    pub stream: TcpStream,
     pub peer: SocketAddr,
     pub local_addr: SocketAddr,
     pub bytes_read: u64,

@@ -83,7 +83,7 @@ A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS 
 
 ### 2.8 Hard Subsystem Boundary: Upstream vs Protocol Subsystems (Lifecycle vs Mechanics)
 Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) without exception:
-- **Upstream Subsystem (`velda-upstream`, `pre_compile/upstream/`)**:
+- **Upstream Subsystem (`velda-upstream`, `crates/velda-edge/src/upstream/`)**:
   - **Single Responsibility**: Connection Lifecycle, Topology Resolution & Pool State (**"WHEN & WHO"**).
   - Owns: Target physical endpoint selection (`select_endpoint()` via load balancing: RoundRobin, WRR, Maglev, LeastConn, etc.), active/passive health tracking, circuit breaking, connection pooling & stream leasing (`acquire_stream()`, `register()`, idle timeout eviction, GOAWAY handling, pool cleanup on drop).
   - Determines **WHEN** to lease an existing connection, **WHEN** to request a new connection, and **WHO** (which physical endpoint) to connect to.
@@ -121,7 +121,7 @@ Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) wi
 - `velda-connection-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.
-- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, pre-computes protocol-specialized upstreams in `pre_compile/upstream/`, and starts `velda-transport` engine).
+- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, pre-computes protocol-specialized upstreams in `src/upstream/`, and starts `velda-transport` engine).
 
 ### 3.2 Go Control Plane (`control-plane/`)
 - Follows **Clean Architecture / DDD**:

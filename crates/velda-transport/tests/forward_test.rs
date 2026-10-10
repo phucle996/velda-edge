@@ -1,6 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use velda_transport::{Connection, connect_and_forward, forward_bidirectional, forward_connection};
+use velda_transport::{Connection, forward_bidirectional, forward_connection};
 
 #[tokio::test]
 async fn test_forward_bidirectional_echo() {
@@ -22,7 +22,7 @@ async fn test_forward_bidirectional_echo() {
         let (mut client_socket, _) = proxy_listener.accept().await.unwrap();
         let mut upstream_socket = TcpStream::connect(echo_addr).await.unwrap();
 
-        forward_bidirectional(&mut client_socket, &mut upstream_socket)
+        forward_bidirectional(&mut client_socket, &mut upstream_socket, 65536)
             .await
             .unwrap()
     });
@@ -73,7 +73,9 @@ async fn test_forward_connection_with_large_payload() {
         let conn = Connection::from_stream(stream).unwrap();
         let upstream = TcpStream::connect(upstream_addr).await.unwrap();
 
-        forward_connection(conn, upstream).await.unwrap()
+        forward_connection(conn, upstream, 65536, None)
+            .await
+            .unwrap()
     });
 
     let client_task = tokio::spawn(async move {
@@ -97,7 +99,7 @@ async fn test_forward_connection_with_large_payload() {
 }
 
 #[tokio::test]
-async fn test_connect_and_forward_helper() {
+async fn test_forward_connection_with_timeout() {
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
 
@@ -115,7 +117,15 @@ async fn test_connect_and_forward_helper() {
     let proxy_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let conn = Connection::from_stream(stream).unwrap();
-        connect_and_forward(conn, upstream_addr).await.unwrap()
+        let upstream = TcpStream::connect(upstream_addr).await.unwrap();
+        forward_connection(
+            conn,
+            upstream,
+            65536,
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .unwrap()
     });
 
     let client_task = tokio::spawn(async move {
@@ -137,8 +147,6 @@ async fn test_connect_and_forward_helper() {
 
 #[tokio::test]
 async fn test_forward_connection_with_custom_buffer_size() {
-    use velda_transport::forward_connection_with_size;
-
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
 
@@ -158,7 +166,7 @@ async fn test_forward_connection_with_custom_buffer_size() {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let conn = Connection::from_stream(stream).unwrap();
         let upstream = TcpStream::connect(upstream_addr).await.unwrap();
-        forward_connection_with_size(conn, upstream, 8 * 1024)
+        forward_connection(conn, upstream, 8 * 1024, None)
             .await
             .unwrap()
     });
@@ -206,7 +214,7 @@ async fn test_splice_bidirectional_large_stream() {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let conn = Connection::from_stream(stream).unwrap();
         let upstream = TcpStream::connect(upstream_addr).await.unwrap();
-        velda_transport::forward_connection(conn, upstream)
+        velda_transport::forward_connection(conn, upstream, 65536, None)
             .await
             .unwrap()
     });

@@ -15,10 +15,10 @@ use velda_transport::EngineHandle;
 
 use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_upstreams};
 use crate::error::EdgeError;
+use crate::profile::RuntimeProfile;
 use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime};
-use crate::runtime_profile::RuntimeProfile;
 
 /// Summary of a successfully applied hot reload operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub fn load_initial_runtime(
     let router = build_router(&routes, &upstreams, &listeners)?;
     let dns_config = profile.to_dns_resolver_config();
     let upstreams_table =
-        crate::runtime::build_upstreams(&upstreams, tls_client.as_ref(), &dns_config);
+        crate::upstream::build_upstreams(&upstreams, tls_client.as_ref(), &dns_config);
 
     // Pre-initialize HTTP/3 persistent pipeline engines for declared H3 listeners
     if let Some(tls) = tls_server.as_ref() {
@@ -129,7 +129,7 @@ pub async fn apply_reload(
     let mut upstreams_changed = false;
 
     let hw = velda_core::hardware::global_hardware_topology();
-    let profile = crate::runtime_profile::resolve_runtime_profile(runtime_dir, hw);
+    let profile = crate::profile::resolve_runtime_profile(runtime_dir, hw);
 
     for domain in &notif.changed_domains {
         match domain.as_str() {
@@ -197,7 +197,7 @@ pub async fn apply_reload(
     // Recompile UpstreamTable if upstreams changed
     let upstreams = if upstreams_changed {
         let dns_config = profile.to_dns_resolver_config();
-        crate::runtime::build_upstreams(&config.upstreams, tls_client.as_ref(), &dns_config)
+        crate::upstream::build_upstreams(&config.upstreams, tls_client.as_ref(), &dns_config)
     } else {
         current.upstreams.clone()
     };

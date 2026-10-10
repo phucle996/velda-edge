@@ -461,16 +461,26 @@ async fn test_grpc_server_stream_pipe_roundtrip() {
         let mut conn = GrpcServerConnection::handshake(sock, &srv_config)
             .await
             .unwrap();
-        while let Some(server_stream) = conn.accept().await.unwrap() {
+        while let Some(mut server_stream) = conn.accept().await.unwrap() {
             let cfg = pipe_config;
             tokio::spawn(async move {
+                let req_data = server_stream
+                    .read_raw_message(cfg.max_message_size)
+                    .await
+                    .unwrap();
                 let mut client =
                     GrpcUpstreamConnector::connect(backend_addr, None, &cfg, None, None)
                         .await
                         .unwrap();
-                pipe_server_stream(server_stream, &mut client, &cfg)
-                    .await
-                    .unwrap();
+                pipe_server_stream(
+                    &server_stream.parts,
+                    &req_data,
+                    &mut server_stream.respond,
+                    &mut client,
+                    &cfg,
+                )
+                .await
+                .unwrap();
             });
         }
     });

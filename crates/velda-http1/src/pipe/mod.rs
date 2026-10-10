@@ -1,4 +1,14 @@
-//! Dedicated HTTP/1.1 wire pipe modules isolated by streaming strategy.
+//! # Low-Level HTTP/1.1 Wire Protocol Baseline (RFC 9112)
+//!
+//! **Architectural Role**: This module is the pure wire-framing engine ("thợ cơ khí đường truyền").
+//! It operates strictly on established HTTP/1.1 client streams without any knowledge of:
+//! - Gateway routing tables or listeners
+//! - Upstream connection pool leasing or lifecycle
+//! - Load balancing algorithms
+//! - Proxy metadata enrichment (`X-Forwarded-*`, `Host`, etc.)
+//!
+//! For high-level Gateway orchestration, connection leasing, self-healing, and
+//! cross-protocol bridging, see `velda_edge::pipeline`.
 //!
 //! Submodules:
 //! - `buffered`: Pure in-memory request-response forwarding for REST APIs.

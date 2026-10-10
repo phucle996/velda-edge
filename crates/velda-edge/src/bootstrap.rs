@@ -12,9 +12,9 @@ use velda_transport::TrafficEngine;
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
+use crate::profile::{RuntimeProfile, resolve_runtime_profile};
 use crate::reload::load_initial_runtime;
 use crate::runtime::{SharedRuntime, new_shared_runtime};
-use crate::runtime_profile::{RuntimeProfile, resolve_runtime_profile};
 
 /// Composition root supervisor coordinating the lifecycle of `velda-edge`.
 pub struct EdgeSupervisor {

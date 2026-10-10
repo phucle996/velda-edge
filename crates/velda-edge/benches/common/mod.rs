@@ -8,9 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_edge::runtime::{
-    PipelineTable, Runtime, RuntimeConfig, build_router, build_upstreams_default,
-};
+use velda_edge::runtime::{PipelineTable, Runtime, RuntimeConfig, build_router};
+use velda_edge::upstream::build_upstreams_default;
 use velda_sync::post_sync::listener::{
     ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     compile_listeners_to_binary,

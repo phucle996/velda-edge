@@ -31,29 +31,27 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
 {
     let mut desired_map: HashMap<String, IngressBinding> = HashMap::with_capacity(desired.len());
     for b in desired {
-        desired_map.insert(b.id().to_string(), b);
+        desired_map.insert(b.id().to_owned(), b);
     }
 
-    // 1. Detect removed or modified listeners
-    let to_remove: Vec<String> = active
-        .iter()
-        .filter(|(id, (current_binding, _))| match desired_map.get(*id) {
-            None => true,
-            Some(new_binding) => new_binding != current_binding,
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    for id in to_remove {
-        if let Some((old_binding, tx)) = active.remove(&id) {
+    // 1. Detect and close removed or modified listeners in-place (zero vector allocation)
+    active.retain(|id, (current_binding, tx)| {
+        let should_keep = match desired_map.get(id) {
+            Some(new_binding) => new_binding == current_binding,
+            None => false,
+        };
+        if !should_keep {
             tracing::info!(
                 listener_id = %id,
-                addr = %old_binding.addr(),
+                addr = %current_binding.addr(),
                 "Declarative Reconcile: Closing obsolete/modified listener"
             );
             let _ = tx.send(true);
+            false
+        } else {
+            true
         }
-    }
+    });
 
     // 2. Detect and bind new or modified listeners
     for (id, binding) in desired_map {

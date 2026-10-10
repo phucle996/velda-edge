@@ -140,7 +140,7 @@ Before writing or modifying any code in `crates/`, ask these five questions:
 1. **Which Cone does this logic belong to?**
    - Ingress mechanics (framing, decoding) $\to$ Top Cone (`velda-http1`, `velda-http2`, `velda-grpc`, `velda-transport`).
    - Routing decision $\to$ Narrow Waist (`velda-router`).
-   - Upstream leasing & forwarding $\to$ Bottom Cone (`velda-upstream`, `pre_compile/upstream/`).
+   - Upstream leasing & forwarding $\to$ Bottom Cone (`velda-upstream`, `crates/velda-edge/src/upstream/`).
 2. **Does this change make the Waist "fat"?**
    - If a proposed change in `velda-router` touches network I/O, parses JSON, allocates dynamic memory, or inspects payload bodies $\to$ **REJECT**.
 3. **Does this change introduce protocol cross-contamination?**

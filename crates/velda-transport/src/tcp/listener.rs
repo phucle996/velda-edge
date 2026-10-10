@@ -474,29 +474,26 @@ impl TcpListener {
         &self,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<Option<Connection>> {
-        if *shutdown.borrow() {
-            return Ok(None);
-        }
+        loop {
+            if *shutdown.borrow() {
+                return Ok(None);
+            }
 
-        tokio::select! {
-            res = shutdown.changed() => {
-                match res {
-                    Ok(()) => {
-                        if *shutdown.borrow() {
-                            Ok(None)
-                        } else {
-                            // Spurious wake-up or non-shutdown change; accept normally
-                            self.accept().await.map(Some)
+            tokio::select! {
+                res = shutdown.changed() => {
+                    match res {
+                        Ok(()) => {
+                            if *shutdown.borrow() {
+                                return Ok(None);
+                            }
+                            // Spurious change without true shutdown, continue loop in select!
                         }
-                    }
-                    Err(_) => {
-                        // Sender dropped, treat as shutdown signal
-                        Ok(None)
+                        Err(_) => return Ok(None), // Sender dropped, treat as shutdown
                     }
                 }
-            }
-            res = self.accept() => {
-                res.map(Some)
+                res = self.accept() => {
+                    return res.map(Some);
+                }
             }
         }
     }
