@@ -293,6 +293,7 @@ pub fn build_upstreams(
                         sni,
                         config.protocol.streaming,
                         shard_count,
+                        max_idle,
                         max_streams,
                     )))),
                 );

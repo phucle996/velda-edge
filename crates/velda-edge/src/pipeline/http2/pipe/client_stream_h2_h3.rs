@@ -62,8 +62,8 @@ pub async fn serve(
     let h3_config = Http3Config::auto();
 
     // 4. Acquire pooled HTTP/3 client
-    let client = match upstream.acquire(&h3_config).await {
-        Ok(c) => c,
+    let (client, _lease) = match upstream.acquire(&h3_config).await {
+        Ok(res) => res,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -90,7 +90,7 @@ pub async fn serve(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok(fresh_client) = upstream.acquire_fresh(&h3_config).await {
+        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
             pipe_res = pipe_client_stream(&fresh_client, &l7_req, &h3_config).await;
         }
     }

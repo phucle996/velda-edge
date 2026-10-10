@@ -113,7 +113,9 @@ where
     };
 
     // 6. Forward buffered request over HTTP/2 stream with self-healing retry
-    let mut pipe_res = send_h2_buffered(&mut client, &head, &body_bytes).await;
+    let is_tls = upstream.is_tls();
+    let upstream_host = upstream.target_host();
+    let mut pipe_res = send_h2_buffered(&mut client, &head, &body_bytes, is_tls, upstream_host).await;
     if let Err(ref e) = pipe_res
         && is_h2_refused_or_goaway(e)
     {
@@ -122,7 +124,7 @@ where
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
-            pipe_res = send_h2_buffered(&mut fresh_client, &head, &body_bytes).await;
+            pipe_res = send_h2_buffered(&mut fresh_client, &head, &body_bytes, is_tls, upstream_host).await;
         }
     }
 
@@ -156,10 +158,31 @@ async fn send_h2_buffered(
     client: &mut h2::client::SendRequest<bytes::Bytes>,
     head: &Http1ServerRequestHead,
     body: &bytes::Bytes,
+    is_tls: bool,
+    upstream_host: &str,
 ) -> Result<Http1ServerResponse, h2::Error> {
+    let scheme = if is_tls { "https" } else { "http" };
+    let authority = head
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| head.uri.host())
+        .unwrap_or(upstream_host);
+    let path_and_query = head
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let uri = http::Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .unwrap_or_else(|_| head.uri.clone());
+
     let mut req = http::Request::builder()
         .method(head.method.clone())
-        .uri(head.uri.clone())
+        .uri(uri)
         .version(http::Version::HTTP_2);
     *req.headers_mut().unwrap() = head.headers.clone();
     let req = req.body(()).unwrap();

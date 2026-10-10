@@ -104,6 +104,22 @@ impl Http2Upstream {
         self.inner.id()
     }
 
+    /// Returns whether this upstream uses TLS.
+    #[inline]
+    pub fn is_tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    /// Returns the target host or SNI for HTTP/2 :authority routing.
+    #[inline]
+    pub fn target_host(&self) -> &str {
+        if let Some((_, ref sni)) = self.tls {
+            sni.as_ref()
+        } else {
+            self.inner.id()
+        }
+    }
+
     /// Acquires an active, ready multiplexed HTTP/2 client connection and lease from the pool or connects a fresh one.
     ///
     /// Distributes streams across parallel TCP connections and Tokio cores while keeping active stream

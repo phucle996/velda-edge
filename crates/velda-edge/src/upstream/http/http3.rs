@@ -51,6 +51,8 @@ pub struct Http3Upstream {
     pub strategy: Http3PipeStrategy,
     /// Lock-sharded persistent HTTP/3 QUIC client connection pool.
     pool: MultiplexedPool<SocketAddr, Http3ClientResource>,
+    /// Maximum concurrent connections permitted per physical endpoint.
+    pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
 }
@@ -62,6 +64,7 @@ impl std::fmt::Debug for Http3Upstream {
             .field("target_sni", &self.target_sni)
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
+            .field("max_connections_per_key", &self.max_connections_per_key)
             .field("max_concurrent_streams", &self.max_concurrent_streams)
             .finish()
     }
@@ -74,6 +77,7 @@ impl Http3Upstream {
         target_sni: Arc<str>,
         streaming: StreamingMode,
         shard_count: usize,
+        max_connections_per_key: usize,
         max_concurrent_streams: u32,
     ) -> Self {
         let strategy = Http3PipeStrategy::from_streaming(streaming);
@@ -82,7 +86,9 @@ impl Http3Upstream {
             target_sni,
             streaming,
             strategy,
-            pool: MultiplexedPool::with_shards(shard_count),
+            pool: MultiplexedPool::with_shards(shard_count)
+                .with_max_connections_per_key(max_connections_per_key),
+            max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
         }
     }
@@ -95,19 +101,36 @@ impl Http3Upstream {
 
     /// Acquires an active multiplexed HTTP/3 client from the pool or establishes a new QUIC connection.
     ///
-    /// Uses pre-compiled upstream `target_sni` for the TLS handshake inside the connector.
-    pub async fn acquire(&self, config: &Http3Config) -> Result<Http3Client, EdgeError> {
+    /// Distributes streams across parallel QUIC connections when active streams exceed the scale-out threshold.
+    pub async fn acquire(
+        &self,
+        config: &Http3Config,
+    ) -> Result<
+        (
+            Http3Client,
+            velda_connection_pool::StreamLease<Http3ClientResource>,
+        ),
+        EdgeError,
+    > {
         let max_streams = self.max_concurrent_streams;
+        let max_conns = self.max_connections_per_key;
         let sni = Arc::clone(&self.target_sni);
         let idle_timeout = self.inner.timeouts().idle;
 
-        let client = self
+        const SCALE_OUT_STREAM_THRESHOLD: u32 = 16;
+
+        let (client, lease) = self
             .inner
             .execute(|endpoint| {
                 let sni = Arc::clone(&sni);
                 async move {
                     if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                        return Ok::<_, String>(lease.client.clone());
+                        let conn_count = self.pool.connection_count(&endpoint);
+                        if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
+                            || conn_count >= max_conns
+                        {
+                            return Ok::<_, String>((lease.client.clone(), lease));
+                        }
                     }
 
                     let client = velda_http3::client::connect(endpoint, &sni, config)
@@ -117,23 +140,32 @@ impl Http3Upstream {
                     let res = Http3ClientResource {
                         client: client.clone(),
                     };
-                    let _lease = self.pool.register(endpoint, res, max_streams);
+                    let lease = self.pool.register(endpoint, res, max_streams);
 
-                    Ok::<_, String>(client)
+                    Ok::<_, String>((client, lease))
                 }
             })
             .await
             .map_err(EdgeError::Upstream)?;
 
-        Ok(client)
+        Ok((client, lease))
     }
 
     /// Forcefully establishes a fresh HTTP/3 client connection directly, bypassing existing connections in the pool.
-    pub async fn acquire_fresh(&self, config: &Http3Config) -> Result<Http3Client, EdgeError> {
+    pub async fn acquire_fresh(
+        &self,
+        config: &Http3Config,
+    ) -> Result<
+        (
+            Http3Client,
+            velda_connection_pool::StreamLease<Http3ClientResource>,
+        ),
+        EdgeError,
+    > {
         let max_streams = self.max_concurrent_streams;
         let sni = Arc::clone(&self.target_sni);
 
-        let client = self
+        let (client, lease) = self
             .inner
             .execute(|endpoint| {
                 let sni = Arc::clone(&sni);
@@ -145,14 +177,14 @@ impl Http3Upstream {
                     let res = Http3ClientResource {
                         client: client.clone(),
                     };
-                    let _lease = self.pool.register(endpoint, res, max_streams);
+                    let lease = self.pool.register(endpoint, res, max_streams);
 
-                    Ok::<_, String>(client)
+                    Ok::<_, String>((client, lease))
                 }
             })
             .await
             .map_err(EdgeError::Upstream)?;
 
-        Ok(client)
+        Ok((client, lease))
     }
 }
