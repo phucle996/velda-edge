@@ -58,27 +58,76 @@ impl OverloadLevel {
     }
 }
 
+use serde::{Deserialize, Serialize};
+
 /// Tunable watermark thresholds for overload detection.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OverloadConfig {
-    /// Ratio of memory limit to enter Shedding (default: 0.82 = 82% RAM).
+    /// Ratio of memory limit to enter Shedding (default: 0.70 = 70% RAM).
     pub shedding_high_watermark: f64,
-    /// Ratio of memory limit to exit Shedding (default: 0.75 = 75% RAM).
+    /// Ratio of memory limit to exit Shedding (default: 0.60 = 60% RAM).
     pub shedding_low_watermark: f64,
-    /// Ratio of memory limit to enter Critical (default: 0.90 = 90% RAM).
+    /// Ratio of memory limit to enter Critical (default: 0.80 = 80% RAM).
     pub critical_high_watermark: f64,
-    /// Ratio of memory limit to exit Critical (default: 0.82 = 82% RAM).
+    /// Ratio of memory limit to exit Critical (default: 0.70 = 70% RAM).
     pub critical_low_watermark: f64,
+}
+
+use crate::hardware::MemoryTier;
+
+impl OverloadConfig {
+    /// Constructs default watermark thresholds calibrated to the node's memory capacity tier.
+    ///
+    /// Smaller tiers (Constrained, Small) allocate larger headroom percentages (15% - 20%)
+    /// to compensate for low absolute megabyte limits before Linux OOMKilled triggers.
+    /// Large bare-metal tiers (Large, XLarge, Ultra) permit higher utilization (90% - 95%)
+    /// because even 5% headroom represents multiple gigabytes of safety margin.
+    pub const fn for_tier(tier: MemoryTier) -> Self {
+        match tier {
+            MemoryTier::Constrained => Self {
+                shedding_high_watermark: 0.70,
+                shedding_low_watermark: 0.60,
+                critical_high_watermark: 0.80,
+                critical_low_watermark: 0.70,
+            },
+            MemoryTier::Small => Self {
+                shedding_high_watermark: 0.75,
+                shedding_low_watermark: 0.65,
+                critical_high_watermark: 0.85,
+                critical_low_watermark: 0.75,
+            },
+            MemoryTier::Medium => Self {
+                shedding_high_watermark: 0.80,
+                shedding_low_watermark: 0.72,
+                critical_high_watermark: 0.88,
+                critical_low_watermark: 0.80,
+            },
+            MemoryTier::Large => Self {
+                shedding_high_watermark: 0.85,
+                shedding_low_watermark: 0.78,
+                critical_high_watermark: 0.92,
+                critical_low_watermark: 0.85,
+            },
+            MemoryTier::XLarge => Self {
+                shedding_high_watermark: 0.88,
+                shedding_low_watermark: 0.82,
+                critical_high_watermark: 0.94,
+                critical_low_watermark: 0.88,
+            },
+            MemoryTier::TwoXLarge | MemoryTier::Ultra => Self {
+                shedding_high_watermark: 0.90,
+                shedding_low_watermark: 0.85,
+                critical_high_watermark: 0.95,
+                critical_low_watermark: 0.90,
+            },
+        }
+    }
 }
 
 impl Default for OverloadConfig {
     fn default() -> Self {
-        Self {
-            shedding_high_watermark: 0.70,
-            shedding_low_watermark: 0.60,
-            critical_high_watermark: 0.80,
-            critical_low_watermark: 0.70,
-        }
+        Self::for_tier(MemoryTier::Medium)
     }
 }
 
@@ -108,10 +157,17 @@ impl OverloadTracker {
         }
     }
 
-    /// Probes host topology and constructs an [`OverloadTracker`] scaled for active hardware.
-    pub fn auto() -> Self {
+    /// Creates an [`OverloadTracker`] with explicit config and automatically resolved memory limit.
+    pub fn with_config(config: OverloadConfig) -> Self {
         let total = crate::hardware::global_hardware_topology().memory_bytes;
-        Self::new(OverloadConfig::default(), total)
+        Self::new(config, total)
+    }
+
+    /// Probes host topology and constructs an [`OverloadTracker`] scaled for active hardware tier.
+    pub fn auto() -> Self {
+        let topology = crate::hardware::global_hardware_topology();
+        let config = OverloadConfig::for_tier(topology.memory_tier());
+        Self::new(config, topology.memory_bytes)
     }
 
     /// Returns the current overload level (reads atomic with Relaxed ordering, ~1ns).

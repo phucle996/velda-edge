@@ -23,13 +23,15 @@ pub mod schema;
 pub use schema::*;
 
 /// Complete runtime profile for the edge node.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeProfile {
     pub version: u32,
     pub hardware: HardwareProfile,
     pub discovery: DiscoveryRuntimeConfig,
     pub transport: TransportRuntimeConfig,
     pub tls: TlsRuntimeConfig,
+    #[serde(default = "velda_core::OverloadConfig::default")]
+    pub overload: velda_core::OverloadConfig,
 }
 
 impl RuntimeProfile {
@@ -120,6 +122,7 @@ impl RuntimeProfile {
                 send_tls13_tickets: tls_params.send_tls13_tickets,
                 handshake_timeout_secs: tls_params.handshake_timeout.as_secs(),
             },
+            overload: velda_core::OverloadConfig::for_tier(memory_tier),
         }
     }
 

@@ -38,5 +38,11 @@
     "max_early_data_size": 8192,
     "send_tls13_tickets": 4,
     "handshake_timeout_secs": 5
+  },
+  "overload": {
+    "shedding_high_watermark": 0.70,
+    "shedding_low_watermark": 0.60,
+    "critical_high_watermark": 0.80,
+    "critical_low_watermark": 0.70
   }
 }

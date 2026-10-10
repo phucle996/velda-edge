@@ -77,6 +77,11 @@ fn test_profile_across_all_tiers() {
 
         let udp_cfg = profile.to_udp_socket_config();
         assert!(udp_cfg.recv_buffer_size.is_some());
+
+        assert_eq!(
+            profile.overload,
+            velda_core::OverloadConfig::for_tier(hardware.memory_tier())
+        );
     }
 }
 
@@ -286,4 +291,29 @@ fn test_effective_tier_override() {
     assert_eq!(resolved.transport.max_active_connections, 4_000_000);
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
     assert_eq!(resolved.tls.session_cache_capacity, 131_072);
+}
+
+#[test]
+fn test_overload_config_override_in_runtime_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runtime_json_path = temp_dir.path().join("runtime.json");
+
+    let json = r#"{
+        "version": 1,
+        "overload": {
+            "shedding_high_watermark": 0.85,
+            "shedding_low_watermark": 0.75,
+            "critical_high_watermark": 0.95,
+            "critical_low_watermark": 0.88
+        }
+    }"#;
+
+    fs::write(&runtime_json_path, json).unwrap();
+    let hardware = HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
+    let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
+
+    assert_eq!(resolved.overload.shedding_high_watermark, 0.85);
+    assert_eq!(resolved.overload.shedding_low_watermark, 0.75);
+    assert_eq!(resolved.overload.critical_high_watermark, 0.95);
+    assert_eq!(resolved.overload.critical_low_watermark, 0.88);
 }

@@ -104,7 +104,7 @@ pub fn load_initial_runtime(
         upstreams: upstreams_table,
         tls_server,
         tls_client,
-        overload: Arc::new(velda_core::OverloadTracker::auto()),
+        overload: Arc::new(velda_core::OverloadTracker::with_config(profile.overload)),
     })
 }
 
