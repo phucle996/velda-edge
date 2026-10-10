@@ -268,7 +268,7 @@ pub async fn process_grpc_udp_request(
                 upstream = %route.upstream_name,
                 "Failed to acquire upstream gRPC over UDP client"
             );
-            return GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}")));
+            return GrpcStatus::Unavailable.to_l7_response(Some("upstream unavailable"));
         }
     };
 
@@ -313,7 +313,7 @@ pub async fn process_grpc_udp_request(
                 upstream = %route.upstream_name,
                 "gRPC over UDP stream pipe terminated with error"
             );
-            GrpcStatus::Unavailable.to_l7_response(Some(&format!("upstream error: {e}")))
+            GrpcStatus::Unavailable.to_l7_response(Some("upstream unavailable"))
         }
     }
 }
