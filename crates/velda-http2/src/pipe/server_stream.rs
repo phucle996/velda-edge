@@ -65,24 +65,45 @@ pub async fn pipe_server_stream(
 
     let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
 
-    // 6. Pump upstream chunks downstream with client disconnect detection and flow-control release
+    // 6. Pump upstream chunks downstream with batched flow-control release and disconnect detection
+    let batch_threshold = (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
     let mut total_bytes = 0;
+    let mut unreleased_bytes = 0;
+
     while let Some(chunk) = body_stream.data().await {
         let data = chunk?;
         let len = data.len();
         total_bytes += len;
+        unreleased_bytes += len;
+
         if total_bytes > config.max_body_size {
-            let _ = body_stream.flow_control().release_capacity(len);
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
             return Err(Http2Error::PayloadTooLarge(total_bytes));
         }
 
         if sender.send_chunk(data).await.is_err() {
             // Downstream client disconnected mid-stream
             tracing::debug!("Downstream client disconnected during H2 response streaming");
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
             return Ok(());
         }
 
-        let _ = body_stream.flow_control().release_capacity(len);
+        if unreleased_bytes >= batch_threshold {
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
+            unreleased_bytes = 0;
+        }
+    }
+
+    if unreleased_bytes > 0 {
+        let _ = body_stream
+            .flow_control()
+            .release_capacity(unreleased_bytes);
     }
 
     let _ = sender.finish();

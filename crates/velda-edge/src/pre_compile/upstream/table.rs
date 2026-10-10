@@ -507,6 +507,7 @@ pub fn build_upstreams(
                         tls,
                         config.protocol.streaming,
                         shard_count,
+                        max_idle,
                         max_streams,
                         http2_acceleration,
                     )))),

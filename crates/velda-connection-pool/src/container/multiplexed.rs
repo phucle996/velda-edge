@@ -10,7 +10,7 @@ use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::container::hasher::FastBuildHasher;
@@ -253,6 +253,8 @@ where
     shards: Box<[MuxShard<K, R>]>,
     hash_builder: S,
     mask: usize,
+    max_connections_per_key: usize,
+    rr_cursor: AtomicUsize,
 }
 
 impl<K, R> Default for MultiplexedPool<K, R, FastBuildHasher>
@@ -277,7 +279,13 @@ where
 
     /// Creates a new multiplexed pool with the specified shard count (clamped to power of 2, min 1).
     pub fn with_shards(shard_count: usize) -> Self {
-        Self::with_hasher(shard_count, FastBuildHasher)
+        Self::with_options(shard_count, shard_count, FastBuildHasher)
+    }
+
+    /// Sets the maximum concurrent connections permitted per individual key/endpoint.
+    pub fn with_max_connections_per_key(mut self, max: usize) -> Self {
+        self.max_connections_per_key = max.max(1);
+        self
     }
 }
 
@@ -289,6 +297,15 @@ where
 {
     /// Creates a new multiplexed pool with custom shard count and custom hash builder.
     pub fn with_hasher(shard_count: usize, hash_builder: S) -> Self {
+        Self::with_options(shard_count, shard_count, hash_builder)
+    }
+
+    /// Creates a new multiplexed pool with custom shard count, custom max connections per key, and custom hasher.
+    pub fn with_options(
+        shard_count: usize,
+        max_connections_per_key: usize,
+        hash_builder: S,
+    ) -> Self {
         let count = shard_count.max(1).next_power_of_two();
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
@@ -299,6 +316,8 @@ where
             shards: shards.into_boxed_slice(),
             hash_builder,
             mask: count - 1,
+            max_connections_per_key: max_connections_per_key.max(1),
+            rr_cursor: AtomicUsize::new(0),
         }
     }
 
@@ -308,27 +327,54 @@ where
         &self.shards[idx]
     }
 
+    /// Returns the number of physical connections currently stored for a given key.
+    pub fn connection_count(&self, key: &K) -> usize {
+        let shard = self.shard_for(key);
+        let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(key).map(|v| v.len()).unwrap_or(0)
+    }
+
     /// Acquires a stream slot from an existing available multiplexed connection,
     /// enforcing the safe idle threshold (75% cutoff) on idle connections.
+    ///
+    /// Distributes streams across connections using Least-Loaded selection with Round-Robin
+    /// tie-breaking for balanced core and socket utilization.
     pub fn acquire_stream(&self, key: &K, idle_timeout: Duration) -> Option<StreamLease<R>> {
         let now = Instant::now();
         let shard = self.shard_for(key);
 
-        // Fast-path: quickly scan and clone candidate Arc under minimal lock hold time (< 10 ns)
+        // Fast-path: quickly scan candidate under minimal lock hold time
         let candidate = {
             let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
             let conns = guard.get(key)?;
-            let mut found = None;
-            for conn in conns.iter() {
+            let total = conns.len();
+            if total == 0 {
+                return None;
+            }
+
+            // Least-Loaded selection with round-robin tie breaking
+            let start_idx = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % total;
+            let mut best: Option<Arc<MultiplexedConnection<R>>> = None;
+            let mut min_load = u32::MAX;
+
+            for i in 0..total {
+                let idx = (start_idx + i) % total;
+                let conn = &conns[idx];
                 if !conn.is_goaway()
                     && !conn.is_exhausted()
                     && !conn.is_idle_at_risk(idle_timeout, now)
                 {
-                    found = Some(Arc::clone(conn));
-                    break;
+                    let load = conn.active_streams();
+                    if load < min_load {
+                        min_load = load;
+                        best = Some(Arc::clone(conn));
+                        if load == 0 {
+                            break;
+                        }
+                    }
                 }
             }
-            found
+            best
         };
 
         // Try acquire stream lock-free OUTSIDE the shard mutex lock
@@ -341,11 +387,18 @@ where
         // Slow-path fallback: If candidate was saturated in race or dead connections exist
         let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
         let conns = guard.get_mut(key)?;
+        let total = conns.len();
+        if total == 0 {
+            return None;
+        }
 
         let mut acquired = None;
         let mut has_dead = false;
+        let start_idx = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % total;
 
-        for conn in conns.iter() {
+        for i in 0..total {
+            let idx = (start_idx + i) % total;
+            let conn = &conns[idx];
             if !conn.is_goaway() && !conn.is_exhausted() && !conn.is_idle_at_risk(idle_timeout, now)
             {
                 if let Some(lease) = conn.try_acquire_stream() {
@@ -372,6 +425,49 @@ where
         }
 
         acquired
+    }
+
+    /// Acquires a stream slot only if an existing connection is currently idle (0 active streams).
+    ///
+    /// Used by upstream managers during scale-out phase to reuse idle connections before
+    /// spawning new parallel connections.
+    pub fn acquire_idle_stream(&self, key: &K, idle_timeout: Duration) -> Option<StreamLease<R>> {
+        let now = Instant::now();
+        let shard = self.shard_for(key);
+
+        let candidate = {
+            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let conns = guard.get(key)?;
+            let total = conns.len();
+            if total == 0 {
+                return None;
+            }
+
+            let start_idx = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % total;
+            let mut found = None;
+
+            for i in 0..total {
+                let idx = (start_idx + i) % total;
+                let conn = &conns[idx];
+                if conn.is_idle()
+                    && !conn.is_goaway()
+                    && !conn.is_exhausted()
+                    && !conn.is_idle_at_risk(idle_timeout, now)
+                {
+                    found = Some(Arc::clone(conn));
+                    break;
+                }
+            }
+            found
+        };
+
+        if let Some(conn) = candidate
+            && let Some(lease) = conn.try_acquire_stream()
+        {
+            return Some(lease);
+        }
+
+        None
     }
 
     /// Registers a newly established connection and immediately claims 1 stream lease.

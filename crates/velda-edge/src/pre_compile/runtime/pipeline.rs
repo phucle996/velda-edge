@@ -423,6 +423,18 @@ fn resolve_http2_config(listener: &ListenerConfig, tier: MemoryTier) -> Http2Con
         if let Some(v) = h2.max_continuation_frames {
             config.max_continuation_frames = v;
         }
+        if let Some(v) = h2.max_send_buffer_size {
+            config.max_send_buffer_size = v;
+        }
+        if let Some(v) = h2.max_requests_per_connection {
+            config.max_requests_per_connection = v;
+        }
+        if let Some(v) = h2.max_connection_duration_secs {
+            config.max_connection_duration_secs = v;
+        }
+        if let Some(v) = h2.alt_svc_port {
+            config.alt_svc_port = Some(v);
+        }
     }
     config
 }

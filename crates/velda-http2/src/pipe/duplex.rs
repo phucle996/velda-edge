@@ -39,10 +39,24 @@ pub async fn pipe_duplex(
         .map_err(|e| Http2Error::Parse(e.to_string()))?;
     let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-    // Task 1: Upload pump — stream downstream chunks to upstream
+    // Task 1: Upload pump — stream downstream chunks to upstream with flow-control backpressure
     let upload_task = async move {
-        while let Some(chunk) = body_rx.recv_chunk().await? {
-            send_stream.send_data(chunk, false)?;
+        while let Some(mut chunk) = body_rx.recv_chunk().await? {
+            while !chunk.is_empty() {
+                let available = send_stream.capacity();
+                if available == 0 {
+                    send_stream.reserve_capacity(chunk.len());
+                    let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
+                    if let Some(err) = res {
+                        err?;
+                    }
+                    continue;
+                }
+
+                let to_send = chunk.len().min(available);
+                let slice = chunk.split_to(to_send);
+                send_stream.send_data(slice, false)?;
+            }
         }
         send_stream.send_data(Bytes::new(), true)?;
         Ok::<(), Http2Error>(())
@@ -66,23 +80,45 @@ pub async fn pipe_duplex(
 
         let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
 
+        let batch_threshold =
+            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
         let mut total_bytes = 0;
+        let mut unreleased_bytes = 0;
+
         while let Some(chunk) = body_stream.data().await {
             let data = chunk?;
             let len = data.len();
             total_bytes += len;
+            unreleased_bytes += len;
+
             if total_bytes > config_max_body {
-                let _ = body_stream.flow_control().release_capacity(len);
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
                 return Err(Http2Error::PayloadTooLarge(total_bytes));
             }
 
             if sender.send_chunk(data).await.is_err() {
                 // Downstream client disconnected mid-stream
                 tracing::debug!("Downstream client disconnected during H2 duplex streaming");
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
                 return Ok(());
             }
 
-            let _ = body_stream.flow_control().release_capacity(len);
+            if unreleased_bytes >= batch_threshold {
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
+                unreleased_bytes = 0;
+            }
+        }
+
+        if unreleased_bytes > 0 {
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
         }
 
         let _ = sender.finish();

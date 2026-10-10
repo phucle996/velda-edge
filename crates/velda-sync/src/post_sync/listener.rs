@@ -102,6 +102,14 @@ pub struct Http2ListenerConfig {
     pub max_pending_control_frames: Option<u32>,
     #[serde(default)]
     pub max_continuation_frames: Option<u32>,
+    #[serde(default)]
+    pub max_send_buffer_size: Option<usize>,
+    #[serde(default)]
+    pub max_requests_per_connection: Option<u32>,
+    #[serde(default)]
+    pub max_connection_duration_secs: Option<u32>,
+    #[serde(default)]
+    pub alt_svc_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -591,6 +599,46 @@ pub fn validate_listeners_with_lkg(
                             domain: "listeners".into(),
                             reason: format!(
                                 "Listener '{}' has invalid max_continuation_frames 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(stream_win) = h2.initial_stream_window_size
+                        && stream_win < 65_535
+                    {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid initial_stream_window_size {}; must be at least 65535 (RFC 9113 minimum floor)",
+                                listener.id, stream_win
+                            ),
+                        });
+                    }
+                    if let Some(conn_win) = h2.initial_connection_window_size
+                        && conn_win < 65_535
+                    {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid initial_connection_window_size {}; must be at least 65535 (RFC 9113 minimum floor)",
+                                listener.id, conn_win
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.max_send_buffer_size {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid max_send_buffer_size 0; must be > 0",
+                                listener.id
+                            ),
+                        });
+                    }
+                    if let Some(0) = h2.alt_svc_port {
+                        return Err(SyncError::Validation {
+                            domain: "listeners".into(),
+                            reason: format!(
+                                "Listener '{}' has invalid alt_svc_port 0; must be > 0",
                                 listener.id
                             ),
                         });

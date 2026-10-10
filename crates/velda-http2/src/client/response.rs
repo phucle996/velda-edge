@@ -113,26 +113,43 @@ impl Http2ClientResponse {
             let _ = body_stream.flow_control().release_capacity(len);
             return Err(crate::error::Http2Error::PayloadTooLarge(len));
         }
-        let _ = body_stream.flow_control().release_capacity(len);
 
         if body_stream.is_end_stream() {
+            let _ = body_stream.flow_control().release_capacity(len);
             return Ok(Body::Bytes(data));
         }
 
+        const BATCH_THRESHOLD: usize = 131_072; // 128 KB
         let mut body_buf = bytes::BytesMut::with_capacity(len * 2);
         body_buf.extend_from_slice(&data);
+        let mut unreleased_bytes = len;
 
         while let Some(chunk) = body_stream.data().await {
             let chunk_data = chunk?;
             let chunk_len = chunk_data.len();
             if body_buf.len() + chunk_len > max_body_size {
-                let _ = body_stream.flow_control().release_capacity(chunk_len);
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes + chunk_len);
                 return Err(crate::error::Http2Error::PayloadTooLarge(
                     body_buf.len() + chunk_len,
                 ));
             }
             body_buf.extend_from_slice(&chunk_data);
-            let _ = body_stream.flow_control().release_capacity(chunk_len);
+            unreleased_bytes += chunk_len;
+
+            if unreleased_bytes >= BATCH_THRESHOLD {
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
+                unreleased_bytes = 0;
+            }
+        }
+
+        if unreleased_bytes > 0 {
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
         }
 
         Ok(Body::Bytes(body_buf.freeze()))

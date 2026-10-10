@@ -120,7 +120,10 @@ pub async fn run_http2_loop<IO>(
     let mut requests_served: u32 = 0;
     let mut is_draining = false;
 
-    match Http2ServerConnection::handshake(stream, config).await {
+    let meta = Arc::new(meta);
+    let config_arc = Arc::new(config);
+
+    match Http2ServerConnection::handshake(stream, *config_arc).await {
         Ok(mut conn) => loop {
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
@@ -243,12 +246,44 @@ pub async fn run_http2_loop<IO>(
                     };
 
                     consecutive_not_founds = 0;
-                    let meta_clone = meta.clone();
-                    let rt_clone = runtime.clone();
-                    let cfg_clone = config;
+
+                    // Resolve upstream target directly within rt read lock (Zero second rt.load / zero second HashMap lookup)
+                    let Some(upstream_target) =
+                        rt.upstreams.http.get(&route.upstream_name).cloned()
+                    else {
+                        tracing::error!(
+                            listener = %meta.listener_id,
+                            route = %route.id,
+                            upstream = %route.upstream_name,
+                            "No healthy backend endpoints available for HTTP upstream"
+                        );
+                        let no_backend = L7Response::from_bytes(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            b"503 Service Unavailable: upstream not configured\n".to_vec(),
+                        )
+                        .with_header(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        );
+                        if !receiver.is_end_stream() {
+                            let _ = responder.send_response_and_cancel_upload(&no_backend);
+                        } else {
+                            let _ = responder.send_response(&no_backend);
+                        }
+                        continue;
+                    };
+
+                    let meta_clone = Arc::clone(&meta);
+                    let cfg_clone = Arc::clone(&config_arc);
                     tokio::spawn(async move {
                         serve_http2_stream(
-                            head, receiver, responder, meta_clone, cfg_clone, rt_clone, route,
+                            head,
+                            receiver,
+                            responder,
+                            meta_clone,
+                            cfg_clone,
+                            upstream_target,
+                            route,
                         )
                         .await;
                     });
@@ -269,7 +304,7 @@ pub async fn run_http2_loop<IO>(
                 Err(_) => {
                     tracing::debug!(
                         listener = %meta.listener_id,
-                        timeout_ms = config.idle_timeout_ms,
+                        timeout_ms = config_arc.idle_timeout_ms,
                         "HTTP/2 stream accept timed out"
                     );
                     break;
@@ -286,36 +321,12 @@ pub async fn run_http2_loop<IO>(
 async fn serve_http2_stream(
     head: Http2ServerRequestHead,
     receiver: Http2StreamReceiver,
-    mut responder: Http2Responder,
-    meta: DownstreamMeta,
-    config: Http2Config,
-    runtime: SharedRuntime,
+    responder: Http2Responder,
+    meta: Arc<DownstreamMeta>,
+    config: Arc<Http2Config>,
+    upstream_target: Arc<HttpUpstream>,
     route: velda_router::Http2Route,
 ) {
-    let rt = runtime.load();
-    let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
-        tracing::error!(
-            listener = %meta.listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            "No healthy backend endpoints available for HTTP upstream"
-        );
-        let no_backend = L7Response::from_bytes(
-            StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: upstream not configured\n".to_vec(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        if !receiver.is_end_stream() {
-            let _ = responder.send_response_and_cancel_upload(&no_backend);
-        } else {
-            let _ = responder.send_response(&no_backend);
-        }
-        return;
-    };
-
     match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => {
             serve_http2_to_http2(head, receiver, responder, meta, config, upstream, &route).await;
@@ -324,6 +335,7 @@ async fn serve_http2_stream(
             serve_http2_to_http1_bridge(head, receiver, responder, meta, upstream, &route).await;
         }
         HttpUpstream::Http3(_) => {
+            let mut responder = responder;
             let not_impl = L7Response::from_bytes(
                 StatusCode::NOT_IMPLEMENTED,
                 b"501 Not Implemented: HTTP/2 to HTTP/3 bridging not supported\n".to_vec(),
@@ -342,8 +354,8 @@ async fn serve_http2_to_http2(
     mut head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
-    meta: DownstreamMeta,
-    config: Http2Config,
+    meta: Arc<DownstreamMeta>,
+    config: Arc<Http2Config>,
     upstream: &Arc<Http2Upstream>,
     route: &velda_router::Http2Route,
 ) {
@@ -365,9 +377,8 @@ async fn serve_http2_to_http2(
     );
 
     // Fail-fast: Acquire upstream multiplexed connection before reading downstream body
-    let upstream_cfg = config;
-    let mut client = match upstream.acquire(&upstream_cfg).await {
-        Ok(client) => client,
+    let (mut client, _lease) = match upstream.acquire(&config).await {
+        Ok(res) => res,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -440,7 +451,8 @@ async fn serve_http2_to_http2(
                     error = %e,
                     "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
                 );
-                if let Ok(mut fresh_client) = upstream.acquire_fresh(&upstream_cfg).await {
+                if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await
+                {
                     res = pipe_server_stream(
                         &head,
                         &body,
@@ -478,7 +490,8 @@ async fn serve_http2_to_http2(
                     error = %e,
                     "HTTP/2 buffered stream refused or connection closed; self-healing with fresh connection"
                 );
-                if let Ok(mut fresh_client) = upstream.acquire_fresh(&upstream_cfg).await {
+                if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await
+                {
                     res = pipe_buffered(&head, &body, &mut responder, &mut fresh_client, &config)
                         .await;
                 }
@@ -524,7 +537,7 @@ async fn serve_http2_to_http1_bridge(
     mut head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
-    meta: DownstreamMeta,
+    meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
     route: &velda_router::Http2Route,
 ) {

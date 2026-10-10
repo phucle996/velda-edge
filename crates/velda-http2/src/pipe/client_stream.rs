@@ -40,9 +40,23 @@ pub async fn pipe_client_stream(
         .map_err(|e| Http2Error::Parse(e.to_string()))?;
     let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-    // 2. Progressively pump downstream DATA chunks to upstream send stream
-    while let Some(chunk) = body_rx.recv_chunk().await? {
-        send_stream.send_data(chunk, false)?;
+    // 2. Progressively pump downstream DATA chunks to upstream send stream with flow-control backpressure
+    while let Some(mut chunk) = body_rx.recv_chunk().await? {
+        while !chunk.is_empty() {
+            let available = send_stream.capacity();
+            if available == 0 {
+                send_stream.reserve_capacity(chunk.len());
+                let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
+                if let Some(err) = res {
+                    err?;
+                }
+                continue;
+            }
+
+            let to_send = chunk.len().min(available);
+            let slice = chunk.split_to(to_send);
+            send_stream.send_data(slice, false)?;
+        }
     }
     // Signal end of request stream to upstream
     send_stream.send_data(Bytes::new(), true)?;
@@ -64,10 +78,12 @@ pub async fn pipe_client_stream(
         ));
     }
 
-    // 5. Accumulate bounded response body while releasing H2 flow-control window
+    // 5. Accumulate bounded response body with batched H2 flow-control release
     let is_no_body_status = parts.status.is_informational()
         || parts.status == http::StatusCode::NO_CONTENT
         || parts.status == http::StatusCode::NOT_MODIFIED;
+
+    let batch_threshold = (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
 
     let resp_body = if is_head || is_no_body_status || body_stream.is_end_stream() {
         Body::Empty
@@ -78,23 +94,39 @@ pub async fn pipe_client_stream(
             let _ = body_stream.flow_control().release_capacity(len);
             return Err(Http2Error::PayloadTooLarge(len));
         }
-        let _ = body_stream.flow_control().release_capacity(len);
 
         if body_stream.is_end_stream() {
+            let _ = body_stream.flow_control().release_capacity(len);
             Body::Bytes(data)
         } else {
             let mut body_buf = BytesMut::with_capacity(len * 2);
             body_buf.extend_from_slice(&data);
+            let mut unreleased_bytes = len;
 
             while let Some(chunk) = body_stream.data().await {
                 let chunk_data = chunk?;
                 let chunk_len = chunk_data.len();
                 if body_buf.len() + chunk_len > config.max_body_size {
-                    let _ = body_stream.flow_control().release_capacity(chunk_len);
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes + chunk_len);
                     return Err(Http2Error::PayloadTooLarge(body_buf.len() + chunk_len));
                 }
                 body_buf.extend_from_slice(&chunk_data);
-                let _ = body_stream.flow_control().release_capacity(chunk_len);
+                unreleased_bytes += chunk_len;
+
+                if unreleased_bytes >= batch_threshold {
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes);
+                    unreleased_bytes = 0;
+                }
+            }
+
+            if unreleased_bytes > 0 {
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
             }
 
             Body::Bytes(body_buf.freeze())

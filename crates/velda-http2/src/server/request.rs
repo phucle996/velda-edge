@@ -227,14 +227,26 @@ impl Http2ServerRequest {
 
 /// Progressive stream receiver for an incoming HTTP/2 request or response body.
 ///
-/// Reads DATA chunks incrementally while enforcing flow-control (`release_capacity`)
+/// Reads DATA chunks incrementally with batched flow-control (`release_capacity`)
 /// and maximum payload size limits without buffering the entire body into RAM.
 #[derive(Debug)]
 pub struct Http2StreamReceiver {
     body_stream: h2::RecvStream,
     max_body_size: usize,
     bytes_received: usize,
+    unreleased_bytes: usize,
     flood_tracker: Option<Arc<Http2FloodTracker>>,
+}
+
+impl Drop for Http2StreamReceiver {
+    fn drop(&mut self) {
+        if self.unreleased_bytes > 0 {
+            let _ = self
+                .body_stream
+                .flow_control()
+                .release_capacity(self.unreleased_bytes);
+        }
+    }
 }
 
 impl Http2StreamReceiver {
@@ -245,6 +257,7 @@ impl Http2StreamReceiver {
             body_stream,
             max_body_size,
             bytes_received: 0,
+            unreleased_bytes: 0,
             flood_tracker: None,
         }
     }
@@ -259,24 +272,43 @@ impl Http2StreamReceiver {
     /// Asynchronously receives the next DATA chunk from the incoming stream.
     pub async fn recv_chunk(&mut self) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
         let Some(chunk_res) = self.body_stream.data().await else {
+            if self.unreleased_bytes > 0 {
+                let _ = self
+                    .body_stream
+                    .flow_control()
+                    .release_capacity(self.unreleased_bytes);
+                self.unreleased_bytes = 0;
+            }
             return Ok(None);
         };
 
         let chunk = chunk_res?;
         let len = chunk.len();
         self.bytes_received += len;
+        self.unreleased_bytes += len;
         if let Some(tracker) = &self.flood_tracker {
             tracker.on_payload_read(len);
         }
 
         if self.bytes_received > self.max_body_size {
-            let _ = self.body_stream.flow_control().release_capacity(len);
+            let _ = self
+                .body_stream
+                .flow_control()
+                .release_capacity(self.unreleased_bytes);
             return Err(crate::error::Http2Error::PayloadTooLarge(
                 self.bytes_received,
             ));
         }
 
-        let _ = self.body_stream.flow_control().release_capacity(len);
+        const INGRESS_BATCH_THRESHOLD: usize = 131_072; // 128 KB
+        if self.unreleased_bytes >= INGRESS_BATCH_THRESHOLD {
+            let _ = self
+                .body_stream
+                .flow_control()
+                .release_capacity(self.unreleased_bytes);
+            self.unreleased_bytes = 0;
+        }
+
         Ok(Some(chunk))
     }
 
@@ -303,6 +335,13 @@ impl Http2StreamReceiver {
         };
 
         if self.is_end_stream() {
+            if self.unreleased_bytes > 0 {
+                let _ = self
+                    .body_stream
+                    .flow_control()
+                    .release_capacity(self.unreleased_bytes);
+                self.unreleased_bytes = 0;
+            }
             return Ok(Body::Bytes(first_chunk));
         }
 
@@ -311,6 +350,14 @@ impl Http2StreamReceiver {
 
         while let Some(chunk) = self.recv_chunk().await? {
             body_buf.extend_from_slice(&chunk);
+        }
+
+        if self.unreleased_bytes > 0 {
+            let _ = self
+                .body_stream
+                .flow_control()
+                .release_capacity(self.unreleased_bytes);
+            self.unreleased_bytes = 0;
         }
 
         Ok(Body::Bytes(body_buf.freeze()))

@@ -49,6 +49,8 @@ pub struct Http2Upstream {
     pub strategy: Http2PipeStrategy,
     /// Lock-sharded persistent HTTP/2 multiplexed client connection pool.
     pool: MultiplexedPool<SocketAddr, Http2ClientResource>,
+    /// Maximum parallel TCP connections maintained per physical endpoint.
+    pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
@@ -61,6 +63,7 @@ impl std::fmt::Debug for Http2Upstream {
             .field("id", &self.inner.id())
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
+            .field("max_connections_per_key", &self.max_connections_per_key)
             .field("max_concurrent_streams", &self.max_concurrent_streams)
             .field("acceleration", &self.acceleration)
             .finish()
@@ -74,6 +77,7 @@ impl Http2Upstream {
         tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
         streaming: StreamingMode,
         shard_count: usize,
+        max_connections_per_key: usize,
         max_concurrent_streams: u32,
         acceleration: velda_http2::Http2AccelerationPath,
     ) -> Self {
@@ -83,7 +87,9 @@ impl Http2Upstream {
             tls,
             streaming,
             strategy,
-            pool: MultiplexedPool::with_shards(shard_count),
+            pool: MultiplexedPool::with_shards(shard_count)
+                .with_max_connections_per_key(max_connections_per_key),
+            max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
             acceleration,
         }
@@ -95,15 +101,22 @@ impl Http2Upstream {
         self.inner.id()
     }
 
-    /// Acquires an active, ready multiplexed HTTP/2 client connection from the pool or connects a fresh one.
+    /// Acquires an active, ready multiplexed HTTP/2 client connection and lease from the pool or connects a fresh one.
     ///
-    /// Hundreds of concurrent downstream streams share the same underlying TCP connection
-    /// without repeated handshakes. Dead connections are automatically replaced.
+    /// Distributes streams across parallel TCP connections and Tokio cores while keeping active stream
+    /// accounting precise via the returned RAII lease guard.
     pub async fn acquire(
         &self,
         config: &velda_http2::Http2Config,
-    ) -> Result<h2::client::SendRequest<Bytes>, EdgeError> {
+    ) -> Result<
+        (
+            h2::client::SendRequest<Bytes>,
+            velda_connection_pool::StreamLease<Http2ClientResource>,
+        ),
+        EdgeError,
+    > {
         let max_streams = self.max_concurrent_streams;
+        let max_conns = self.max_connections_per_key;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
@@ -114,12 +127,35 @@ impl Http2Upstream {
 
         self.inner
             .execute(|endpoint| async move {
-                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let ready_client = lease.client.clone();
-                    match ready_client.ready().await {
-                        Ok(ready_client) => return Ok::<_, String>(ready_client),
-                        Err(_) => {
-                            lease.mark_goaway();
+                let conn_count = self.pool.connection_count(&endpoint);
+                let can_scale_out = conn_count < max_conns;
+
+                if can_scale_out {
+                    // During scale-out phase, reuse an idle connection if available.
+                    // If all existing connections are actively in-flight, skip to connect a parallel connection!
+                    if let Some(lease) = self.pool.acquire_idle_stream(&endpoint, idle_timeout) {
+                        let ready_client = lease.client.clone();
+                        match ready_client.ready().await {
+                            Ok(ready_client) => {
+                                return Ok::<_, String>((ready_client.clone(), lease));
+                            }
+                            Err(_) => {
+                                lease.mark_goaway();
+                            }
+                        }
+                    }
+                } else {
+                    // Pool reached max concurrent connections for this endpoint:
+                    // Lease from existing connections using Least-Loaded selection!
+                    if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                        let ready_client = lease.client.clone();
+                        match ready_client.ready().await {
+                            Ok(ready_client) => {
+                                return Ok::<_, String>((ready_client.clone(), lease));
+                            }
+                            Err(_) => {
+                                lease.mark_goaway();
+                            }
                         }
                     }
                 }
@@ -139,13 +175,13 @@ impl Http2Upstream {
                     .await
                     .map_err(|err| format!("Reconnected H2 client not ready: {err}"))?;
 
-                let _ = self.pool.register(
+                let lease = self.pool.register(
                     endpoint,
                     Http2ClientResource::new(ready_fresh.clone()),
                     max_streams,
                 );
 
-                Ok::<_, String>(ready_fresh)
+                Ok::<_, String>((ready_fresh, lease))
             })
             .await
             .map_err(EdgeError::Upstream)
@@ -158,7 +194,13 @@ impl Http2Upstream {
     pub async fn acquire_fresh(
         &self,
         config: &velda_http2::Http2Config,
-    ) -> Result<h2::client::SendRequest<Bytes>, EdgeError> {
+    ) -> Result<
+        (
+            h2::client::SendRequest<Bytes>,
+            velda_connection_pool::StreamLease<Http2ClientResource>,
+        ),
+        EdgeError,
+    > {
         let max_streams = self.max_concurrent_streams;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
@@ -184,13 +226,13 @@ impl Http2Upstream {
                     .await
                     .map_err(|err| format!("Fresh H2 client not ready: {err}"))?;
 
-                let _ = self.pool.register(
+                let lease = self.pool.register(
                     endpoint,
                     Http2ClientResource::new(ready_fresh.clone()),
                     max_streams,
                 );
 
-                Ok::<_, String>(ready_fresh)
+                Ok::<_, String>((ready_fresh, lease))
             })
             .await
             .map_err(EdgeError::Upstream)
