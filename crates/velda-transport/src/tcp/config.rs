@@ -54,6 +54,8 @@ pub struct TcpListenerConfig {
     pub rto_min_us: Option<u32>,
     /// Caps delayed ACK timer in microseconds (`TCP_DELACK_MAX_US`, Linux >= 6.9) down to 2ms on accepted sockets.
     pub delack_max_us: Option<u32>,
+    /// Attempts BBR congestion control (`TCP_CONGESTION`) on accepted downstream sockets.
+    pub bbr: bool,
 }
 
 impl Default for TcpListenerConfig {
@@ -78,6 +80,7 @@ impl Default for TcpListenerConfig {
             prefer_busy_poll: false,
             rto_min_us: None,
             delack_max_us: None,
+            bbr: false,
         }
     }
 }
@@ -199,6 +202,12 @@ impl TcpListenerConfig {
     /// Sets `TCP_DELACK_MAX_US` maximum delayed ACK timer in microseconds on accepted sockets (Linux).
     pub fn with_delack_max_us(mut self, us: Option<u32>) -> Self {
         self.delack_max_us = us;
+        self
+    }
+
+    /// Sets whether to attempt BBR congestion control on accepted sockets (Linux).
+    pub fn with_bbr(mut self, bbr: bool) -> Self {
+        self.bbr = bbr;
         self
     }
 
@@ -344,6 +353,9 @@ impl TcpListenerConfig {
             )
         {
             cfg.prefer_busy_poll = true;
+        }
+        if topo.kernel.supports_bbr() {
+            cfg.bbr = true;
         }
         cfg
     }

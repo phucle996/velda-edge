@@ -47,6 +47,16 @@ pub struct Http2AccelerationPath {
     pub delack_max_us: Option<u32>,
     /// Caps maximum RTO in milliseconds (`TCP_RTO_MAX_MS`, Linux >= 6.9) down to 1000ms.
     pub rto_max_ms: Option<u32>,
+    /// Optional socket receive and send buffer size hint (`SO_RCVBUF` / `SO_SNDBUF`).
+    pub socket_buffer_size: Option<usize>,
+    /// Attempts BBR congestion control (`TCP_CONGESTION`) for high-throughput egress.
+    pub bbr: bool,
+    /// Delays ephemeral source port selection until `connect(2)` (`IP_BIND_ADDRESS_NO_PORT`),
+    /// eliminating the 64,000 ephemeral outbound port ceiling.
+    pub bind_address_no_port: bool,
+    /// Immediately acknowledges incoming upstream response packets (`TCP_QUICKACK`) to prevent
+    /// 40ms delayed-ACK stalls on backend responses.
+    pub quickack: bool,
 }
 
 impl Default for Http2AccelerationPath {
@@ -63,6 +73,10 @@ impl Default for Http2AccelerationPath {
             rto_min_us: None,
             delack_max_us: None,
             rto_max_ms: None,
+            socket_buffer_size: None,
+            bbr: false,
+            bind_address_no_port: false,
+            quickack: true,
         }
     }
 }
@@ -131,6 +145,19 @@ impl Http2AccelerationPath {
                 (None, None, None)
             };
 
+        let socket_buffer_size = match topo.memory_tier() {
+            velda_core::MemoryTier::Constrained => None,
+            velda_core::MemoryTier::Small => Some(128 * 1024),
+            velda_core::MemoryTier::Medium => Some(256 * 1024),
+            velda_core::MemoryTier::Large => Some(512 * 1024),
+            _ => Some(1024 * 1024),
+        };
+
+        let bbr = topo.kernel.supports_bbr();
+        let bind_address_no_port =
+            ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
+        let quickack = true;
+
         Self {
             nodelay: true,
             fastopen,
@@ -143,31 +170,56 @@ impl Http2AccelerationPath {
             rto_min_us,
             delack_max_us,
             rto_max_ms,
+            socket_buffer_size,
+            bbr,
+            bind_address_no_port,
+            quickack,
         }
     }
 
-    /// Applies pre-connect socket acceleration options (e.g. `TCP_FASTOPEN_CONNECT`).
+    /// Applies pre-connect socket acceleration options (e.g. `TCP_FASTOPEN_CONNECT`, `IP_BIND_ADDRESS_NO_PORT`).
     ///
     /// Unprivileged containers (Docker default seccomp, K8s unprivileged pods) often block
     /// Fast Open with `EPERM` or `ENOPROTOOPT`. Logging at trace level and proceeding ensures
     /// traffic still flows without hard connection failures.
     pub fn apply_pre_connect(&self, fd: std::os::unix::io::RawFd) {
         #[cfg(target_os = "linux")]
-        if self.fastopen {
-            let val: libc::c_int = 1;
-            unsafe {
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_FASTOPEN_CONNECT,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(
-                        errno = std::io::Error::last_os_error().raw_os_error(),
-                        "TCP_FASTOPEN_CONNECT not supported by kernel or denied in container; skipping"
+        {
+            if self.bind_address_no_port {
+                let val: libc::c_int = 1;
+                unsafe {
+                    let ret = libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IP,
+                        libc::IP_BIND_ADDRESS_NO_PORT,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&val) as libc::socklen_t,
                     );
+                    if ret != 0 {
+                        tracing::trace!(
+                            errno = std::io::Error::last_os_error().raw_os_error(),
+                            "IP_BIND_ADDRESS_NO_PORT not supported by kernel or denied in container; skipping"
+                        );
+                    }
+                }
+            }
+
+            if self.fastopen {
+                let val: libc::c_int = 1;
+                unsafe {
+                    let ret = libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_TCP,
+                        libc::TCP_FASTOPEN_CONNECT,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&val) as libc::socklen_t,
+                    );
+                    if ret != 0 {
+                        tracing::trace!(
+                            errno = std::io::Error::last_os_error().raw_os_error(),
+                            "TCP_FASTOPEN_CONNECT not supported by kernel or denied in container; skipping"
+                        );
+                    }
                 }
             }
         }
@@ -176,13 +228,31 @@ impl Http2AccelerationPath {
     }
 
     /// Applies post-connect socket acceleration options (`TCP_NODELAY`, `TCP_NOTSENT_LOWAT`,
-    /// `TCP_USER_TIMEOUT`, `SO_KEEPALIVE`, `TCP_KEEPIDLE`, `SO_BUSY_POLL`).
+    /// `TCP_USER_TIMEOUT`, `SO_KEEPALIVE`, `TCP_KEEPIDLE`, `SO_BUSY_POLL`, `SO_RCVBUF`, `SO_SNDBUF`).
     ///
     /// Invoked immediately after connection handshake. Any option rejected by host seccomp
     /// or legacy kernel is skipped at trace level rather than dropping an established backend stream.
     pub fn apply_post_connect(&self, fd: std::os::unix::io::RawFd) {
         #[cfg(target_os = "linux")]
         unsafe {
+            if let Some(buf_size) = self.socket_buffer_size {
+                let val = buf_size as libc::c_int;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+            }
+
             if let Some(lowat) = self.notsent_lowat {
                 let val = lowat as libc::c_uint;
                 let ret = libc::setsockopt(
@@ -330,6 +400,31 @@ impl Http2AccelerationPath {
                 );
                 if ret != 0 {
                     tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_RTO_MAX_MS skipped");
+                }
+            }
+
+            if self.quickack {
+                let val: libc::c_int = 1;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_QUICKACK,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+            }
+
+            if self.bbr {
+                let bbr_name = b"bbr\0";
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_CONGESTION,
+                    bbr_name.as_ptr() as *const libc::c_void,
+                    bbr_name.len() as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(error = %std::io::Error::last_os_error(), "TCP_CONGESTION bbr skipped");
                 }
             }
         }
@@ -485,6 +580,15 @@ mod tests {
             if topo.kernel.supports_tcp_fastopen_connect() {
                 assert!(accel_tls.fastopen);
             }
+            if topo.kernel.supports_bbr() {
+                assert!(accel_plain.bbr);
+                assert!(accel_tls.bbr);
+            }
+            if topo.kernel.supports_ip_bind_address_no_port() {
+                assert!(accel_plain.bind_address_no_port);
+                assert!(accel_tls.bind_address_no_port);
+            }
+            assert!(accel_plain.quickack);
         }
     }
 }

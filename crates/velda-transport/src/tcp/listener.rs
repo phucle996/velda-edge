@@ -244,6 +244,38 @@ impl TcpListener {
         }
 
         #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+
+            if let Some(rcv) = self.config.recv_buffer_size {
+                let val: libc::c_int = rcv as libc::c_int;
+                unsafe {
+                    let _ = libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&val) as libc::socklen_t,
+                    );
+                }
+            }
+
+            if let Some(snd) = self.config.send_buffer_size {
+                let val: libc::c_int = snd as libc::c_int;
+                unsafe {
+                    let _ = libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&val) as libc::socklen_t,
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
         if self.config.quickack {
             use std::os::fd::AsRawFd;
             let fd = stream.as_raw_fd();
@@ -256,6 +288,28 @@ impl TcpListener {
                     &val as *const _ as *const libc::c_void,
                     std::mem::size_of_val(&val) as libc::socklen_t,
                 );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.config.bbr {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let bbr_name = b"bbr\0";
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_CONGESTION,
+                    bbr_name.as_ptr() as *const libc::c_void,
+                    bbr_name.len() as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "TCP_CONGESTION bbr skipped on accepted downstream socket"
+                    );
+                }
             }
         }
 

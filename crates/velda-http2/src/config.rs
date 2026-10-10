@@ -101,12 +101,12 @@ impl Http2Config {
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
                 max_concurrent_streams: 256,
-                initial_connection_window_size: 4 * 1024 * 1024,
-                initial_stream_window_size: 1024 * 1024,
-                max_frame_size: 16 * 1024,
+                initial_connection_window_size: 8 * 1024 * 1024,
+                initial_stream_window_size: 2 * 1024 * 1024,
+                max_frame_size: 64 * 1024,
                 max_header_list_size: 64 * 1024,
                 enable_push: false,
-                max_send_buffer_size: 1024 * 1024,
+                max_send_buffer_size: 2 * 1024 * 1024,
                 max_consecutive_resets: 500,
                 max_pending_control_frames: 200,
                 max_continuation_frames: 16,
@@ -120,12 +120,12 @@ impl Http2Config {
                 max_headers: 96,
                 idle_timeout_ms: 45_000,
                 max_concurrent_streams: 512,
-                initial_connection_window_size: 8 * 1024 * 1024,
-                initial_stream_window_size: 2 * 1024 * 1024,
-                max_frame_size: 16 * 1024,
+                initial_connection_window_size: 16 * 1024 * 1024,
+                initial_stream_window_size: 4 * 1024 * 1024,
+                max_frame_size: 64 * 1024,
                 max_header_list_size: 64 * 1024,
                 enable_push: false,
-                max_send_buffer_size: 2 * 1024 * 1024,
+                max_send_buffer_size: 4 * 1024 * 1024,
                 max_consecutive_resets: 1_000,
                 max_pending_control_frames: 500,
                 max_continuation_frames: 16,
@@ -139,12 +139,12 @@ impl Http2Config {
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
                 max_concurrent_streams: 1024,
-                initial_connection_window_size: 16 * 1024 * 1024,
-                initial_stream_window_size: 2 * 1024 * 1024,
-                max_frame_size: 16 * 1024,
+                initial_connection_window_size: 32 * 1024 * 1024,
+                initial_stream_window_size: 4 * 1024 * 1024,
+                max_frame_size: 64 * 1024,
                 max_header_list_size: 128 * 1024,
                 enable_push: false,
-                max_send_buffer_size: 2 * 1024 * 1024,
+                max_send_buffer_size: 8 * 1024 * 1024,
                 max_consecutive_resets: 2_000,
                 max_pending_control_frames: 500,
                 max_continuation_frames: 32,
@@ -158,12 +158,12 @@ impl Http2Config {
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
                 max_concurrent_streams: 2048,
-                initial_connection_window_size: 32 * 1024 * 1024,
-                initial_stream_window_size: 4 * 1024 * 1024,
-                max_frame_size: 16 * 1024,
+                initial_connection_window_size: 64 * 1024 * 1024,
+                initial_stream_window_size: 8 * 1024 * 1024,
+                max_frame_size: 64 * 1024,
                 max_header_list_size: 128 * 1024,
                 enable_push: false,
-                max_send_buffer_size: 4 * 1024 * 1024,
+                max_send_buffer_size: 16 * 1024 * 1024,
                 max_consecutive_resets: 5_000,
                 max_pending_control_frames: 1_000,
                 max_continuation_frames: 32,
@@ -177,12 +177,12 @@ impl Http2Config {
                 max_headers: 256,
                 idle_timeout_ms: 120_000,
                 max_concurrent_streams: 4096,
-                initial_connection_window_size: 64 * 1024 * 1024,
-                initial_stream_window_size: 4 * 1024 * 1024,
-                max_frame_size: 16 * 1024,
+                initial_connection_window_size: 128 * 1024 * 1024,
+                initial_stream_window_size: 8 * 1024 * 1024,
+                max_frame_size: 64 * 1024,
                 max_header_list_size: 256 * 1024,
                 enable_push: false,
-                max_send_buffer_size: 4 * 1024 * 1024,
+                max_send_buffer_size: 32 * 1024 * 1024,
                 max_consecutive_resets: 10_000,
                 max_pending_control_frames: 1_000,
                 max_continuation_frames: 32,
@@ -336,7 +336,7 @@ mod tests {
         let config = Http2Config::auto();
         assert!(config.max_concurrent_streams >= 64);
         assert!(config.max_header_size >= 16 * 1024);
-        assert_eq!(config.max_frame_size, 16 * 1024);
+        assert!(config.max_frame_size >= 16 * 1024);
     }
 
     #[test]
@@ -349,15 +349,17 @@ mod tests {
 
         let medium = Http2Config::for_tier(MemoryTier::Medium);
         assert_eq!(medium.max_concurrent_streams, 256);
-        assert_eq!(medium.initial_connection_window_size, 4 * 1024 * 1024);
-        assert_eq!(medium.initial_stream_window_size, 1024 * 1024);
+        assert_eq!(medium.initial_connection_window_size, 8 * 1024 * 1024);
+        assert_eq!(medium.initial_stream_window_size, 2 * 1024 * 1024);
         assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
+        assert_eq!(medium.max_frame_size, 64 * 1024);
 
         let ultra = Http2Config::for_tier(MemoryTier::Ultra);
         assert_eq!(ultra.max_concurrent_streams, 4096);
-        assert_eq!(ultra.initial_connection_window_size, 64 * 1024 * 1024);
-        assert_eq!(ultra.initial_stream_window_size, 4 * 1024 * 1024);
+        assert_eq!(ultra.initial_connection_window_size, 128 * 1024 * 1024);
+        assert_eq!(ultra.initial_stream_window_size, 8 * 1024 * 1024);
         assert_eq!(ultra.max_body_size, 512 * 1024 * 1024);
+        assert_eq!(ultra.max_frame_size, 64 * 1024);
     }
 
     #[test]

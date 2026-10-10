@@ -84,6 +84,8 @@ pub async fn pipe_duplex(
             (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
         let mut total_bytes = 0;
         let mut unreleased_bytes = 0;
+        const COALESCE_LIMIT: usize = 65_536;
+        let mut pending_buf = bytes::BytesMut::with_capacity(COALESCE_LIMIT);
 
         while let Some(chunk) = body_stream.data().await {
             let data = chunk?;
@@ -98,13 +100,28 @@ pub async fn pipe_duplex(
                 return Err(Http2Error::PayloadTooLarge(total_bytes));
             }
 
-            if sender.send_chunk(data).await.is_err() {
-                // Downstream client disconnected mid-stream
-                tracing::debug!("Downstream client disconnected during H2 duplex streaming");
-                let _ = body_stream
-                    .flow_control()
-                    .release_capacity(unreleased_bytes);
-                return Ok(());
+            if pending_buf.is_empty() && len >= COALESCE_LIMIT {
+                if sender.send_chunk(data).await.is_err() {
+                    tracing::debug!("Downstream client disconnected during H2 duplex streaming");
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes);
+                    return Ok(());
+                }
+            } else {
+                pending_buf.extend_from_slice(&data);
+                if pending_buf.len() >= COALESCE_LIMIT {
+                    let to_send = pending_buf.split().freeze();
+                    if sender.send_chunk(to_send).await.is_err() {
+                        tracing::debug!(
+                            "Downstream client disconnected during H2 duplex streaming"
+                        );
+                        let _ = body_stream
+                            .flow_control()
+                            .release_capacity(unreleased_bytes);
+                        return Ok(());
+                    }
+                }
             }
 
             if unreleased_bytes >= batch_threshold {
@@ -112,6 +129,17 @@ pub async fn pipe_duplex(
                     .flow_control()
                     .release_capacity(unreleased_bytes);
                 unreleased_bytes = 0;
+            }
+        }
+
+        if !pending_buf.is_empty() {
+            let to_send = pending_buf.freeze();
+            if sender.send_chunk(to_send).await.is_err() {
+                tracing::debug!("Downstream client disconnected during H2 duplex streaming tail");
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
+                return Ok(());
             }
         }
 
