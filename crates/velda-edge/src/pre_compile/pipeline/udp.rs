@@ -160,6 +160,18 @@ pub async fn handle_l4_udp(
     datagram: Datagram,
     rt: &Runtime,
 ) {
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            listener = %listener_id,
+            peer = %datagram.peer(),
+            overload = ?overload_lvl,
+            "Shedding L4 UDP datagram due to memory saturation"
+        );
+        return;
+    }
+
     let Some(route) = rt.router.route_udp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,

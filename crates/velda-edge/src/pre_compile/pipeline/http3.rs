@@ -369,6 +369,26 @@ pub async fn process_http3_request(
         );
     };
 
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %route.upstream_name,
+            overload = ?overload_lvl,
+            "Shedding HTTP/3 request due to memory saturation"
+        );
+        return L7Response::from_bytes(
+            StatusCode::TOO_MANY_REQUESTS,
+            b"429 Too Many Requests: edge under memory pressure, please retry later\n".to_vec(),
+        )
+        .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
+        .with_header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+    }
+
     let h3_config = velda_http3::Http3Config::auto();
     let strategy = upstream.strategy;
 

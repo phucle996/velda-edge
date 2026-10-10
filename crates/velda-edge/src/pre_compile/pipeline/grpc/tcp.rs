@@ -177,6 +177,22 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %route.upstream_name,
+            overload = ?overload_lvl,
+            "Shedding gRPC TCP request due to memory saturation"
+        );
+        let _ = server_stream.respond.send_trailers_only(
+            GrpcStatus::ResourceExhausted,
+            Some("edge under memory pressure, please retry later"),
+        );
+        return;
+    }
+
     let strategy = upstream.strategy;
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,

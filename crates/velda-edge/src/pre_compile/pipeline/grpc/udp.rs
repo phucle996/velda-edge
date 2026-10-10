@@ -247,6 +247,19 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
     };
 
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %route.upstream_name,
+            overload = ?overload_lvl,
+            "Shedding gRPC UDP request due to memory saturation"
+        );
+        return GrpcStatus::ResourceExhausted
+            .to_l7_response(Some("edge under memory pressure, please retry later"));
+    }
+
     let strategy = upstream.strategy;
     let client = match upstream.acquire(config).await {
         Ok(c) => c,

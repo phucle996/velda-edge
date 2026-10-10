@@ -15,6 +15,19 @@ use crate::runtime::Runtime;
 /// lookup always come from the same generation.
 pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime) {
     let peer = conn.peer();
+
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            listener = %listener_id,
+            peer = %peer,
+            overload = ?overload_lvl,
+            "Shedding L4 TCP connection due to memory saturation"
+        );
+        return;
+    }
+
     let Some(route) = rt.router.route_tcp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,
