@@ -380,7 +380,7 @@ pub async fn process_http3_request(
         );
         return L7Response::from_bytes(
             StatusCode::TOO_MANY_REQUESTS,
-            b"429 Too Many Requests: edge under memory pressure, please retry later\n".to_vec(),
+            b"429 Too Many Requests\n".to_vec(),
         )
         .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
         .with_header(

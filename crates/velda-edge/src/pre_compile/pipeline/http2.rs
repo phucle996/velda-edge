@@ -273,12 +273,9 @@ pub async fn run_http2_loop<IO>(
                         );
                         let shed_resp = L7Response::from_bytes(
                             StatusCode::TOO_MANY_REQUESTS,
-                            b"429 Too Many Requests: edge under memory pressure, please retry later\n".to_vec(),
+                            b"429 Too Many Requests\n".to_vec(),
                         )
-                        .with_header(
-                            http::header::RETRY_AFTER,
-                            HeaderValue::from_static("1"),
-                        )
+                        .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
                         .with_header(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),

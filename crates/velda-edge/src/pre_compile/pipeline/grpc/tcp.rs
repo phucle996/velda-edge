@@ -186,10 +186,9 @@ async fn dispatch_grpc_tcp_request_stream(
             overload = ?overload_lvl,
             "Shedding gRPC TCP request due to memory saturation"
         );
-        let _ = server_stream.respond.send_trailers_only(
-            GrpcStatus::ResourceExhausted,
-            Some("edge under memory pressure, please retry later"),
-        );
+        let _ = server_stream
+            .respond
+            .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
         return;
     }
 

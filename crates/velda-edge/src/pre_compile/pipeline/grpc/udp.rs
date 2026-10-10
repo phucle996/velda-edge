@@ -256,8 +256,7 @@ pub async fn process_grpc_udp_request(
             overload = ?overload_lvl,
             "Shedding gRPC UDP request due to memory saturation"
         );
-        return GrpcStatus::ResourceExhausted
-            .to_l7_response(Some("edge under memory pressure, please retry later"));
+        return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
     }
 
     let strategy = upstream.strategy;
