@@ -262,6 +262,38 @@ pub async fn run_http2_loop<IO>(
                         continue;
                     };
 
+                    // Resource Saturation Circuit Breaker (Overload Protection)
+                    let overload_lvl = rt.overload.level();
+                    if overload_lvl.is_shedding() {
+                        let is_heavy = upstream_target.is_streaming();
+                        if is_heavy || overload_lvl.is_critical() {
+                            tracing::warn!(
+                                route = %route.id,
+                                upstream = %route.upstream_name,
+                                overload = ?overload_lvl,
+                                "Shedding HTTP/2 request due to memory saturation"
+                            );
+                            let shed_resp = L7Response::from_bytes(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                b"429 Too Many Requests: edge under memory pressure, please retry later\n".to_vec(),
+                            )
+                            .with_header(
+                                http::header::RETRY_AFTER,
+                                HeaderValue::from_static("1"),
+                            )
+                            .with_header(
+                                CONTENT_TYPE,
+                                HeaderValue::from_static("text/plain; charset=utf-8"),
+                            );
+                            if !receiver.is_end_stream() {
+                                let _ = responder.send_response_and_cancel_upload(&shed_resp);
+                            } else {
+                                let _ = responder.send_response(&shed_resp);
+                            }
+                            continue;
+                        }
+                    }
+
                     let meta_clone = Arc::clone(&meta);
                     let cfg_clone = Arc::clone(&config_arc);
                     tokio::spawn(async move {

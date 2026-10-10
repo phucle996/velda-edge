@@ -145,6 +145,16 @@ impl HttpUpstream {
             _ => None,
         }
     }
+
+    /// Returns whether this upstream employs progressive streaming (client, server, or duplex).
+    #[inline]
+    pub fn is_streaming(&self) -> bool {
+        match self {
+            Self::Http1(u) => u.strategy != velda_http1::Http1PipeStrategy::Buffered,
+            Self::Http2(u) => u.strategy != velda_http2::Http2PipeStrategy::Buffered,
+            Self::Http3(_) => false,
+        }
+    }
 }
 
 /// Upstream variant in the Layer 7 gRPC family (gRPC over TCP / gRPC over UDP).

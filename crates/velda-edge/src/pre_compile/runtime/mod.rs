@@ -19,6 +19,7 @@ pub use upstream::{UpstreamTable, build_upstreams, build_upstreams_default};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use velda_core::OverloadTracker;
 use velda_router::Router;
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -80,6 +81,8 @@ pub struct Runtime {
     pub tls_server: Option<TlsServerEngine>,
     /// Pre-compiled upstream TLS client engine for O(1) hot-path backend handshake execution.
     pub tls_client: Option<TlsClientEngine>,
+    /// Thread-safe resource saturation and overload circuit breaker.
+    pub overload: Arc<OverloadTracker>,
 }
 
 /// Thread-safe, lock-free container for the active [`Runtime`] snapshot.

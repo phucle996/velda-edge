@@ -104,6 +104,7 @@ pub fn load_initial_runtime(
         upstreams: upstreams_table,
         tls_server,
         tls_client,
+        overload: Arc::new(velda_core::OverloadTracker::auto()),
     })
 }
 
@@ -215,6 +216,7 @@ pub async fn apply_reload(
         }
     }
 
+    let overload = shared_runtime.load().overload.clone();
     let candidate = Runtime {
         revision: new_revision,
         config,
@@ -223,6 +225,7 @@ pub async fn apply_reload(
         upstreams,
         tls_server,
         tls_client,
+        overload,
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings

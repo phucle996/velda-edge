@@ -79,8 +79,9 @@ pub use hardware::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, CpuTier, DeadPeerTeardownTier,
     HardwareTopology, KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile,
     MemoryTier, MultipathResilienceTier, MultiplexPacingTier, OutboundPortScalingTier,
-    ParseTierError, UdpEgressTier, UdpOffloadTier, global_hardware_topology,
-    init_hardware_topology, probe_cpu, probe_kernel, probe_memory,
+    OverloadConfig, OverloadLevel, OverloadTracker, ParseTierError, UdpEgressTier, UdpOffloadTier,
+    global_hardware_topology, init_hardware_topology, probe_cpu, probe_kernel, probe_memory,
+    probe_memory_usage,
 };
 pub use provenance::Provenance;
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

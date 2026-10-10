@@ -18,6 +18,7 @@
 pub mod cpu;
 pub mod kernel;
 pub mod memory;
+pub mod overload;
 
 use std::sync::OnceLock;
 
@@ -28,6 +29,7 @@ pub use kernel::{
     MultiplexPacingTier, OutboundPortScalingTier, UdpEgressTier, UdpOffloadTier, probe_kernel,
 };
 pub use memory::{MemoryProfile, MemoryTier, probe_memory};
+pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
 
 /// Error returned when a hardware tier string fails to parse.
 #[derive(Debug, Clone, PartialEq, Eq)]

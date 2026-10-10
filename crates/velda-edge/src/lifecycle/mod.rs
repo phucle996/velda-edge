@@ -6,6 +6,8 @@
 
 pub mod gateway;
 pub mod ipc;
+pub mod overload;
 
 pub use gateway::run_gateway;
 pub use ipc::run_ipc_server;
+pub use overload::{DEFAULT_OVERLOAD_SAMPLE_INTERVAL, spawn_overload_monitor};

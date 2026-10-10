@@ -261,6 +261,34 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
+        // Resource Saturation Circuit Breaker (Overload Protection)
+        let overload_lvl = rt.overload.level();
+        if overload_lvl.is_shedding() {
+            let is_heavy = upstream.strategy != velda_http1::Http1PipeStrategy::Buffered;
+            if is_heavy || overload_lvl.is_critical() {
+                tracing::warn!(
+                    route = %route.id,
+                    upstream = %route.upstream_name,
+                    overload = ?overload_lvl,
+                    "Shedding HTTP/1.1 request due to memory saturation"
+                );
+                let shed_resp = Http1ServerResponse::from_bytes(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    b"429 Too Many Requests: edge under memory pressure, please retry later\n"
+                        .to_vec(),
+                )
+                .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                conn.mark_close();
+                let _ = conn.send_response(&shed_resp).await;
+                conn.lingering_close().await;
+                break;
+            }
+        }
+
         // ========================================================================
         // [PHASE 4: Pre-Upstream Hook Placeholder]
         // Flat workflow execution after route/upstream resolution, before lease/forward.
