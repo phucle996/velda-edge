@@ -25,27 +25,18 @@ pub async fn pipe_client_stream(
     // 1. Build and sanitize outbound upstream H2 request with end_of_stream = false (zero-clone)
     let is_head = head.method == http::Method::HEAD;
     crate::headers::sanitize_h2_headers(&mut head.headers);
-    let mut builder = http::Request::builder()
-        .method(head.method)
-        .uri(head.uri)
-        .version(Version::HTTP_2);
-
-    for (k, v) in head.headers.drain() {
-        if let Some(k) = k {
-            builder = builder.header(k, v);
-        }
-    }
-    let http_req = builder
-        .body(())
-        .map_err(|e| Http2Error::Parse(e.to_string()))?;
+    let http_req = head.into_http_request();
     let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
     // 2. Progressively pump downstream DATA chunks to upstream send stream with flow-control backpressure
+    const UPLOAD_BATCH_RESERVE: usize = 131_072; // 128 KB
+    send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+
     while let Some(mut chunk) = body_rx.recv_chunk().await? {
         while !chunk.is_empty() {
             let available = send_stream.capacity();
             if available == 0 {
-                send_stream.reserve_capacity(chunk.len());
+                send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
                 let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
                 if let Some(err) = res {
                     err?;
@@ -56,6 +47,11 @@ pub async fn pipe_client_stream(
             let to_send = chunk.len().min(available);
             let slice = chunk.split_to(to_send);
             send_stream.send_data(slice, false)?;
+
+            // Maintain continuous window headroom to avoid poll_capacity stalls
+            if send_stream.capacity() < 32_768 {
+                send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+            }
         }
     }
     // Signal end of request stream to upstream

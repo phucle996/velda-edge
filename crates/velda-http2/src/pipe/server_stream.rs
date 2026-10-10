@@ -27,17 +27,11 @@ pub async fn pipe_server_stream(
 ) -> Result<(), Http2Error> {
     // 1. Build outbound upstream H2 request from borrowed head
     let is_head = head.method == http::Method::HEAD;
-    let mut builder = http::Request::builder()
-        .method(&head.method)
-        .uri(&head.uri)
-        .version(Version::HTTP_2);
-
-    for (k, v) in &head.headers {
-        builder = builder.header(k, v);
-    }
-    let http_req = builder
-        .body(())
-        .map_err(|e| Http2Error::Parse(e.to_string()))?;
+    let mut http_req = http::Request::new(());
+    *http_req.method_mut() = head.method.clone();
+    *http_req.uri_mut() = head.uri.clone();
+    *http_req.version_mut() = Version::HTTP_2;
+    *http_req.headers_mut() = head.headers.clone();
 
     // 2. Transmit HEADERS frame and optional DATA body frame to upstream
     let has_body = !body.is_empty();

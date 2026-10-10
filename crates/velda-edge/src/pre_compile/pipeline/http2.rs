@@ -75,12 +75,7 @@ pub async fn handle_http2_stream(
                     return;
                 }
 
-                let meta = DownstreamMeta {
-                    listener_id,
-                    peer,
-                    local_addr,
-                    is_tls: true,
-                };
+                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
                 run_http2_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
@@ -93,12 +88,7 @@ pub async fn handle_http2_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta {
-            listener_id,
-            peer,
-            local_addr,
-            is_tls: false,
-        };
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false);
         run_http2_loop(connection, meta, config, runtime).await;
     }
 }
@@ -194,8 +184,7 @@ pub async fn run_http2_loop<IO>(
                     // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
                     // ========================================================
                     let rt = runtime.load();
-                    let matched_route =
-                        rt.router.route_http2(&meta.listener_id, &http_req).cloned();
+                    let matched_route = rt.router.route_http2(&meta.listener_id, &http_req);
 
                     // ========================================================
                     // FAST-PATH 404 EVALUATION (Zero Tokio Task Allocation)
@@ -283,7 +272,6 @@ pub async fn run_http2_loop<IO>(
                             meta_clone,
                             cfg_clone,
                             upstream_target,
-                            route,
                         )
                         .await;
                     });
@@ -325,14 +313,13 @@ async fn serve_http2_stream(
     meta: Arc<DownstreamMeta>,
     config: Arc<Http2Config>,
     upstream_target: Arc<HttpUpstream>,
-    route: velda_router::Http2Route,
 ) {
     match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => {
-            serve_http2_to_http2(head, receiver, responder, meta, config, upstream, &route).await;
+            serve_http2_to_http2(head, receiver, responder, meta, config, upstream).await;
         }
         HttpUpstream::Http1(upstream) => {
-            serve_http2_to_http1_bridge(head, receiver, responder, meta, upstream, &route).await;
+            serve_http2_to_http1_bridge(head, receiver, responder, meta, upstream).await;
         }
         HttpUpstream::Http3(_) => {
             let mut responder = responder;
@@ -357,7 +344,6 @@ async fn serve_http2_to_http2(
     meta: Arc<DownstreamMeta>,
     config: Arc<Http2Config>,
     upstream: &Arc<Http2Upstream>,
-    route: &velda_router::Http2Route,
 ) {
     // ========================================================================
     // [PHASE 4: Pre-Upstream Hook Placeholder]
@@ -368,11 +354,11 @@ async fn serve_http2_to_http2(
     // ========================================================================
 
     let strategy = upstream.strategy;
-    velda_http2::server::header::enrich_headers(
+    velda_http2::server::header::enrich_headers_precomputed(
         &mut head.headers,
         &head.uri,
-        meta.peer,
-        meta.local_addr,
+        &meta.client_ip_header,
+        &meta.client_port_header,
         meta.is_tls,
     );
 
@@ -382,7 +368,7 @@ async fn serve_http2_to_http2(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_name,
+                upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/2 connection"
             );
             let err_resp = L7Response::from_bytes(
@@ -409,7 +395,7 @@ async fn serve_http2_to_http2(
             {
                 tracing::warn!(
                     error = %e,
-                    upstream = %route.upstream_name,
+                    upstream = %upstream.id(),
                     "HTTP/2 upstream pipe failed"
                 );
             }
@@ -419,7 +405,7 @@ async fn serve_http2_to_http2(
             if let Err(e) = pipe_duplex(head, receiver, responder, &mut client, &config).await {
                 tracing::warn!(
                     error = %e,
-                    upstream = %route.upstream_name,
+                    upstream = %upstream.id(),
                     "HTTP/2 upstream pipe failed"
                 );
             }
@@ -447,7 +433,7 @@ async fn serve_http2_to_http2(
                 && e.is_refused_or_goaway()
             {
                 tracing::debug!(
-                    upstream = %route.upstream_name,
+                    upstream = %upstream.id(),
                     error = %e,
                     "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
                 );
@@ -486,7 +472,7 @@ async fn serve_http2_to_http2(
                 && e.is_refused_or_goaway()
             {
                 tracing::debug!(
-                    upstream = %route.upstream_name,
+                    upstream = %upstream.id(),
                     error = %e,
                     "HTTP/2 buffered stream refused or connection closed; self-healing with fresh connection"
                 );
@@ -511,7 +497,7 @@ async fn serve_http2_to_http2(
     if let Err(e) = pipe_res {
         tracing::warn!(
             error = %e,
-            upstream = %route.upstream_name,
+            upstream = %upstream.id(),
             "HTTP/2 upstream pipe failed"
         );
         let err_resp = L7Response::from_bytes(
@@ -539,7 +525,6 @@ async fn serve_http2_to_http1_bridge(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
-    route: &velda_router::Http2Route,
 ) {
     let body = match receiver.consume_all().await {
         Ok(b) => b,
@@ -557,11 +542,11 @@ async fn serve_http2_to_http1_bridge(
         }
     };
 
-    velda_http2::server::header::enrich_headers(
+    velda_http2::server::header::enrich_headers_precomputed(
         &mut head.headers,
         &head.uri,
-        meta.peer,
-        meta.local_addr,
+        &meta.client_ip_header,
+        &meta.client_port_header,
         meta.is_tls,
     );
 
@@ -570,7 +555,7 @@ async fn serve_http2_to_http1_bridge(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_name,
+                upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/1.1 connection for HTTP/2 bridge"
             );
             let err_resp = L7Response::from_bytes(
@@ -602,7 +587,7 @@ async fn serve_http2_to_http1_bridge(
         lease.mark_closed();
         tracing::warn!(
             error = %e,
-            upstream = %route.upstream_name,
+            upstream = %upstream.id(),
             "Failed to send bridged HTTP/1.1 request to upstream"
         );
         let err_resp = L7Response::from_bytes(
@@ -645,7 +630,7 @@ async fn serve_http2_to_http1_bridge(
                     lease.mark_closed();
                     tracing::warn!(
                         error = %e,
-                        upstream = %route.upstream_name,
+                        upstream = %upstream.id(),
                         "Failed to decode upstream HTTP/1.1 response"
                     );
                     let err_resp = L7Response::from_bytes(
@@ -660,7 +645,7 @@ async fn serve_http2_to_http1_bridge(
                 lease.mark_closed();
                 tracing::warn!(
                     error = %e,
-                    upstream = %route.upstream_name,
+                    upstream = %upstream.id(),
                     "Error reading upstream HTTP/1.1 response"
                 );
                 let err_resp = L7Response::from_bytes(

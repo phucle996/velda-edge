@@ -92,6 +92,51 @@ pub fn enrich_headers(
     }
 }
 
+/// Enriches HTTP/2 request headers with pre-computed connection-level metadata.
+///
+/// Completely eliminates per-stream IP/port string formatting and buffer writes.
+#[inline]
+pub fn enrich_headers_precomputed(
+    headers: &mut HeaderMap,
+    uri: &Uri,
+    client_ip: &HeaderValue,
+    client_port: &HeaderValue,
+    is_tls: bool,
+) {
+    // 1. Strip prohibited connection-specific headers per RFC 9113 Section 8.2.2
+    crate::headers::sanitize_h2_headers(headers);
+
+    // 2. Inject authoritative pre-computed forwarding headers (zero formatting)
+    let proto = if is_tls { "https" } else { "http" };
+
+    headers.insert(
+        HeaderName::from_static("x-forwarded-for"),
+        client_ip.clone(),
+    );
+    headers.insert(HeaderName::from_static("x-real-ip"), client_ip.clone());
+    headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(proto),
+    );
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        client_port.clone(),
+    );
+
+    let host_hdr = headers.get(http::header::HOST).cloned();
+    let host_str = host_hdr
+        .as_ref()
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()))
+        .or_else(|| uri.host());
+
+    if let Some(h) = host_str
+        && let Ok(val) = HeaderValue::from_str(h)
+    {
+        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
+    }
+}
+
 /// Extracts effective Host or authority string from request headers (Host) or URI.
 #[inline]
 pub fn extract_host<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {

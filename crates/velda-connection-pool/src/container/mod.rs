@@ -55,13 +55,13 @@ pub fn concurrency_shards_for_cpu_tier(tier: CpuTier) -> usize {
 #[inline]
 pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
     match tier {
-        MemoryTier::Constrained => 8,
-        MemoryTier::Small => 16,
-        MemoryTier::Medium => 32,
-        MemoryTier::Large => 64,
-        MemoryTier::XLarge => 128,
-        MemoryTier::TwoXLarge => 256,
-        MemoryTier::Ultra => 512,
+        MemoryTier::Constrained => 16,
+        MemoryTier::Small => 64,
+        MemoryTier::Medium => 256,
+        MemoryTier::Large => 512,
+        MemoryTier::XLarge => 1024,
+        MemoryTier::TwoXLarge => 2048,
+        MemoryTier::Ultra => 4096,
     }
 }
 
@@ -69,13 +69,13 @@ pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
 #[inline]
 pub fn max_concurrent_streams_for_mem_tier(tier: MemoryTier) -> u32 {
     match tier {
-        MemoryTier::Constrained => 32,
-        MemoryTier::Small => 64,
-        MemoryTier::Medium => 100,
-        MemoryTier::Large => 128,
-        MemoryTier::XLarge => 256,
-        MemoryTier::TwoXLarge => 256,
-        MemoryTier::Ultra => 512,
+        MemoryTier::Constrained => 128,
+        MemoryTier::Small => 512,
+        MemoryTier::Medium => 2048,
+        MemoryTier::Large => 4096,
+        MemoryTier::XLarge => 8192,
+        MemoryTier::TwoXLarge => 16384,
+        MemoryTier::Ultra => 32768,
     }
 }
 

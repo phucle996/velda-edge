@@ -147,10 +147,10 @@ impl Http2AccelerationPath {
 
         let socket_buffer_size = match topo.memory_tier() {
             velda_core::MemoryTier::Constrained => None,
-            velda_core::MemoryTier::Small => Some(128 * 1024),
-            velda_core::MemoryTier::Medium => Some(256 * 1024),
-            velda_core::MemoryTier::Large => Some(512 * 1024),
-            _ => Some(1024 * 1024),
+            velda_core::MemoryTier::Small => Some(512 * 1024),
+            velda_core::MemoryTier::Medium => Some(1024 * 1024),
+            velda_core::MemoryTier::Large => Some(2 * 1024 * 1024),
+            _ => Some(4 * 1024 * 1024),
         };
 
         let bbr = topo.kernel.supports_bbr();

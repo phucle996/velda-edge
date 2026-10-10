@@ -183,6 +183,17 @@ impl Http2ServerRequestHead {
             .sum();
         headers_len + self.uri.path().len() + self.method.as_str().len() + 32
     }
+
+    /// Converts this server request head into an outbound upstream [`http::Request<()>`] zero-copy by moving fields.
+    #[inline]
+    pub fn into_http_request(self) -> http::Request<()> {
+        let mut req = http::Request::new(());
+        *req.method_mut() = self.method;
+        *req.uri_mut() = self.uri;
+        *req.version_mut() = Version::HTTP_2;
+        *req.headers_mut() = self.headers;
+        req
+    }
 }
 
 /// An incoming HTTP/2 server request received on an active multiplexed stream.

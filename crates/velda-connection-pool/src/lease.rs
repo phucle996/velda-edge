@@ -324,6 +324,12 @@ impl<R: PoolableResource> StreamLease<R> {
         &self.connection
     }
 
+    /// Returns the current number of active streams on the underlying multiplexed connection.
+    #[inline]
+    pub fn active_streams(&self) -> u32 {
+        self.connection.active_streams()
+    }
+
     /// Marks the underlying connection as having received GOAWAY or being closed.
     #[inline]
     pub fn mark_goaway(&self) {

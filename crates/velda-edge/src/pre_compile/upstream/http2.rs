@@ -55,6 +55,8 @@ pub struct Http2Upstream {
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     pub acceleration: velda_http2::Http2AccelerationPath,
+    /// Cold-start / saturation synchronization lock preventing thundering-herd connection storms.
+    connect_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Http2Upstream {
@@ -92,6 +94,7 @@ impl Http2Upstream {
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
             acceleration,
+            connect_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -127,27 +130,14 @@ impl Http2Upstream {
 
         self.inner
             .execute(|endpoint| async move {
-                let conn_count = self.pool.connection_count(&endpoint);
-                let can_scale_out = conn_count < max_conns;
-
-                if can_scale_out {
-                    // During scale-out phase, reuse an idle connection if available.
-                    // If all existing connections are actively in-flight, skip to connect a parallel connection!
-                    if let Some(lease) = self.pool.acquire_idle_stream(&endpoint, idle_timeout) {
-                        let ready_client = lease.client.clone();
-                        match ready_client.ready().await {
-                            Ok(ready_client) => {
-                                return Ok::<_, String>((ready_client.clone(), lease));
-                            }
-                            Err(_) => {
-                                lease.mark_goaway();
-                            }
-                        }
-                    }
-                } else {
-                    // Pool reached max concurrent connections for this endpoint:
-                    // Lease from existing connections using Least-Loaded selection!
-                    if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
+                // HTTP/2 is designed for multiplexing: concurrent streams share established connections.
+                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                    let conn_count = self.pool.connection_count(&endpoint);
+                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 8;
+                    if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
+                        || conn_count >= max_conns
+                    {
                         let ready_client = lease.client.clone();
                         match ready_client.ready().await {
                             Ok(ready_client) => {
@@ -160,6 +150,30 @@ impl Http2Upstream {
                     }
                 }
 
+                // 2. Slow-path: pool is empty, all connections are saturated, or stream threshold exceeded.
+                // Acquire connect lock to serialize fresh connection establishment and prevent thundering herds.
+                let _guard = self.connect_lock.lock().await;
+
+                // Double-check: did a concurrent request finish connecting while we waited for the lock?
+                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                    let conn_count = self.pool.connection_count(&endpoint);
+                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 8;
+                    if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
+                        || conn_count >= max_conns
+                    {
+                        let ready_client = lease.client.clone();
+                        match ready_client.ready().await {
+                            Ok(ready_client) => {
+                                return Ok::<_, String>((ready_client.clone(), lease));
+                            }
+                            Err(_) => {
+                                lease.mark_goaway();
+                            }
+                        }
+                    }
+                }
+
+                // Establish a single fresh HTTP/2 client connection
                 let fresh = velda_http2::client::connect(
                     endpoint,
                     tls,

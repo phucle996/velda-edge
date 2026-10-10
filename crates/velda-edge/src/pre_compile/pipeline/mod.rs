@@ -24,6 +24,30 @@ pub struct DownstreamMeta {
     pub peer: SocketAddr,
     pub local_addr: SocketAddr,
     pub is_tls: bool,
+    pub client_ip_header: http::HeaderValue,
+    pub client_port_header: http::HeaderValue,
+}
+
+impl DownstreamMeta {
+    /// Creates and pre-computes downstream metadata and static header values once per TCP connection.
+    pub fn new(
+        listener_id: Arc<str>,
+        peer: SocketAddr,
+        local_addr: SocketAddr,
+        is_tls: bool,
+    ) -> Self {
+        let client_ip_header = http::HeaderValue::from_str(&peer.ip().to_string())
+            .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));
+        let client_port_header = http::HeaderValue::from(local_addr.port());
+        Self {
+            listener_id,
+            peer,
+            local_addr,
+            is_tls,
+            client_ip_header,
+            client_port_header,
+        }
+    }
 }
 
 /// Boxed thread-safe future alias for pre-bound pipeline runners.
@@ -232,12 +256,7 @@ async fn handle_http_auto_stream(
                 "Downstream TLS handshake succeeded for HTTP family"
             );
 
-            let meta = DownstreamMeta {
-                listener_id,
-                peer,
-                local_addr,
-                is_tls: true,
-            };
+            let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
 
             // ALPN demuxing strictly within the HTTP protocol family
             match handshake_info.alpn.as_deref() {

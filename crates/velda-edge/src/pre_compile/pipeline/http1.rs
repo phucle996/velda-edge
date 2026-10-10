@@ -77,12 +77,7 @@ pub async fn handle_http1_stream(
                     return;
                 }
 
-                let meta = DownstreamMeta {
-                    listener_id,
-                    peer,
-                    local_addr,
-                    is_tls: true,
-                };
+                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
                 run_http1_loop(tls_stream, meta, streaming, config, runtime).await;
             }
             Err(e) => {
@@ -95,12 +90,7 @@ pub async fn handle_http1_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta {
-            listener_id,
-            peer,
-            local_addr,
-            is_tls: false,
-        };
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false);
         run_http1_loop(connection, meta, streaming, config, runtime).await;
     }
 }

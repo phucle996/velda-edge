@@ -112,6 +112,16 @@ pub enum HttpUpstream {
 }
 
 impl HttpUpstream {
+    /// Returns the upstream unique identifier.
+    #[inline]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Http1(u) => u.id(),
+            Self::Http2(u) => u.id(),
+            Self::Http3(u) => u.id(),
+        }
+    }
+
     #[inline]
     pub fn as_http1(&self) -> Option<&Arc<Http1Upstream>> {
         match self {
