@@ -74,10 +74,10 @@ pub struct OverloadConfig {
 impl Default for OverloadConfig {
     fn default() -> Self {
         Self {
-            shedding_high_watermark: 0.82,
-            shedding_low_watermark: 0.75,
-            critical_high_watermark: 0.90,
-            critical_low_watermark: 0.82,
+            shedding_high_watermark: 0.70,
+            shedding_low_watermark: 0.60,
+            critical_high_watermark: 0.80,
+            critical_low_watermark: 0.70,
         }
     }
 }
@@ -205,7 +205,25 @@ impl OverloadTracker {
 /// 3. Linux proc statm: `/proc/self/statm` (Resident Set Size pages * 4096)
 /// 4. Fallback: 0 bytes.
 pub fn probe_memory_usage() -> usize {
-    // 1. Container cgroup v2: /sys/fs/cgroup/memory.current
+    // 1. Process-specific cgroup v2 path from /proc/self/cgroup
+    if let Ok(cgroup_content) = std::fs::read_to_string("/proc/self/cgroup") {
+        for line in cgroup_content.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() == 3 {
+                let sub = parts[2].trim_start_matches('/');
+                if !sub.is_empty() {
+                    let path = format!("/sys/fs/cgroup/{sub}/memory.current");
+                    if let Ok(content) = std::fs::read_to_string(&path)
+                        && let Ok(bytes) = content.trim().parse::<usize>()
+                    {
+                        return bytes;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Container cgroup v2: /sys/fs/cgroup/memory.current
     if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
         && let Ok(bytes) = content.trim().parse::<usize>()
     {

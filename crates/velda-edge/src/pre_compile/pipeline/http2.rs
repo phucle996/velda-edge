@@ -285,6 +285,10 @@ pub async fn run_http2_loop<IO>(
                         } else {
                             let _ = responder.send_response(&shed_resp);
                         }
+                        if overload_lvl.is_critical() && !is_draining {
+                            is_draining = true;
+                            conn.graceful_shutdown();
+                        }
                         continue;
                     }
 

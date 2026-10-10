@@ -110,7 +110,29 @@ impl MemoryProfile {
 /// 3. Host OS `/proc/meminfo` MemTotal
 /// 4. Safe baseline: 1 GB
 pub fn probe_memory() -> MemoryProfile {
-    // 1. Check cgroup v2 memory limit: /sys/fs/cgroup/memory.max
+    // 1. Check process-specific cgroup v2 path from /proc/self/cgroup
+    if let Ok(cgroup_content) = std::fs::read_to_string("/proc/self/cgroup") {
+        for line in cgroup_content.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() == 3 {
+                let sub = parts[2].trim_start_matches('/');
+                if !sub.is_empty() {
+                    let path = format!("/sys/fs/cgroup/{sub}/memory.max");
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let trimmed = content.trim();
+                        if trimmed != "max"
+                            && let Ok(bytes) = trimmed.parse::<usize>()
+                            && bytes > 0
+                        {
+                            return MemoryProfile::new(bytes, "cgroup_v2");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check root cgroup v2 memory limit: /sys/fs/cgroup/memory.max
     if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
         let trimmed = content.trim();
         if trimmed != "max"

@@ -10,8 +10,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use velda_core::OverloadTracker;
 
-/// Default sampling interval for resource overload monitoring (50 ms).
-pub const DEFAULT_OVERLOAD_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
+/// Default sampling interval for resource overload monitoring (10 ms).
+pub const DEFAULT_OVERLOAD_SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Spawns a background task monitoring host/container memory saturation.
 ///
