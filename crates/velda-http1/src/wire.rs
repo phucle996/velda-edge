@@ -396,17 +396,44 @@ pub fn encode_headers(headers: &HeaderMap, dst: &mut BytesMut) {
     }
 }
 
+/// Formats `val` as uppercase hexadecimal followed by CRLF into `buf` without heap allocations or formatting machinery.
+/// Returns the number of bytes written.
+#[inline]
+pub fn format_hex_crlf(mut val: usize, buf: &mut [u8; 32]) -> usize {
+    const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
+    if val == 0 {
+        buf[0] = b'0';
+        buf[1] = b'\r';
+        buf[2] = b'\n';
+        return 3;
+    }
+    let mut temp = [0u8; 16];
+    let mut i = 0;
+    while val > 0 {
+        temp[i] = HEX_CHARS[val & 0xF];
+        val >>= 4;
+        i += 1;
+    }
+    let mut out_idx = 0;
+    while i > 0 {
+        i -= 1;
+        buf[out_idx] = temp[i];
+        out_idx += 1;
+    }
+    buf[out_idx] = b'\r';
+    buf[out_idx + 1] = b'\n';
+    out_idx + 2
+}
+
 /// Encodes a single chunk into `dst` formatted as `<hex_len>\r\n<data>\r\n`.
 #[inline]
 pub fn encode_chunk(chunk: &[u8], dst: &mut BytesMut) {
     if chunk.is_empty() {
         return;
     }
-    use std::io::Write;
-    let mut hex_buf = [0u8; 16];
-    let mut cursor = std::io::Cursor::new(&mut hex_buf[..]);
-    let _ = write!(cursor, "{:X}\r\n", chunk.len());
-    let len = cursor.position() as usize;
+    let mut hex_buf = [0u8; 32];
+    let len = format_hex_crlf(chunk.len(), &mut hex_buf);
+    dst.reserve(len + chunk.len() + 2);
     dst.put_slice(&hex_buf[..len]);
     dst.extend_from_slice(chunk);
     dst.put_slice(b"\r\n");
@@ -429,11 +456,9 @@ where
     if chunk.is_empty() {
         return Ok(());
     }
-    use std::io::{IoSlice, Write};
+    use std::io::IoSlice;
     let mut header = [0u8; 32];
-    let mut cursor = std::io::Cursor::new(&mut header[..]);
-    write!(cursor, "{:X}\r\n", chunk.len()).map_err(Http1Error::Io)?;
-    let header_len = cursor.position() as usize;
+    let header_len = format_hex_crlf(chunk.len(), &mut header);
 
     let total_len = header_len + chunk.len() + 2;
     let mut written = 0;
@@ -472,7 +497,6 @@ where
     W: AsyncWrite + Unpin,
 {
     stream.write_all(b"0\r\n\r\n").await?;
-    stream.flush().await?;
     Ok(())
 }
 
@@ -496,7 +520,7 @@ where
         return send_chunk(stream, &chunks[0]).await;
     }
 
-    use std::io::{IoSlice, Write};
+    use std::io::IoSlice;
 
     for batch in chunks.chunks(32) {
         let total_payload_len: usize = batch.iter().map(|c| c.len()).sum();
@@ -505,9 +529,7 @@ where
         }
 
         let mut header = [0u8; 32];
-        let mut cursor = std::io::Cursor::new(&mut header[..]);
-        write!(cursor, "{:X}\r\n", total_payload_len).map_err(Http1Error::Io)?;
-        let header_len = cursor.position() as usize;
+        let header_len = format_hex_crlf(total_payload_len, &mut header);
 
         let total_wire_len = header_len + total_payload_len + 2;
         let mut written = 0;

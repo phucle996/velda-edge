@@ -122,8 +122,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
 
-        // Opportunistically drain any downstream chunks available
-        if let Ok(Some(Some(client_chunk))) = decode_chunk(&mut conn.read_buf) {
+        // Opportunistically drain all downstream chunks available
+        while let Ok(Some(Some(client_chunk))) = decode_chunk(&mut conn.read_buf) {
             send_stream.reserve_capacity(client_chunk.len());
             let _ = send_stream.send_data(client_chunk, false);
         }

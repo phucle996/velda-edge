@@ -6,7 +6,7 @@
 //! - Downstream client disconnect cleanly aborts the upstream stream to stop wasting backend resources.
 
 use bytes::Buf;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 use velda_core::Body;
 
@@ -40,6 +40,12 @@ where
 
     // 1. Send complete request to upstream backend reusing scratch buffer
     send_request(req, upstream, &mut conn.upstream_write_buf).await?;
+
+    // Pre-reserve upstream read buffer capacity to at least 64KB for high-throughput streaming
+    // allowing Linux kernel TCP receive window to coalesce multiple segments into single recv syscall
+    if conn.upstream_read_buf.capacity() < 65536 {
+        conn.upstream_read_buf.reserve(65536);
+    }
 
     // 3. Read upstream response head reusing connection read buffer
     let (mut resp_head, resp_framing) =
@@ -176,26 +182,35 @@ where
                     conn.upstream_read_buf.advance(available);
                 }
 
+                let stream_buf_target = if total_len > 65536 { 131072 } else { 65536 };
                 let mut remaining = total_len - available;
                 while remaining > 0 {
-                    let to_read = remaining.min(65536);
-                    match read_chunk_sized(upstream, &mut conn.upstream_read_buf, to_read).await? {
-                        Some(chunk) => {
-                            remaining = remaining.saturating_sub(chunk.len());
-                            if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
-                                tracing::debug!(
-                                    error = %e,
-                                    "Downstream client disconnected during sized server streaming"
-                                );
-                                client_disconnected = true;
-                                break;
-                            }
+                    if conn.upstream_read_buf.is_empty() {
+                        conn.upstream_read_buf.clear();
+                        if conn.upstream_read_buf.capacity() < stream_buf_target {
+                            conn.upstream_read_buf.reserve(stream_buf_target);
                         }
-                        None => {
+                        let n = upstream.read_buf(&mut conn.upstream_read_buf).await?;
+                        if n == 0 {
                             return Err(Http1Error::Parse(
                                 "Unexpected EOF while reading upstream response body: premature connection close".into(),
                             ));
                         }
+                    }
+
+                    let chunk_len = conn.upstream_read_buf.len().min(remaining);
+                    let send_res =
+                        send_chunk(&mut conn.stream, &conn.upstream_read_buf[..chunk_len]).await;
+                    conn.upstream_read_buf.advance(chunk_len);
+                    remaining -= chunk_len;
+
+                    if let Err(e) = send_res {
+                        tracing::debug!(
+                            error = %e,
+                            "Downstream client disconnected during sized server streaming"
+                        );
+                        client_disconnected = true;
+                        break;
                     }
                 }
 

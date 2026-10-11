@@ -81,6 +81,11 @@ impl RuntimeProfile {
                     } else {
                         None
                     },
+                    bbr: if engine_config.tcp.bbr {
+                        Some(true)
+                    } else {
+                        None
+                    },
                 },
                 udp: UdpRuntimeConfig {
                     recv_buffer_size: engine_config.udp.recv_buffer_size,
@@ -176,6 +181,9 @@ impl RuntimeProfile {
         }
         if let Some(fb) = self.transport.tcp.freebind {
             cfg = cfg.with_freebind(fb);
+        }
+        if let Some(b) = self.transport.tcp.bbr {
+            cfg = cfg.with_bbr(b);
         }
         cfg
     }

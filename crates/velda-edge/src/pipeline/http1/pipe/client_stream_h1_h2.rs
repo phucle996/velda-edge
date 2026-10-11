@@ -102,7 +102,7 @@ where
     // 6. Pump downstream chunks to HTTP/2 DATA frames
     match framing {
         Http1BodyFraming::Chunked => loop {
-            match decode_chunk(&mut conn.upstream_read_buf)? {
+            match decode_chunk(&mut conn.read_buf)? {
                 Some(Some(chunk)) => {
                     send_stream.reserve_capacity(chunk.len());
                     send_stream
@@ -111,30 +111,43 @@ where
                 }
                 Some(None) => break,
                 None => {
-                    let mut temp = [0u8; 8192];
                     use tokio::io::AsyncReadExt;
-                    let n = conn.stream.read(&mut temp).await?;
+                    let n = conn.stream.read_buf(&mut conn.read_buf).await?;
                     if n == 0 {
                         break;
                     }
-                    conn.upstream_read_buf.extend_from_slice(&temp[..n]);
                 }
             }
         },
         Http1BodyFraming::ContentLength(len) => {
             let mut remaining = len;
             while remaining > 0 {
-                let to_read = remaining.min(8192);
-                let mut temp = vec![0u8; to_read];
+                let available = conn.read_buf.len();
+                if available > 0 {
+                    let chunk_len = available.min(remaining);
+                    let chunk = conn.read_buf.split_to(chunk_len).freeze();
+                    remaining = remaining.saturating_sub(chunk_len);
+                    send_stream.reserve_capacity(chunk_len);
+                    send_stream
+                        .send_data(chunk, false)
+                        .map_err(|_| Http1Error::ConnectionClosed)?;
+                    continue;
+                }
+                let to_read = remaining.min(65536);
+                if conn.read_buf.capacity() < to_read {
+                    conn.read_buf.reserve(to_read);
+                }
                 use tokio::io::AsyncReadExt;
-                let n = conn.stream.read(&mut temp).await?;
+                let n = conn.stream.read_buf(&mut conn.read_buf).await?;
                 if n == 0 {
                     break;
                 }
-                remaining = remaining.saturating_sub(n);
-                send_stream.reserve_capacity(n);
+                let chunk_len = n.min(remaining);
+                let chunk = conn.read_buf.split_to(chunk_len).freeze();
+                remaining = remaining.saturating_sub(chunk_len);
+                send_stream.reserve_capacity(chunk_len);
                 send_stream
-                    .send_data(Bytes::copy_from_slice(&temp[..n]), false)
+                    .send_data(chunk, false)
                     .map_err(|_| Http1Error::ConnectionClosed)?;
             }
         }
@@ -150,7 +163,12 @@ where
         .map_err(|_| Http1Error::ConnectionClosed)?;
     let (parts, mut body_stream) = response.into_parts();
 
-    let mut resp_body = BytesMut::new();
+    let expected_len = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
+        .unwrap_or(0);
+    let mut resp_body = BytesMut::with_capacity(expected_len);
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk.map_err(|_| Http1Error::ConnectionClosed)?;
         let _ = body_stream.flow_control().release_capacity(chunk.len());

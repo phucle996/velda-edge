@@ -5,7 +5,7 @@
 //! - Upstream receives chunks in real-time without gateway buffering the entire upload in RAM.
 //! - Response from upstream is expected to be finite and buffered (e.g. 201 Created or JSON receipt).
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 
 use super::sanitize_headers;
@@ -16,7 +16,7 @@ use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use crate::server::response::Http1ServerResponse;
-use crate::wire::{parse_single_chunk, send_chunk, send_chunked_end};
+use crate::wire::{parse_single_chunk, send_chunked_end};
 
 /// Pipes a client-streaming HTTP/1.1 request (streaming upload, buffered response).
 pub async fn pipe_client_stream<DownIO, UpIO>(
@@ -38,31 +38,52 @@ where
     let mut total_body_bytes = 0usize;
     let idle_timeout = std::time::Duration::from_millis(config.idle_timeout_ms);
     let target_reserve = config.client_body_buffer_size;
+    let mut sent_terminal = false;
 
     loop {
-        if let Some((needed, payload, is_terminal)) = parse_single_chunk(&conn.read_buf)? {
-            if is_terminal {
-                use bytes::Buf;
-                conn.read_buf.advance(needed);
-                if conn.read_buf.is_empty() {
-                    conn.read_buf.clear();
-                }
-                break;
-            }
+        // Coalesce as many complete valid chunks as possible from conn.read_buf
+        let mut coalesced_wire_len = 0usize;
+        let mut coalesced_payload_bytes = 0usize;
+        let mut reached_terminal = false;
 
+        while coalesced_wire_len < conn.read_buf.len() {
+            match parse_single_chunk(&conn.read_buf[coalesced_wire_len..])? {
+                Some((needed, payload, is_terminal)) => {
+                    coalesced_wire_len += needed;
+                    coalesced_payload_bytes += payload.len();
+                    if is_terminal {
+                        reached_terminal = true;
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        if coalesced_wire_len > 0 {
             total_body_bytes = total_body_bytes
-                .checked_add(payload.len())
+                .checked_add(coalesced_payload_bytes)
                 .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
             if total_body_bytes > config.max_body_size {
                 return Err(Http1Error::PayloadTooLarge(total_body_bytes));
             }
 
-            send_chunk(upstream, payload).await?;
+            // Zero-rechunking passthrough: forward the exact wire bytes
+            // containing valid chunk headers and payloads directly to upstream in a single write!
+            upstream
+                .write_all(&conn.read_buf[..coalesced_wire_len])
+                .await
+                .map_err(Http1Error::Io)?;
 
             use bytes::Buf;
-            conn.read_buf.advance(needed);
+            conn.read_buf.advance(coalesced_wire_len);
             if conn.read_buf.is_empty() {
                 conn.read_buf.clear();
+            }
+
+            if reached_terminal {
+                sent_terminal = true;
+                break;
             }
             continue;
         }
@@ -92,7 +113,10 @@ where
             }
         }
     }
-    send_chunked_end(upstream).await?;
+
+    if !sent_terminal {
+        send_chunked_end(upstream).await?;
+    }
 
     // 3. Read upstream response head reusing connection read buffer
     let (mut resp_head, resp_framing) =

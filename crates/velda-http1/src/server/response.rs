@@ -446,7 +446,6 @@ where
     write_buf.clear();
     encode_response_head_chunked(version, status, headers, force_close, write_buf);
     stream.write_all(write_buf).await?;
-    stream.flush().await?;
 
     Ok(force_close || is_connection_close(headers))
 }
@@ -467,20 +466,21 @@ where
     W: AsyncWrite + Unpin,
 {
     use bytes::BufMut;
-    use std::io::Write;
 
     write_buf.clear();
-    encode_response_head_chunked(head.version, head.status, &head.headers, force_close, write_buf);
+    encode_response_head_chunked(
+        head.version,
+        head.status,
+        &head.headers,
+        force_close,
+        write_buf,
+    );
 
     if let Some(chunk) = initial_chunk
         && !chunk.is_empty()
     {
-        let mut hex_buf = [0u8; 16];
-        let hex_len = {
-            let mut cur = std::io::Cursor::new(&mut hex_buf[..]);
-            write!(cur, "{:X}\r\n", chunk.len()).map_err(Http1Error::Io)?;
-            cur.position() as usize
-        };
+        let mut hex_buf = [0u8; 32];
+        let hex_len = crate::wire::format_hex_crlf(chunk.len(), &mut hex_buf);
         let hex_slice = &hex_buf[..hex_len];
         write_buf.reserve(hex_slice.len() + chunk.len() + 2 + if is_terminated { 5 } else { 0 });
         write_buf.put_slice(hex_slice);
@@ -493,7 +493,6 @@ where
     }
 
     stream.write_all(write_buf).await?;
-    stream.flush().await?;
 
     Ok(force_close || is_connection_close(&head.headers))
 }

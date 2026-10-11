@@ -77,6 +77,8 @@ pub struct TcpRuntimeConfig {
     pub user_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freebind: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbr: Option<bool>,
 }
 
 /// UDP-specific runtime configuration.

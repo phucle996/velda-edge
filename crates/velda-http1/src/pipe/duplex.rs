@@ -5,7 +5,7 @@
 //! - Upstream streams response body progressively using chunked transfer encoding.
 //! - Cleanly propagates client disconnects to cancel active upstream stream.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use velda_core::Body;
 
@@ -39,6 +39,7 @@ where
 
     // 2. Stream request body chunks to upstream reusing conn.read_buf with zero heap allocations
     let mut total_req_bytes = 0usize;
+    let mut sent_terminal = false;
     let idle_timeout = std::time::Duration::from_millis(config.idle_timeout_ms);
     let target_reserve = config.client_body_buffer_size;
 
@@ -46,6 +47,9 @@ where
         if let Some((needed, payload, is_terminal)) = parse_single_chunk(&conn.read_buf)? {
             if is_terminal {
                 use bytes::Buf;
+                // Forward terminal wire chunk directly to upstream (coalesced 0\r\n\r\n)
+                upstream.write_all(&conn.read_buf[..needed]).await?;
+                sent_terminal = true;
                 conn.read_buf.advance(needed);
                 if conn.read_buf.is_empty() {
                     conn.read_buf.clear();
@@ -60,7 +64,8 @@ where
                 return Err(Http1Error::PayloadTooLarge(total_req_bytes));
             }
 
-            send_chunk(upstream, payload).await?;
+            // Wire-passthrough coalescing: forward raw chunk wire bytes directly to upstream socket
+            upstream.write_all(&conn.read_buf[..needed]).await?;
 
             use bytes::Buf;
             conn.read_buf.advance(needed);
@@ -95,7 +100,9 @@ where
             }
         }
     }
-    send_chunked_end(upstream).await?;
+    if !sent_terminal {
+        send_chunked_end(upstream).await?;
+    }
 
     // 3. Read upstream response head reusing connection read buffer
     let (mut resp_head, resp_framing) =
