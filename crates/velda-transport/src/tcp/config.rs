@@ -228,49 +228,39 @@ impl TcpListenerConfig {
     /// Creates a TCP listener configuration sized appropriately for the host's [`velda_core::MemoryTier`].
     pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
         const KB: usize = 1024;
-        const MB: usize = 1024 * KB;
+        // recv_buffer_size and send_buffer_size are None by default, allowing
+        // the Linux kernel dynamic TCP window auto-tuning (tcp_rmem / tcp_wmem)
+        // to scale dynamically from 4KB to 16MB based on BDP, while eliminating
+        // 2 setsockopt syscalls on every accepted connection.
         let mut cfg = Self::default();
+
         match tier {
             velda_core::MemoryTier::Constrained => {
                 cfg.backlog = 1024;
-                cfg.recv_buffer_size = None;
-                cfg.send_buffer_size = None;
                 cfg.copy_buffer_size = 16 * KB;
             }
             velda_core::MemoryTier::Small => {
                 cfg.backlog = 4096;
-                cfg.recv_buffer_size = Some(256 * KB);
-                cfg.send_buffer_size = Some(256 * KB);
                 cfg.copy_buffer_size = 32 * KB;
             }
             velda_core::MemoryTier::Medium => {
                 cfg.backlog = 8192;
-                cfg.recv_buffer_size = Some(512 * KB);
-                cfg.send_buffer_size = Some(512 * KB);
                 cfg.copy_buffer_size = 64 * KB;
             }
             velda_core::MemoryTier::Large => {
                 cfg.backlog = 16384;
-                cfg.recv_buffer_size = Some(MB);
-                cfg.send_buffer_size = Some(MB);
                 cfg.copy_buffer_size = 64 * KB;
             }
             velda_core::MemoryTier::XLarge => {
                 cfg.backlog = 32768;
-                cfg.recv_buffer_size = Some(2 * MB);
-                cfg.send_buffer_size = Some(2 * MB);
                 cfg.copy_buffer_size = 64 * KB;
             }
             velda_core::MemoryTier::TwoXLarge => {
                 cfg.backlog = 65535;
-                cfg.recv_buffer_size = Some(4 * MB);
-                cfg.send_buffer_size = Some(4 * MB);
                 cfg.copy_buffer_size = 64 * KB;
             }
             velda_core::MemoryTier::Ultra => {
                 cfg.backlog = 65535;
-                cfg.recv_buffer_size = Some(8 * MB);
-                cfg.send_buffer_size = Some(8 * MB);
                 cfg.copy_buffer_size = 64 * KB;
             }
         }
@@ -403,27 +393,27 @@ mod tests {
 
         let small = TcpListenerConfig::for_tier(velda_core::MemoryTier::Small);
         assert_eq!(small.backlog, 4096);
-        assert_eq!(small.recv_buffer_size, Some(256 * 1024));
+        assert_eq!(small.recv_buffer_size, None);
 
         let medium = TcpListenerConfig::for_tier(velda_core::MemoryTier::Medium);
         assert_eq!(medium.backlog, 8192);
-        assert_eq!(medium.recv_buffer_size, Some(512 * 1024));
+        assert_eq!(medium.recv_buffer_size, None);
 
         let large = TcpListenerConfig::for_tier(velda_core::MemoryTier::Large);
         assert_eq!(large.backlog, 16384);
-        assert_eq!(large.recv_buffer_size, Some(1024 * 1024));
+        assert_eq!(large.recv_buffer_size, None);
 
         let xlarge = TcpListenerConfig::for_tier(velda_core::MemoryTier::XLarge);
         assert_eq!(xlarge.backlog, 32768);
-        assert_eq!(xlarge.recv_buffer_size, Some(2 * 1024 * 1024));
+        assert_eq!(xlarge.recv_buffer_size, None);
 
         let two_xlarge = TcpListenerConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
         assert_eq!(two_xlarge.backlog, 65535);
-        assert_eq!(two_xlarge.recv_buffer_size, Some(4 * 1024 * 1024));
+        assert_eq!(two_xlarge.recv_buffer_size, None);
 
         let ultra = TcpListenerConfig::for_tier(velda_core::MemoryTier::Ultra);
         assert_eq!(ultra.backlog, 65535);
-        assert_eq!(ultra.recv_buffer_size, Some(8 * 1024 * 1024));
+        assert_eq!(ultra.recv_buffer_size, None);
     }
 
     #[test]
@@ -464,7 +454,7 @@ mod tests {
             TcpListenerConfig::for_tiers(velda_core::CpuTier::Ultra, velda_core::MemoryTier::Small);
         assert_eq!(cfg.copy_buffer_size, 64 * 1024); // from Ultra CPU
         assert_eq!(cfg.backlog, 4096); // from Small Memory
-        assert_eq!(cfg.recv_buffer_size, Some(256 * 1024)); // from Small Memory
+        assert_eq!(cfg.recv_buffer_size, None); // dynamic auto-tuning by default
         assert_eq!(cfg.concurrency_shards, 128); // from Ultra CPU
         assert_eq!(cfg.reuseport, cfg!(unix));
     }

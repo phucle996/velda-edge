@@ -14,7 +14,7 @@ use super::request::{
 };
 use super::response::{
     Http1ServerResponse, Http1ServerResponseHead, send_response, send_response_head_chunked,
-    send_response_parts,
+    send_response_head_chunked_coalesced, send_response_parts,
 };
 use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
@@ -27,7 +27,7 @@ pub struct Http1ServerConnection<IO> {
     pub write_buf: BytesMut,
     pub upstream_read_buf: BytesMut,
     pub upstream_write_buf: BytesMut,
-    close_requested: bool,
+    pub close_requested: bool,
     config: Http1Config,
 }
 
@@ -346,6 +346,33 @@ where
         let server_head =
             Http1ServerResponseHead::new(head.status, head.version, head.headers.clone());
         self.send_response_head_chunked(&server_head).await
+    }
+
+    /// Sends the HTTP/1.1 response head configured for progressive chunked streaming,
+    /// coalesced with an initial chunk payload and optional terminal chunk.
+    pub async fn send_client_response_head_chunked_coalesced(
+        &mut self,
+        head: &Http1ClientResponseHead,
+        initial_chunk: Option<&[u8]>,
+        is_terminated: bool,
+    ) -> Result<(), Http1Error> {
+        let server_head =
+            Http1ServerResponseHead::new(head.status, head.version, head.headers.clone());
+        let close = send_response_head_chunked_coalesced(
+            &mut self.stream,
+            &mut self.write_buf,
+            &server_head,
+            initial_chunk,
+            is_terminated,
+            self.close_requested,
+        )
+        .await?;
+
+        if close {
+            self.close_requested = true;
+        }
+
+        Ok(())
     }
 
     /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).

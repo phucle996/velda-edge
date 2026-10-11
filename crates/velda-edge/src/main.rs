@@ -15,6 +15,19 @@ use velda_edge::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// High-performance Datacenter Jemalloc profile:
+// - background_thread:true: Purges dirty pages in dedicated background thread, eliminating latency spikes on worker threads.
+// - metadata_thp:auto: Uses Transparent Huge Pages for internal metadata.
+// - dirty_decay_ms / muzzy_decay_ms: 30000ms: Holds cached pages for rapid reuse across traffic bursts, avoiding madvise syscalls.
+#[cfg(all(
+    feature = "jemalloc",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[unsafe(export_name = "malloc_conf")]
+pub static MALLOC_CONF: &[u8] =
+    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000\0";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check CLI arguments first before runtime bootstrap
     let args: Vec<String> = std::env::args().collect();
@@ -130,6 +143,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id = WORKER_ID.fetch_add(1, Ordering::Relaxed);
         format!("velda-worker-{id}")
     });
+
+    // Datacenter edge tuning:
+    // - event_interval: 31 (default 61): polls epoll I/O driver twice as frequently to gash P99 tail latency.
+    // - global_queue_interval: 127 (default 61): prioritizes per-core local queue work before acquiring global injection mutex.
+    // - thread_stack_size: 1MB (default 2MB): optimizes CPU cache locality and virtual memory footprint for async state machines.
+    // - max_blocking_threads: 512, thread_keep_alive: 30s.
+    builder.event_interval(31);
+    builder.global_queue_interval(127);
+    builder.thread_stack_size(1024 * 1024);
+    builder.max_blocking_threads(512);
+    builder.thread_keep_alive(std::time::Duration::from_secs(30));
 
     if cpu_pinning {
         let pinner = Arc::new(ThreadPinner::new());
