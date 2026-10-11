@@ -115,7 +115,8 @@ where
     // 6. Forward buffered request over HTTP/2 stream with self-healing retry
     let is_tls = upstream.is_tls();
     let upstream_host = upstream.target_host();
-    let mut pipe_res = send_h2_buffered(&mut client, &head, &body_bytes, is_tls, upstream_host).await;
+    let mut pipe_res =
+        send_h2_buffered(&mut client, &head, &body_bytes, is_tls, upstream_host).await;
     if let Err(ref e) = pipe_res
         && is_h2_refused_or_goaway(e)
     {
@@ -124,7 +125,9 @@ where
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
-            pipe_res = send_h2_buffered(&mut fresh_client, &head, &body_bytes, is_tls, upstream_host).await;
+            pipe_res =
+                send_h2_buffered(&mut fresh_client, &head, &body_bytes, is_tls, upstream_host)
+                    .await;
         }
     }
 

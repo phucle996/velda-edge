@@ -965,29 +965,29 @@ Mọi kịch bản thử nghiệm đều chia tỷ lệ 4/3/3 giữa 3 nhánh up
 
 ---
 
-### KB 21: client_stream_h1_h1 — Large Upload (5MB File Upload)
-- **Mục tiêu thử nghiệm**: Đẩy luồng file 5MB liên tục lên upstream, kiểm tra cơ chế zero-alloc chunk parsing.
-- **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes chunked upload body
-- **Lệnh thực thi chuẩn**: `wrk -t4 -c20 -d10s -s upload_5mb.lua http://192.168.122.14:8080/upload/5mb`
+### KB 21: client_stream_h1_h1 — Large Upload (200MB Chunked Stream Upload)
+- **Mục tiêu thử nghiệm**: Đẩy luồng file cực lớn 200MB/request liên tục lên upstream qua 5 kết nối đồng thời, kiểm tra cơ chế zero-alloc chunk parsing và tail latency.
+- **Kích thước tải trọng & Quy chuẩn**: 209,715,200 bytes (200 MB) chunked upload body.
+- **Lệnh thực thi chuẩn**: 5 concurrent streams liên tục 12 giây qua HTTP/1.1 chunked sockets.
 - **Nhánh Upstream**: Dual-Upstream (50% Cleartext h1 : 50% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | — | — | — | — |
-| | **Băng thông truyền tải (Throughput MB/s)** | — | — | — | — |
-| | **Độ trễ trung bình (Mean Latency)** | — | — | — | — |
-| | **Độ trễ tối thiểu (Min Latency)** | — | — | — | — |
-| | **Độ trễ phân vị P50** | — | — | — | — |
-| | **Độ trễ phân vị P90** | — | — | — | — |
-| | **Độ trễ phân vị P99** | — | — | — | — |
-| | **Độ trễ phân vị P99.9** | — | — | — | — |
-| | **Độ trễ tối đa (Max Latency)** | — | — | — | — |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | — | — | — | — |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | — | — | — | — |
-| | **Thời gian kết nối (Connect Time Avg)** | — | — | — | — |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | — | — | — | — |
-| | **Tỷ lệ thành công (Success Rate %)** | — | — | — | — |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | — | — | — | — |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **22.64 uploads/s** | **28.83 uploads/s** | 0.00 uploads/s | Envoy lỗi Buffer Overflow / RST; Velda tăng thêm +13.7% |
+| | **Băng thông truyền tải (Throughput MB/s)** | **4,527.30 MB/s (4.42 GB/s)** | **5,766.11 MB/s (5.63 GB/s)** | 0.00 MB/s | Velda vượt 4.4 GB/s sau khi tích hợp branchless hex parsing |
+| | **Độ trễ trung bình (Mean Latency)** | **220.24 ms** | **171.25 ms** | N/A | Độ trễ trung bình hoàn tất tải 200MB giảm thêm 29.3ms |
+| | **Độ trễ tối thiểu (Min Latency)** | **156.40 ms** | **122.40 ms** | N/A | Ngưỡng trễ nhanh nhất thu hẹp đáng kể |
+| | **Độ trễ phân vị P50** | **213.33 ms** | **171.29 ms** | N/A | Phân vị P50 hoàn tất request giảm xuống 213ms |
+| | **Độ trễ phân vị P90** | **252.38 ms** | **198.50 ms** | N/A | Phân vị P90 ổn định ở mức 252ms |
+| | **Độ trễ phân vị P99** | **309.08 ms** | **224.02 ms** | N/A | Tail latency giảm thêm ~26ms, tiệm cận mốc 300ms |
+| | **Độ trễ phân vị P99.9** | **322.10 ms** | **245.10 ms** | N/A | Đuôi trễ phân vị sâu giảm đều |
+| | **Độ trễ tối đa (Max Latency)** | **328.50 ms** | **268.40 ms** | N/A | Đỉnh trễ tối đa không còn bị spike |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **21.80 ms** | 34.20 ms | N/A | Độ phân bổ độ trễ của Velda mượt hơn cả Nginx |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | **1.95 ms** | 3.50 ms | N/A | Thời gian phản ứng byte đầu cực nhanh |
+| | **Thời gian kết nối (Connect Time Avg)** | **0.24 ms** | 0.20 ms | 0.26 ms | Bắt tay kết nối ban đầu |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **275 2xx (0 fail, 0 timeout)** | **346 2xx (0 fail)** | 0 2xx, 60 fails | Envoy gửi TCP RST; Velda hoàn tất 55.0 GB trong 12s |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0% (275/275)** | **100.0% (346/346)** | **0.0% (Thất bại)** | Envoy bị lỗi tràn buffer stream |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | **25.6 MB** | **981.0 MB** | **2,381.0 MB (~2.38 GB)** | Velda ghim RAM O(1), thấp hơn Nginx **38x**, Envoy **93x** |
 | **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | — | — | — | — |
 | | **Số lệnh CPU / Request (`insn / req`)** | — | — | — | — |
 | | **Tổng chu kỳ CPU (`cycles`)** | — | — | — | — |

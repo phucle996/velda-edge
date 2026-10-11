@@ -367,7 +367,13 @@ where
 
             let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
             let target_reserve = self.config.client_body_buffer_size;
-            if self.read_buf.capacity() - self.read_buf.len() < target_reserve {
+            if self.read_buf.is_empty() {
+                if self.read_buf.capacity() < target_reserve
+                    || self.read_buf.capacity() > target_reserve * 2
+                {
+                    self.read_buf = BytesMut::with_capacity(target_reserve);
+                }
+            } else if self.read_buf.capacity() - self.read_buf.len() < target_reserve {
                 self.read_buf.reserve(target_reserve);
             }
             let bytes_read =

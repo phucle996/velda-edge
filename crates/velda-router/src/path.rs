@@ -39,17 +39,18 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
         return false;
     }
 
-    let mut bad_char_mask: u8 = 0;
-    let mut bad_slash_mask: u8 = 0;
-    let mut prev = b'/';
-
-    for &b in &bytes[1..] {
-        bad_char_mask |= ((b == 0) | (b == b'\\') | (b == b'%')) as u8;
-        bad_slash_mask |= ((prev == b'/') & ((b == b'/') | (b == b'.'))) as u8;
-        prev = b;
+    // 2. SIMD vector scan: rejects null bytes, backslashes, percent signs in 1 vector cycle
+    if memchr::memchr3(b'\0', b'\\', b'%', bytes).is_some() {
+        return false;
     }
 
-    (bad_char_mask | bad_slash_mask) == 0
+    // 3. SIMD substring scan for consecutive slashes "//" or dot segments "/."
+    if memchr::memmem::find(bytes, b"//").is_some() || memchr::memmem::find(bytes, b"/.").is_some()
+    {
+        return false;
+    }
+
+    true
 }
 
 /// Normalizes a request URI path with zero allocations on clean paths.

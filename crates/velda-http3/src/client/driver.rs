@@ -34,9 +34,12 @@ pub(crate) enum ClientCommand {
     Close,
 }
 
-struct ActiveStream {
+struct ActiveStreamSlot {
     method: http::Method,
     reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+    headers: Option<(Option<StatusCode>, HeaderMap)>,
+    raw_buf: BytesMut,
+    data_payload: BytesMut,
 }
 
 /// Background QUIC connection driver loop.
@@ -51,10 +54,7 @@ pub(crate) async fn run_client_driver(
     mut command_rx: mpsc::Receiver<ClientCommand>,
     max_body_size: usize,
 ) {
-    let mut active_streams: HashMap<StreamId, ActiveStream> = HashMap::new();
-    let mut stream_headers: HashMap<StreamId, (Option<StatusCode>, HeaderMap)> = HashMap::new();
-    let mut stream_raw_bufs: HashMap<StreamId, BytesMut> = HashMap::new();
-    let mut stream_data_payloads: HashMap<StreamId, BytesMut> = HashMap::new();
+    let mut streams: HashMap<StreamId, ActiveStreamSlot> = HashMap::with_capacity(256);
     let mut transmit_buf = Vec::with_capacity(65535);
     let mut socket_recv_buf = vec![0u8; 65535];
     let mut chunk_scratch_buf = Vec::with_capacity(65536);
@@ -77,105 +77,143 @@ pub(crate) async fn run_client_driver(
         };
 
         tokio::select! {
-            // Ingest new command from client handles
+            // Ingest new command from client handles with adaptive batch draining
             cmd = command_rx.recv() => {
-                match cmd {
-                    Some(ClientCommand::SendRequest { request, reply_tx }) => {
-                        let stream_id = match conn.streams().open(Dir::Bi) {
-                            Some(id) => id,
-                            None => {
-                                let _ = reply_tx.send(Err(Http3Error::H3("No concurrent bidirectional streams available".into())));
-                                continue;
-                            }
-                        };
+                let mut current_cmd = cmd;
+                let mut batch_count = 0;
+                let mut should_exit = false;
 
-                        let req_method = request.method.clone();
-
-                        // Encode QPACK request HEADERS frame
-                        let mut header_buf = BytesMut::new();
-                        encode_qpack_request(&request.method, &request.uri, &request.headers, &mut header_buf);
-                        let header_frame = Http3Frame::Headers(header_buf.freeze());
-
-                        let mut send_buf = BytesMut::new();
-                        encode_frame(&header_frame, &mut send_buf);
-
-                        // Encode optional DATA frame using move semantics (zero clone)
-                        if let Body::Bytes(b) = request.body
-                            && !b.is_empty()
-                        {
-                            let data_frame = Http3Frame::Data(b);
-                            encode_frame(&data_frame, &mut send_buf);
-                        }
-
-                        let mut written = 0;
-                        let mut write_err = None;
-                        while written < send_buf.len() {
-                            match conn.send_stream(stream_id).write(&send_buf[written..]) {
-                                Ok(n) => {
-                                    if n == 0 {
+                while let Some(c) = current_cmd {
+                    match c {
+                        ClientCommand::SendRequest { request, reply_tx } => {
+                            let stream_id = match conn.streams().open(Dir::Bi) {
+                                Some(id) => id,
+                                None => {
+                                    let _ = reply_tx.send(Err(Http3Error::H3("No concurrent bidirectional streams available".into())));
+                                    batch_count += 1;
+                                    if batch_count >= 32 {
                                         break;
                                     }
-                                    written += n;
+                                    current_cmd = command_rx.try_recv().ok();
+                                    continue;
                                 }
-                                Err(e) => {
-                                    write_err = Some(e);
-                                    break;
+                            };
+
+                            let req_method = request.method.clone();
+
+                            // Encode QPACK request HEADERS frame
+                            let mut header_buf = BytesMut::new();
+                            encode_qpack_request(&request.method, &request.uri, &request.headers, &mut header_buf);
+                            let header_frame = Http3Frame::Headers(header_buf.freeze());
+
+                            let mut send_buf = BytesMut::new();
+                            encode_frame(&header_frame, &mut send_buf);
+
+                            // Encode optional DATA frame using move semantics (zero clone)
+                            if let Body::Bytes(b) = request.body
+                                && !b.is_empty()
+                            {
+                                let data_frame = Http3Frame::Data(b);
+                                encode_frame(&data_frame, &mut send_buf);
+                            }
+
+                            let mut written = 0;
+                            let mut write_err = None;
+                            while written < send_buf.len() {
+                                match conn.send_stream(stream_id).write(&send_buf[written..]) {
+                                    Ok(n) => {
+                                        if n == 0 {
+                                            break;
+                                        }
+                                        written += n;
+                                    }
+                                    Err(e) => {
+                                        write_err = Some(e);
+                                        break;
+                                    }
                                 }
                             }
-                        }
 
-                        if let Some(e) = write_err {
-                            let _ = reply_tx.send(Err(Http3Error::H3(e.to_string())));
-                            continue;
+                            if let Some(e) = write_err {
+                                let _ = reply_tx.send(Err(Http3Error::H3(e.to_string())));
+                            } else if written < send_buf.len() {
+                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                    "Client send stream window exhausted: {written}/{} bytes written",
+                                    send_buf.len()
+                                ))));
+                            } else {
+                                let _ = conn.send_stream(stream_id).finish();
+                                streams.insert(
+                                    stream_id,
+                                    ActiveStreamSlot {
+                                        method: req_method,
+                                        reply_tx,
+                                        headers: None,
+                                        raw_buf: BytesMut::new(),
+                                        data_payload: BytesMut::new(),
+                                    },
+                                );
+                            }
                         }
-                        if written < send_buf.len() {
-                            let _ = reply_tx.send(Err(Http3Error::H3(format!(
-                                "Client send stream window exhausted: {written}/{} bytes written",
-                                send_buf.len()
-                            ))));
-                            continue;
+                        ClientCommand::Close => {
+                            conn.close(
+                                Instant::now(),
+                                quinn_proto::VarInt::from_u32(error_code::H3_NO_ERROR as u32),
+                                bytes::Bytes::from_static(b"done"),
+                            );
+                            should_exit = true;
+                            break;
                         }
-                        let _ = conn.send_stream(stream_id).finish();
-
-                        active_streams.insert(stream_id, ActiveStream { method: req_method, reply_tx });
-                        flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
                     }
-                    Some(ClientCommand::Close) | None => {
-                        conn.close(
-                            Instant::now(),
-                            quinn_proto::VarInt::from_u32(error_code::H3_NO_ERROR as u32),
-                            bytes::Bytes::from_static(b"done"),
-                        );
-                        flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
+
+                    batch_count += 1;
+                    if batch_count >= 32 {
                         break;
                     }
+                    current_cmd = command_rx.try_recv().ok();
+                }
+
+                flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
+                if should_exit {
+                    break;
                 }
             }
 
-            // Ingest incoming UDP packets from network
+            // Ingest incoming UDP packets from network with opportunistic batch draining
             res = socket.recv_from(&mut socket_recv_buf) => {
-                let (len, from_addr) = match res {
-                    Ok(pair) => pair,
-                    Err(_) => break,
-                };
-                let now = Instant::now();
-                let payload = BytesMut::from(&socket_recv_buf[..len]);
-                let mut resp_buf = Vec::new();
-                match endpoint.handle(now, from_addr, None, None, payload, &mut resp_buf) {
-                    Some(quinn_proto::DatagramEvent::ConnectionEvent(_, ce)) => {
-                        conn.handle_event(ce);
+                let mut current_res = Some(res);
+                let mut drain_count = 0;
+
+                while let Some(r) = current_res {
+                    let (len, from_addr) = match r {
+                        Ok(pair) => pair,
+                        Err(_) => return,
+                    };
+                    let now = Instant::now();
+                    let payload = BytesMut::from(&socket_recv_buf[..len]);
+                    let mut resp_buf = Vec::new();
+                    match endpoint.handle(now, from_addr, None, None, payload, &mut resp_buf) {
+                        Some(quinn_proto::DatagramEvent::ConnectionEvent(_, ce)) => {
+                            conn.handle_event(ce);
+                        }
+                        Some(quinn_proto::DatagramEvent::Response(transmit))
+                            if transmit.size > 0 =>
+                        {
+                            let _ = socket
+                                .send_to(&transmit_buf[..transmit.size], transmit.destination)
+                                .await;
+                        }
+                        _ => {}
                     }
-                    Some(quinn_proto::DatagramEvent::Response(transmit))
-                        if transmit.size > 0 =>
-                    {
-                        let _ = socket
-                            .send_to(&transmit_buf[..transmit.size], transmit.destination)
-                            .await;
+                    if !resp_buf.is_empty() {
+                        let _ = socket.send_to(&resp_buf, from_addr).await;
                     }
-                    _ => {}
-                }
-                if !resp_buf.is_empty() {
-                    let _ = socket.send_to(&resp_buf, from_addr).await;
+
+                    drain_count += 1;
+                    if drain_count >= 32 {
+                        break;
+                    }
+                    current_res = socket.try_recv_from(&mut socket_recv_buf).ok().map(Ok);
                 }
             }
 
@@ -191,10 +229,10 @@ pub(crate) async fn run_client_driver(
         }
 
         // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver
-        let cancelled_streams: Vec<StreamId> = active_streams
+        let cancelled_streams: Vec<StreamId> = streams
             .iter()
-            .filter_map(|(&id, active)| {
-                if active.reply_tx.is_closed() {
+            .filter_map(|(&id, slot)| {
+                if slot.reply_tx.is_closed() {
                     Some(id)
                 } else {
                     None
@@ -203,10 +241,7 @@ pub(crate) async fn run_client_driver(
             .collect();
 
         for id in cancelled_streams {
-            active_streams.remove(&id);
-            stream_headers.remove(&id);
-            stream_raw_bufs.remove(&id);
-            stream_data_payloads.remove(&id);
+            streams.remove(&id);
             // H3_REQUEST_CANCELLED (RFC 9114 Section 4.1 & 8.1)
             let _ = conn.send_stream(id).reset(quinn_proto::VarInt::from_u32(
                 error_code::H3_REQUEST_CANCELLED as u32,
@@ -229,15 +264,12 @@ pub(crate) async fn run_client_driver(
                         continue;
                     }
 
-                    if !active_streams.contains_key(&id) {
+                    if !streams.contains_key(&id) {
                         // Stream was cancelled or already completed. Drain bytes to advance flow control.
                         if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
                             while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
                             let _ = chunks.finalize();
                         }
-                        stream_headers.remove(&id);
-                        stream_raw_bufs.remove(&id);
-                        stream_data_payloads.remove(&id);
                         continue;
                     }
 
@@ -246,7 +278,7 @@ pub(crate) async fn run_client_driver(
                     let mut stream_reset_err = None;
                     chunk_scratch_buf.clear();
 
-                    let current_raw_len = stream_raw_bufs.get(&id).map(|b| b.len()).unwrap_or(0);
+                    let current_raw_len = streams.get(&id).map(|s| s.raw_buf.len()).unwrap_or(0);
                     if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
                         loop {
                             match chunks.next(65535) {
@@ -276,14 +308,11 @@ pub(crate) async fn run_client_driver(
                     }
 
                     if let Some(err) = stream_reset_err {
-                        if let Some(active) = active_streams.remove(&id) {
-                            let _ = active
+                        if let Some(slot) = streams.remove(&id) {
+                            let _ = slot
                                 .reply_tx
                                 .send(Err(Http3Error::H3(format!("Stream reset by peer: {err}"))));
                         }
-                        stream_headers.remove(&id);
-                        stream_raw_bufs.remove(&id);
-                        stream_data_payloads.remove(&id);
                         continue;
                     }
 
@@ -291,33 +320,27 @@ pub(crate) async fn run_client_driver(
                         let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                             error_code::H3_MESSAGE_ERROR as u32,
                         ));
-                        if let Some(active) = active_streams.remove(&id) {
-                            let _ = active
+                        if let Some(slot) = streams.remove(&id) {
+                            let _ = slot
                                 .reply_tx
                                 .send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
                         }
-                        stream_headers.remove(&id);
-                        stream_raw_bufs.remove(&id);
-                        stream_data_payloads.remove(&id);
                         continue;
                     }
 
-                    let raw_buf = stream_raw_bufs.entry(id).or_default();
-                    raw_buf.extend_from_slice(&chunk_scratch_buf);
+                    if let Some(slot) = streams.get_mut(&id) {
+                        slot.raw_buf.extend_from_slice(&chunk_scratch_buf);
 
-                    // Decode incoming frames
-                    if let Some(buf) = stream_raw_bufs.get_mut(&id) {
-                        while let Ok(Some(frame)) = decode_frame(buf) {
+                        // Decode incoming frames
+                        while let Ok(Some(frame)) = decode_frame(&mut slot.raw_buf) {
                             match frame {
                                 Http3Frame::Headers(payload) => {
                                     if let Ok(decoded) = decode_qpack(&payload) {
-                                        stream_headers
-                                            .insert(id, (decoded.status, decoded.headers));
+                                        slot.headers = Some((decoded.status, decoded.headers));
                                     }
                                 }
                                 Http3Frame::Data(payload) => {
-                                    let data_buf = stream_data_payloads.entry(id).or_default();
-                                    data_buf.extend_from_slice(&payload);
+                                    slot.data_payload.extend_from_slice(&payload);
                                 }
                                 _ => {}
                             }
@@ -325,38 +348,29 @@ pub(crate) async fn run_client_driver(
                     }
 
                     // Only complete and emit the response when peer has finished sending stream data (FIN reached)
-                    if stream_finished {
-                        stream_raw_bufs.remove(&id);
-                        let headers_opt = stream_headers.remove(&id);
-                        let body_opt = stream_data_payloads.remove(&id);
+                    let slot = if stream_finished {
+                        streams.remove(&id)
+                    } else {
+                        None
+                    };
+                    if let Some(slot) = slot {
+                        let (status, headers) = slot
+                            .headers
+                            .unwrap_or((Some(StatusCode::OK), HeaderMap::new()));
+                        let status_code = status.unwrap_or(StatusCode::OK);
+                        let is_no_body = slot.method == http::Method::HEAD
+                            || status_code.is_informational()
+                            || status_code == StatusCode::NO_CONTENT
+                            || status_code == StatusCode::NOT_MODIFIED;
 
-                        if let Some(active) = active_streams.remove(&id) {
-                            let (status, headers) =
-                                headers_opt.unwrap_or((Some(StatusCode::OK), HeaderMap::new()));
-                            let status_code = status.unwrap_or(StatusCode::OK);
-                            let is_no_body = active.method == http::Method::HEAD
-                                || status_code.is_informational()
-                                || status_code == StatusCode::NO_CONTENT
-                                || status_code == StatusCode::NOT_MODIFIED;
+                        let body = if is_no_body || slot.data_payload.is_empty() {
+                            Body::Empty
+                        } else {
+                            Body::Bytes(slot.data_payload.freeze())
+                        };
 
-                            let body = if is_no_body {
-                                Body::Empty
-                            } else {
-                                body_opt
-                                    .map(|b| {
-                                        if b.is_empty() {
-                                            Body::Empty
-                                        } else {
-                                            Body::Bytes(b.freeze())
-                                        }
-                                    })
-                                    .unwrap_or(Body::Empty)
-                            };
-
-                            let response =
-                                L7Response::new(status_code, Version::HTTP_3, headers, body);
-                            let _ = active.reply_tx.send(Ok(response));
-                        }
+                        let response = L7Response::new(status_code, Version::HTTP_3, headers, body);
+                        let _ = slot.reply_tx.send(Ok(response));
                     }
                 }
                 Event::Stream(StreamEvent::Finished { .. }) => {
@@ -367,18 +381,15 @@ pub(crate) async fn run_client_driver(
                     if id.dir() == Dir::Uni {
                         continue;
                     }
-                    if let Some(active) = active_streams.remove(&id) {
-                        let _ = active.reply_tx.send(Err(Http3Error::H3(format!(
+                    if let Some(slot) = streams.remove(&id) {
+                        let _ = slot.reply_tx.send(Err(Http3Error::H3(format!(
                             "Stream reset by peer: {error_code}"
                         ))));
                     }
-                    stream_headers.remove(&id);
-                    stream_raw_bufs.remove(&id);
-                    stream_data_payloads.remove(&id);
                 }
                 Event::ConnectionLost { reason } => {
-                    for (_, active) in active_streams.drain() {
-                        let _ = active
+                    for (_, slot) in streams.drain() {
+                        let _ = slot
                             .reply_tx
                             .send(Err(Http3Error::H3(format!("Connection lost: {reason}"))));
                     }
@@ -397,8 +408,8 @@ pub(crate) async fn run_client_driver(
     }
 
     // Notify any remaining in-flight requests
-    for (_, active) in active_streams.drain() {
-        let _ = active.reply_tx.send(Err(Http3Error::ConnectionClosed));
+    for (_, slot) in streams.drain() {
+        let _ = slot.reply_tx.send(Err(Http3Error::ConnectionClosed));
     }
 }
 

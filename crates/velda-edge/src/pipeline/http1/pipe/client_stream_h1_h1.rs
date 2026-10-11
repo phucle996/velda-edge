@@ -10,8 +10,8 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, pipe_client_stream,
+    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
+    Http1ServerRequestHead, Http1ServerResponse, pipe_buffered, pipe_client_stream,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -71,7 +71,23 @@ where
 
     let cfg = *conn.config();
 
-    // 4. Pipe streaming upload chunks to upstream
+    // 4. If request has no body (e.g. GET, HEAD), forward directly via buffered pipe
+    if framing == Http1BodyFraming::Empty {
+        let mut req = Http1ServerRequest::new(
+            head.method,
+            head.uri,
+            head.version,
+            head.headers,
+            velda_core::Body::Empty,
+        );
+        let res = pipe_buffered(conn, &mut req, &mut *upstream_lease, &cfg).await;
+        if res.is_err() {
+            upstream_lease.mark_closed();
+        }
+        return res;
+    }
+
+    // 5. Pipe streaming upload chunks to upstream
     let res = pipe_client_stream(conn, &mut head, &mut *upstream_lease, &cfg).await;
     if res.is_err() {
         upstream_lease.mark_closed();

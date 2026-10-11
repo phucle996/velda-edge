@@ -218,5 +218,6 @@ where
     }
 
     let _ = send_chunked_end(&mut conn.stream).await;
+    conn.compact_buffers();
     Ok(())
 }

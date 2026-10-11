@@ -263,6 +263,25 @@ impl AsyncWrite for Connection {
         }
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.stream).poll_write_vectored(cx, bufs) {
+            Poll::Ready(Ok(n)) => {
+                this.bytes_written += n as u64;
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         Pin::new(&mut this.stream).poll_flush(cx)
@@ -373,6 +392,25 @@ impl AsyncWrite for ConnectionWriter {
             }
             other => other,
         }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.write_half).poll_write_vectored(cx, bufs) {
+            Poll::Ready(Ok(n)) => {
+                this.bytes_written += n as u64;
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.write_half.is_write_vectored()
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

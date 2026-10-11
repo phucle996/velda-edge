@@ -136,6 +136,9 @@ where
                 l7_resp.body,
             );
             conn.send_response(&server_resp).await?;
+            if conn.read_buf.is_empty() {
+                conn.compact_buffers();
+            }
             Ok(())
         }
         Err(e) => {

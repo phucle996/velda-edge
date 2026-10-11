@@ -36,11 +36,40 @@ pub fn find_crlf(data: &[u8]) -> Option<usize> {
     memchr::memmem::find(data, b"\r\n")
 }
 
+/// Pre-computed 256-byte branchless ASCII hex lookup table.
+/// Maps ASCII '0'..='9', 'a'..='f', 'A'..='F' to 0..=15, and all invalid bytes to 0xFF.
+const HEX_TABLE: [u8; 256] = {
+    let mut t = [0xFF; 256];
+    let mut i = 0u8;
+    while i < 10 {
+        t[(b'0' + i) as usize] = i;
+        i += 1;
+    }
+    i = 0;
+    while i < 6 {
+        t[(b'a' + i) as usize] = 10 + i;
+        t[(b'A' + i) as usize] = 10 + i;
+        i += 1;
+    }
+    t
+};
+
+/// Pre-computed 256-byte branchless ASCII decimal lookup table.
+/// Maps ASCII '0'..='9' to 0..=9, and all invalid bytes to 0xFF.
+const DEC_TABLE: [u8; 256] = {
+    let mut t = [0xFF; 256];
+    let mut i = 0u8;
+    while i < 10 {
+        t[(b'0' + i) as usize] = i;
+        i += 1;
+    }
+    t
+};
+
 /// Parses hex chunk size directly from ASCII byte slice without UTF-8 or String allocations.
 ///
 /// Strictly adheres to RFC 9112 Section 7.1 (`chunk-size = 1*HEXDIG`).
-/// Leading and trailing whitespace before chunk extensions are trimmed, but
-/// whitespace between digits is strictly rejected to prevent smuggling evasion.
+/// Uses branchless 256-byte L1 cache table lookup for zero branch misprediction.
 #[inline]
 pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
     let mut start = 0;
@@ -58,17 +87,13 @@ pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
 
     let mut val: usize = 0;
     for &b in trimmed {
-        let digit = match b {
-            b'0'..=b'9' => (b - b'0') as usize,
-            b'a'..=b'f' => (b - b'a' + 10) as usize,
-            b'A'..=b'F' => (b - b'A' + 10) as usize,
-            _ => {
-                return Err(cold_chunked_error("Invalid hex chunk size character"));
-            }
-        };
+        let digit = HEX_TABLE[b as usize];
+        if digit == 0xFF {
+            return Err(cold_chunked_error("Invalid hex chunk size character"));
+        }
         val = val
             .checked_shl(4)
-            .and_then(|v| v.checked_add(digit))
+            .and_then(|v| v.checked_add(digit as usize))
             .ok_or_else(|| cold_chunked_error("Chunk size integer overflow"))?;
     }
     Ok(val)
@@ -76,7 +101,7 @@ pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
 
 /// Parses ASCII decimal digits directly from byte slice without UTF-8 validation or allocations.
 ///
-/// Leading and trailing whitespace are trimmed, but inner whitespace is rejected.
+/// Uses branchless 256-byte L1 cache table lookup for zero branch misprediction.
 #[inline]
 pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Error> {
     let mut start = 0;
@@ -94,12 +119,13 @@ pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Error> {
 
     let mut val: usize = 0;
     for &b in trimmed {
-        if !b.is_ascii_digit() {
+        let digit = DEC_TABLE[b as usize];
+        if digit == 0xFF {
             return Err(cold_parse_error("Invalid non-digit in Content-Length"));
         }
         val = val
             .checked_mul(10)
-            .and_then(|v| v.checked_add((b - b'0') as usize))
+            .and_then(|v| v.checked_add(digit as usize))
             .ok_or_else(|| cold_parse_error("Content-Length integer overflow"))?;
     }
     Ok(val)
@@ -472,7 +498,7 @@ where
 
     use std::io::{IoSlice, Write};
 
-    for batch in chunks.chunks(16) {
+    for batch in chunks.chunks(32) {
         let total_payload_len: usize = batch.iter().map(|c| c.len()).sum();
         if total_payload_len == 0 {
             continue;
@@ -486,7 +512,7 @@ where
         let total_wire_len = header_len + total_payload_len + 2;
         let mut written = 0;
 
-        let mut slices = [IoSlice::new(&[]); 18];
+        let mut slices = [IoSlice::new(&[]); 34];
 
         while written < total_wire_len {
             let mut slice_count = 0;

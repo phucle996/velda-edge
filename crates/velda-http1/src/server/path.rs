@@ -50,21 +50,18 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes[0] != b'/' {
         return false;
     }
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'/' {
-            if i + 1 < bytes.len() {
-                let next = bytes[i + 1];
-                if next == b'/' || next == b'.' {
-                    return false;
-                }
-            }
-        } else if b == b'\\' || b == b'%' || b == 0 {
-            return false;
-        }
-        i += 1;
+
+    // SIMD vector scan: rejects null bytes, backslashes, percent signs in 1 vector cycle
+    if memchr::memchr3(b'\0', b'\\', b'%', bytes).is_some() {
+        return false;
     }
+
+    // SIMD substring scan for consecutive slashes "//" or dot segments "/."
+    if memchr::memmem::find(bytes, b"//").is_some() || memchr::memmem::find(bytes, b"/.").is_some()
+    {
+        return false;
+    }
+
     true
 }
 

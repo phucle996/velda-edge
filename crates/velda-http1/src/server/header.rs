@@ -28,13 +28,42 @@ pub fn enrich_headers(
     let proto = if is_tls { "https" } else { "http" };
 
     let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
+    let client_ip_bytes: &[u8] = match client_ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            let mut cursor = 0;
+            for (idx, &octet) in octets.iter().enumerate() {
+                if idx > 0 {
+                    ip_buf[cursor] = b'.';
+                    cursor += 1;
+                }
+                if octet >= 100 {
+                    ip_buf[cursor] = b'0' + octet / 100;
+                    cursor += 1;
+                    ip_buf[cursor] = b'0' + (octet / 10) % 10;
+                    cursor += 1;
+                    ip_buf[cursor] = b'0' + octet % 10;
+                    cursor += 1;
+                } else if octet >= 10 {
+                    ip_buf[cursor] = b'0' + octet / 10;
+                    cursor += 1;
+                    ip_buf[cursor] = b'0' + octet % 10;
+                    cursor += 1;
+                } else {
+                    ip_buf[cursor] = b'0' + octet;
+                    cursor += 1;
+                }
+            }
+            &ip_buf[..cursor]
+        }
+        std::net::IpAddr::V6(v6) => {
+            use std::io::Write;
+            let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
+            let _ = write!(cursor, "{}", v6);
+            let len = cursor.position() as usize;
+            &ip_buf[..len]
+        }
     };
-    let client_ip_bytes = &ip_buf[..ip_len];
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
         headers.insert(HeaderName::from_static("x-forwarded-for"), val.clone());

@@ -71,6 +71,24 @@ impl AsyncWrite for UpstreamHttp1Stream {
         }
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_write_vectored(),
+            Self::Tls(s) => s.is_write_vectored(),
+        }
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Self::Plain(s) => Pin::new(s).poll_flush(cx),

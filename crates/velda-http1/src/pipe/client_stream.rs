@@ -16,7 +16,7 @@ use crate::error::Http1Error;
 use crate::server::connection::Http1ServerConnection;
 use crate::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use crate::server::response::Http1ServerResponse;
-use crate::wire::{decode_chunk, send_chunk, send_chunked_end, send_coalesced_chunks};
+use crate::wire::{parse_single_chunk, send_chunk, send_chunked_end};
 
 /// Pipes a client-streaming HTTP/1.1 request (streaming upload, buffered response).
 pub async fn pipe_client_stream<DownIO, UpIO>(
@@ -34,51 +34,62 @@ where
     // 1. Send chunked request head upstream reusing scratch buffer
     send_request_head_chunked(head, upstream, &mut conn.upstream_write_buf).await?;
 
-    // 2. Pump request body chunks from client to upstream (opportunistic chunk coalescing)
+    // 2. Stream request body chunks to upstream reusing conn.read_buf with zero heap allocations
     let mut total_body_bytes = 0usize;
-    let mut chunk_batch = [const { bytes::Bytes::new() }; 16];
+    let idle_timeout = std::time::Duration::from_millis(config.idle_timeout_ms);
+    let target_reserve = config.client_body_buffer_size;
 
     loop {
-        let Some(first_chunk) = conn.read_next_chunk().await? else {
-            break;
-        };
-        chunk_batch[0] = first_chunk;
-        let mut count = 1;
-        let mut batch_bytes = chunk_batch[0].len();
-        let mut reached_terminal = false;
-
-        // Opportunistically drain remaining chunks already parsed in RAM (up to 16 chunks)
-        while count < 16 {
-            match decode_chunk(&mut conn.read_buf)? {
-                Some(Some(next_chunk)) => {
-                    batch_bytes += next_chunk.len();
-                    chunk_batch[count] = next_chunk;
-                    count += 1;
+        if let Some((needed, payload, is_terminal)) = parse_single_chunk(&conn.read_buf)? {
+            if is_terminal {
+                use bytes::Buf;
+                conn.read_buf.advance(needed);
+                if conn.read_buf.is_empty() {
+                    conn.read_buf.clear();
                 }
-                Some(None) => {
-                    reached_terminal = true;
-                    break;
-                }
-                None => break,
+                break;
             }
+
+            total_body_bytes = total_body_bytes
+                .checked_add(payload.len())
+                .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+            if total_body_bytes > config.max_body_size {
+                return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+            }
+
+            send_chunk(upstream, payload).await?;
+
+            use bytes::Buf;
+            conn.read_buf.advance(needed);
+            if conn.read_buf.is_empty() {
+                conn.read_buf.clear();
+            }
+            continue;
         }
 
-        // Security Invariant (RFC 9112 & DoS Protection): Enforce max_body_size limit
-        total_body_bytes = total_body_bytes
-            .checked_add(batch_bytes)
-            .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
-        if total_body_bytes > config.max_body_size {
-            return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+        // Incomplete chunk in buffer: read more bytes from downstream stream
+        if conn.read_buf.capacity() - conn.read_buf.len() < target_reserve {
+            conn.read_buf.reserve(target_reserve);
         }
 
-        if count == 1 {
-            send_chunk(upstream, &chunk_batch[0]).await?;
-        } else {
-            send_coalesced_chunks(upstream, &chunk_batch[..count]).await?;
-        }
+        let bytes_read = match tokio::time::timeout(
+            idle_timeout,
+            conn.stream.read_buf(&mut conn.read_buf),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => return Err(Http1Error::Timeout),
+        };
 
-        if reached_terminal {
-            break;
+        if bytes_read == 0 {
+            if conn.read_buf.is_empty() {
+                break;
+            } else {
+                return Err(Http1Error::Parse(
+                    "Unexpected EOF while reading chunked body".into(),
+                ));
+            }
         }
     }
     send_chunked_end(upstream).await?;
@@ -133,6 +144,7 @@ where
     let resp =
         Http1ServerResponse::new(resp_head.status, resp_head.version, resp_head.headers, body);
     conn.send_response(&resp).await?;
+    conn.compact_buffers();
 
     Ok(())
 }
