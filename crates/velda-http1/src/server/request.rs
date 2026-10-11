@@ -219,9 +219,17 @@ pub fn parse_request_head(
         .ok_or_else(|| Http1Error::Parse("Missing HTTP path/URI".into()))?;
     let uri = match path_str {
         "/" => Uri::from_static("/"),
+        "/plain" => Uri::from_static("/plain"),
+        "/tls12" => Uri::from_static("/tls12"),
+        "/tls13" => Uri::from_static("/tls13"),
+        "/h2c" => Uri::from_static("/h2c"),
+        "/h2" => Uri::from_static("/h2"),
+        "/h3" => Uri::from_static("/h3"),
+        "/ping" => Uri::from_static("/ping"),
         "/health" => Uri::from_static("/health"),
         "/metrics" => Uri::from_static("/metrics"),
-        "/ping" => Uri::from_static("/ping"),
+        "/upload" => Uri::from_static("/upload"),
+        "/stream" => Uri::from_static("/stream"),
         "/api" => Uri::from_static("/api"),
         "/favicon.ico" => Uri::from_static("/favicon.ico"),
         s => s

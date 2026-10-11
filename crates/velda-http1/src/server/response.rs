@@ -230,17 +230,8 @@ pub fn encode_response_head(
     force_close: bool,
     dst: &mut BytesMut,
 ) {
-    let mut needed = 36;
-    for (name, val) in headers {
-        needed += name.as_str().len() + val.as_bytes().len() + 4;
-    }
-    if body_len.is_some() {
-        needed += 36;
-    }
-    if force_close {
-        needed += 24;
-    }
-    dst.reserve(needed);
+    // Fast O(1) capacity estimation: avoids redundant pass over all response headers
+    dst.reserve(128 + headers.len() * 48);
 
     encode_status_line(version, status, dst);
     let mut has_conn = false;
@@ -379,7 +370,7 @@ where
 
     if !is_no_body
         && let Body::Bytes(bytes) = body
-        && bytes.len() <= 16384
+        && bytes.len() <= 65536
     {
         write_buf.extend_from_slice(bytes);
         stream.write_all(write_buf).await?;

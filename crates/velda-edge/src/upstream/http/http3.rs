@@ -55,6 +55,8 @@ pub struct Http3Upstream {
     pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
+    /// Serialization lock for establishing new QUIC connections to prevent thundering herd storms.
+    connect_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Http3Upstream {
@@ -90,6 +92,7 @@ impl Http3Upstream {
                 .with_max_connections_per_key(max_connections_per_key),
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
+            connect_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -117,13 +120,28 @@ impl Http3Upstream {
         let sni = Arc::clone(&self.target_sni);
         let idle_timeout = self.inner.timeouts().idle;
 
-        const SCALE_OUT_STREAM_THRESHOLD: u32 = 16;
+        const SCALE_OUT_STREAM_THRESHOLD: u32 = 128;
 
         let (client, lease) = self
             .inner
             .execute(|endpoint| {
                 let sni = Arc::clone(&sni);
                 async move {
+                    // 1. Fast-path: lease a stream slot from an existing healthy QUIC connection in the pool.
+                    if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                        let conn_count = self.pool.connection_count(&endpoint);
+                        if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
+                            || conn_count >= max_conns
+                        {
+                            return Ok::<_, String>((lease.client.clone(), lease));
+                        }
+                    }
+
+                    // 2. Slow-path: acquire connect lock to serialize fresh QUIC connection establishment
+                    // and eliminate thundering herd packet storms
+                    let _guard = self.connect_lock.lock().await;
+
+                    // Double-check: did a concurrent request finish connecting while we waited for the lock?
                     if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                         let conn_count = self.pool.connection_count(&endpoint);
                         if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD

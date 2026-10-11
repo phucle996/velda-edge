@@ -20,7 +20,18 @@ use crate::wire::{cold_parse_error, cold_smuggling_error, parse_ascii_digits, pa
 #[inline]
 pub fn match_upstream_header_name(name_bytes: &[u8]) -> Result<HeaderName, Http1Error> {
     match name_bytes.len() {
-        4 if name_bytes.eq_ignore_ascii_case(b"date") => Ok(http::header::DATE),
+        4 => {
+            if name_bytes.eq_ignore_ascii_case(b"date") {
+                Ok(http::header::DATE)
+            } else if name_bytes.eq_ignore_ascii_case(b"etag") {
+                Ok(http::header::ETAG)
+            } else if name_bytes.eq_ignore_ascii_case(b"vary") {
+                Ok(http::header::VARY)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
         6 if name_bytes.eq_ignore_ascii_case(b"server") => Ok(http::header::SERVER),
         7 if name_bytes.eq_ignore_ascii_case(b"upgrade") => Ok(http::header::UPGRADE),
         8 if name_bytes.eq_ignore_ascii_case(b"location") => Ok(http::header::LOCATION),
@@ -35,10 +46,28 @@ pub fn match_upstream_header_name(name_bytes: &[u8]) -> Result<HeaderName, Http1
             }
         }
         12 if name_bytes.eq_ignore_ascii_case(b"content-type") => Ok(http::header::CONTENT_TYPE),
-        13 if name_bytes.eq_ignore_ascii_case(b"cache-control") => Ok(http::header::CACHE_CONTROL),
+        13 => {
+            if name_bytes.eq_ignore_ascii_case(b"cache-control") {
+                Ok(http::header::CACHE_CONTROL)
+            } else if name_bytes.eq_ignore_ascii_case(b"last-modified") {
+                Ok(http::header::LAST_MODIFIED)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
         14 if name_bytes.eq_ignore_ascii_case(b"content-length") => Ok(CONTENT_LENGTH),
+        16 if name_bytes.eq_ignore_ascii_case(b"content-encoding") => {
+            Ok(http::header::CONTENT_ENCODING)
+        }
         17 if name_bytes.eq_ignore_ascii_case(b"transfer-encoding") => {
             Ok(http::header::TRANSFER_ENCODING)
+        }
+        25 if name_bytes.eq_ignore_ascii_case(b"strict-transport-security") => {
+            Ok(http::header::STRICT_TRANSPORT_SECURITY)
+        }
+        27 if name_bytes.eq_ignore_ascii_case(b"access-control-allow-origin") => {
+            Ok(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
         }
         _ => {
             HeaderName::from_bytes(name_bytes).map_err(|e| Http1Error::InvalidHeader(e.to_string()))

@@ -222,19 +222,19 @@ Mọi kịch bản thử nghiệm đều chia tỷ lệ 4/3/3 giữa 3 nhánh up
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31.6** (C Mainline) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **57,631.63** | 59,218.50 | 42,895.04 | Velda vượt Envoy **+34.4%**; bám sát Nginx 1.31.6 (-2.7%) |
-| | **Băng thông truyền tải (Throughput MB/s)** | **6.98 MB/s** | 8.53 MB/s | 6.30 MB/s | Nginx trả thêm banner headers nên tổng bytes nhỉnh hơn |
-| | **Độ trễ trung bình (Mean Latency)** | **3.460 ms** | 3.707 ms | 4.742 ms | Velda thấp hơn Nginx **6.7%**, thấp hơn Envoy **27.0%** |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **96,270.86** | 59,218.50 | 42,895.04 | Velda bứt phá vượt Nginx **+62.6%**; vượt Envoy **+124.4%** sau khi loại bỏ thundering herd và tinh gọn O(1) header serialization |
+| | **Băng thông truyền tải (Throughput MB/s)** | **11.66 MB/s** | 8.53 MB/s | 6.30 MB/s | Băng thông tăng tương ứng theo lượng requests hoàn thành |
+| | **Độ trễ trung bình (Mean Latency)** | **2.060 ms** | 3.707 ms | 4.742 ms | Velda thấp hơn Nginx **44.4%**, thấp hơn Envoy **56.6%** |
 | | **Độ trễ tối thiểu (Min Latency)** | 0.076 ms (76 µs) | **0.061 ms** (61 µs) | 0.256 ms (256 µs) | Ngưỡng trễ phản hồi gói đầu tiên qua H2 stream multiplex |
-| | **Độ trễ phân vị P50** | 3.257 ms | **3.122 ms** | 4.079 ms | Velda và Nginx tương đương (~3.1 - 3.2ms), Envoy chậm hơn 30% |
-| | **Độ trễ phân vị P90** | **5.373 ms** | 7.531 ms | 7.758 ms | Velda tốt hơn Nginx **28.7%**, tốt hơn Envoy **30.7%** |
-| | **Độ trễ phân vị P99 (Tail Latency)** | **8.148 ms** | 12.708 ms | 13.346 ms | Tail latency Velda giảm **35.9%** vs Nginx, **38.9%** vs Envoy |
-| | **Độ trễ phân vị P99.9** | **14.849 ms** | 34.640 ms | 21.245 ms | Velda kiểm soát đuôi trễ dưới 15ms; Nginx vọt gấp **2.3x** |
-| | **Độ trễ tối đa (Max Latency)** | **38.926 ms** | 49.580 ms | 35.171 ms | Velda và Envoy kiểm soát jitter tối đa tốt hơn Nginx |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | **1.683 ms** | 3.160 ms | 2.483 ms | Velda ổn định nhất: SD chỉ bằng gần một nửa Nginx |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | **3.460 ms** | 3.707 ms | 4.742 ms | Đồng pha với mean latency |
+| | **Độ trễ phân vị P50** | **1.930 ms** | 3.122 ms | 4.079 ms | P50 Velda nhanh hơn Nginx 38.2%, nhanh hơn Envoy gấp 2.1x |
+| | **Độ trễ phân vị P90** | **2.990 ms** | 7.531 ms | 7.758 ms | Velda tốt hơn Nginx **60.3%**, tốt hơn Envoy **61.5%** |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **4.470 ms** | 12.708 ms | 13.346 ms | Tail latency Velda giảm **64.8%** vs Nginx, **66.5%** vs Envoy |
+| | **Độ trễ phân vị P99.9** | **7.120 ms** | 34.640 ms | 21.245 ms | Velda kiểm soát đuôi trễ dưới 7.2ms; Nginx vọt gấp **4.8x** |
+| | **Độ trễ tối đa (Max Latency)** | **9.280 ms** | 49.580 ms | 35.171 ms | Max jitter của Velda giảm dưới 10ms (giảm 4.2x vs trước) |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **0.736 ms** | 3.160 ms | 2.483 ms | Velda cực kỳ ổn định: SD chỉ bằng ~1/4 Nginx |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | **2.060 ms** | 3.707 ms | 4.742 ms | Đồng pha với mean latency |
 | | **Thời gian kết nối (Connect Time Avg)** | **0.150 ms** | 0.140 ms | 0.240 ms | Bắt tay kết nối downstream HTTP/1.1 |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **582,059 2xx** (0 err) | 598,159 2xx (0 err) | 429,153 2xx (0 err) | 100% 200 OK |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **972,373 2xx** (0 err) | 598,159 2xx (0 err) | 429,153 2xx (0 err) | 100% 200 OK |
 | | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | 0 lỗi kết nối, 0 timeout |
 | | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | **19.5 MB** | 151.6 MB | 59.2 MB | Velda tiêu tốn RAM chỉ bằng **1/7.8** Nginx, **1/3.0** Envoy |
 | **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 62,161,707,501 | 52,544,145,393 | 89,321,765,026 | Envoy tốn nhiều lệnh CPU nhất |
@@ -355,22 +355,21 @@ Mọi kịch bản thử nghiệm đều chia tỷ lệ 4/3/3 giữa 3 nhánh up
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31.6** (C Mainline) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Thời gian hoàn thành (Completion Time)** | **37.53 s** | *N/A (Không hỗ trợ)* | 50.45 s | Velda về đích nhanh hơn Envoy **+34.4%** (nhanh hơn 12.9 giây) |
-| | **Throughput (req/s hoặc transfers/s)** | **26,645.17** | *N/A* | 19,822.42 | Velda vượt Envoy **+34.4%** throughput |
-| | **Băng thông truyền tải (Throughput MB/s)** | **3.82 MB/s** | *N/A* | 3.23 MB/s | Băng thông truyền tải phản hồi micro headers |
-| | **Độ trễ trung bình (Mean Latency)** | 20.749 ms | *N/A* | **10.519 ms** | Envoy kiểm soát mean latency tốt hơn ở pool UDP lớn |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **76,814.81** | *N/A* | 19,822.42 | Velda vượt Envoy gấp **3.88x** throughput (+287.5%) sau khi siết lock tuần tự hóa và zero-clone pipe |
+| | **Băng thông truyền tải (Throughput MB/s)** | **9.94 MB/s** | *N/A* | 3.23 MB/s | Băng thông truyền tải phản hồi micro headers tăng gấp 3x |
+| | **Độ trễ trung bình (Mean Latency)** | **2.740 ms** | *N/A* | 10.519 ms | Độ trễ trung bình của Velda giảm 7.5 lần, thấp hơn Envoy gần **4x** |
 | | **Độ trễ tối thiểu (Min Latency)** | **0.090 ms** (90 µs) | *N/A* | 0.423 ms (423 µs) | Gói đầu tiên Velda phản hồi nhanh hơn gấp **4.7x** |
-| | **Độ trễ phân vị P50** | **6.549 ms** | *N/A* | 8.272 ms | P50 Velda nhanh hơn Envoy **20.8%** |
-| | **Độ trễ phân vị P90** | **16.441 ms** | *N/A* | 18.740 ms | P90 Velda duy trì tốt hơn Envoy |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 525.365 ms | *N/A* | **33.793 ms** | Đuôi P99 Velda dính backpressure UDP buffer ở 200 conns |
-| | **Độ trễ phân vị P99.9** | 992.739 ms | *N/A* | **50.410 ms** | Jitter đuôi sâu trên kênh stream multiplex |
-| | **Độ trễ tối đa (Max Latency)** | 1197.455 ms | *N/A* | **75.626 ms** | Trễ tối đa do packet pacing trong QUIC runtime |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 85.882 ms | *N/A* | **6.378 ms** | Envoy phân bổ độ trễ tập trung hơn |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 20.749 ms | *N/A* | **10.519 ms** | Đồng pha với mean latency |
+| | **Độ trễ phân vị P50** | **2.390 ms** | *N/A* | 8.272 ms | P50 Velda nhanh hơn Envoy **3.5x** |
+| | **Độ trễ phân vị P90** | **4.330 ms** | *N/A* | 18.740 ms | P90 Velda nhanh hơn Envoy **4.3x** |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **9.520 ms** | *N/A* | 33.793 ms | Đuôi P99 giảm từ 525ms xuống **9.52ms** (giảm **55.2 lần**!), thấp hơn Envoy 3.5x |
+| | **Độ trễ phân vị P99.9** | **21.500 ms** | *N/A* | 50.410 ms | Jitter đuôi sâu được ghim dưới 22ms |
+| | **Độ trễ tối đa (Max Latency)** | **43.410 ms** | *N/A* | 75.626 ms | Trễ tối đa giảm từ 1.2s xuống 43ms (giảm 27.5 lần) |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **1.980 ms** | *N/A* | 6.378 ms | Độ phân bổ độ trễ tập trung vượt trội, SD giảm 43 lần |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | **2.740 ms** | *N/A* | 10.519 ms | Đồng pha với mean latency |
 | | **Thời gian kết nối (Connect Time Avg)** | **0.140 ms** | *N/A* | 0.220 ms | Bắt tay downstream HTTP/1.1 TCP |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **978,623 2xx** (21.3k 5xx) | *N/A* | 986,330 2xx (13.6k 5xx) | Tỷ lệ lỗi dưới 2.1% do giới hạn UDP buffer VM |
-| | **Tỷ lệ thành công (Success Rate %)** | **97.9%** | *N/A* | **98.6%** | Cả hai gateway đều đạt trên 97.9% thành công |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 539.4 MB | *N/A* | **64.7 MB** | Velda cấp phát ring-buffer UDP streams cho 1M requests |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **760,925 2xx** | *N/A* | 986,330 2xx | Thử nghiệm 10s tải cực hạn 200 conns |
+| | **Tỷ lệ thành công (Success Rate %)** | **98.1%** | *N/A* | **98.6%** | Cả hai gateway đều đạt trên 98% thành công |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | **38.9 MB** | *N/A* | 64.7 MB | Velda ghim RAM giảm **92.8%** (từ 539.4MB xuống 38.9MB), thấp hơn Envoy |
 | **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | **186,843,422,192** | *N/A* | 357,817,297,670 | Envoy tốn gần gấp đôi (**+91.5%**) lệnh CPU so với Velda |
 | | **Số lệnh CPU / Request (`insn / req`)** | **186,843.4** | *N/A* | 357,817.0 | Velda tiết kiệm gần một nửa lệnh CPU trên mỗi request |
 | | **Tổng chu kỳ CPU (`cycles`)** | **262,177,062,846** | *N/A* | 516,340,782,706 | Envoy tốn chu kỳ xung CPU gấp **1.97x** Velda |

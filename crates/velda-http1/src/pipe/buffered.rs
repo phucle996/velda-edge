@@ -51,8 +51,10 @@ where
     }
 
     if let Some(content_type) = resp_head.headers.get(http::header::CONTENT_TYPE)
-        && let Ok(ct_str) = content_type.to_str()
-        && ct_str.to_ascii_lowercase().contains("text/event-stream")
+        && content_type
+            .as_bytes()
+            .windows(b"text/event-stream".len())
+            .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     {
         return Err(Http1Error::StreamingViolation(
             "Upstream returned text/event-stream (SSE), but server streaming is disabled on this listener"

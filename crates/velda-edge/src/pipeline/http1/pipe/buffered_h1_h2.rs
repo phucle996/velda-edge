@@ -199,7 +199,12 @@ async fn send_h2_buffered(
     let response = response_future.await?;
     let (parts, mut body_stream) = response.into_parts();
 
-    let mut resp_body = BytesMut::new();
+    let expected_len = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
+        .unwrap_or(0);
+    let mut resp_body = BytesMut::with_capacity(expected_len);
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk?;
         body_stream.flow_control().release_capacity(chunk.len())?;

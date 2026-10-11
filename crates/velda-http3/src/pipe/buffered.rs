@@ -16,7 +16,7 @@ use crate::error::Http3Error;
 /// Pipes a non-streaming HTTP/3 request using an active multiplexed client connection.
 pub async fn pipe_buffered(
     client: &Http3Client,
-    req: &L7Request,
+    req: L7Request,
     config: &Http3Config,
 ) -> Result<L7Response, Http3Error> {
     // 1. Verify downstream request body limit
@@ -26,13 +26,14 @@ pub async fn pipe_buffered(
         return Err(Http3Error::PayloadTooLarge(b.len()));
     }
 
-    // 2. Forward request to upstream HTTP/3 backend
-    let resp = client.send_request_ref(req).await?;
+    let is_head = req.method == http::Method::HEAD;
+
+    // 2. Forward request to upstream HTTP/3 backend (zero cloning)
+    let resp = client.send_request(req).await?;
 
     // 3. Enforce non-streaming invariant: reject SSE if listener has server streaming disabled
     if let Some(content_type) = resp.headers.get(http::header::CONTENT_TYPE)
-        && let Ok(ct_str) = content_type.to_str()
-        && ct_str
+        && content_type
             .as_bytes()
             .windows(b"text/event-stream".len())
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
@@ -50,7 +51,6 @@ pub async fn pipe_buffered(
     }
 
     // 5. Enforce RFC 9110/9114 no-body invariant for HEAD, 1xx, 204, 304
-    let is_head = req.method == http::Method::HEAD;
     let is_no_body = resp.status.is_informational()
         || resp.status == http::StatusCode::NO_CONTENT
         || resp.status == http::StatusCode::NOT_MODIFIED;

@@ -100,7 +100,7 @@ mod tests {
         );
         let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let (client, _rx) = crate::client::Http3Client::mock_for_test(target);
-        let res = pipe_buffered(&client, &req, &config).await;
+        let res = pipe_buffered(&client, req, &config).await;
         assert!(matches!(res, Err(Http3Error::PayloadTooLarge(27))));
     }
 }

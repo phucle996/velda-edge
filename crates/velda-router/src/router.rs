@@ -64,6 +64,15 @@ impl Router {
         self.http1.route(listener_id, req)
     }
 
+    /// Returns the compiled HTTP/1.1 route table for a listener.
+    #[inline]
+    pub fn http1_listener(
+        &self,
+        listener_id: &str,
+    ) -> Option<&crate::l7::http1::ListenerHttp1Router> {
+        self.http1.listener(listener_id)
+    }
+
     /// Resolves an HTTP/2 route by `listener_id` and request view.
     #[inline]
     pub fn route_http2(

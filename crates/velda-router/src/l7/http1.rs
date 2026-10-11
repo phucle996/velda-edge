@@ -253,6 +253,12 @@ impl Http1Router {
         listener_router.route(req)
     }
 
+    /// Returns the compiled route table for a specific listener.
+    #[inline]
+    pub fn listener(&self, listener_id: &str) -> Option<&ListenerHttp1Router> {
+        self.listeners.get(listener_id)
+    }
+
     /// Returns the number of registered listeners.
     #[inline]
     pub fn listener_count(&self) -> usize {

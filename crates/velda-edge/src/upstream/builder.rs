@@ -167,12 +167,11 @@ pub fn build_upstreams(
         let protocol_str = Arc::from(config.protocol.transport.as_str());
         let balancer = LbAlgorithm::from_name(&config.load_balancer.algorithm);
 
-        // Tier-aware Pool Sizing:
+        // Tier & Exact-Cores aware Pool Sizing:
         let topology = velda_core::global_hardware_topology();
-        let cpu_tier = topology.cpu_tier();
         let mem_tier = topology.memory_tier();
 
-        let default_shards = velda_connection_pool::concurrency_shards_for_cpu_tier(cpu_tier);
+        let default_shards = topology.available_cores().max(1).next_power_of_two();
         let default_max_idle = velda_connection_pool::max_idle_per_key_for_mem_tier(mem_tier);
         let default_max_streams =
             velda_connection_pool::max_concurrent_streams_for_mem_tier(mem_tier);

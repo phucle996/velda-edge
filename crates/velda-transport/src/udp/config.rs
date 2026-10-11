@@ -126,13 +126,13 @@ impl UdpSocketConfig {
     pub fn for_tiers(cpu: velda_core::CpuTier, mem: velda_core::MemoryTier) -> Self {
         let mut cfg = Self::for_tier(mem);
         cfg.concurrency_shards = match cpu {
-            velda_core::CpuTier::Constrained => 1,
-            velda_core::CpuTier::Small => 2,
-            velda_core::CpuTier::Medium => 4,
-            velda_core::CpuTier::Large => 8,
-            velda_core::CpuTier::XLarge => 16,
-            velda_core::CpuTier::TwoXLarge => 32,
-            velda_core::CpuTier::Ultra => 64,
+            velda_core::CpuTier::Constrained => 2,
+            velda_core::CpuTier::Small => 4,
+            velda_core::CpuTier::Medium => 8,
+            velda_core::CpuTier::Large => 16,
+            velda_core::CpuTier::XLarge => 32,
+            velda_core::CpuTier::TwoXLarge => 64,
+            velda_core::CpuTier::Ultra => 128,
         };
         cfg
     }
@@ -140,6 +140,7 @@ impl UdpSocketConfig {
     /// Pre-compiles UDP socket acceleration settings from probed hardware topology and evolutionary ladder.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
         let mut cfg = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
+        cfg.concurrency_shards = topo.available_cores().max(1);
         let ladder = topo.acceleration_ladder();
         if ladder.udp_offload == velda_core::UdpOffloadTier::GenericReceiveOffload {
             cfg.gro = true;

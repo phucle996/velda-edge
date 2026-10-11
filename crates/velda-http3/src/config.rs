@@ -41,70 +41,70 @@ impl Http3Config {
                 max_header_size: 16 * 1024,
                 max_headers: 32,
                 idle_timeout_ms: 15_000,
-                max_concurrent_streams: 64,
-                max_concurrent_uni_streams: 16,
+                max_concurrent_streams: 128,
+                max_concurrent_uni_streams: 32,
                 max_qpack_table_capacity: 4096,
-                max_pending_handshakes: 256,
+                max_pending_handshakes: 512,
             },
             MemoryTier::Small => Self {
                 max_body_size: 4 * 1024 * 1024,
                 max_header_size: 32 * 1024,
                 max_headers: 48,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 128,
-                max_concurrent_uni_streams: 32,
+                max_concurrent_streams: 256,
+                max_concurrent_uni_streams: 64,
                 max_qpack_table_capacity: 4096,
-                max_pending_handshakes: 512,
+                max_pending_handshakes: 1_024,
             },
             MemoryTier::Medium => Self {
                 max_body_size: 10 * 1024 * 1024,
                 max_header_size: 64 * 1024,
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 256,
-                max_concurrent_uni_streams: 64,
+                max_concurrent_streams: 512,
+                max_concurrent_uni_streams: 128,
                 max_qpack_table_capacity: 8192,
-                max_pending_handshakes: 1_024,
+                max_pending_handshakes: 2_048,
             },
             MemoryTier::Large => Self {
                 max_body_size: 16 * 1024 * 1024,
                 max_header_size: 64 * 1024,
                 max_headers: 96,
                 idle_timeout_ms: 45_000,
-                max_concurrent_streams: 256,
-                max_concurrent_uni_streams: 64,
+                max_concurrent_streams: 1024,
+                max_concurrent_uni_streams: 256,
                 max_qpack_table_capacity: 16384,
-                max_pending_handshakes: 2_048,
+                max_pending_handshakes: 4_096,
             },
             MemoryTier::XLarge => Self {
                 max_body_size: 32 * 1024 * 1024,
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 512,
-                max_concurrent_uni_streams: 128,
+                max_concurrent_streams: 2048,
+                max_concurrent_uni_streams: 512,
                 max_qpack_table_capacity: 32768,
-                max_pending_handshakes: 4_096,
+                max_pending_handshakes: 8_192,
             },
             MemoryTier::TwoXLarge => Self {
                 max_body_size: 64 * 1024 * 1024,
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 512,
-                max_concurrent_uni_streams: 128,
+                max_concurrent_streams: 4096,
+                max_concurrent_uni_streams: 1024,
                 max_qpack_table_capacity: 65536,
-                max_pending_handshakes: 8_192,
+                max_pending_handshakes: 16_384,
             },
             MemoryTier::Ultra => Self {
                 max_body_size: 128 * 1024 * 1024,
                 max_header_size: 256 * 1024,
                 max_headers: 256,
                 idle_timeout_ms: 120_000,
-                max_concurrent_streams: 512,
-                max_concurrent_uni_streams: 256,
+                max_concurrent_streams: 8192,
+                max_concurrent_uni_streams: 2048,
                 max_qpack_table_capacity: 65536,
-                max_pending_handshakes: 16_384,
+                max_pending_handshakes: 32_768,
             },
         }
     }
@@ -209,18 +209,18 @@ mod tests {
     #[test]
     fn test_for_tier_explicit_all_tiers() {
         let constrained = Http3Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 64);
+        assert_eq!(constrained.max_concurrent_streams, 128);
         assert_eq!(constrained.max_body_size, 2 * 1024 * 1024);
-        assert_eq!(constrained.max_pending_handshakes, 256);
+        assert_eq!(constrained.max_pending_handshakes, 512);
 
         let medium = Http3Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 256);
+        assert_eq!(medium.max_concurrent_streams, 512);
         assert_eq!(medium.max_body_size, 10 * 1024 * 1024);
-        assert_eq!(medium.max_pending_handshakes, 1_024);
+        assert_eq!(medium.max_pending_handshakes, 2_048);
 
         let ultra = Http3Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 512);
+        assert_eq!(ultra.max_concurrent_streams, 8192);
         assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
-        assert_eq!(ultra.max_pending_handshakes, 16_384);
+        assert_eq!(ultra.max_pending_handshakes, 32_768);
     }
 }

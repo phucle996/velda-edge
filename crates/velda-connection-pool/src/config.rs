@@ -52,6 +52,13 @@ impl PoolConfig {
         };
         (config, shards)
     }
+
+    /// Pre-compiles pool configuration and scales shard count directly to available CPU cores.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
+        let (config, _) = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
+        let shards = topo.available_cores().max(1).next_power_of_two();
+        (config, shards)
+    }
 }
 
 /// Real-time metrics and accounting of pool operations aggregated across shards.
@@ -88,26 +95,26 @@ mod tests {
     fn test_pool_config_tiers() {
         // Constrained CPU + Constrained Memory
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
-        assert_eq!(shards, 1);
-        assert_eq!(cfg.max_idle_per_key, 16);
-        assert_eq!(cfg.max_concurrent_streams, 128);
+        assert_eq!(shards, 2);
+        assert_eq!(cfg.max_idle_per_key, 32);
+        assert_eq!(cfg.max_concurrent_streams, 256);
 
         // Ultra CPU + Constrained Memory (Compute-heavy, low RAM)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Constrained);
-        assert_eq!(shards, 64);
-        assert_eq!(cfg.max_idle_per_key, 16);
-        assert_eq!(cfg.max_concurrent_streams, 128);
+        assert_eq!(shards, 128);
+        assert_eq!(cfg.max_idle_per_key, 32);
+        assert_eq!(cfg.max_concurrent_streams, 256);
 
         // Constrained CPU + Ultra Memory (Low core, massive RAM)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Ultra);
-        assert_eq!(shards, 1);
-        assert_eq!(cfg.max_idle_per_key, 4096);
-        assert_eq!(cfg.max_concurrent_streams, 32768);
+        assert_eq!(shards, 2);
+        assert_eq!(cfg.max_idle_per_key, 16384);
+        assert_eq!(cfg.max_concurrent_streams, 65536);
 
         // Ultra CPU + Ultra Memory (Hyperscale server)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Ultra);
-        assert_eq!(shards, 64);
-        assert_eq!(cfg.max_idle_per_key, 4096);
-        assert_eq!(cfg.max_concurrent_streams, 32768);
+        assert_eq!(shards, 128);
+        assert_eq!(cfg.max_idle_per_key, 16384);
+        assert_eq!(cfg.max_concurrent_streams, 65536);
     }
 }

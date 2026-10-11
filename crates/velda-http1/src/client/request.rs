@@ -170,14 +170,8 @@ pub fn encode_request_head(
     body_len: Option<usize>,
     dst: &mut BytesMut,
 ) {
-    let mut needed = method.as_str().len() + uri.path().len() + 36;
-    for (name, val) in headers {
-        needed += name.as_str().len() + val.as_bytes().len() + 4;
-    }
-    if body_len.is_some() {
-        needed += 36;
-    }
-    dst.reserve(needed);
+    // Fast O(1) capacity estimation: avoids redundant pass over all header keys & values
+    dst.reserve(128 + headers.len() * 48);
 
     encode_request_line(method, uri, dst);
     for (name, val) in headers {
@@ -233,7 +227,7 @@ where
     encode_request_head(method, uri, headers, body_len, write_buf);
 
     if let Body::Bytes(bytes) = body
-        && bytes.len() <= 16384
+        && bytes.len() <= 65536
     {
         write_buf.extend_from_slice(bytes);
         stream.write_all(write_buf).await?;

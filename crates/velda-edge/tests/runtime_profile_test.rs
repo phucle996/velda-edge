@@ -9,17 +9,17 @@ fn test_profile_across_all_tiers() {
     const GB: usize = 1024 * MB;
 
     let test_cases = [
-        (256 * MB, "constrained", 1_000, 500, 10_000, 1024, 0),
-        (1024 * MB, "small", 10_000, 2_000, 50_000, 2048, 4096),
-        (4 * GB, "medium", 50_000, 10_000, 200_000, 8192, 8192),
-        (16 * GB, "large", 150_000, 30_000, 500_000, 16384, 8192),
-        (48 * GB, "xlarge", 400_000, 80_000, 1_000_000, 32768, 16384),
+        (256 * MB, "constrained", 1_000, 500, 20_000, 1024, 0),
+        (1024 * MB, "small", 10_000, 2_000, 100_000, 2048, 4096),
+        (4 * GB, "medium", 50_000, 10_000, 500_000, 8192, 8192),
+        (16 * GB, "large", 150_000, 30_000, 1_000_000, 16384, 8192),
+        (48 * GB, "xlarge", 400_000, 80_000, 2_000_000, 32768, 16384),
         (
             96 * GB,
             "2xlarge",
             1_000_000,
             200_000,
-            2_000_000,
+            5_000_000,
             65536,
             16384,
         ),
@@ -28,7 +28,7 @@ fn test_profile_across_all_tiers() {
             "ultra",
             2_500_000,
             500_000,
-            4_000_000,
+            10_000_000,
             131072,
             32768,
         ),
@@ -50,7 +50,7 @@ fn test_profile_across_all_tiers() {
         assert_eq!(profile.hardware.tier, expected_tier);
         assert_eq!(profile.hardware.memory_tier, expected_tier);
         assert_eq!(profile.hardware.cpu_tier, "small"); // 4 cores = small
-        assert_eq!(profile.transport.io_workers, 2); // small = 2 io_workers
+        assert_eq!(profile.transport.io_workers, 4); // small = 4 io_workers
         assert_eq!(profile.transport.max_active_connections, expected_conns);
         assert_eq!(profile.discovery.max_dns_cache_capacity, expected_cache);
         assert_eq!(profile.discovery.max_lkg_capacity, expected_lkg);
@@ -72,8 +72,8 @@ fn test_profile_across_all_tiers() {
         assert_eq!(dns_cfg.lkg_capacity, expected_lkg);
 
         let tcp_cfg = profile.to_tcp_listener_config();
-        assert!(tcp_cfg.backlog >= 512);
-        assert_eq!(tcp_cfg.copy_buffer_size, 16 * 1024); // small cpu = 16KB
+        assert!(tcp_cfg.backlog >= 1024);
+        assert_eq!(tcp_cfg.copy_buffer_size, 32 * 1024); // small cpu = 32KB
 
         let udp_cfg = profile.to_udp_socket_config();
         assert!(udp_cfg.recv_buffer_size.is_some());
@@ -138,7 +138,7 @@ fn test_fallback_writeback() {
     assert_eq!(resolved.hardware.tier, "ultra");
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
     assert_eq!(resolved.discovery.max_lkg_capacity, 500_000);
-    assert_eq!(resolved.transport.max_active_connections, 4_000_000);
+    assert_eq!(resolved.transport.max_active_connections, 10_000_000);
 
     // Verify write-back occurred
     assert!(runtime_json_path.exists());
@@ -173,8 +173,8 @@ fn test_partial_override() {
     assert_eq!(resolved.discovery.max_lkg_capacity, 10_000);
     assert_eq!(resolved.discovery.max_negative_ttl_secs, 60);
     assert_eq!(resolved.discovery.query_timeout_ms, 2000);
-    assert_eq!(resolved.transport.io_workers, 2); // 4 cores = small cpu tier (2 workers)
-    assert_eq!(resolved.transport.max_active_connections, 200_000);
+    assert_eq!(resolved.transport.io_workers, 4); // 4 cores = small cpu tier (4 workers)
+    assert_eq!(resolved.transport.max_active_connections, 500_000);
 
     // Verify that the file was updated with the full merged state
     let updated_content = fs::read_to_string(&runtime_json_path).unwrap();
@@ -288,7 +288,7 @@ fn test_effective_tier_override() {
 
     assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Ultra);
     assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Ultra);
-    assert_eq!(resolved.transport.max_active_connections, 4_000_000);
+    assert_eq!(resolved.transport.max_active_connections, 10_000_000);
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
     assert_eq!(resolved.tls.session_cache_capacity, 131_072);
 }
@@ -316,4 +316,28 @@ fn test_overload_config_override_in_runtime_json() {
     assert_eq!(resolved.overload.shedding_low_watermark, 0.75);
     assert_eq!(resolved.overload.critical_high_watermark, 0.95);
     assert_eq!(resolved.overload.critical_low_watermark, 0.88);
+}
+
+#[test]
+fn test_exact_cores_pinning_for_odd_topologies() {
+    // 1-core VPS (e.g. cheapest droplet/instance)
+    let hw_1 = HardwareTopology::with_workers_and_memory(1, 1024 * 1024 * 1024);
+    let p_1 = RuntimeProfile::from_hardware(&hw_1);
+    assert_eq!(p_1.transport.io_workers, 1);
+    assert_eq!(p_1.transport.tcp.concurrency_shards, 1);
+    assert_eq!(p_1.transport.udp.concurrency_shards, 1);
+
+    // 3-cores instance (e.g. Hetzner cloud or custom cloud quota)
+    let hw_3 = HardwareTopology::with_workers_and_memory(3, 4 * 1024 * 1024 * 1024);
+    let p_3 = RuntimeProfile::from_hardware(&hw_3);
+    assert_eq!(p_3.transport.io_workers, 3);
+    assert_eq!(p_3.transport.tcp.concurrency_shards, 3);
+    assert_eq!(p_3.transport.udp.concurrency_shards, 3);
+
+    // 6-cores instance
+    let hw_6 = HardwareTopology::with_workers_and_memory(6, 16 * 1024 * 1024 * 1024);
+    let p_6 = RuntimeProfile::from_hardware(&hw_6);
+    assert_eq!(p_6.transport.io_workers, 6);
+    assert_eq!(p_6.transport.tcp.concurrency_shards, 6);
+    assert_eq!(p_6.transport.udp.concurrency_shards, 6);
 }

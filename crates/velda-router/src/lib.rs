@@ -18,6 +18,7 @@ pub use l4::{TcpRoute, TcpRouter, UdpRoute, UdpRouter};
 pub use l7::{
     GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router,
     Http2Route, Http2RouteRequest, Http2Router, Http3Route, Http3RouteRequest, Http3Router,
+    ListenerHttp1Router,
 };
 pub use path::{is_clean_path, normalize_path};
 pub use router::{Router, RouterBuilder};

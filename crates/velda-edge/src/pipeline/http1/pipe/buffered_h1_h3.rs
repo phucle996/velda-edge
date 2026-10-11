@@ -15,7 +15,6 @@ use velda_http1::{
     Http1ServerResponse,
 };
 use velda_http3::Http3Config;
-use velda_http3::error::Http3Error;
 use velda_http3::pipe::pipe_buffered;
 
 use crate::pipeline::DownstreamMeta;
@@ -93,7 +92,7 @@ where
     let h3_config = Http3Config::auto();
 
     // 5. Acquire pooled HTTP/3 client
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, lease) = match upstream.acquire(&h3_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -116,15 +115,26 @@ where
     };
 
     // 6. Pipe buffered request & response with self-healing on connection close
-    let mut pipe_res = pipe_buffered(&client, &l7_req, &h3_config).await;
-    if let Err(Http3Error::ConnectionClosed) = pipe_res {
+    let req_retry = l7_req.clone();
+    let mut pipe_res = pipe_buffered(&client, l7_req, &h3_config).await;
+    let mut _fresh_lease_guard = None;
+    if pipe_res
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.is_connection_closed())
+    {
+        lease.mark_goaway();
+        drop(lease);
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = pipe_buffered(&fresh_client, &l7_req, &h3_config).await;
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
+            pipe_res = pipe_buffered(&fresh_client, req_retry, &h3_config).await;
+            _fresh_lease_guard = Some(fresh_lease);
         }
+    } else {
+        drop(lease);
     }
 
     match pipe_res {

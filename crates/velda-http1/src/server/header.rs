@@ -92,34 +92,82 @@ pub fn enrich_headers(
         headers.insert(HeaderName::from_static("x-forwarded-host"), val);
     }
 
-    // Build RFC 7239 Forwarded header
+    // Build RFC 7239 Forwarded header without dynamic trait formatting overhead
     let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
+    let mut cursor = 0;
+
+    fwd_buf[cursor..cursor + 4].copy_from_slice(b"for=");
+    cursor += 4;
+    match client_ip {
+        std::net::IpAddr::V4(_) => {
+            fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
+            cursor += client_ip_bytes.len();
+        }
+        std::net::IpAddr::V6(_) => {
+            fwd_buf[cursor..cursor + 2].copy_from_slice(b"\"[");
+            cursor += 2;
+            fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
+            cursor += client_ip_bytes.len();
+            fwd_buf[cursor..cursor + 2].copy_from_slice(b"]\"");
+            cursor += 2;
+        }
+    }
+
+    fwd_buf[cursor..cursor + 7].copy_from_slice(b";proto=");
+    cursor += 7;
+    let proto_bytes = proto.as_bytes();
+    fwd_buf[cursor..cursor + proto_bytes.len()].copy_from_slice(proto_bytes);
+    cursor += proto_bytes.len();
+
+    fwd_buf[cursor..cursor + 4].copy_from_slice(b";by=");
+    cursor += 4;
+    match local_addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            for (idx, &octet) in octets.iter().enumerate() {
+                if idx > 0 {
+                    fwd_buf[cursor] = b'.';
+                    cursor += 1;
+                }
+                if octet >= 100 {
+                    fwd_buf[cursor] = b'0' + octet / 100;
+                    cursor += 1;
+                    fwd_buf[cursor] = b'0' + (octet / 10) % 10;
+                    cursor += 1;
+                    fwd_buf[cursor] = b'0' + octet % 10;
+                    cursor += 1;
+                } else if octet >= 10 {
+                    fwd_buf[cursor] = b'0' + octet / 10;
+                    cursor += 1;
+                    fwd_buf[cursor] = b'0' + octet % 10;
+                    cursor += 1;
+                } else {
+                    fwd_buf[cursor] = b'0' + octet;
+                    cursor += 1;
+                }
             }
         }
-        let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
+        std::net::IpAddr::V6(v6) => {
+            use std::io::Write;
+            let mut c = std::io::Cursor::new(&mut fwd_buf[cursor..]);
+            let _ = write!(c, "\"[{v6}]\"");
+            cursor += c.position() as usize;
         }
-        if let Some(h) = host_str {
-            let _ = write!(cursor, ";host=\"{h}\"");
+    }
+
+    if let Some(h) = host_str {
+        fwd_buf[cursor..cursor + 7].copy_from_slice(b";host=\"");
+        cursor += 7;
+        let h_bytes = h.as_bytes();
+        if cursor + h_bytes.len() < fwd_buf.len() {
+            fwd_buf[cursor..cursor + h_bytes.len()].copy_from_slice(h_bytes);
+            cursor += h_bytes.len();
+            fwd_buf[cursor] = b'"';
+            cursor += 1;
         }
-        cursor.position() as usize
-    };
-    if let Ok(val) = HeaderValue::from_bytes(&fwd_buf[..fwd_len]) {
+    }
+
+    if let Ok(val) = HeaderValue::from_bytes(&fwd_buf[..cursor]) {
         headers.insert(HeaderName::from_static("forwarded"), val);
     }
 }
@@ -137,13 +185,63 @@ pub fn extract_host<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str>
 pub fn match_header_name(name_bytes: &[u8]) -> Result<HeaderName, Http1Error> {
     match name_bytes.len() {
         4 if name_bytes.eq_ignore_ascii_case(b"host") => Ok(http::header::HOST),
-        6 if name_bytes.eq_ignore_ascii_case(b"accept") => Ok(http::header::ACCEPT),
-        10 if name_bytes.eq_ignore_ascii_case(b"connection") => Ok(http::header::CONNECTION),
-        10 if name_bytes.eq_ignore_ascii_case(b"user-agent") => Ok(http::header::USER_AGENT),
+        6 => {
+            if name_bytes.eq_ignore_ascii_case(b"accept") {
+                Ok(http::header::ACCEPT)
+            } else if name_bytes.eq_ignore_ascii_case(b"cookie") {
+                Ok(http::header::COOKIE)
+            } else if name_bytes.eq_ignore_ascii_case(b"origin") {
+                Ok(http::header::ORIGIN)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
+        7 if name_bytes.eq_ignore_ascii_case(b"referer") => Ok(http::header::REFERER),
+        10 => {
+            if name_bytes.eq_ignore_ascii_case(b"connection") {
+                Ok(http::header::CONNECTION)
+            } else if name_bytes.eq_ignore_ascii_case(b"user-agent") {
+                Ok(http::header::USER_AGENT)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
         12 if name_bytes.eq_ignore_ascii_case(b"content-type") => Ok(http::header::CONTENT_TYPE),
+        13 => {
+            if name_bytes.eq_ignore_ascii_case(b"authorization") {
+                Ok(http::header::AUTHORIZATION)
+            } else if name_bytes.eq_ignore_ascii_case(b"if-none-match") {
+                Ok(http::header::IF_NONE_MATCH)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
         14 if name_bytes.eq_ignore_ascii_case(b"content-length") => Ok(CONTENT_LENGTH),
-        17 if name_bytes.eq_ignore_ascii_case(b"transfer-encoding") => {
-            Ok(http::header::TRANSFER_ENCODING)
+        15 => {
+            if name_bytes.eq_ignore_ascii_case(b"accept-encoding") {
+                Ok(http::header::ACCEPT_ENCODING)
+            } else if name_bytes.eq_ignore_ascii_case(b"accept-language") {
+                Ok(http::header::ACCEPT_LANGUAGE)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
+        17 => {
+            if name_bytes.eq_ignore_ascii_case(b"transfer-encoding") {
+                Ok(http::header::TRANSFER_ENCODING)
+            } else if name_bytes.eq_ignore_ascii_case(b"if-modified-since") {
+                Ok(http::header::IF_MODIFIED_SINCE)
+            } else {
+                HeaderName::from_bytes(name_bytes)
+                    .map_err(|e| Http1Error::InvalidHeader(e.to_string()))
+            }
+        }
+        25 if name_bytes.eq_ignore_ascii_case(b"upgrade-insecure-requests") => {
+            Ok(http::header::UPGRADE_INSECURE_REQUESTS)
         }
         _ => {
             HeaderName::from_bytes(name_bytes).map_err(|e| Http1Error::InvalidHeader(e.to_string()))

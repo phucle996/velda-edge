@@ -149,18 +149,15 @@ impl Http2Upstream {
                 // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     let conn_count = self.pool.connection_count(&endpoint);
-                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 8;
+                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 128;
                     if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
                         || conn_count >= max_conns
                     {
-                        let ready_client = lease.client.clone();
-                        match ready_client.ready().await {
-                            Ok(ready_client) => {
-                                return Ok::<_, String>((ready_client.clone(), lease));
-                            }
-                            Err(_) => {
-                                lease.mark_goaway();
-                            }
+                        let client = lease.client.clone();
+                        if let Ok(ready_client) = client.ready().await {
+                            return Ok::<_, String>((ready_client, lease));
+                        } else {
+                            lease.mark_goaway();
                         }
                     }
                 }
@@ -171,18 +168,15 @@ impl Http2Upstream {
                 // Double-check: did a concurrent request finish connecting while we waited for the lock?
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     let conn_count = self.pool.connection_count(&endpoint);
-                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 8;
+                    const SCALE_OUT_STREAM_THRESHOLD: u32 = 128;
                     if lease.active_streams() <= SCALE_OUT_STREAM_THRESHOLD
                         || conn_count >= max_conns
                     {
-                        let ready_client = lease.client.clone();
-                        match ready_client.ready().await {
-                            Ok(ready_client) => {
-                                return Ok::<_, String>((ready_client.clone(), lease));
-                            }
-                            Err(_) => {
-                                lease.mark_goaway();
-                            }
+                        let client = lease.client.clone();
+                        if let Ok(ready_client) = client.ready().await {
+                            return Ok::<_, String>((ready_client, lease));
+                        } else {
+                            lease.mark_goaway();
                         }
                     }
                 }

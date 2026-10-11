@@ -204,7 +204,11 @@ pub async fn run_http1_loop<IO>(
         }
         http_req = http_req.with_method(head.method.as_str());
 
-        let Some(route) = rt.router.route_http1(&meta.listener_id, &http_req) else {
+        let route = rt
+            .router
+            .http1_listener(&meta.listener_id)
+            .and_then(|lr| lr.route(&http_req));
+        let Some(route) = route else {
             tracing::debug!(
                 listener = %meta.listener_id,
                 path = %head.uri.path(),

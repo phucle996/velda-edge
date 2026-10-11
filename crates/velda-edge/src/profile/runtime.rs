@@ -29,8 +29,12 @@ impl RuntimeProfile {
     ) -> Self {
         let dns_config = DnsResolverConfig::for_tier(memory_tier);
         let mut engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
+        let exact_cores = hardware.available_cores().max(1);
+        engine_config.io_workers = exact_cores;
         engine_config.tcp = TcpListenerConfig::for_topology(hardware);
+        engine_config.tcp.concurrency_shards = exact_cores;
         engine_config.udp = UdpSocketConfig::for_topology(hardware);
+        engine_config.udp.concurrency_shards = exact_cores;
         let tls_params = velda_tls::TlsServerParams::for_tiers(cpu_tier, memory_tier);
 
         Self {

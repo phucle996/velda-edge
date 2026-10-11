@@ -39,13 +39,13 @@ pub const MAX_SHARDS: usize = 1024;
 #[inline]
 pub fn concurrency_shards_for_cpu_tier(tier: CpuTier) -> usize {
     match tier {
-        CpuTier::Constrained => 1,
-        CpuTier::Small => 2,
-        CpuTier::Medium => 4,
-        CpuTier::Large => 8,
-        CpuTier::XLarge => 16,
-        CpuTier::TwoXLarge => 32,
-        CpuTier::Ultra => 64,
+        CpuTier::Constrained => 2,
+        CpuTier::Small => 4,
+        CpuTier::Medium => 8,
+        CpuTier::Large => 16,
+        CpuTier::XLarge => 32,
+        CpuTier::TwoXLarge => 64,
+        CpuTier::Ultra => 128,
     }
 }
 
@@ -55,13 +55,13 @@ pub fn concurrency_shards_for_cpu_tier(tier: CpuTier) -> usize {
 #[inline]
 pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
     match tier {
-        MemoryTier::Constrained => 16,
-        MemoryTier::Small => 64,
-        MemoryTier::Medium => 256,
-        MemoryTier::Large => 512,
-        MemoryTier::XLarge => 1024,
-        MemoryTier::TwoXLarge => 2048,
-        MemoryTier::Ultra => 4096,
+        MemoryTier::Constrained => 32,
+        MemoryTier::Small => 128,
+        MemoryTier::Medium => 1024,
+        MemoryTier::Large => 2048,
+        MemoryTier::XLarge => 4096,
+        MemoryTier::TwoXLarge => 8192,
+        MemoryTier::Ultra => 16384,
     }
 }
 
@@ -69,13 +69,13 @@ pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
 #[inline]
 pub fn max_concurrent_streams_for_mem_tier(tier: MemoryTier) -> u32 {
     match tier {
-        MemoryTier::Constrained => 128,
-        MemoryTier::Small => 512,
-        MemoryTier::Medium => 2048,
-        MemoryTier::Large => 4096,
-        MemoryTier::XLarge => 8192,
-        MemoryTier::TwoXLarge => 16384,
-        MemoryTier::Ultra => 32768,
+        MemoryTier::Constrained => 256,
+        MemoryTier::Small => 1024,
+        MemoryTier::Medium => 4096,
+        MemoryTier::Large => 8192,
+        MemoryTier::XLarge => 16384,
+        MemoryTier::TwoXLarge => 32768,
+        MemoryTier::Ultra => 65536,
     }
 }
 

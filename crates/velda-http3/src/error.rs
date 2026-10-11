@@ -38,6 +38,9 @@ impl Http3Error {
             Http3Error::ConnectionClosed => true,
             Http3Error::H3(msg) => {
                 msg.contains("connection closed")
+                    || msg.contains("Connection lost")
+                    || msg.contains("closed by peer")
+                    || msg.contains("maximum number of requests")
                     || msg.contains("H3_REQUEST_REJECTED")
                     || msg.contains("reset")
             }
