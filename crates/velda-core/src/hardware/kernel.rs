@@ -105,6 +105,10 @@ pub struct KernelProfile {
     pub acceleration: AccelerationTier,
     /// Human-readable diagnostic description of how the acceleration tier was selected.
     pub reason: &'static str,
+    /// Maximum OS socket receive buffer size in bytes (`net.core.rmem_max`).
+    pub rmem_max: Option<u64>,
+    /// Maximum OS socket send buffer size in bytes (`net.core.wmem_max`).
+    pub wmem_max: Option<u64>,
 }
 
 impl KernelProfile {
@@ -119,7 +123,21 @@ impl KernelProfile {
             version,
             acceleration,
             reason,
+            rmem_max: None,
+            wmem_max: None,
         }
+    }
+
+    /// Attaches probed socket buffer sizes (`net.core.rmem_max`, `net.core.wmem_max`).
+    #[inline]
+    pub const fn with_socket_buffers(
+        mut self,
+        rmem_max: Option<u64>,
+        wmem_max: Option<u64>,
+    ) -> Self {
+        self.rmem_max = rmem_max;
+        self.wmem_max = wmem_max;
+        self
     }
 
     // =========================================================================
@@ -575,6 +593,16 @@ fn probe_io_uring_capability() -> IoUringProbeResult {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[inline]
+fn read_sysctl_u64(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
 /// Probes host OS kernel version and hardware I/O acceleration capabilities.
 ///
 /// Executes a 2-stage capability handshake:
@@ -582,6 +610,9 @@ fn probe_io_uring_capability() -> IoUringProbeResult {
 /// 2. Capability Dry-Run: Tests `io_uring_setup` syscall to verify Seccomp/cgroup unblocking.
 #[cfg(target_os = "linux")]
 pub fn probe_kernel() -> KernelProfile {
+    let rmem_max = read_sysctl_u64("/proc/sys/net/core/rmem_max");
+    let wmem_max = read_sysctl_u64("/proc/sys/net/core/wmem_max");
+
     // 1. Inspect kernel release string via uname(2)
     let mut uts = std::mem::MaybeUninit::<libc::utsname>::uninit();
     let res = unsafe { libc::uname(uts.as_mut_ptr()) };
@@ -590,7 +621,8 @@ pub fn probe_kernel() -> KernelProfile {
             KernelVersion::default(),
             AccelerationTier::Standard,
             "uname_probe_failed_fallback_epoll",
-        );
+        )
+        .with_socket_buffers(rmem_max, wmem_max);
     }
     let uts = unsafe { uts.assume_init() };
 
@@ -605,40 +637,42 @@ pub fn probe_kernel() -> KernelProfile {
 
     // Stage 1: Version Gatekeeper
     // ACCELERATION PATH requires Linux >= 5.19 for multi-shot accept and stable network rings.
-    if !version.is_at_least(5, 19) {
-        return KernelProfile::new(
+    let profile = if !version.is_at_least(5, 19) {
+        KernelProfile::new(
             version,
             AccelerationTier::Standard,
             "kernel_below_5_19_standard_epoll",
-        );
-    }
+        )
+    } else {
+        // Stage 2: Capability Dry-Run (Probe io_uring_setup to verify Seccomp & permissions)
+        // Avoids branch loops by matching directly on the probe result enum.
+        match probe_io_uring_capability() {
+            // ACCELERATION FAST-PATH: Linux Kernel >= 5.19 with unlocked io_uring ring buffers.
+            // Condition: Kernel >= 5.19 AND io_uring_setup dry-run returned success (unrestricted).
+            IoUringProbeResult::Available => KernelProfile::new(
+                version,
+                AccelerationTier::IoUringFastPath,
+                "kernel_5_19_plus_io_uring_unlocked",
+            ),
+            IoUringProbeResult::BlockedBySeccomp => KernelProfile::new(
+                version,
+                AccelerationTier::Standard,
+                "io_uring_blocked_by_seccomp_fallback_epoll",
+            ),
+            IoUringProbeResult::Disabled => KernelProfile::new(
+                version,
+                AccelerationTier::Standard,
+                "io_uring_disabled_by_sysctl_fallback_epoll",
+            ),
+            IoUringProbeResult::Unsupported => KernelProfile::new(
+                version,
+                AccelerationTier::Standard,
+                "io_uring_unsupported_fallback_epoll",
+            ),
+        }
+    };
 
-    // Stage 2: Capability Dry-Run (Probe io_uring_setup to verify Seccomp & permissions)
-    // Avoids branch loops by matching directly on the probe result enum.
-    match probe_io_uring_capability() {
-        // ACCELERATION FAST-PATH: Linux Kernel >= 5.19 with unlocked io_uring ring buffers.
-        // Condition: Kernel >= 5.19 AND io_uring_setup dry-run returned success (unrestricted).
-        IoUringProbeResult::Available => KernelProfile::new(
-            version,
-            AccelerationTier::IoUringFastPath,
-            "kernel_5_19_plus_io_uring_unlocked",
-        ),
-        IoUringProbeResult::BlockedBySeccomp => KernelProfile::new(
-            version,
-            AccelerationTier::Standard,
-            "io_uring_blocked_by_seccomp_fallback_epoll",
-        ),
-        IoUringProbeResult::Disabled => KernelProfile::new(
-            version,
-            AccelerationTier::Standard,
-            "io_uring_disabled_by_sysctl_fallback_epoll",
-        ),
-        IoUringProbeResult::Unsupported => KernelProfile::new(
-            version,
-            AccelerationTier::Standard,
-            "io_uring_unsupported_fallback_epoll",
-        ),
-    }
+    profile.with_socket_buffers(rmem_max, wmem_max)
 }
 
 /// Fallback probe for non-Linux host environments.

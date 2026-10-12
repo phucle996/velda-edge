@@ -128,6 +128,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // System Doctor: warn if kernel UDP buffer is undersized (< 2MB)
+    if let Some(rmem) = hardware.kernel.rmem_max {
+        const RECOMMENDED_BUFFER: u64 = 2 * 1024 * 1024;
+        if rmem < RECOMMENDED_BUFFER {
+            let rmem_kb = rmem / 1024;
+            tracing::warn!(
+                rmem_max = rmem,
+                rmem_kb,
+                recommended = 16_777_216,
+                "Kernel UDP buffer (rmem_max) is low ({}KB). For high-throughput HTTP/3, recommended: net.core.rmem_max=16777216",
+                rmem_kb
+            );
+        }
+    }
+
     tracing::info!(
         cores = hardware.available_cores,
         workers = worker_threads,

@@ -588,6 +588,21 @@ if [[ -f "${SCRIPT_DIR}/systemd/velda.target" ]] || [[ "$COMPONENT" == "all" ]];
     install_systemd_unit "velda.target"
 fi
 
+# ------------------------------------------------------------------------------
+# Install Kernel Sysctl Tuning (99-velda.conf)
+# ------------------------------------------------------------------------------
+if [[ "$COMPONENT" == "all" || "$COMPONENT" == "edge" ]]; then
+    if [[ -f "${SCRIPT_DIR}/99-velda.conf" ]]; then
+        log_info "Installing kernel parameters: /etc/sysctl.d/99-velda.conf"
+        run_cmd cp "${SCRIPT_DIR}/99-velda.conf" "/etc/sysctl.d/99-velda.conf"
+        run_cmd chmod 644 "/etc/sysctl.d/99-velda.conf"
+        if command -v sysctl >/dev/null 2>&1; then
+            log_info "Applying kernel parameters (sysctl --system)..."
+            run_cmd sysctl --system >/dev/null 2>&1 || log_warn "Failed to reload sysctl settings"
+        fi
+    fi
+fi
+
 if [[ "$NO_RELOAD" == false ]]; then
     log_info "Reloading systemd daemon..."
     run_cmd systemctl daemon-reload

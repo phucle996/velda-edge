@@ -18,8 +18,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, encode_response_head, parse_single_chunk, read_response_head,
-    sanitize_headers, send_chunked_end, send_request,
+    Http1ServerResponse, ProgressiveChunkDecoder, encode_chunk, encode_response_head,
+    read_response_head, sanitize_headers, send_chunk, send_chunked_end, send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -214,95 +214,52 @@ where
         let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
         let target_reserve = cfg.client_body_buffer_size.max(65536);
         let mut sent_terminal = false;
+        let mut decoder = ProgressiveChunkDecoder::new();
 
-        // Opportunistically coalesce already-received chunks into the initial write buffer
-        let mut coalesced_wire_len = 0usize;
-        let mut coalesced_payload_bytes = 0usize;
-        while coalesced_wire_len < conn.read_buf.len() {
-            match parse_single_chunk(&conn.read_buf[coalesced_wire_len..])? {
-                Some((needed, payload, is_terminal)) => {
-                    coalesced_wire_len += needed;
-                    coalesced_payload_bytes += payload.len();
-                    if is_terminal {
-                        sent_terminal = true;
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-
-        if coalesced_wire_len > 0 {
-            total_body_bytes += coalesced_payload_bytes;
+        // Opportunistically encode any already-buffered chunk payload into the initial flight buffer
+        while let Some(slice) = decoder.decode_step(&mut conn.read_buf)? {
+            total_body_bytes += slice.len();
             if total_body_bytes > cfg.max_body_size {
                 return Err(Http1Error::PayloadTooLarge(total_body_bytes));
             }
-            conn.upstream_write_buf
-                .extend_from_slice(&conn.read_buf[..coalesced_wire_len]);
-            let remaining_len = conn.read_buf.len() - coalesced_wire_len;
-            if remaining_len == 0 {
-                conn.read_buf.clear();
-            } else {
-                conn.read_buf.advance(coalesced_wire_len);
+            encode_chunk(&slice, &mut conn.upstream_write_buf);
+            if conn.upstream_write_buf.len() >= 65536 {
+                break;
             }
         }
 
-        // Single write combining request head and initial chunks
+        if decoder.is_done() {
+            velda_http1::encode_chunked_end(&mut conn.upstream_write_buf);
+            sent_terminal = true;
+        }
+
+        // Single atomic write combining request head and initial chunks
         upstream_lease
             .write_all(&conn.upstream_write_buf)
             .await
             .map_err(Http1Error::Io)?;
         conn.upstream_write_buf.clear();
 
-        // If terminal chunk was not in the initial buffer, stream remaining chunks
+        // If terminal chunk was not in the initial buffer, progressively stream remaining chunks
         if !sent_terminal {
             loop {
-                let mut wire_len = 0usize;
-                let mut payload_bytes = 0usize;
-                let mut reached_terminal = false;
-
-                while wire_len < conn.read_buf.len() {
-                    match parse_single_chunk(&conn.read_buf[wire_len..])? {
-                        Some((needed, payload, is_terminal)) => {
-                            wire_len += needed;
-                            payload_bytes += payload.len();
-                            if is_terminal {
-                                reached_terminal = true;
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-
-                if wire_len > 0 {
+                // Drain and dispatch all available chunk payload slices currently in memory
+                while let Some(slice) = decoder.decode_step(&mut conn.read_buf)? {
                     total_body_bytes = total_body_bytes
-                        .checked_add(payload_bytes)
+                        .checked_add(slice.len())
                         .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
                     if total_body_bytes > cfg.max_body_size {
                         return Err(Http1Error::PayloadTooLarge(total_body_bytes));
                     }
-
-                    upstream_lease
-                        .write_all(&conn.read_buf[..wire_len])
-                        .await
-                        .map_err(Http1Error::Io)?;
-
-                    let remaining = conn.read_buf.len() - wire_len;
-                    if remaining == 0 {
-                        conn.read_buf.clear();
-                    } else {
-                        conn.read_buf.advance(wire_len);
-                    }
-
-                    if reached_terminal {
-                        sent_terminal = true;
-                        break;
-                    }
-                    continue;
+                    send_chunk(&mut *upstream_lease, &slice).await?;
                 }
 
-                if conn.read_buf.capacity() - conn.read_buf.len() < target_reserve {
+                if decoder.is_done() {
+                    sent_terminal = true;
+                    break;
+                }
+
+                if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < target_reserve {
                     conn.read_buf.reserve(target_reserve);
                 }
 
@@ -317,7 +274,8 @@ where
                 };
 
                 if bytes_read == 0 {
-                    if conn.read_buf.is_empty() {
+                    if decoder.is_done() {
+                        sent_terminal = true;
                         break;
                     } else {
                         return Err(Http1Error::Parse(
@@ -327,7 +285,7 @@ where
                 }
             }
 
-            if !sent_terminal {
+            if sent_terminal {
                 send_chunked_end(&mut *upstream_lease).await?;
             }
         }

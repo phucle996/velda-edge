@@ -62,7 +62,7 @@ pub async fn serve(
 
     // 4. Open progressive HTTP/3 stream
     let (sender, response_rx) = match client
-        .open_stream(head.method, head.uri, head.headers)
+        .open_stream(head.method, head.uri, head.headers, None, false)
         .await
     {
         Ok(parts) => parts,

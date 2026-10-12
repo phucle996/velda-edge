@@ -190,10 +190,7 @@ pub fn build_upstreams(
             .unwrap_or(default_max_streams);
         // For multiplexed protocols (H2, H3, gRPC), align parallel connections 1:1 with CPU cores
         // to maintain thread-affinity and eliminate cross-core lock/cache thrashing.
-        let mux_conns = pool_opt
-            .and_then(|p| p.max_idle_per_key)
-            .map(|v| v.max(cores))
-            .unwrap_or(cores);
+        let mux_conns = cores.max(1);
         let idle_timeout = pool_opt
             .and_then(|p| p.idle_timeout_ms.map(std::time::Duration::from_millis))
             .unwrap_or(timeouts.idle);
@@ -320,7 +317,7 @@ pub fn build_upstreams(
                         config.protocol.streaming,
                         shard_count,
                         mux_conns,
-                        max_streams.min(32),
+                        max_streams.min(512),
                     )))),
                 );
             }

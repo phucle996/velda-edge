@@ -10,10 +10,10 @@ use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::wire::{decode_chunk, send_chunk, send_chunked_end};
+use velda_http1::wire::{send_chunk, send_chunked_end};
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
+    Http1ServerResponse, ProgressiveChunkDecoder,
 };
 use velda_http2::{Http2Config, sanitize_h2_headers};
 
@@ -134,46 +134,48 @@ where
         }
 
         match framing {
-            Http1BodyFraming::Chunked => loop {
-                if resp_done_rx.try_recv().is_ok() {
-                    break;
-                }
+            Http1BodyFraming::Chunked => {
+                let mut decoder = ProgressiveChunkDecoder::new();
+                const TARGET_RESERVE: usize = 65536;
+                loop {
+                    if resp_done_rx.try_recv().is_ok() {
+                        break;
+                    }
 
-                match decode_chunk(read_buf)? {
-                    Some(Some(chunk)) => {
+                    while let Some(chunk) = decoder.decode_step(read_buf)? {
                         send_stream.reserve_capacity(chunk.len());
                         send_stream
                             .send_data(chunk, false)
                             .map_err(|_| Http1Error::ConnectionClosed)?;
                     }
-                    Some(None) => {
+
+                    if decoder.is_done() {
                         upload_finished.store(true, Ordering::Release);
                         break;
                     }
-                    None => {
-                        const TARGET_RESERVE: usize = 65536;
-                        if read_buf.capacity().saturating_sub(read_buf.len()) < TARGET_RESERVE {
-                            read_buf.reserve(TARGET_RESERVE);
-                        }
-                        tokio::select! {
-                            biased;
-                            _ = &mut resp_done_rx => break,
-                            res = client_read.read_buf(read_buf) => {
-                                let n = res?;
-                                if n == 0 {
-                                    if read_buf.is_empty() {
-                                        break;
-                                    } else {
-                                        return Err(Http1Error::Parse(
-                                            "Unexpected EOF while reading chunked body".into(),
-                                        ));
-                                    }
+
+                    if read_buf.capacity().saturating_sub(read_buf.len()) < TARGET_RESERVE {
+                        read_buf.reserve(TARGET_RESERVE);
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = &mut resp_done_rx => break,
+                        res = client_read.read_buf(read_buf) => {
+                            let n = res?;
+                            if n == 0 {
+                                if decoder.is_done() {
+                                    upload_finished.store(true, Ordering::Release);
+                                    break;
+                                } else {
+                                    return Err(Http1Error::Parse(
+                                        "Unexpected EOF while reading chunked body".into(),
+                                    ));
                                 }
                             }
                         }
                     }
                 }
-            },
+            }
             Http1BodyFraming::ContentLength(total_len) => {
                 let mut remaining = total_len;
                 while remaining > 0 {

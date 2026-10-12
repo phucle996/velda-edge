@@ -212,6 +212,18 @@ impl Http3Config {
             quinn_proto::VarInt::from_u64(conn_window)
                 .unwrap_or(quinn_proto::VarInt::from_u32(Self::DEFAULT_CONN_WINDOW)),
         );
+
+        // 3. Edge-to-Backend Low Latency & High Throughput:
+        // - Initial RTT of 1ms (eliminates 333ms RFC 9002 default lag on LAN/loopback backends)
+        // - 64MB - 256MB send_window to prevent upload pipe starvation across concurrent streams
+        // - BBR congestion controller for high bandwidth with fast ACK convergence
+        // - Explicit segmentation offload enablement
+        transport.initial_rtt(std::time::Duration::from_millis(1));
+        transport.send_window(conn_window);
+        transport.congestion_controller_factory(std::sync::Arc::new(
+            quinn_proto::congestion::BbrConfig::default(),
+        ));
+        transport.enable_segmentation_offload(true);
     }
 
     /// Builds a Quinn [`quinn_proto::TransportConfig`] tuned according to this configuration.

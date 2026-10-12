@@ -48,6 +48,8 @@ pub(crate) enum ClientCommand {
         method: http::Method,
         uri: http::Uri,
         headers: HeaderMap,
+        initial_chunk: Option<bytes::Bytes>,
+        is_fin: bool,
         reply_tx: oneshot::Sender<OpenStreamReply>,
     },
     /// Sends a chunk of request DATA frame or finishes the request stream.
@@ -227,6 +229,8 @@ fn dispatch_open_command(
             method,
             uri,
             headers,
+            initial_chunk,
+            is_fin,
             reply_tx,
         } => {
             let req_method = method.clone();
@@ -238,6 +242,14 @@ fn dispatch_open_command(
 
             let mut send_buf = BytesMut::new();
             encode_frame(&header_frame, &mut send_buf);
+
+            // Encode optional initial DATA frame with zero-copy move semantics
+            if let Some(chunk) = initial_chunk
+                && !chunk.is_empty()
+            {
+                let data_frame = Http3Frame::Data(chunk);
+                encode_frame(&data_frame, &mut send_buf);
+            }
 
             let (resp_tx, resp_rx) = oneshot::channel();
             let (chunk_tx, chunk_rx) = mpsc::channel(32);
@@ -255,7 +267,7 @@ fn dispatch_open_command(
                 headers: None,
                 raw_buf: BytesMut::new(),
                 outbound_buf: send_buf,
-                outbound_finished: false,
+                outbound_finished: is_fin,
             };
             flush_stream_outbound(conn, stream_id, &mut slot);
             streams.insert(stream_id, slot);
@@ -313,11 +325,13 @@ pub(crate) async fn run_client_driver(
     let mut transmit_buf = Vec::with_capacity(98304);
     let mut socket_recv_buf = vec![0u8; 65535];
     let mut chunk_scratch_buf = Vec::with_capacity(65536);
+    let mut cancelled_streams_buf = Vec::with_capacity(64);
+    let mut resp_buf = Vec::with_capacity(2048);
+
+    // Initial flush of connection transmits before entering event loop
+    flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
 
     loop {
-        // Flush connection outgoing packets
-        flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
-
         // Determine next timeout deadline
         let timeout_sleep = match conn.poll_timeout() {
             Some(t) => {
@@ -404,14 +418,14 @@ pub(crate) async fn run_client_driver(
                     }
 
                     batch_count += 1;
-                    if batch_count >= 32 {
+                    if batch_count >= 128 {
                         break;
                     }
                     current_cmd = command_rx.try_recv().ok();
                 }
 
-                flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
                 if should_exit {
+                    flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
                     break;
                 }
             }
@@ -424,11 +438,11 @@ pub(crate) async fn run_client_driver(
                 while let Some(r) = current_res {
                     let (len, from_addr) = match r {
                         Ok(pair) => pair,
-                        Err(_) => return,
+                        Err(_) => break,
                     };
                     let now = Instant::now();
                     let payload = BytesMut::from(&socket_recv_buf[..len]);
-                    let mut resp_buf = Vec::new();
+                    resp_buf.clear();
                     match endpoint.handle(now, from_addr, None, None, payload, &mut resp_buf) {
                         Some(quinn_proto::DatagramEvent::ConnectionEvent(_, ce)) => {
                             conn.handle_event(ce);
@@ -442,12 +456,9 @@ pub(crate) async fn run_client_driver(
                         }
                         _ => {}
                     }
-                    if !resp_buf.is_empty() {
-                        let _ = socket.send_to(&resp_buf, from_addr).await;
-                    }
 
                     drain_count += 1;
-                    if drain_count >= 32 {
+                    if drain_count >= 64 {
                         break;
                     }
                     current_res = socket.try_recv_from(&mut socket_recv_buf).ok().map(Ok);
@@ -479,33 +490,25 @@ pub(crate) async fn run_client_driver(
             }
         }
 
-        // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver
-        let cancelled_streams: Vec<StreamId> = streams
-            .iter()
-            .filter_map(|(&id, slot)| match &slot.reply {
-                StreamReply::Buffered { reply_tx, .. } => {
-                    if reply_tx.is_closed() {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                }
+        // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver (zero-alloc)
+        cancelled_streams_buf.clear();
+        for (&id, slot) in streams.iter() {
+            let is_cancelled = match &slot.reply {
+                StreamReply::Buffered { reply_tx, .. } => reply_tx.is_closed(),
                 StreamReply::Streaming { head_tx, chunk_tx } => {
                     let head_closed = head_tx
                         .as_ref()
                         .map(|(tx, _)| tx.is_closed())
                         .unwrap_or(false);
-                    let chunk_closed = chunk_tx.is_closed();
-                    if head_closed || chunk_closed {
-                        Some(id)
-                    } else {
-                        None
-                    }
+                    head_closed || chunk_tx.is_closed()
                 }
-            })
-            .collect();
+            };
+            if is_cancelled {
+                cancelled_streams_buf.push(id);
+            }
+        }
 
-        for id in cancelled_streams {
+        for id in cancelled_streams_buf.drain(..) {
             streams.remove(&id);
             // H3_REQUEST_CANCELLED (RFC 9114 Section 4.1 & 8.1)
             let _ = conn.send_stream(id).reset(quinn_proto::VarInt::from_u32(

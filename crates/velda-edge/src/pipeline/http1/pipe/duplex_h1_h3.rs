@@ -6,14 +6,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::wire::{find_crlf, parse_hex_usize, send_chunk, send_chunked_end};
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
+    Http1ServerResponse, ProgressiveChunkDecoder, send_chunk, send_chunked_end,
 };
 use velda_http3::{Http3Config, sanitize_headers};
 
@@ -77,10 +75,82 @@ where
         }
     };
 
-    // 5. Open progressive HTTP/3 duplex stream with self-healing on stale connection drop
+    // 5. Opportunistically drain any already-buffered payload bytes waiting in the downstream
+    // kernel socket buffer before opening the upstream stream (zero async scheduler yields).
+    if framing != Http1BodyFraming::Empty {
+        const INITIAL_MAX_COALESCE: usize = 131072; // 128KB
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        while conn.read_buf.len() < INITIAL_MAX_COALESCE {
+            if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < 65536 {
+                conn.read_buf.reserve(65536);
+            }
+            let mut read_buf = tokio::io::ReadBuf::uninit(conn.read_buf.spare_capacity_mut());
+            match tokio::io::AsyncRead::poll_read(
+                std::pin::Pin::new(&mut conn.stream),
+                &mut cx,
+                &mut read_buf,
+            ) {
+                std::task::Poll::Ready(Ok(())) if !read_buf.filled().is_empty() => {
+                    let n = read_buf.filled().len();
+                    unsafe {
+                        let new_len = conn.read_buf.len() + n;
+                        conn.read_buf.set_len(new_len);
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    // 6. Decode any opportunistic initial payload chunk already buffered in conn.read_buf
+    let mut initial_chunk: Option<bytes::Bytes> = None;
+    let mut initial_is_fin = false;
+    let mut chunked_decoder = match framing {
+        Http1BodyFraming::Chunked => Some(ProgressiveChunkDecoder::new()),
+        _ => None,
+    };
+
+    match framing {
+        Http1BodyFraming::Empty => {
+            initial_is_fin = true;
+        }
+        Http1BodyFraming::Chunked => {
+            if let Some(decoder) = chunked_decoder.as_mut() {
+                let mut acc = bytes::BytesMut::new();
+                while let Some(slice) = decoder.decode_step(&mut conn.read_buf)? {
+                    acc.extend_from_slice(&slice);
+                    if acc.len() >= 65536 {
+                        break;
+                    }
+                }
+                if decoder.is_done() {
+                    initial_is_fin = true;
+                }
+                if !acc.is_empty() {
+                    initial_chunk = Some(acc.freeze());
+                }
+            }
+        }
+        Http1BodyFraming::ContentLength(total_len) => {
+            if !conn.read_buf.is_empty() {
+                let chunk_len = conn.read_buf.len().min(total_len);
+                initial_chunk = Some(conn.read_buf.split_to(chunk_len).freeze());
+                initial_is_fin = chunk_len == total_len;
+            }
+        }
+    }
+
+    // 6. Open progressive HTTP/3 duplex stream with opportunistic initial payload and self-healing
     let mut _lease_guard = Some(lease);
     let (sender, response_rx) = match client
-        .open_stream(head.method.clone(), head.uri.clone(), head.headers.clone())
+        .open_stream(
+            head.method.clone(),
+            head.uri.clone(),
+            head.headers.clone(),
+            initial_chunk.clone(),
+            initial_is_fin,
+        )
         .await
     {
         Ok(parts) => parts,
@@ -111,7 +181,13 @@ where
             };
             _lease_guard = Some(fresh_lease);
             match fresh_client
-                .open_stream(head.method.clone(), head.uri.clone(), head.headers.clone())
+                .open_stream(
+                    head.method.clone(),
+                    head.uri.clone(),
+                    head.headers.clone(),
+                    initial_chunk.clone(),
+                    initial_is_fin,
+                )
                 .await
             {
                 Ok(parts) => parts,
@@ -147,142 +223,50 @@ where
         }
     };
 
-    // 6. Split downstream IO into concurrent Read and Write halves
+    // 7. Split downstream IO into concurrent Read and Write halves for true asynchronous duplex
     let (mut client_read, mut client_write) = tokio::io::split(&mut conn.stream);
     let read_buf = &mut conn.read_buf;
+    let write_buf = &mut conn.write_buf;
+    let should_close = conn.close_requested;
 
-    // Asymmetric coordination channels
-    let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
-    let upload_finished = AtomicBool::new(framing == Http1BodyFraming::Empty);
+    let upload_finished = AtomicBool::new(initial_is_fin);
 
     // Task 1: Upload Pump (Downstream H1 -> Upstream H3 QUIC)
     let upload_task = async {
-        let is_eos = framing == Http1BodyFraming::Empty;
-        if is_eos {
-            let _ = sender.finish().await;
+        if initial_is_fin {
+            upload_finished.store(true, Ordering::Release);
             return Ok::<(), Http1Error>(());
         }
 
         match framing {
             Http1BodyFraming::Chunked => {
-                let mut chunk_remaining: Option<usize> = None;
-                let mut need_crlf = false;
-
+                let mut decoder = chunked_decoder.unwrap_or_default();
+                const TARGET_RESERVE: usize = 65536;
                 loop {
-                    if resp_done_rx.try_recv().is_ok() {
+                    while let Some(chunk) = decoder.decode_step(read_buf)? {
+                        sender
+                            .send_chunk(chunk)
+                            .await
+                            .map_err(|_| Http1Error::ConnectionClosed)?;
+                    }
+
+                    if decoder.is_done() {
+                        upload_finished.store(true, Ordering::Release);
                         break;
                     }
 
-                    // 1. If currently inside a chunk payload, stream available bytes immediately
-                    if let Some(remaining) = chunk_remaining {
-                        if remaining > 0 {
-                            let available = read_buf.len();
-                            if available > 0 {
-                                let send_len = available.min(remaining);
-                                let chunk_data = read_buf.split_to(send_len).freeze();
-                                chunk_remaining = Some(remaining - send_len);
-                                tokio::select! {
-                                    biased;
-                                    _ = &mut resp_done_rx => break,
-                                    send_res = sender.send_chunk(chunk_data) => {
-                                        send_res.map_err(|_| Http1Error::ConnectionClosed)?;
-                                    }
-                                }
-                                continue;
-                            }
-                        } else {
-                            chunk_remaining = None;
-                            need_crlf = true;
-                        }
-                    }
-
-                    // 2. Consume trailing \r\n after chunk data
-                    if need_crlf {
-                        if read_buf.len() >= 2 {
-                            if &read_buf[..2] == b"\r\n" {
-                                read_buf.advance(2);
-                                need_crlf = false;
-                            } else {
-                                return Err(Http1Error::Parse(
-                                    "Malformed chunk: missing trailing CRLF".into(),
-                                ));
-                            }
-                        } else {
-                            tokio::select! {
-                                biased;
-                                _ = &mut resp_done_rx => break,
-                                res = client_read.read_buf(read_buf) => {
-                                    let n = res?;
-                                    if n == 0 {
-                                        return Err(Http1Error::Parse(
-                                            "Unexpected EOF expecting chunk CRLF".into(),
-                                        ));
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
-
-                    // 3. Parse next chunk header if not in the middle of a chunk
-                    if chunk_remaining.is_none()
-                        && !need_crlf
-                        && let Some(crlf_pos) = find_crlf(read_buf)
-                    {
-                        let line = &read_buf[..crlf_pos];
-                        let size_part = match line.iter().position(|&b| b == b';') {
-                            Some(semi) => &line[..semi],
-                            None => line,
-                        };
-                        let chunk_size = parse_hex_usize(size_part)?;
-                        let header_len = crlf_pos + 2;
-
-                        if chunk_size == 0 {
-                            // Terminal chunk reached
-                            let trailer_data = &read_buf[header_len..];
-                            if trailer_data.starts_with(b"\r\n") {
-                                read_buf.advance(header_len + 2);
-                                upload_finished.store(true, Ordering::Release);
-                                break;
-                            }
-                            if let Some(pos) =
-                                trailer_data.windows(4).position(|w| w == b"\r\n\r\n")
-                            {
-                                read_buf.advance(header_len + pos + 4);
-                                upload_finished.store(true, Ordering::Release);
-                                break;
-                            }
-                            if trailer_data.len() > 8192 {
-                                return Err(Http1Error::Parse(
-                                    "Chunk trailer exceeds limit".into(),
-                                ));
-                            }
-                        } else {
-                            read_buf.advance(header_len);
-                            chunk_remaining = Some(chunk_size);
-                            continue;
-                        }
-                    }
-
-                    // 4. Ingest more data from downstream TCP socket
-                    const TARGET_RESERVE: usize = 262144; // 256KB — match ContentLength coalescing
                     if read_buf.capacity().saturating_sub(read_buf.len()) < TARGET_RESERVE {
                         read_buf.reserve(TARGET_RESERVE);
                     }
-                    tokio::select! {
-                        biased;
-                        _ = &mut resp_done_rx => break,
-                        res = client_read.read_buf(read_buf) => {
-                            let n = res?;
-                            if n == 0 {
-                                if read_buf.is_empty() {
-                                    break;
-                                } else {
-                                    return Err(Http1Error::Parse(
-                                        "Unexpected EOF while reading chunked body".into(),
-                                    ));
-                                }
-                            }
+                    let n = client_read.read_buf(read_buf).await?;
+                    if n == 0 {
+                        if decoder.is_done() {
+                            upload_finished.store(true, Ordering::Release);
+                            break;
+                        } else {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading chunked body".into(),
+                            ));
                         }
                     }
                 }
@@ -293,12 +277,9 @@ where
                 // a task context switch, so fewer larger sends (up to 256KB) are significantly
                 // more efficient than many small ones (typically 4-16KB from kernel).
                 const COALESCE_TARGET: usize = 262144; // 256KB
-                let mut remaining = total_len;
+                let initial_len = initial_chunk.as_ref().map(|c| c.len()).unwrap_or(0);
+                let mut remaining = total_len.saturating_sub(initial_len);
                 while remaining > 0 {
-                    if resp_done_rx.try_recv().is_ok() {
-                        break;
-                    }
-
                     let available = read_buf.len();
                     if available > 0 {
                         // If we have enough data or this is the final chunk, send immediately
@@ -306,13 +287,10 @@ where
                             let chunk_len = available.min(remaining);
                             let chunk = read_buf.split_to(chunk_len).freeze();
                             remaining = remaining.saturating_sub(chunk_len);
-                            tokio::select! {
-                                biased;
-                                _ = &mut resp_done_rx => break,
-                                send_res = sender.send_chunk(chunk) => {
-                                    send_res.map_err(|_| Http1Error::ConnectionClosed)?;
-                                }
-                            }
+                            sender
+                                .send_chunk(chunk)
+                                .await
+                                .map_err(|_| Http1Error::ConnectionClosed)?;
                             continue;
                         }
 
@@ -322,29 +300,20 @@ where
                             read_buf.reserve(needed);
                         }
 
-                        tokio::select! {
-                            biased;
-                            _ = &mut resp_done_rx => break,
-                            res = client_read.read_buf(read_buf) => {
-                                let n = res?;
-                                if n == 0 {
-                                    // EOF — flush whatever we have accumulated
-                                    let chunk_len = read_buf.len().min(remaining);
-                                    if chunk_len > 0 {
-                                        let chunk = read_buf.split_to(chunk_len).freeze();
-                                        tokio::select! {
-                                            biased;
-                                            _ = &mut resp_done_rx => break,
-                                            send_res = sender.send_chunk(chunk) => {
-                                                send_res.map_err(|_| Http1Error::ConnectionClosed)?;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
-                                continue; // loop back to re-check accumulated size
+                        let n = client_read.read_buf(read_buf).await?;
+                        if n == 0 {
+                            // EOF — flush whatever we have accumulated
+                            let chunk_len = read_buf.len().min(remaining);
+                            if chunk_len > 0 {
+                                let chunk = read_buf.split_to(chunk_len).freeze();
+                                sender
+                                    .send_chunk(chunk)
+                                    .await
+                                    .map_err(|_| Http1Error::ConnectionClosed)?;
                             }
+                            break;
                         }
+                        continue;
                     }
 
                     // Empty buffer: read fresh data from downstream TCP
@@ -353,16 +322,9 @@ where
                         read_buf.reserve(to_read);
                     }
 
-                    tokio::select! {
-                        biased;
-                        _ = &mut resp_done_rx => break,
-                        res = client_read.read_buf(read_buf) => {
-                            let n = res?;
-                            if n == 0 {
-                                break;
-                            }
-                            // Loop back to coalescing check rather than sending immediately
-                        }
+                    let n = client_read.read_buf(read_buf).await?;
+                    if n == 0 {
+                        break;
                     }
                 }
                 if remaining == 0 {
@@ -389,25 +351,22 @@ where
             Err(_) => return Err(Http1Error::ConnectionClosed),
         };
 
-        let should_close = conn.close_requested;
-
         let is_no_body_status = resp_stream.status.is_informational()
             || resp_stream.status == http::StatusCode::NO_CONTENT
             || resp_stream.status == http::StatusCode::NOT_MODIFIED;
 
         if is_no_body_status {
-            let mut write_buf = bytes::BytesMut::with_capacity(256);
+            write_buf.clear();
             velda_http1::encode_response_head(
                 http::Version::HTTP_11,
                 resp_stream.status,
                 &resp_stream.headers,
                 Some(0),
                 should_close,
-                &mut write_buf,
+                write_buf,
             );
-            client_write.write_all(&write_buf).await?;
+            client_write.write_all(write_buf).await?;
             client_write.flush().await?;
-            let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
 
@@ -432,27 +391,26 @@ where
                     None => break,
                 }
             }
-            let mut write_buf = bytes::BytesMut::with_capacity(256 + body_buf.len());
+            write_buf.clear();
             velda_http1::encode_response_head(
                 http::Version::HTTP_11,
                 resp_stream.status,
                 &resp_stream.headers,
                 Some(body_buf.len()),
                 should_close,
-                &mut write_buf,
+                write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
-            client_write.write_all(&write_buf).await?;
+            client_write.write_all(write_buf).await?;
             client_write.flush().await?;
-            let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
 
         // True progressive chunked streaming path
-        let mut write_buf = bytes::BytesMut::with_capacity(512);
+        write_buf.clear();
         velda_http1::send_response_head_chunked(
             &mut client_write,
-            &mut write_buf,
+            write_buf,
             http::Version::HTTP_11,
             resp_stream.status,
             &resp_stream.headers,
@@ -475,7 +433,6 @@ where
 
         send_chunked_end(&mut client_write).await?;
         client_write.flush().await?;
-        let _ = resp_done_tx.send(());
         Ok::<(), Http1Error>(())
     };
 

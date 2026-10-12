@@ -169,12 +169,18 @@ impl Http3Upstream {
     > {
         let max_streams = self.max_concurrent_streams;
         let sni = Arc::clone(&self.target_sni);
+        let idle_timeout = self.inner.timeouts().idle;
 
         let (client, lease) = self
             .inner
             .execute(|endpoint| {
                 let sni = Arc::clone(&sni);
                 async move {
+                    let _guard = self.connect_lock.lock().await;
+                    if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                        return Ok::<_, String>((lease.client.clone(), lease));
+                    }
+
                     let client = velda_http3::client::connect(endpoint, &sni, config)
                         .await
                         .map_err(|e| e.to_string())?;

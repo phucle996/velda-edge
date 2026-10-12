@@ -29,29 +29,44 @@ pub struct Http3StreamSender {
 
 impl Http3StreamSender {
     /// Progressively sends a chunk of request DATA frame to the upstream HTTP/3 stream.
+    ///
+    /// Employs an opportunistic non-blocking fast-path (`try_send`) to dispatch into the
+    /// internal command channel without parking the Tokio task when capacity is available,
+    /// falling back to asynchronous `.send().await` only under channel backpressure.
     #[inline]
     pub async fn send_chunk(&self, chunk: bytes::Bytes) -> Result<(), Http3Error> {
-        self.command_tx
-            .send(ClientCommand::SendChunk {
-                stream_id: self.stream_id,
-                chunk,
-                is_fin: false,
-            })
-            .await
-            .map_err(|_| Http3Error::ConnectionClosed)
+        self.send_chunk_fin(chunk, false).await
+    }
+
+    /// Progressively sends a chunk of request DATA frame and optionally marks stream FIN.
+    ///
+    /// Eliminates an extra command roundtrip when the final chunk payload is already known.
+    #[inline]
+    pub async fn send_chunk_fin(
+        &self,
+        chunk: bytes::Bytes,
+        is_fin: bool,
+    ) -> Result<(), Http3Error> {
+        let cmd = ClientCommand::SendChunk {
+            stream_id: self.stream_id,
+            chunk,
+            is_fin,
+        };
+        match self.command_tx.try_send(cmd) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(cmd)) => self
+                .command_tx
+                .send(cmd)
+                .await
+                .map_err(|_| Http3Error::ConnectionClosed),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(Http3Error::ConnectionClosed),
+        }
     }
 
     /// Finishes the upstream HTTP/3 request stream (emits FIN bit).
     #[inline]
     pub async fn finish(&self) -> Result<(), Http3Error> {
-        self.command_tx
-            .send(ClientCommand::SendChunk {
-                stream_id: self.stream_id,
-                chunk: bytes::Bytes::new(),
-                is_fin: true,
-            })
-            .await
-            .map_err(|_| Http3Error::ConnectionClosed)
+        self.send_chunk_fin(bytes::Bytes::new(), true).await
     }
 }
 
@@ -102,16 +117,17 @@ impl Http3Client {
     }
 
     /// Initiates a progressive bidirectional stream on this HTTP/3 connection.
+    /// Initiates a progressive bidirectional stream with optional initial payload on this HTTP/3 connection.
     ///
-    /// Sends the request headers frame upstream immediately and returns a pair:
-    /// `(Http3StreamSender, oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>)`
-    /// - `Http3StreamSender` allows streaming request body chunks to upstream immediately.
-    /// - The receiver yields the upstream [`Http3StreamResponse`] once response headers arrive.
+    /// When `initial_chunk` is present, encodes HEADERS and DATA frame into the initial stream flight,
+    /// eliminating cross-thread channel roundtrips and enabling zero-RTT payload forwarding.
     pub async fn open_stream(
         &self,
         method: http::Method,
         uri: http::Uri,
         headers: http::HeaderMap,
+        initial_chunk: Option<bytes::Bytes>,
+        is_fin: bool,
     ) -> Result<
         (
             Http3StreamSender,
@@ -125,6 +141,8 @@ impl Http3Client {
                 method,
                 uri,
                 headers,
+                initial_chunk,
+                is_fin,
                 reply_tx,
             })
             .await
@@ -291,6 +309,9 @@ pub async fn connect(
         "[::]:0".parse().unwrap()
     };
     sock.bind(&bind_addr.into()).map_err(Http3Error::Io)?;
+    // RFC 9114 client acceleration: connect UDP socket to upstream target endpoint
+    // to enable Linux kernel 4-tuple route caching and eliminate routing lookups per datagram.
+    let _ = sock.connect(&target.into());
     let std_socket: std::net::UdpSocket = sock.into();
     let socket = Arc::new(UdpSocket::from_std(std_socket).map_err(Http3Error::Io)?);
 

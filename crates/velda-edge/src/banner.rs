@@ -130,6 +130,18 @@ pub fn format_startup_banner(
             out.push_str(right);
             out.push('\n');
         }
+
+        if let Some(rmem) = hardware.kernel.rmem_max {
+            const RECOMMENDED_BUFFER: u64 = 2 * 1024 * 1024;
+            if rmem < RECOMMENDED_BUFFER {
+                let rmem_kb = rmem / 1024;
+                out.push('\n');
+                out.push_str(&format!(
+                    "  {c_bgold}⚠️  WARN:{c_reset} {c_bwhite}Kernel UDP buffer (rmem_max) is low ({rmem_kb}KB). For high-throughput HTTP/3, recommended: net.core.rmem_max=16777216{c_reset}\n"
+                ));
+            }
+        }
+
         out
     } else {
         let left_lines = [
@@ -175,6 +187,18 @@ pub fn format_startup_banner(
             out.push_str(right);
             out.push('\n');
         }
+
+        if let Some(rmem) = hardware.kernel.rmem_max {
+            const RECOMMENDED_BUFFER: u64 = 2 * 1024 * 1024;
+            if rmem < RECOMMENDED_BUFFER {
+                let rmem_kb = rmem / 1024;
+                out.push('\n');
+                out.push_str(&format!(
+                    "  ⚠️  WARN: Kernel UDP buffer (rmem_max) is low ({rmem_kb}KB). For high-throughput HTTP/3, recommended: net.core.rmem_max=16777216\n"
+                ));
+            }
+        }
+
         out
     }
 }
@@ -233,5 +257,29 @@ mod tests {
         let colored = format_startup_banner(&prov, &hardware, 8, true, &path, &listeners, true);
         assert!(colored.contains("VELDA EDGE"));
         assert!(colored.contains("\x1b["));
+    }
+
+    #[test]
+    fn test_startup_banner_rmem_warning() {
+        let prov = Provenance::current();
+        let mut hardware = HardwareTopology::probe();
+        let path = PathBuf::from("/etc/velda");
+        let listeners = vec!["0.0.0.0:80 (HTTP1)".to_string()];
+
+        // Case 1: Low rmem_max (208KB)
+        hardware.kernel.rmem_max = Some(212992);
+        let plain = format_startup_banner(&prov, &hardware, 4, false, &path, &listeners, false);
+        assert!(plain.contains("WARN: Kernel UDP buffer (rmem_max) is low (208KB)"));
+        assert!(plain.contains("net.core.rmem_max=16777216"));
+
+        let colored = format_startup_banner(&prov, &hardware, 4, false, &path, &listeners, true);
+        assert!(colored.contains("WARN:"));
+        assert!(colored.contains("(208KB)"));
+
+        // Case 2: Optimal rmem_max (16MB)
+        hardware.kernel.rmem_max = Some(16777216);
+        let plain_optimal =
+            format_startup_banner(&prov, &hardware, 4, false, &path, &listeners, false);
+        assert!(!plain_optimal.contains("Kernel UDP buffer (rmem_max) is low"));
     }
 }

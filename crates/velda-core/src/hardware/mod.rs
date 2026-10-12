@@ -178,6 +178,7 @@ pub fn global_hardware_topology() -> &'static HardwareTopology {
 /// Explicitly sets the global hardware topology in RAM during cold-start bootstrap.
 ///
 /// Returns `Ok(())` if set, or `Err(existing)` if already initialized.
+#[allow(clippy::result_large_err)]
 pub fn init_hardware_topology(topology: HardwareTopology) -> Result<(), HardwareTopology> {
     TOPOLOGY.set(topology)
 }

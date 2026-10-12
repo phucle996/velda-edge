@@ -376,6 +376,138 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
     )))
 }
 
+/// Progressive HTTP/1.1 chunked transfer-encoding state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressiveChunkState {
+    /// Reading next chunk-size hex line (`<hex>[;ext]\r\n`).
+    Header,
+    /// Streaming raw payload bytes of an active chunk.
+    Payload { remaining: usize },
+    /// Consuming the trailing `\r\n` delimiter following chunk payload.
+    TrailingCrlf,
+    /// Terminal chunk (`0\r\n\r\n`) consumed; stream ended cleanly.
+    Done,
+}
+
+/// Progressive, streaming HTTP/1.1 chunked transfer-encoding parser.
+///
+/// Unlike `decode_chunk` which requires entire chunks (even 64KB - 10MB) to be buffered
+/// in memory in their entirety before yielding, `ProgressiveChunkDecoder` extracts payload
+/// slices progressively as TCP packets arrive. This enables true pipelined stream forwarding
+/// with strict O(1) memory overhead.
+#[derive(Debug, Clone)]
+pub struct ProgressiveChunkDecoder {
+    state: ProgressiveChunkState,
+}
+
+impl Default for ProgressiveChunkDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProgressiveChunkDecoder {
+    /// Creates a fresh progressive chunk decoder positioned at the initial chunk header.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            state: ProgressiveChunkState::Header,
+        }
+    }
+
+    /// Returns `true` if the terminal chunk (`0\r\n\r\n`) has been encountered and consumed.
+    #[inline]
+    pub fn is_done(&self) -> bool {
+        self.state == ProgressiveChunkState::Done
+    }
+
+    /// Progressively consumes available wire bytes from `buf`, extracting payload slices.
+    ///
+    /// Returns:
+    /// - `Ok(Some(payload_slice))`: Slice of chunk payload bytes ready for forwarding.
+    /// - `Ok(None)`: Buffer incomplete or chunk delimiter consumed; need more wire data from socket.
+    /// - `Err(Http1Error)`: Malformed chunk framing (invalid hex, missing CRLF, etc.).
+    pub fn decode_step(&mut self, buf: &mut BytesMut) -> Result<Option<bytes::Bytes>, Http1Error> {
+        use bytes::Buf;
+        loop {
+            match self.state {
+                ProgressiveChunkState::Header => {
+                    if buf.is_empty() {
+                        return Ok(None);
+                    }
+                    let Some(crlf_pos) = find_crlf(buf) else {
+                        if buf.len() > 4096 {
+                            return Err(cold_chunked_error(
+                                "Chunk header line exceeds 4KB limit without CRLF",
+                            ));
+                        }
+                        return Ok(None);
+                    };
+                    let line = &buf[..crlf_pos];
+                    let size_part = match memchr::memchr(b';', line) {
+                        Some(semi) => &line[..semi],
+                        None => line,
+                    };
+                    let chunk_size = parse_hex_usize(size_part)?;
+                    let header_len = crlf_pos + 2;
+
+                    if chunk_size == 0 {
+                        let trailer_data = &buf[header_len..];
+                        if trailer_data.starts_with(b"\r\n") {
+                            buf.advance(header_len + 2);
+                            self.state = ProgressiveChunkState::Done;
+                            return Ok(None);
+                        }
+                        if let Some(pos) = memchr::memmem::find(trailer_data, b"\r\n\r\n") {
+                            buf.advance(header_len + pos + 4);
+                            self.state = ProgressiveChunkState::Done;
+                            return Ok(None);
+                        }
+                        if trailer_data.len() > 8192 {
+                            return Err(cold_chunked_error(
+                                "Chunk trailer fields exceed 8KB limit without double CRLF",
+                            ));
+                        }
+                        return Ok(None);
+                    }
+
+                    buf.advance(header_len);
+                    self.state = ProgressiveChunkState::Payload {
+                        remaining: chunk_size,
+                    };
+                }
+                ProgressiveChunkState::Payload { ref mut remaining } => {
+                    if buf.is_empty() {
+                        return Ok(None);
+                    }
+                    let available = buf.len().min(*remaining);
+                    let payload = buf.split_to(available).freeze();
+                    *remaining -= available;
+                    if *remaining == 0 {
+                        self.state = ProgressiveChunkState::TrailingCrlf;
+                    }
+                    return Ok(Some(payload));
+                }
+                ProgressiveChunkState::TrailingCrlf => {
+                    if buf.len() < 2 {
+                        return Ok(None);
+                    }
+                    if &buf[..2] != b"\r\n" {
+                        return Err(Http1Error::InvalidChunkedEncoding(
+                            "Missing CRLF after chunk data".into(),
+                        ));
+                    }
+                    buf.advance(2);
+                    self.state = ProgressiveChunkState::Header;
+                }
+                ProgressiveChunkState::Done => {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
 /// Encodes HTTP headers into the destination buffer with a single capacity reservation.
 #[inline]
 pub fn encode_headers(headers: &HeaderMap, dst: &mut BytesMut) {
@@ -579,4 +711,64 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_progressive_chunk_decoder_single_shot() {
+        let mut buf = BytesMut::from(&b"5\r\nhello\r\n0\r\n\r\n"[..]);
+        let mut decoder = ProgressiveChunkDecoder::new();
+
+        let chunk1 = decoder.decode_step(&mut buf).unwrap();
+        assert_eq!(chunk1.as_deref(), Some(&b"hello"[..]));
+        assert!(!decoder.is_done());
+
+        let chunk2 = decoder.decode_step(&mut buf).unwrap();
+        assert!(chunk2.is_none());
+        assert!(decoder.is_done());
+    }
+
+    #[test]
+    fn test_progressive_chunk_decoder_fragmented_stream() {
+        let mut decoder = ProgressiveChunkDecoder::new();
+        let mut buf = BytesMut::new();
+
+        // Feed chunk header and partial data
+        buf.extend_from_slice(b"A\r\n12345");
+        let p1 = decoder.decode_step(&mut buf).unwrap();
+        assert_eq!(p1.as_deref(), Some(&b"12345"[..]));
+        assert!(!decoder.is_done());
+
+        // Incomplete buffer
+        let p2 = decoder.decode_step(&mut buf).unwrap();
+        assert!(p2.is_none());
+
+        // Feed remainder of chunk and next chunk
+        buf.extend_from_slice(b"67890\r\n4\r\nabcd\r\n0\r\n\r\n");
+        let p3 = decoder.decode_step(&mut buf).unwrap();
+        assert_eq!(p3.as_deref(), Some(&b"67890"[..]));
+
+        let p4 = decoder.decode_step(&mut buf).unwrap();
+        assert_eq!(p4.as_deref(), Some(&b"abcd"[..]));
+
+        let p5 = decoder.decode_step(&mut buf).unwrap();
+        assert!(p5.is_none());
+        assert!(decoder.is_done());
+    }
+
+    #[test]
+    fn test_progressive_chunk_decoder_with_trailers() {
+        let mut buf = BytesMut::from(&b"4\r\ntest\r\n0\r\nX-Checksum: 1234\r\n\r\n"[..]);
+        let mut decoder = ProgressiveChunkDecoder::new();
+
+        let chunk = decoder.decode_step(&mut buf).unwrap();
+        assert_eq!(chunk.as_deref(), Some(&b"test"[..]));
+
+        let end = decoder.decode_step(&mut buf).unwrap();
+        assert!(end.is_none());
+        assert!(decoder.is_done());
+    }
 }

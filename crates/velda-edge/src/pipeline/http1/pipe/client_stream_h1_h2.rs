@@ -10,10 +10,9 @@ use bytes::{Bytes, BytesMut};
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::wire::decode_chunk;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
+    Http1ServerResponse, ProgressiveChunkDecoder,
 };
 use velda_http2::Http2Config;
 
@@ -120,35 +119,37 @@ where
 
     // 6. Pump downstream chunks to HTTP/2 DATA frames
     match framing {
-        Http1BodyFraming::Chunked => loop {
-            match decode_chunk(&mut conn.read_buf)? {
-                Some(Some(chunk)) => {
+        Http1BodyFraming::Chunked => {
+            let mut decoder = ProgressiveChunkDecoder::new();
+            const TARGET_RESERVE: usize = 65536;
+            loop {
+                while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
                     send_stream.reserve_capacity(chunk.len());
                     send_stream
                         .send_data(chunk, false)
                         .map_err(|_| Http1Error::ConnectionClosed)?;
                 }
-                Some(None) => break,
-                None => {
-                    use tokio::io::AsyncReadExt;
-                    const TARGET_RESERVE: usize = 65536;
-                    if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < TARGET_RESERVE
-                    {
-                        conn.read_buf.reserve(TARGET_RESERVE);
-                    }
-                    let n = conn.stream.read_buf(&mut conn.read_buf).await?;
-                    if n == 0 {
-                        if conn.read_buf.is_empty() {
-                            break;
-                        } else {
-                            return Err(Http1Error::Parse(
-                                "Unexpected EOF while reading chunked body".into(),
-                            ));
-                        }
+
+                if decoder.is_done() {
+                    break;
+                }
+
+                use tokio::io::AsyncReadExt;
+                if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < TARGET_RESERVE {
+                    conn.read_buf.reserve(TARGET_RESERVE);
+                }
+                let n = conn.stream.read_buf(&mut conn.read_buf).await?;
+                if n == 0 {
+                    if decoder.is_done() {
+                        break;
+                    } else {
+                        return Err(Http1Error::Parse(
+                            "Unexpected EOF while reading chunked body".into(),
+                        ));
                     }
                 }
             }
-        },
+        }
         Http1BodyFraming::ContentLength(len) => {
             let mut remaining = len;
             while remaining > 0 {

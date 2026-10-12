@@ -18,9 +18,9 @@ RestartSec=3s
 KillMode=mixed
 TimeoutStopSec=15s
 
-# Capabilities: allow binding to privileged ports (< 1024) without root
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Capabilities: allow binding to privileged ports (< 1024) and SO_RCVBUFFORCE without root
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 NoNewPrivileges=yes
 
 # Sandboxing and Filesystem security
