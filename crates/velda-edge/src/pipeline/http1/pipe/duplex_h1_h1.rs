@@ -82,7 +82,7 @@ where
     let head_method = head.method.clone();
 
     let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
-    let target_reserve = cfg.client_body_buffer_size.max(65536);
+    let target_reserve = cfg.client_body_buffer_size.max(262144);
     let max_body_size = cfg.max_body_size;
 
     let (mut down_read, mut down_write) = tokio::io::split(&mut conn.stream);
@@ -139,8 +139,7 @@ where
                 if remaining_len == 0 {
                     read_buf.clear();
                 } else {
-                    read_buf.copy_within(coalesced_wire_len.., 0);
-                    read_buf.truncate(remaining_len);
+                    read_buf.advance(coalesced_wire_len);
                 }
 
                 if reached_terminal {
@@ -261,7 +260,7 @@ where
 
                 let mut remaining = total_len - available;
                 while remaining > 0 {
-                    let to_read = remaining.min(65536);
+                    let to_read = remaining.min(262144);
                     match read_chunk_sized(&mut up_read, upstream_read_buf, to_read).await? {
                         Some(chunk) => {
                             remaining = remaining.saturating_sub(chunk.len());

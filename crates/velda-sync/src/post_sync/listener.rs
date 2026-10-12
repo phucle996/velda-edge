@@ -60,6 +60,8 @@ pub struct ListenerApplicationConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Http1ListenerConfig {
+    /// Maximum body size in bytes. Strictly enforced ONLY for `Buffered` strategy.
+    /// Streaming strategies scale dynamically with constant memory footprint.
     #[serde(default)]
     pub max_body_size: Option<usize>,
     #[serde(default)]
@@ -78,6 +80,8 @@ pub struct Http1ListenerConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Http2ListenerConfig {
+    /// Maximum body size in bytes. Strictly enforced ONLY for `Buffered` strategy.
+    /// Streaming strategies scale dynamically with constant memory footprint.
     #[serde(default)]
     pub max_body_size: Option<usize>,
     #[serde(default)]
@@ -134,6 +138,8 @@ pub struct GrpcListenerConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Http3ListenerConfig {
+    /// Maximum body size in bytes. Strictly enforced ONLY for `Buffered` strategy.
+    /// Streaming strategies scale dynamically with constant memory footprint.
     #[serde(default)]
     pub max_body_size: Option<usize>,
     #[serde(default)]

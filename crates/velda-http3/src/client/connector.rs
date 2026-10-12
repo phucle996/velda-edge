@@ -189,6 +189,108 @@ impl Http3Client {
     }
 }
 
+/// Configures tuned kernel buffers and opportunistic acceleration flags on an egress UDP socket.
+///
+/// Implements continuous safe memory budgeting (clamped between 512KB and 16MB) based on
+/// host/cgroup RAM, avoiding rigid tier classification and adapting seamlessly to any VPS or bare-metal host.
+///
+/// Opportunistically enables Linux kernel UDP acceleration (`UDP_GRO`, `SO_RCVBUFFORCE`).
+/// In all cases, failure (e.g. unprivileged container, older kernel) gracefully falls back
+/// to standard unaccelerated socket options without interrupting connection establishment.
+fn tune_udp_socket(sock: &socket2::Socket) {
+    let topology = velda_core::global_hardware_topology();
+    let total_ram = topology.memory.total_bytes;
+    // 1/64 of available host/cgroup RAM, clamped between 512KB and 16MB.
+    let desired_buf = ((total_ram / 64) as usize).clamp(512 * 1024, 16 * 1024 * 1024);
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = sock.as_raw_fd();
+
+        // 1. Opportunistic privileged force-buffers (SO_RCVBUFFORCE / SO_SNDBUFFORCE)
+        // If CAP_NET_ADMIN is present, bypasses sysctl rmem_max / wmem_max constraints.
+        // Otherwise gracefully falls back to standard SO_RCVBUF / SO_SNDBUF (kernel auto-clamps to rmem_max).
+        let buf_size_c = desired_buf as libc::c_int;
+        unsafe {
+            let ret_rcv = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUFFORCE,
+                &buf_size_c as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&buf_size_c) as libc::socklen_t,
+            );
+            if ret_rcv != 0 {
+                let _ = sock.set_recv_buffer_size(desired_buf);
+            }
+
+            let ret_snd = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUFFORCE,
+                &buf_size_c as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&buf_size_c) as libc::socklen_t,
+            );
+            if ret_snd != 0 {
+                let _ = sock.set_send_buffer_size(desired_buf);
+            }
+        }
+
+        // 2. Opportunistic UDP Generic Receive Offload (UDP_GRO, Linux 5.0+)
+        // Fast-path: Coalesces multiple incoming UDP datagrams into single batches, dramatically reducing
+        // userspace recvfrom syscall rate.
+        // Fallback: If unsupported by kernel or denied by permissions, gracefully falls back to disabled.
+        if topology.kernel.supports_udp_gro() {
+            const UDP_GRO: libc::c_int = 104;
+            let gro_val: libc::c_int = 1;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_UDP,
+                    UDP_GRO,
+                    &gro_val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&gro_val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "Kernel UDP_GRO not supported or denied, gracefully fell back to disabled"
+                    );
+                }
+            }
+        }
+
+        // 3. Opportunistic UDP Generic Segmentation Offload (UDP_SEGMENT, Linux 4.18+)
+        // Fast-path: Transmits up to 64KB buffers in a single system call, offloading segmentation to kernel/NIC.
+        // Fallback: If unsupported by kernel or denied by permissions, gracefully falls back to disabled.
+        if topology.kernel.supports_udp_segment() {
+            const UDP_SEGMENT: libc::c_int = 103;
+            let val: libc::c_int = 1472;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_UDP,
+                    UDP_SEGMENT,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "Kernel UDP_SEGMENT not supported or denied, gracefully fell back to disabled"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sock.set_recv_buffer_size(desired_buf);
+        let _ = sock.set_send_buffer_size(desired_buf);
+    }
+}
+
 /// Establishes a new persistent, multiplexed HTTP/3 client connection to the target backend endpoint.
 ///
 /// Drives the initial QUIC handshake to completion and spawns the background connection driver.
@@ -197,15 +299,14 @@ pub async fn connect(
     server_name: &str,
     config: &Http3Config,
 ) -> Result<Http3Client, Http3Error> {
-    // 1. Bind local UDP egress socket with tuned kernel buffers
+    // 1. Bind local UDP egress socket with tuned kernel buffers and graceful acceleration
     let domain = if target.is_ipv4() {
         socket2::Domain::IPV4
     } else {
         socket2::Domain::IPV6
     };
     let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(Http3Error::Io)?;
-    let _ = sock.set_recv_buffer_size(4 * 1024 * 1024);
-    let _ = sock.set_send_buffer_size(4 * 1024 * 1024);
+    tune_udp_socket(&sock);
     sock.set_nonblocking(true).map_err(Http3Error::Io)?;
     let bind_addr: SocketAddr = if target.is_ipv4() {
         "0.0.0.0:0".parse().unwrap()
@@ -320,7 +421,7 @@ pub async fn connect(
     }
 
     // 5. Spawn background connection driver task
-    let (command_tx, command_rx) = mpsc::channel(256);
+    let (command_tx, command_rx) = mpsc::channel(4096);
     tokio::spawn(run_client_driver(
         socket,
         endpoint,

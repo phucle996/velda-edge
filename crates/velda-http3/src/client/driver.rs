@@ -552,13 +552,23 @@ pub(crate) async fn run_client_driver(
                     let mut stream_reset_err = None;
                     chunk_scratch_buf.clear();
 
+                    let is_buffered = streams
+                        .get(&id)
+                        .map(|s| matches!(s.reply, StreamReply::Buffered { .. }))
+                        .unwrap_or(false);
                     let current_raw_len = streams.get(&id).map(|s| s.raw_buf.len()).unwrap_or(0);
                     if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
                         loop {
                             match chunks.next(65535) {
                                 Ok(Some(chunk)) => {
-                                    if current_raw_len + chunk_scratch_buf.len() + chunk.bytes.len()
-                                        > max_body_size + 65536
+                                    // Security: Enforce max_body_size buffer limits strictly for buffered
+                                    // responses that accumulate into RAM. Progressive Streaming streams are
+                                    // forwarded chunk-by-chunk with constant memory footprint and flow control.
+                                    if is_buffered
+                                        && current_raw_len
+                                            + chunk_scratch_buf.len()
+                                            + chunk.bytes.len()
+                                            > max_body_size + 65536
                                     {
                                         payload_too_large = true;
                                         break;

@@ -13,6 +13,9 @@ use velda_core::hardware::MemoryTier;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http1Config {
     /// Maximum allowed request body size in bytes.
+    ///
+    /// Note: Enforced strictly for `Buffered` strategy. Streaming strategies
+    /// (`ServerStream`, `ClientStream`, `Duplex`) stream continuously with constant memory footprint.
     pub max_body_size: usize,
     /// Maximum allowed size of the raw header block in bytes.
     pub max_header_size: usize,
@@ -143,7 +146,9 @@ impl Http1Config {
         Self::for_tier(hw.memory_tier())
     }
 
-    /// Sets the maximum request body size in bytes.
+    /// Sets the maximum request body size in bytes for buffered requests.
+    ///
+    /// *Note:* Enforced strictly for `Buffered` strategy; streaming strategies stream continuously.
     #[inline]
     pub const fn with_max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;

@@ -340,18 +340,88 @@ where
             }
         }
         Http1BodyFraming::Chunked => {
-            conn.send_response_head_chunked(&server_head).await?;
+            // [OPPORTUNISTIC CHUNKED COALESCING]:
+            // For micro-SSE ping/heartbeats and low-latency chunked streaming, check if the initial
+            // chunk or the entire stream is already present in `upstream_read_buf`.
+            let mut sent_via_coalesced = false;
+            if let Some(first_opt) = velda_http1::wire::decode_chunk(&mut conn.upstream_read_buf)? {
+                sent_via_coalesced = true;
+                match first_opt {
+                    None => {
+                        // Empty chunked response (immediate 0\r\n\r\n)
+                        let close =
+                            velda_http1::server::response::send_response_head_chunked_coalesced(
+                                &mut conn.stream,
+                                &mut conn.write_buf,
+                                &server_head,
+                                None,
+                                true,
+                                conn.close_requested,
+                            )
+                            .await?;
+                        if close {
+                            conn.close_requested = true;
+                        }
+                        return Ok(());
+                    }
+                    Some(first_chunk) => {
+                        // Check if terminal chunk 0\r\n\r\n is also already in upstream_read_buf
+                        let is_terminated = matches!(
+                            velda_http1::wire::decode_chunk(&mut conn.upstream_read_buf)?,
+                            Some(None)
+                        );
 
-            while let Some(chunk) =
-                read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
-            {
-                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
-                    tracing::debug!(
-                        error = %e,
-                        "Downstream client disconnected during chunked server streaming"
-                    );
-                    client_disconnected = true;
-                    break;
+                        let close =
+                            velda_http1::server::response::send_response_head_chunked_coalesced(
+                                &mut conn.stream,
+                                &mut conn.write_buf,
+                                &server_head,
+                                Some(&first_chunk),
+                                is_terminated,
+                                conn.close_requested,
+                            )
+                            .await?;
+                        if close {
+                            conn.close_requested = true;
+                        }
+
+                        if is_terminated {
+                            // Entire micro-SSE response was emitted in a single atomic socket write syscall!
+                            return Ok(());
+                        }
+
+                        // Stream continues: forward subsequent chunks
+                        while let Some(chunk) =
+                            read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf)
+                                .await?
+                        {
+                            if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Downstream client disconnected during chunked server streaming"
+                                );
+                                client_disconnected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !sent_via_coalesced {
+                conn.send_response_head_chunked(&server_head).await?;
+
+                while let Some(chunk) =
+                    read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
+                {
+                    if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+                        tracing::debug!(
+                            error = %e,
+                            "Downstream client disconnected during chunked server streaming"
+                        );
+                        client_disconnected = true;
+                        break;
+                    }
                 }
             }
         }

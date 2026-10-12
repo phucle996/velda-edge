@@ -359,6 +359,7 @@ fn resolve_http1_config(listener: &ListenerConfig, tier: MemoryTier) -> Http1Con
     let mut config = Http1Config::for_tier(tier);
     if let Some(ref h1) = listener.http1 {
         if let Some(v) = h1.max_body_size {
+            // Note: max_body_size is enforced strictly for Buffered strategy.
             config.max_body_size = v;
         }
         if let Some(v) = h1.max_header_size {
@@ -387,6 +388,8 @@ fn resolve_http2_config(listener: &ListenerConfig, tier: MemoryTier) -> Http2Con
     let mut config = Http2Config::for_tier(tier);
     if let Some(ref h2) = listener.http2 {
         if let Some(v) = h2.max_body_size {
+            // Note: max_body_size is enforced strictly for Buffered strategy.
+            // Streaming strategies stream continuously via flow control windows.
             config.max_body_size = v;
         }
         if let Some(v) = h2.max_header_size {
@@ -474,6 +477,8 @@ fn resolve_http3_config(listener: &ListenerConfig, tier: MemoryTier) -> Http3Con
     let mut config = Http3Config::for_tier(tier);
     if let Some(ref h3) = listener.http3 {
         if let Some(v) = h3.max_body_size {
+            // Note: max_body_size is enforced strictly for Buffered strategy.
+            // Streaming strategies stream continuously via dynamic flow control.
             config.max_body_size = v;
         }
         if let Some(v) = h3.max_header_size {

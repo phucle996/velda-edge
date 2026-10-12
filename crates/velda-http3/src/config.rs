@@ -8,7 +8,7 @@ use velda_core::hardware::MemoryTier;
 /// Tunable settings for HTTP/3 framing, QPACK metadata limits, and stream concurrency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http3Config {
-    /// Maximum request/response body size in bytes.
+    /// Maximum request/response body size in bytes for buffered requests.
     pub max_body_size: usize,
     /// Maximum header size in bytes.
     pub max_header_size: usize,
@@ -109,7 +109,9 @@ impl Http3Config {
         }
     }
 
-    /// Sets the maximum body size in bytes.
+    /// Sets the maximum body size in bytes for buffered requests.
+    ///
+    /// *Note:* Enforced strictly for `Buffered` strategy; streaming strategies stream continuously via dynamic flow control.
     #[inline]
     pub const fn with_max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;
@@ -165,7 +167,23 @@ impl Http3Config {
         self
     }
 
+    /// Baseline per-stream receive flow-control window (1 MB).
+    ///
+    /// Provides optimal in-flight credit for high-bandwidth/high-RTT backends out-of-the-box,
+    /// avoiding user-side tuning in configuration files. As streams consume and forward data,
+    /// QUIC continuously updates credits automatically (`MAX_STREAM_DATA`).
+    pub const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024; // 1 MB
+
+    /// Baseline connection-level receive flow-control window (16 MB).
+    ///
+    /// Accommodates high-concurrency multiplexing across dozens of active streams without
+    /// connection-level window starvation. Automatically scaled up if host has large RAM.
+    pub const DEFAULT_CONN_WINDOW: u32 = 16 * 1024 * 1024; // 16 MB
+
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
+    ///
+    /// Flow control windows are completely decoupled from `max_body_size`, providing high
+    /// throughput out-of-the-box like Envoy without requiring manual configuration in JSON files.
     pub fn apply_to_transport(&self, transport: &mut quinn_proto::TransportConfig) {
         if let Ok(timeout) = quinn_proto::IdleTimeout::try_from(std::time::Duration::from_millis(
             self.idle_timeout_ms,
@@ -178,12 +196,18 @@ impl Http3Config {
         transport.max_concurrent_uni_streams(quinn_proto::VarInt::from_u32(
             self.max_concurrent_uni_streams,
         ));
-        let stream_window = (self.max_body_size as u32).clamp(65536, 16 * 1024 * 1024);
-        transport.stream_receive_window(quinn_proto::VarInt::from_u32(stream_window));
-        let conn_window = (stream_window as u64 * 8).clamp(512 * 1024, 64 * 1024 * 1024);
+
+        // 1. Stream-level flow control: 1 MB baseline.
+        // As data is read and consumed, Quinn automatically issues MAX_STREAM_DATA frames to replenish credit.
+        transport.stream_receive_window(quinn_proto::VarInt::from_u32(Self::DEFAULT_STREAM_WINDOW));
+
+        // 2. Connection-level flow control: 16 MB - 64 MB budget scaled smoothly by host RAM.
+        let topology = velda_core::global_hardware_topology();
+        let total_ram = topology.memory.total_bytes;
+        let conn_window = ((total_ram / 128) as u64).clamp(16 * 1024 * 1024, 64 * 1024 * 1024);
         transport.receive_window(
             quinn_proto::VarInt::from_u64(conn_window)
-                .unwrap_or(quinn_proto::VarInt::from_u32(1024 * 1024)),
+                .unwrap_or(quinn_proto::VarInt::from_u32(Self::DEFAULT_CONN_WINDOW)),
         );
     }
 

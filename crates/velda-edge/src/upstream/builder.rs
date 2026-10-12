@@ -169,9 +169,10 @@ pub fn build_upstreams(
 
         // Tier & Exact-Cores aware Pool Sizing:
         let topology = velda_core::global_hardware_topology();
+        let cores = topology.available_cores().max(1);
         let mem_tier = topology.memory_tier();
 
-        let default_shards = topology.available_cores().max(1).next_power_of_two();
+        let default_shards = cores.next_power_of_two();
         let default_max_idle = velda_connection_pool::max_idle_per_key_for_mem_tier(mem_tier);
         let default_max_streams =
             velda_connection_pool::max_concurrent_streams_for_mem_tier(mem_tier);
@@ -187,6 +188,12 @@ pub fn build_upstreams(
         let max_streams = pool_opt
             .and_then(|p| p.max_concurrent_streams)
             .unwrap_or(default_max_streams);
+        // For multiplexed protocols (H2, H3, gRPC), align parallel connections 1:1 with CPU cores
+        // to maintain thread-affinity and eliminate cross-core lock/cache thrashing.
+        let mux_conns = pool_opt
+            .and_then(|p| p.max_idle_per_key)
+            .map(|v| v.max(cores))
+            .unwrap_or(cores);
         let idle_timeout = pool_opt
             .and_then(|p| p.idle_timeout_ms.map(std::time::Duration::from_millis))
             .unwrap_or(timeouts.idle);
@@ -243,8 +250,28 @@ pub fn build_upstreams(
         }
 
         // TLS identity for TCP-based upstreams; `None` means cleartext.
+        // If upstream defines explicit TLS settings, compile a dedicated TlsClientEngine for it
+        // to prevent cross-upstream collisions when different upstreams share the same SNI with different TLS versions.
         let tls = match (is_tls, shared_tls_client.as_ref(), target_sni.clone()) {
-            (true, Some(engine), Some(sni)) => Some((Arc::clone(engine), sni)),
+            (true, Some(engine), Some(sni)) => {
+                let upstream_engine = if let Some(tls_cfg) = &config.tls {
+                    let client_cfg = velda_tls::ClientTlsConfig {
+                        sni: tls_cfg.sni.clone(),
+                        versions: tls_cfg.versions.clone(),
+                        alpn: tls_cfg.alpn.clone(),
+                        ca_pem: tls_cfg.ca_pem.clone(),
+                        client_cert_pem: tls_cfg.client_cert_pem.clone(),
+                        client_key_pem: tls_cfg.client_key_pem.clone(),
+                        insecure_skip_verify: tls_cfg.insecure_skip_verify,
+                    };
+                    velda_tls::TlsClientEngine::new(&[client_cfg])
+                        .map(Arc::new)
+                        .unwrap_or_else(|_| Arc::clone(engine))
+                } else {
+                    Arc::clone(engine)
+                };
+                Some((upstream_engine, sni))
+            }
             _ => None,
         };
 
@@ -292,7 +319,7 @@ pub fn build_upstreams(
                         sni,
                         config.protocol.streaming,
                         shard_count,
-                        max_idle,
+                        mux_conns,
                         max_streams,
                     )))),
                 );
@@ -311,7 +338,7 @@ pub fn build_upstreams(
                         tls,
                         config.protocol.streaming,
                         shard_count,
-                        max_idle,
+                        mux_conns,
                         max_streams,
                         http2_acceleration,
                     )))),

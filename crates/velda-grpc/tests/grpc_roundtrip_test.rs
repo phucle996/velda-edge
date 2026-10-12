@@ -3,11 +3,11 @@ use http::{HeaderMap, Method, StatusCode, Uri};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use velda_core::{Body, L7Request, MemoryTier};
+use velda_grpc::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
 use velda_grpc::status::GrpcStatus;
 use velda_grpc::tcp::client::GrpcUpstreamConnector;
 use velda_grpc::tcp::server::GrpcServerConnection;
-use velda_grpc::GrpcConfig;
 
 /// Tests direct Unary RPC roundtrip between GrpcUpstreamConnector and GrpcServerConnection.
 #[tokio::test]
@@ -379,7 +379,10 @@ async fn test_grpc_server_payload_too_large() {
             .unwrap();
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
-            match stream.read_raw_message(restricted_config.max_message_size).await {
+            match stream
+                .read_raw_message(restricted_config.max_message_size)
+                .await
+            {
                 Ok(_) => {
                     stream
                         .respond
