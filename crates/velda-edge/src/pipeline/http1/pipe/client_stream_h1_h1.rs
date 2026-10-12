@@ -11,14 +11,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, parse_single_chunk, read_response_head, sanitize_headers,
-    send_chunked_end, send_request, send_request_head_chunked,
+    Http1ServerResponse, encode_response_head, parse_single_chunk, read_response_head,
+    sanitize_headers, send_chunked_end, send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -104,46 +105,96 @@ where
                 || resp_head.status == StatusCode::NO_CONTENT
                 || resp_head.status == StatusCode::NOT_MODIFIED;
 
-            let body = if is_head || is_no_body_status {
-                Body::Empty
-            } else {
-                match resp_framing {
-                    Http1BodyFraming::Empty => Body::Empty,
-                    Http1BodyFraming::ContentLength(len) => {
-                        if len > cfg.max_body_size {
-                            return Err(Http1Error::PayloadTooLarge(len));
-                        }
-                        if conn.upstream_read_buf.len() < len {
-                            let needed = len - conn.upstream_read_buf.len();
-                            conn.upstream_read_buf.reserve(needed);
-                            while conn.upstream_read_buf.len() < len {
-                                let n = upstream_lease
-                                    .read_buf(&mut conn.upstream_read_buf)
-                                    .await?;
-                                if n == 0 {
-                                    return Err(Http1Error::Parse(
-                                        "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
-                    }
-                    Http1BodyFraming::Chunked => {
-                        return Err(Http1Error::StreamingViolation(
-                            "Upstream returned chunked transfer-encoding on client-streaming route with server streaming disabled".into(),
-                        ));
+            if is_head || is_no_body_status {
+                conn.write_buf.clear();
+                encode_response_head(
+                    resp_head.version,
+                    resp_head.status,
+                    &resp_head.headers,
+                    Some(0),
+                    conn.close_requested,
+                    &mut conn.write_buf,
+                );
+                conn.stream.write_all(&conn.write_buf).await?;
+                if resp_head
+                    .headers
+                    .get(http::header::CONNECTION)
+                    .and_then(|h| h.to_str().ok())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+                {
+                    conn.close_requested = true;
+                }
+                return Ok::<(), Http1Error>(());
+            }
+
+            match resp_framing {
+                Http1BodyFraming::Empty => {
+                    conn.write_buf.clear();
+                    encode_response_head(
+                        resp_head.version,
+                        resp_head.status,
+                        &resp_head.headers,
+                        Some(0),
+                        conn.close_requested,
+                        &mut conn.write_buf,
+                    );
+                    conn.stream.write_all(&conn.write_buf).await?;
+                    if resp_head
+                        .headers
+                        .get(http::header::CONNECTION)
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+                    {
+                        conn.close_requested = true;
                     }
                 }
-            };
-
-            let resp = Http1ServerResponse::new(
-                resp_head.status,
-                resp_head.version,
-                resp_head.headers,
-                body,
-            );
-            conn.send_response(&resp).await?;
+                Http1BodyFraming::ContentLength(len) => {
+                    if len > cfg.max_body_size {
+                        return Err(Http1Error::PayloadTooLarge(len));
+                    }
+                    if conn.upstream_read_buf.len() < len {
+                        let needed = len - conn.upstream_read_buf.len();
+                        conn.upstream_read_buf.reserve(needed);
+                        while conn.upstream_read_buf.len() < len {
+                            let n = upstream_lease
+                                .read_buf(&mut conn.upstream_read_buf)
+                                .await?;
+                            if n == 0 {
+                                return Err(Http1Error::Parse(
+                                    "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                                ));
+                            }
+                        }
+                    }
+                    conn.write_buf.clear();
+                    encode_response_head(
+                        resp_head.version,
+                        resp_head.status,
+                        &resp_head.headers,
+                        Some(len),
+                        conn.close_requested,
+                        &mut conn.write_buf,
+                    );
+                    if len > 0 {
+                        conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);
+                        conn.upstream_read_buf.advance(len);
+                    }
+                    conn.stream.write_all(&conn.write_buf).await?;
+                    if resp_head
+                        .headers
+                        .get(http::header::CONNECTION)
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+                    {
+                        conn.close_requested = true;
+                    }
+                }
+                Http1BodyFraming::Chunked => {
+                    return Err(Http1Error::StreamingViolation(
+                        "Upstream returned chunked transfer-encoding on client-streaming route with server streaming disabled".into(),
+                    ));
+                }
+            }
             Ok::<(), Http1Error>(())
         }
         .await;
@@ -156,93 +207,129 @@ where
 
     // 5. Pipe streaming upload chunks to upstream
     let pipe_res = async {
-        // Send chunked request head upstream reusing scratch buffer
-        send_request_head_chunked(&head, &mut *upstream_lease, &mut conn.upstream_write_buf)
-            .await?;
+        // Encode chunked request head into upstream_write_buf
+        velda_http1::encode_request_head_chunked(&head, &mut conn.upstream_write_buf);
 
-        // Stream request body chunks to upstream reusing conn.read_buf with zero heap allocations
         let mut total_body_bytes = 0usize;
         let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
         let target_reserve = cfg.client_body_buffer_size.max(65536);
         let mut sent_terminal = false;
 
-        loop {
-            // Coalesce as many complete valid chunks as possible from conn.read_buf
-            let mut coalesced_wire_len = 0usize;
-            let mut coalesced_payload_bytes = 0usize;
-            let mut reached_terminal = false;
-
-            while coalesced_wire_len < conn.read_buf.len() {
-                match parse_single_chunk(&conn.read_buf[coalesced_wire_len..])? {
-                    Some((needed, payload, is_terminal)) => {
-                        coalesced_wire_len += needed;
-                        coalesced_payload_bytes += payload.len();
-                        if is_terminal {
-                            reached_terminal = true;
-                            break;
-                        }
+        // Opportunistically coalesce already-received chunks into the initial write buffer
+        let mut coalesced_wire_len = 0usize;
+        let mut coalesced_payload_bytes = 0usize;
+        while coalesced_wire_len < conn.read_buf.len() {
+            match parse_single_chunk(&conn.read_buf[coalesced_wire_len..])? {
+                Some((needed, payload, is_terminal)) => {
+                    coalesced_wire_len += needed;
+                    coalesced_payload_bytes += payload.len();
+                    if is_terminal {
+                        sent_terminal = true;
+                        break;
                     }
-                    None => break,
                 }
-            }
-
-            if coalesced_wire_len > 0 {
-                total_body_bytes = total_body_bytes
-                    .checked_add(coalesced_payload_bytes)
-                    .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
-                if total_body_bytes > cfg.max_body_size {
-                    return Err(Http1Error::PayloadTooLarge(total_body_bytes));
-                }
-
-                // Zero-rechunking passthrough: forward the exact wire bytes directly to upstream
-                upstream_lease
-                    .write_all(&conn.read_buf[..coalesced_wire_len])
-                    .await
-                    .map_err(Http1Error::Io)?;
-
-                let remaining_len = conn.read_buf.len() - coalesced_wire_len;
-                if remaining_len == 0 {
-                    conn.read_buf.clear();
-                } else {
-                    conn.read_buf.copy_within(coalesced_wire_len.., 0);
-                    conn.read_buf.truncate(remaining_len);
-                }
-
-                if reached_terminal {
-                    sent_terminal = true;
-                    break;
-                }
-                continue;
-            }
-
-            // Incomplete chunk in buffer: ensure buffer capacity has room for next chunk
-            if conn.read_buf.capacity() - conn.read_buf.len() < target_reserve {
-                conn.read_buf.reserve(target_reserve);
-            }
-
-            let bytes_read = match tokio::time::timeout(
-                idle_timeout,
-                conn.stream.read_buf(&mut conn.read_buf),
-            )
-            .await
-            {
-                Ok(res) => res?,
-                Err(_) => return Err(Http1Error::Timeout),
-            };
-
-            if bytes_read == 0 {
-                if conn.read_buf.is_empty() {
-                    break;
-                } else {
-                    return Err(Http1Error::Parse(
-                        "Unexpected EOF while reading chunked body".into(),
-                    ));
-                }
+                None => break,
             }
         }
 
+        if coalesced_wire_len > 0 {
+            total_body_bytes += coalesced_payload_bytes;
+            if total_body_bytes > cfg.max_body_size {
+                return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+            }
+            conn.upstream_write_buf
+                .extend_from_slice(&conn.read_buf[..coalesced_wire_len]);
+            let remaining_len = conn.read_buf.len() - coalesced_wire_len;
+            if remaining_len == 0 {
+                conn.read_buf.clear();
+            } else {
+                conn.read_buf.advance(coalesced_wire_len);
+            }
+        }
+
+        // Single write combining request head and initial chunks
+        upstream_lease
+            .write_all(&conn.upstream_write_buf)
+            .await
+            .map_err(Http1Error::Io)?;
+        conn.upstream_write_buf.clear();
+
+        // If terminal chunk was not in the initial buffer, stream remaining chunks
         if !sent_terminal {
-            send_chunked_end(&mut *upstream_lease).await?;
+            loop {
+                let mut wire_len = 0usize;
+                let mut payload_bytes = 0usize;
+                let mut reached_terminal = false;
+
+                while wire_len < conn.read_buf.len() {
+                    match parse_single_chunk(&conn.read_buf[wire_len..])? {
+                        Some((needed, payload, is_terminal)) => {
+                            wire_len += needed;
+                            payload_bytes += payload.len();
+                            if is_terminal {
+                                reached_terminal = true;
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+
+                if wire_len > 0 {
+                    total_body_bytes = total_body_bytes
+                        .checked_add(payload_bytes)
+                        .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                    if total_body_bytes > cfg.max_body_size {
+                        return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+                    }
+
+                    upstream_lease
+                        .write_all(&conn.read_buf[..wire_len])
+                        .await
+                        .map_err(Http1Error::Io)?;
+
+                    let remaining = conn.read_buf.len() - wire_len;
+                    if remaining == 0 {
+                        conn.read_buf.clear();
+                    } else {
+                        conn.read_buf.advance(wire_len);
+                    }
+
+                    if reached_terminal {
+                        sent_terminal = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                if conn.read_buf.capacity() - conn.read_buf.len() < target_reserve {
+                    conn.read_buf.reserve(target_reserve);
+                }
+
+                let bytes_read = match tokio::time::timeout(
+                    idle_timeout,
+                    conn.stream.read_buf(&mut conn.read_buf),
+                )
+                .await
+                {
+                    Ok(res) => res?,
+                    Err(_) => return Err(Http1Error::Timeout),
+                };
+
+                if bytes_read == 0 {
+                    if conn.read_buf.is_empty() {
+                        break;
+                    } else {
+                        return Err(Http1Error::Parse(
+                            "Unexpected EOF while reading chunked body".into(),
+                        ));
+                    }
+                }
+            }
+
+            if !sent_terminal {
+                send_chunked_end(&mut *upstream_lease).await?;
+            }
         }
 
         // Read upstream response head
@@ -266,38 +353,92 @@ where
             || resp_head.status == StatusCode::NO_CONTENT
             || resp_head.status == StatusCode::NOT_MODIFIED;
 
-        let body = if is_head || is_no_body_status {
-            Body::Empty
-        } else {
-            match resp_framing {
-                Http1BodyFraming::Empty => Body::Empty,
-                Http1BodyFraming::ContentLength(len) => {
-                    if len > cfg.max_body_size {
-                        return Err(Http1Error::PayloadTooLarge(len));
-                    }
-                    if conn.upstream_read_buf.len() < len {
-                        let needed = len - conn.upstream_read_buf.len();
-                        conn.upstream_read_buf.reserve(needed);
-                        while conn.upstream_read_buf.len() < len {
-                            let n = upstream_lease
-                                .read_buf(&mut conn.upstream_read_buf)
-                                .await?;
-                            if n == 0 {
-                                return Err(Http1Error::Parse(
-                                    "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                                ));
-                            }
+        if is_head || is_no_body_status {
+            conn.write_buf.clear();
+            encode_response_head(
+                resp_head.version,
+                resp_head.status,
+                &resp_head.headers,
+                Some(0),
+                conn.close_requested,
+                &mut conn.write_buf,
+            );
+            conn.stream.write_all(&conn.write_buf).await?;
+            if resp_head
+                .headers
+                .get(http::header::CONNECTION)
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+            {
+                conn.close_requested = true;
+            }
+            return Ok::<(), Http1Error>(());
+        }
+
+        match resp_framing {
+            Http1BodyFraming::Empty => {
+                conn.write_buf.clear();
+                encode_response_head(
+                    resp_head.version,
+                    resp_head.status,
+                    &resp_head.headers,
+                    Some(0),
+                    conn.close_requested,
+                    &mut conn.write_buf,
+                );
+                conn.stream.write_all(&conn.write_buf).await?;
+                if resp_head
+                    .headers
+                    .get(http::header::CONNECTION)
+                    .and_then(|h| h.to_str().ok())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+                {
+                    conn.close_requested = true;
+                }
+            }
+            Http1BodyFraming::ContentLength(len) => {
+                if len > cfg.max_body_size {
+                    return Err(Http1Error::PayloadTooLarge(len));
+                }
+                if conn.upstream_read_buf.len() < len {
+                    let needed = len - conn.upstream_read_buf.len();
+                    conn.upstream_read_buf.reserve(needed);
+                    while conn.upstream_read_buf.len() < len {
+                        let n = upstream_lease
+                            .read_buf(&mut conn.upstream_read_buf)
+                            .await?;
+                        if n == 0 {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
                         }
                     }
-                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
                 }
-                Http1BodyFraming::Chunked => unreachable!(),
+                conn.write_buf.clear();
+                encode_response_head(
+                    resp_head.version,
+                    resp_head.status,
+                    &resp_head.headers,
+                    Some(len),
+                    conn.close_requested,
+                    &mut conn.write_buf,
+                );
+                if len > 0 {
+                    conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);
+                    conn.upstream_read_buf.advance(len);
+                }
+                conn.stream.write_all(&conn.write_buf).await?;
+                if resp_head
+                    .headers
+                    .get(http::header::CONNECTION)
+                    .and_then(|h| h.to_str().ok())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("close"))
+                {
+                    conn.close_requested = true;
+                }
             }
-        };
-
-        let resp =
-            Http1ServerResponse::new(resp_head.status, resp_head.version, resp_head.headers, body);
-        conn.send_response(&resp).await?;
+            Http1BodyFraming::Chunked => unreachable!(),
+        }
         Ok::<(), Http1Error>(())
     }
     .await;

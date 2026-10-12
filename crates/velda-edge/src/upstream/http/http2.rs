@@ -135,7 +135,6 @@ impl Http2Upstream {
         EdgeError,
     > {
         let max_streams = self.max_concurrent_streams;
-        let max_conns = self.max_connections_per_key;
         let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
@@ -148,17 +147,11 @@ impl Http2Upstream {
             .execute(|endpoint| async move {
                 // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let conn_count = self.pool.connection_count(&endpoint);
-                    // Scale-out across all CPU cores:
-                    // If all CPU cores have active connections (conn_count >= max_conns),
-                    // or if the leased connection is currently idle (active_streams <= 1), reuse it immediately.
-                    if conn_count >= max_conns || lease.active_streams() <= 1 {
-                        let client = lease.client.clone();
-                        if let Ok(ready_client) = client.ready().await {
-                            return Ok::<_, String>((ready_client, lease));
-                        } else {
-                            lease.mark_goaway();
-                        }
+                    let client = lease.client.clone();
+                    if let Ok(ready_client) = client.ready().await {
+                        return Ok::<_, String>((ready_client, lease));
+                    } else {
+                        lease.mark_goaway();
                     }
                 }
 
@@ -167,14 +160,11 @@ impl Http2Upstream {
 
                 // Double-check: did a concurrent request finish connecting while we waited for the lock?
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let conn_count = self.pool.connection_count(&endpoint);
-                    if conn_count >= max_conns || lease.active_streams() <= 1 {
-                        let client = lease.client.clone();
-                        if let Ok(ready_client) = client.ready().await {
-                            return Ok::<_, String>((ready_client, lease));
-                        } else {
-                            lease.mark_goaway();
-                        }
+                    let client = lease.client.clone();
+                    if let Ok(ready_client) = client.ready().await {
+                        return Ok::<_, String>((ready_client, lease));
+                    } else {
+                        lease.mark_goaway();
                     }
                 }
 

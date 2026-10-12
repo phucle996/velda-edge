@@ -116,7 +116,6 @@ impl Http3Upstream {
         EdgeError,
     > {
         let max_streams = self.max_concurrent_streams;
-        let max_conns = self.max_connections_per_key;
         let sni = Arc::clone(&self.target_sni);
         let idle_timeout = self.inner.timeouts().idle;
 
@@ -127,13 +126,7 @@ impl Http3Upstream {
                 async move {
                     // 1. Fast-path: lease a stream slot from an existing healthy QUIC connection in the pool.
                     if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                        let conn_count = self.pool.connection_count(&endpoint);
-                        // Scale-out across all CPU cores:
-                        // If all CPU cores have active connections (conn_count >= max_conns),
-                        // or if the leased connection is currently idle (active_streams <= 1), reuse it immediately.
-                        if conn_count >= max_conns || lease.active_streams() <= 1 {
-                            return Ok::<_, String>((lease.client.clone(), lease));
-                        }
+                        return Ok::<_, String>((lease.client.clone(), lease));
                     }
 
                     // 2. Slow-path: acquire connect lock to serialize fresh QUIC connection establishment
@@ -142,10 +135,7 @@ impl Http3Upstream {
 
                     // Double-check: did a concurrent request finish connecting while we waited for the lock?
                     if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                        let conn_count = self.pool.connection_count(&endpoint);
-                        if conn_count >= max_conns || lease.active_streams() <= 1 {
-                            return Ok::<_, String>((lease.client.clone(), lease));
-                        }
+                        return Ok::<_, String>((lease.client.clone(), lease));
                     }
 
                     let client = velda_http3::client::connect(endpoint, &sni, config)

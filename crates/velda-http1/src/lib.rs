@@ -51,8 +51,8 @@ pub use client::connector::{
 pub use client::header::{HOP_BY_HOP, extract_sni, resolve_sni, sanitize_headers, strip_port};
 pub use client::request::{
     Http1ClientRequest, Http1ClientRequestHead, encode_request, encode_request_head,
-    encode_request_line, forward_request, send_request, send_request_head_chunked,
-    send_request_parts,
+    encode_request_head_chunked, encode_request_line, forward_request, send_request,
+    send_request_head_chunked, send_request_parts,
 };
 pub use client::response::{
     Http1ClientResponse, Http1ClientResponseHead, decode_response, decode_response_head,

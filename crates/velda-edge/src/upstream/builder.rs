@@ -320,7 +320,7 @@ pub fn build_upstreams(
                         config.protocol.streaming,
                         shard_count,
                         mux_conns,
-                        max_streams,
+                        max_streams.min(32),
                     )))),
                 );
             }

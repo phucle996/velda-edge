@@ -206,12 +206,63 @@ where
 
     let (parts, mut body_stream) = response.into_parts();
 
-    // 7. Send chunked response head downstream
+    // 7. Send chunked response head downstream with opportunistic chunk coalescing
     let resp_head =
         Http1ServerResponseHead::new(parts.status, http::Version::HTTP_11, parts.headers);
-    conn.send_response_head_chunked(&resp_head).await?;
 
-    // 8. Stream chunks downstream with opportunistic batching & backpressure
+    let first_chunk_opt = match body_stream.data().await {
+        Some(Ok(c)) => Some(c),
+        Some(Err(e)) => {
+            tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
+            return Err(Http1Error::ConnectionClosed);
+        }
+        None => None,
+    };
+
+    match first_chunk_opt {
+        None => {
+            let close = velda_http1::server::response::send_response_head_chunked_coalesced(
+                &mut conn.stream,
+                &mut conn.write_buf,
+                &resp_head,
+                None,
+                true,
+                conn.close_requested,
+            )
+            .await?;
+            if close {
+                conn.close_requested = true;
+            }
+            return Ok(());
+        }
+        Some(first_chunk) => {
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(first_chunk.len());
+
+            let is_terminated = body_stream.is_end_stream()
+                || matches!(poll_ready_chunk(&mut body_stream), Some(None));
+
+            let close = velda_http1::server::response::send_response_head_chunked_coalesced(
+                &mut conn.stream,
+                &mut conn.write_buf,
+                &resp_head,
+                Some(&first_chunk),
+                is_terminated,
+                conn.close_requested,
+            )
+            .await?;
+            if close {
+                conn.close_requested = true;
+            }
+
+            if is_terminated {
+                return Ok(());
+            }
+        }
+    }
+
+    // 8. Stream remaining chunks downstream with opportunistic batching & backpressure
     let mut chunk_batch: [bytes::Bytes; 16] = Default::default();
 
     loop {
@@ -227,10 +278,10 @@ where
         chunk_batch[0] = first_chunk;
         let mut count = 1;
         let mut batch_bytes = chunk_batch[0].len();
-        let mut reached_eof = false;
+        let mut reached_eof = body_stream.is_end_stream();
 
         // Opportunistically drain ready chunks already buffered in H2 connection driver
-        while count < 16 && batch_bytes < 131_072 {
+        while !reached_eof && count < 16 && batch_bytes < 131_072 {
             match poll_ready_chunk(&mut body_stream) {
                 Some(Some(Ok(next_chunk))) => {
                     batch_bytes += next_chunk.len();

@@ -261,15 +261,9 @@ where
     .await
 }
 
-/// Serializes and writes an HTTP/1.1 request head configured for chunked streaming to upstream using provided write buffer.
-pub async fn send_request_head_chunked<IO>(
-    head: &Http1ServerRequestHead,
-    stream: &mut IO,
-    write_buf: &mut BytesMut,
-) -> Result<(), Http1Error>
-where
-    IO: AsyncWrite + Unpin,
-{
+/// Serializes an HTTP/1.1 request head configured for chunked streaming into provided write buffer.
+#[inline]
+pub fn encode_request_head_chunked(head: &Http1ServerRequestHead, write_buf: &mut BytesMut) {
     write_buf.clear();
     encode_request_line(&head.method, &head.uri, write_buf);
 
@@ -290,7 +284,18 @@ where
         write_buf.put_slice(b"transfer-encoding: chunked\r\n");
     }
     write_buf.put_slice(b"\r\n");
+}
 
+/// Serializes and writes an HTTP/1.1 request head configured for chunked streaming to upstream using provided write buffer.
+pub async fn send_request_head_chunked<IO>(
+    head: &Http1ServerRequestHead,
+    stream: &mut IO,
+    write_buf: &mut BytesMut,
+) -> Result<(), Http1Error>
+where
+    IO: AsyncWrite + Unpin,
+{
+    encode_request_head_chunked(head, write_buf);
     stream.write_all(write_buf).await?;
     Ok(())
 }

@@ -1,9 +1,10 @@
-//! Layer 7 HTTP/1.1 to HTTP/2 Duplex Pipeline.
+//! Layer 7 HTTP/1.1 to HTTP/2 Duplex Streaming Bridge Pipeline.
 //!
-//! Handles concurrent full-duplex bidirectional streaming (e.g. WebSocket / bidirectional stream)
-//! between downstream HTTP/1.1 client and upstream HTTP/2 connection.
+//! Handles full-duplex bidirectional streaming (e.g. WebSocket over H2, bidirectional RPC)
+//! where downstream HTTP/1.1 chunks and upstream HTTP/2 DATA frames flow concurrently.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use http::StatusCode;
@@ -14,12 +15,12 @@ use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse,
 };
-use velda_http2::Http2Config;
+use velda_http2::{Http2Config, sanitize_h2_headers};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
 
-/// Serves a full-duplex HTTP/1.1 downstream stream bridged to an HTTP/2 backend.
+/// Serves a full-duplex bidirectional streaming HTTP/1.1 downstream request bridged to an HTTP/2 backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
     mut head: Http1ServerRequestHead,
@@ -48,19 +49,19 @@ where
         head.headers.remove(http::header::EXPECT);
     }
 
-    // 3. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut head.headers);
+    // 3. Sanitize connection-specific headers forbidden by RFC 9113 §8.2.2
+    sanitize_h2_headers(&mut head.headers);
 
     let h2_config = Http2Config::auto();
 
-    // 4. Acquire upstream connection before duplex session begins
+    // 4. Acquire pooled HTTP/2 client
     let (mut client, _lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
-                "Failed to acquire upstream HTTP/2 connection"
+                "Failed to acquire upstream HTTP/2 client for duplex stream"
             );
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
@@ -122,6 +123,10 @@ where
     let (mut client_read, mut client_write) = tokio::io::split(&mut conn.stream);
     let read_buf = &mut conn.read_buf;
 
+    // Asymmetric coordination channel
+    let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let upload_finished = AtomicBool::new(is_eos);
+
     // Task 1: Concurrent Upload Pump (Downstream -> Upstream H2)
     let upload_task = async {
         if is_eos {
@@ -130,6 +135,10 @@ where
 
         match framing {
             Http1BodyFraming::Chunked => loop {
+                if resp_done_rx.try_recv().is_ok() {
+                    break;
+                }
+
                 match decode_chunk(read_buf)? {
                     Some(Some(chunk)) => {
                         send_stream.reserve_capacity(chunk.len());
@@ -137,20 +146,29 @@ where
                             .send_data(chunk, false)
                             .map_err(|_| Http1Error::ConnectionClosed)?;
                     }
-                    Some(None) => break,
+                    Some(None) => {
+                        upload_finished.store(true, Ordering::Release);
+                        break;
+                    }
                     None => {
                         const TARGET_RESERVE: usize = 65536;
                         if read_buf.capacity().saturating_sub(read_buf.len()) < TARGET_RESERVE {
                             read_buf.reserve(TARGET_RESERVE);
                         }
-                        let n = client_read.read_buf(read_buf).await?;
-                        if n == 0 {
-                            if read_buf.is_empty() {
-                                break;
-                            } else {
-                                return Err(Http1Error::Parse(
-                                    "Unexpected EOF while reading chunked body".into(),
-                                ));
+                        tokio::select! {
+                            biased;
+                            _ = &mut resp_done_rx => break,
+                            res = client_read.read_buf(read_buf) => {
+                                let n = res?;
+                                if n == 0 {
+                                    if read_buf.is_empty() {
+                                        break;
+                                    } else {
+                                        return Err(Http1Error::Parse(
+                                            "Unexpected EOF while reading chunked body".into(),
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
@@ -159,6 +177,10 @@ where
             Http1BodyFraming::ContentLength(total_len) => {
                 let mut remaining = total_len;
                 while remaining > 0 {
+                    if resp_done_rx.try_recv().is_ok() {
+                        break;
+                    }
+
                     let available = read_buf.len();
                     if available > 0 {
                         let chunk_len = available.min(remaining);
@@ -170,24 +192,37 @@ where
                             .map_err(|_| Http1Error::ConnectionClosed)?;
                         continue;
                     }
+
                     let to_read = remaining.min(65536);
                     if read_buf.capacity().saturating_sub(read_buf.len()) < to_read {
                         read_buf.reserve(to_read);
                     }
-                    let n = client_read.read_buf(read_buf).await?;
-                    if n == 0 {
-                        break;
+
+                    tokio::select! {
+                        biased;
+                        _ = &mut resp_done_rx => break,
+                        res = client_read.read_buf(read_buf) => {
+                            let n = res?;
+                            if n == 0 {
+                                break;
+                            }
+                            let chunk_len = n.min(remaining);
+                            let chunk = read_buf.split_to(chunk_len).freeze();
+                            remaining = remaining.saturating_sub(chunk_len);
+                            send_stream.reserve_capacity(chunk_len);
+                            send_stream
+                                .send_data(chunk, false)
+                                .map_err(|_| Http1Error::ConnectionClosed)?;
+                        }
                     }
-                    let chunk_len = n.min(remaining);
-                    let chunk = read_buf.split_to(chunk_len).freeze();
-                    remaining = remaining.saturating_sub(chunk_len);
-                    send_stream.reserve_capacity(chunk_len);
-                    send_stream
-                        .send_data(chunk, false)
-                        .map_err(|_| Http1Error::ConnectionClosed)?;
+                }
+                if remaining == 0 {
+                    upload_finished.store(true, Ordering::Release);
                 }
             }
-            Http1BodyFraming::Empty => {}
+            Http1BodyFraming::Empty => {
+                upload_finished.store(true, Ordering::Release);
+            }
         }
 
         // Conclude upload stream to unblock upstream response completion
@@ -202,6 +237,8 @@ where
             .map_err(|_| Http1Error::ConnectionClosed)?;
         let (parts, mut body_stream) = response.into_parts();
 
+        let should_close = conn.close_requested;
+
         let is_no_body_status = parts.status.is_informational()
             || parts.status == http::StatusCode::NO_CONTENT
             || parts.status == http::StatusCode::NOT_MODIFIED;
@@ -213,11 +250,12 @@ where
                 parts.status,
                 &parts.headers,
                 Some(0),
-                false,
+                should_close,
                 &mut write_buf,
             );
             client_write.write_all(&write_buf).await?;
             client_write.flush().await?;
+            let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
 
@@ -248,12 +286,13 @@ where
                 parts.status,
                 &parts.headers,
                 Some(body_buf.len()),
-                false,
+                should_close,
                 &mut write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
             client_write.write_all(&write_buf).await?;
             client_write.flush().await?;
+            let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
 
@@ -265,7 +304,7 @@ where
             http::Version::HTTP_11,
             parts.status,
             &parts.headers,
-            false,
+            should_close,
         )
         .await?;
 
@@ -277,11 +316,14 @@ where
 
         send_chunked_end(&mut client_write).await?;
         client_write.flush().await?;
+        let _ = resp_done_tx.send(());
         Ok::<(), Http1Error>(())
     };
 
     // 7. Concurrently drive upload and download with zero head-of-line blocking
-    tokio::try_join!(upload_task, download_task)?;
-
-    Ok(())
+    let duplex_res = tokio::try_join!(upload_task, download_task);
+    if !upload_finished.load(Ordering::Acquire) {
+        conn.mark_close();
+    }
+    duplex_res.map(|_| ())
 }

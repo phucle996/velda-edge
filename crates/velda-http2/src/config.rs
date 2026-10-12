@@ -10,6 +10,9 @@ use velda_core::hardware::MemoryTier;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http2Config {
     /// Maximum request/response body size in bytes for buffered requests.
+    ///
+    /// Note: Enforced strictly for `Buffered` strategy. Streaming strategies
+    /// (`ServerStream`, `ClientStream`, `Duplex`) stream continuously with constant memory footprint.
     pub max_body_size: usize,
     /// Maximum header size in bytes.
     pub max_header_size: usize,

@@ -188,10 +188,6 @@ impl GrpcServerStream {
             let declared_len =
                 u32::from_be_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]) as usize;
             if declared_len > max_body_size {
-                let _ = self.respond.send_trailers_only(
-                    crate::status::GrpcStatus::ResourceExhausted,
-                    Some("request message length exceeds limit"),
-                );
                 return Err(GrpcError::PayloadTooLarge(declared_len));
             }
         }
@@ -213,20 +209,12 @@ impl GrpcServerStream {
                     let declared_len =
                         u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
                     if declared_len > max_body_size {
-                        let _ = self.respond.send_trailers_only(
-                            crate::status::GrpcStatus::ResourceExhausted,
-                            Some("request message length exceeds limit"),
-                        );
                         return Err(GrpcError::PayloadTooLarge(declared_len));
                     }
                     checked_lpm = true;
                 }
 
                 if buf.len() > max_body_size + 5 {
-                    let _ = self.respond.send_trailers_only(
-                        crate::status::GrpcStatus::ResourceExhausted,
-                        Some("request message size exceeds limit"),
-                    );
                     return Err(GrpcError::PayloadTooLarge(buf.len()));
                 }
             }

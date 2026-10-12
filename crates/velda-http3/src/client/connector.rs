@@ -259,29 +259,6 @@ fn tune_udp_socket(sock: &socket2::Socket) {
                 }
             }
         }
-
-        // 3. Opportunistic UDP Generic Segmentation Offload (UDP_SEGMENT, Linux 4.18+)
-        // Fast-path: Transmits up to 64KB buffers in a single system call, offloading segmentation to kernel/NIC.
-        // Fallback: If unsupported by kernel or denied by permissions, gracefully falls back to disabled.
-        if topology.kernel.supports_udp_segment() {
-            const UDP_SEGMENT: libc::c_int = 103;
-            let val: libc::c_int = 1472;
-            unsafe {
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_UDP,
-                    UDP_SEGMENT,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(
-                        errno = std::io::Error::last_os_error().raw_os_error(),
-                        "Kernel UDP_SEGMENT not supported or denied, gracefully fell back to disabled"
-                    );
-                }
-            }
-        }
     }
 
     #[cfg(not(target_os = "linux"))]

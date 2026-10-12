@@ -9,6 +9,9 @@ use velda_core::hardware::MemoryTier;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http3Config {
     /// Maximum request/response body size in bytes for buffered requests.
+    ///
+    /// Note: Enforced strictly for `Buffered` strategy. Streaming strategies
+    /// (`ServerStream`, `ClientStream`, `Duplex`) stream continuously with constant memory footprint.
     pub max_body_size: usize,
     /// Maximum header size in bytes.
     pub max_header_size: usize,
@@ -167,18 +170,18 @@ impl Http3Config {
         self
     }
 
-    /// Baseline per-stream receive flow-control window (1 MB).
+    /// Baseline per-stream receive flow-control window (8 MB).
     ///
     /// Provides optimal in-flight credit for high-bandwidth/high-RTT backends out-of-the-box,
     /// avoiding user-side tuning in configuration files. As streams consume and forward data,
     /// QUIC continuously updates credits automatically (`MAX_STREAM_DATA`).
-    pub const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024; // 1 MB
+    pub const DEFAULT_STREAM_WINDOW: u32 = 8 * 1024 * 1024; // 8 MB
 
-    /// Baseline connection-level receive flow-control window (16 MB).
+    /// Baseline connection-level receive flow-control window (64 MB).
     ///
     /// Accommodates high-concurrency multiplexing across dozens of active streams without
     /// connection-level window starvation. Automatically scaled up if host has large RAM.
-    pub const DEFAULT_CONN_WINDOW: u32 = 16 * 1024 * 1024; // 16 MB
+    pub const DEFAULT_CONN_WINDOW: u32 = 64 * 1024 * 1024; // 64 MB
 
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
     ///
@@ -197,14 +200,14 @@ impl Http3Config {
             self.max_concurrent_uni_streams,
         ));
 
-        // 1. Stream-level flow control: 1 MB baseline.
+        // 1. Stream-level flow control: 8 MB baseline.
         // As data is read and consumed, Quinn automatically issues MAX_STREAM_DATA frames to replenish credit.
         transport.stream_receive_window(quinn_proto::VarInt::from_u32(Self::DEFAULT_STREAM_WINDOW));
 
-        // 2. Connection-level flow control: 16 MB - 64 MB budget scaled smoothly by host RAM.
+        // 2. Connection-level flow control: 64 MB - 256 MB budget scaled smoothly by host RAM.
         let topology = velda_core::global_hardware_topology();
         let total_ram = topology.memory.total_bytes;
-        let conn_window = ((total_ram / 128) as u64).clamp(16 * 1024 * 1024, 64 * 1024 * 1024);
+        let conn_window = ((total_ram / 128) as u64).clamp(64 * 1024 * 1024, 256 * 1024 * 1024);
         transport.receive_window(
             quinn_proto::VarInt::from_u64(conn_window)
                 .unwrap_or(quinn_proto::VarInt::from_u32(Self::DEFAULT_CONN_WINDOW)),

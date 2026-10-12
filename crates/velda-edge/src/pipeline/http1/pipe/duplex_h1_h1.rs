@@ -19,7 +19,6 @@ use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse, Http1ServerResponseHead, parse_single_chunk, read_chunk_sized,
     read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
-    send_request_head_chunked,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -85,6 +84,264 @@ where
     let target_reserve = cfg.client_body_buffer_size.max(262144);
     let max_body_size = cfg.max_body_size;
 
+    // Fast-path: If downstream request body is already fully buffered in memory,
+    // dispatch request to upstream and stream response downstream directly on conn without tokio::io::split overhead.
+    let mut chunked_coalesced_wire_len = 0usize;
+    let is_fully_buffered_request = match framing {
+        Http1BodyFraming::Empty => true,
+        Http1BodyFraming::ContentLength(total_len) => conn.read_buf.len() >= total_len,
+        Http1BodyFraming::Chunked => {
+            let mut wire_len = 0usize;
+            let mut has_term = false;
+            while wire_len < conn.read_buf.len() {
+                match parse_single_chunk(&conn.read_buf[wire_len..]) {
+                    Ok(Some((needed, _, is_term))) => {
+                        wire_len += needed;
+                        if is_term {
+                            has_term = true;
+                            chunked_coalesced_wire_len = wire_len;
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            has_term
+        }
+    };
+
+    if is_fully_buffered_request {
+        match framing {
+            Http1BodyFraming::Empty => {
+                velda_http1::encode_request_head(
+                    &head.method,
+                    &head.uri,
+                    &head.headers,
+                    Some(0),
+                    &mut conn.upstream_write_buf,
+                );
+            }
+            Http1BodyFraming::ContentLength(total_len) => {
+                velda_http1::encode_request_head(
+                    &head.method,
+                    &head.uri,
+                    &head.headers,
+                    Some(total_len),
+                    &mut conn.upstream_write_buf,
+                );
+                if total_len > 0 {
+                    conn.upstream_write_buf
+                        .extend_from_slice(&conn.read_buf[..total_len]);
+                    conn.read_buf.advance(total_len);
+                }
+            }
+            Http1BodyFraming::Chunked => {
+                velda_http1::encode_request_head_chunked(&head, &mut conn.upstream_write_buf);
+                if chunked_coalesced_wire_len > 0 {
+                    conn.upstream_write_buf
+                        .extend_from_slice(&conn.read_buf[..chunked_coalesced_wire_len]);
+                    conn.read_buf.advance(chunked_coalesced_wire_len);
+                }
+            }
+        }
+
+        upstream_lease.write_all(&conn.upstream_write_buf).await?;
+        conn.upstream_write_buf.clear();
+
+        let (resp_head, resp_framing) =
+            read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await?;
+
+        let is_head = head_method == http::Method::HEAD;
+        let is_no_body = is_head
+            || resp_head.status.is_informational()
+            || resp_head.status == StatusCode::NO_CONTENT
+            || resp_head.status == StatusCode::NOT_MODIFIED;
+
+        let server_head =
+            Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
+
+        if is_no_body {
+            let close = velda_http1::server::response::send_response_parts(
+                &mut conn.stream,
+                &mut conn.write_buf,
+                &server_head,
+                &Body::Empty,
+                conn.close_requested,
+            )
+            .await?;
+            if close {
+                conn.close_requested = true;
+            }
+            return Ok(());
+        }
+
+        match resp_framing {
+            Http1BodyFraming::ContentLength(total_len) => {
+                if total_len <= 65536 && conn.upstream_read_buf.len() < total_len {
+                    let needed = total_len - conn.upstream_read_buf.len();
+                    conn.upstream_read_buf.reserve(needed);
+                    while conn.upstream_read_buf.len() < total_len {
+                        let n = (*upstream_lease)
+                            .read_buf(&mut conn.upstream_read_buf)
+                            .await?;
+                        if n == 0 {
+                            upstream_lease.mark_closed();
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body".into(),
+                            ));
+                        }
+                    }
+                }
+                let available = conn.upstream_read_buf.len().min(total_len);
+                if available == total_len {
+                    let body_slice = if total_len > 0 {
+                        Some(&conn.upstream_read_buf[..total_len])
+                    } else {
+                        None
+                    };
+                    let close =
+                        velda_http1::server::response::send_response_head_chunked_coalesced(
+                            &mut conn.stream,
+                            &mut conn.write_buf,
+                            &server_head,
+                            body_slice,
+                            true,
+                            conn.close_requested,
+                        )
+                        .await?;
+                    if close {
+                        conn.close_requested = true;
+                    }
+                    if total_len > 0 {
+                        conn.upstream_read_buf.advance(total_len);
+                    }
+                    return Ok(());
+                }
+
+                let close = velda_http1::server::response::send_response_head_chunked(
+                    &mut conn.stream,
+                    &mut conn.write_buf,
+                    server_head.version,
+                    server_head.status,
+                    &server_head.headers,
+                    conn.close_requested,
+                )
+                .await?;
+                if close {
+                    conn.close_requested = true;
+                }
+                if available > 0 {
+                    let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
+                    send_chunk(&mut conn.stream, &first_chunk).await?;
+                }
+                let mut remaining = total_len - available;
+                while remaining > 0 {
+                    let to_read = remaining.min(262144);
+                    match read_chunk_sized(
+                        &mut *upstream_lease,
+                        &mut conn.upstream_read_buf,
+                        to_read,
+                    )
+                    .await?
+                    {
+                        Some(chunk) => {
+                            remaining = remaining.saturating_sub(chunk.len());
+                            send_chunk(&mut conn.stream, &chunk).await?;
+                        }
+                        None => {
+                            upstream_lease.mark_closed();
+                            return Err(Http1Error::Parse("Unexpected EOF".into()));
+                        }
+                    }
+                }
+                send_chunked_end(&mut conn.stream).await?;
+                return Ok(());
+            }
+            Http1BodyFraming::Chunked => {
+                if let Some((wire1, payload1, is_term1)) =
+                    velda_http1::parse_single_chunk(&conn.upstream_read_buf)?
+                {
+                    if is_term1 {
+                        conn.upstream_read_buf.advance(wire1);
+                        let close =
+                            velda_http1::server::response::send_response_head_chunked_coalesced(
+                                &mut conn.stream,
+                                &mut conn.write_buf,
+                                &server_head,
+                                None,
+                                true,
+                                conn.close_requested,
+                            )
+                            .await?;
+                        if close {
+                            conn.close_requested = true;
+                        }
+                        return Ok(());
+                    }
+
+                    let (is_terminated, total_wire) =
+                        match velda_http1::parse_single_chunk(&conn.upstream_read_buf[wire1..])? {
+                            Some((wire2, _, true)) => (true, wire1 + wire2),
+                            _ => (false, wire1),
+                        };
+
+                    let close =
+                        velda_http1::server::response::send_response_head_chunked_coalesced(
+                            &mut conn.stream,
+                            &mut conn.write_buf,
+                            &server_head,
+                            Some(payload1),
+                            is_terminated,
+                            conn.close_requested,
+                        )
+                        .await?;
+                    if close {
+                        conn.close_requested = true;
+                    }
+                    conn.upstream_read_buf.advance(total_wire);
+
+                    if is_terminated {
+                        return Ok(());
+                    }
+                }
+
+                let close = velda_http1::server::response::send_response_head_chunked(
+                    &mut conn.stream,
+                    &mut conn.write_buf,
+                    server_head.version,
+                    server_head.status,
+                    &server_head.headers,
+                    conn.close_requested,
+                )
+                .await?;
+                if close {
+                    conn.close_requested = true;
+                }
+                while let Some(chunk) =
+                    read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
+                {
+                    send_chunk(&mut conn.stream, &chunk).await?;
+                }
+                send_chunked_end(&mut conn.stream).await?;
+                return Ok(());
+            }
+            Http1BodyFraming::Empty => {
+                let close = velda_http1::server::response::send_response_parts(
+                    &mut conn.stream,
+                    &mut conn.write_buf,
+                    &server_head,
+                    &Body::Empty,
+                    conn.close_requested,
+                )
+                .await?;
+                if close {
+                    conn.close_requested = true;
+                }
+                return Ok(());
+            }
+        }
+    }
+
     let (mut down_read, mut down_write) = tokio::io::split(&mut conn.stream);
     let (mut up_read, mut up_write) = tokio::io::split(&mut *upstream_lease);
 
@@ -97,84 +354,257 @@ where
         ..
     } = *conn;
 
-    // Concurrently pump client chunked upload to upstream and upstream chunked response downstream.
+    // Asymmetric coordination channel: Signals upload task when upstream response is fully received
+    let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let upload_finished = std::sync::atomic::AtomicBool::new(framing == Http1BodyFraming::Empty);
+
+    // Concurrently pump client upload to upstream and upstream response downstream.
     let upload_task = async {
-        // Send chunked request head upstream reusing scratch buffer
-        send_request_head_chunked(&head, &mut up_write, upstream_write_buf).await?;
+        let mut early_response = false;
 
-        let mut total_req_bytes = 0usize;
-        let mut sent_terminal = false;
+        match framing {
+            Http1BodyFraming::Chunked => {
+                // Encode chunked request head into upstream_write_buf
+                velda_http1::encode_request_head_chunked(&head, upstream_write_buf);
 
-        loop {
-            // Coalesce as many complete valid chunks as possible from read_buf
-            let mut coalesced_wire_len = 0usize;
-            let mut coalesced_payload_bytes = 0usize;
-            let mut reached_terminal = false;
+                let mut total_req_bytes = 0usize;
+                let mut sent_terminal = false;
 
-            while coalesced_wire_len < read_buf.len() {
-                match parse_single_chunk(&read_buf[coalesced_wire_len..])? {
-                    Some((needed, payload, is_terminal)) => {
-                        coalesced_wire_len += needed;
-                        coalesced_payload_bytes += payload.len();
-                        if is_terminal {
-                            reached_terminal = true;
+                // Opportunistically coalesce already-received chunks into initial write buffer
+                let mut coalesced_wire_len = 0usize;
+                let mut coalesced_payload_bytes = 0usize;
+                while coalesced_wire_len < read_buf.len() {
+                    match parse_single_chunk(&read_buf[coalesced_wire_len..])? {
+                        Some((needed, payload, is_terminal)) => {
+                            coalesced_wire_len += needed;
+                            coalesced_payload_bytes += payload.len();
+                            if is_terminal {
+                                sent_terminal = true;
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+
+                if coalesced_wire_len > 0 {
+                    total_req_bytes += coalesced_payload_bytes;
+                    if total_req_bytes > max_body_size {
+                        return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+                    }
+                    upstream_write_buf.extend_from_slice(&read_buf[..coalesced_wire_len]);
+                    let remaining_len = read_buf.len() - coalesced_wire_len;
+                    if remaining_len == 0 {
+                        read_buf.clear();
+                    } else {
+                        read_buf.advance(coalesced_wire_len);
+                    }
+                }
+
+                // Send request head + initial chunks in a single coalesced write
+                up_write.write_all(upstream_write_buf).await?;
+                upstream_write_buf.clear();
+
+                if sent_terminal {
+                    upload_finished.store(true, std::sync::atomic::Ordering::Release);
+                } else {
+                    loop {
+                        if !early_response && resp_done_rx.try_recv().is_ok() {
+                            early_response = true;
+                        }
+
+                        // Coalesce as many complete valid chunks as possible from read_buf
+                        let mut wire_len = 0usize;
+                        let mut payload_bytes = 0usize;
+                        let mut reached_terminal = false;
+
+                        while wire_len < read_buf.len() {
+                            match parse_single_chunk(&read_buf[wire_len..])? {
+                                Some((needed, payload, is_terminal)) => {
+                                    wire_len += needed;
+                                    payload_bytes += payload.len();
+                                    if is_terminal {
+                                        reached_terminal = true;
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+
+                        if wire_len > 0 {
+                            total_req_bytes = total_req_bytes
+                                .checked_add(payload_bytes)
+                                .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                            if total_req_bytes > max_body_size {
+                                return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+                            }
+
+                            if !early_response {
+                                tokio::select! {
+                                    biased;
+                                    _ = &mut resp_done_rx => {
+                                        early_response = true;
+                                    }
+                                    write_res = up_write.write_all(&read_buf[..wire_len]) => {
+                                        write_res?;
+                                    }
+                                }
+                            }
+
+                            let remaining_len = read_buf.len() - wire_len;
+                            if remaining_len == 0 {
+                                read_buf.clear();
+                            } else {
+                                read_buf.advance(wire_len);
+                            }
+
+                            if reached_terminal {
+                                sent_terminal = true;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if read_buf.capacity() - read_buf.len() < target_reserve {
+                            read_buf.reserve(target_reserve);
+                        }
+
+                        let bytes_read = if !early_response {
+                            tokio::select! {
+                                biased;
+                                _ = &mut resp_done_rx => {
+                                    early_response = true;
+                                    break;
+                                }
+                                res = tokio::time::timeout(idle_timeout, down_read.read_buf(read_buf)) => {
+                                    match res {
+                                        Ok(res) => res?,
+                                        Err(_) => return Err(Http1Error::Timeout),
+                                    }
+                                }
+                            }
+                        } else {
                             break;
+                        };
+
+                        if bytes_read == 0 {
+                            if read_buf.is_empty() {
+                                break;
+                            } else {
+                                return Err(Http1Error::Parse(
+                                    "Unexpected EOF while reading chunked body".into(),
+                                ));
+                            }
                         }
                     }
-                    None => break,
+
+                    if sent_terminal {
+                        upload_finished.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    if !early_response {
+                        if !sent_terminal {
+                            send_chunked_end(&mut up_write).await?;
+                        }
+                        up_write.flush().await?;
+                    }
                 }
             }
+            Http1BodyFraming::ContentLength(total_len) => {
+                velda_http1::encode_request_head(
+                    &head.method,
+                    &head.uri,
+                    &head.headers,
+                    Some(total_len),
+                    upstream_write_buf,
+                );
 
-            if coalesced_wire_len > 0 {
-                total_req_bytes = total_req_bytes
-                    .checked_add(coalesced_payload_bytes)
-                    .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
-                if total_req_bytes > max_body_size {
-                    return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+                let mut remaining = total_len;
+                let initial_avail = read_buf.len().min(remaining);
+                if initial_avail > 0 {
+                    upstream_write_buf.extend_from_slice(&read_buf[..initial_avail]);
+                    read_buf.advance(initial_avail);
+                    remaining -= initial_avail;
                 }
 
-                up_write.write_all(&read_buf[..coalesced_wire_len]).await?;
+                up_write.write_all(upstream_write_buf).await?;
+                upstream_write_buf.clear();
 
-                let remaining_len = read_buf.len() - coalesced_wire_len;
-                if remaining_len == 0 {
-                    read_buf.clear();
-                } else {
-                    read_buf.advance(coalesced_wire_len);
+                while remaining > 0 {
+                    if !early_response && resp_done_rx.try_recv().is_ok() {
+                        early_response = true;
+                    }
+
+                    let available = read_buf.len().min(remaining);
+                    if available > 0 {
+                        if !early_response {
+                            tokio::select! {
+                                biased;
+                                _ = &mut resp_done_rx => {
+                                    early_response = true;
+                                }
+                                write_res = up_write.write_all(&read_buf[..available]) => {
+                                    write_res?;
+                                }
+                            }
+                        }
+                        read_buf.advance(available);
+                        remaining -= available;
+                        if remaining == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if read_buf.capacity() - read_buf.len() < target_reserve {
+                        read_buf.reserve(target_reserve);
+                    }
+
+                    let bytes_read = if !early_response {
+                        tokio::select! {
+                            biased;
+                            _ = &mut resp_done_rx => {
+                                early_response = true;
+                                break;
+                            }
+                            res = tokio::time::timeout(idle_timeout, down_read.read_buf(read_buf)) => {
+                                match res {
+                                    Ok(res) => res?,
+                                    Err(_) => return Err(Http1Error::Timeout),
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    };
+
+                    if bytes_read == 0 {
+                        break;
+                    }
                 }
 
-                if reached_terminal {
-                    sent_terminal = true;
-                    break;
+                if remaining == 0 {
+                    upload_finished.store(true, std::sync::atomic::Ordering::Release);
                 }
-                continue;
+                if !early_response {
+                    up_write.flush().await?;
+                }
             }
-
-            if read_buf.capacity() - read_buf.len() < target_reserve {
-                read_buf.reserve(target_reserve);
-            }
-
-            let bytes_read =
-                match tokio::time::timeout(idle_timeout, down_read.read_buf(read_buf)).await {
-                    Ok(res) => res?,
-                    Err(_) => return Err(Http1Error::Timeout),
-                };
-
-            if bytes_read == 0 {
-                if read_buf.is_empty() {
-                    break;
-                } else {
-                    return Err(Http1Error::Parse(
-                        "Unexpected EOF while reading chunked body".into(),
-                    ));
-                }
+            Http1BodyFraming::Empty => {
+                velda_http1::encode_request_head(
+                    &head.method,
+                    &head.uri,
+                    &head.headers,
+                    Some(0),
+                    upstream_write_buf,
+                );
+                up_write.write_all(upstream_write_buf).await?;
+                up_write.flush().await?;
+                upstream_write_buf.clear();
             }
         }
 
-        if !sent_terminal {
-            send_chunked_end(&mut up_write).await?;
-        }
-        up_write.flush().await?;
-        Ok::<(), Http1Error>(())
+        Ok::<bool, Http1Error>(early_response)
     };
 
     let download_task = async {
@@ -205,6 +635,7 @@ where
             if close {
                 *close_requested = true;
             }
+            let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
 
@@ -237,6 +668,7 @@ where
                     if total_len > 0 {
                         upstream_read_buf.advance(total_len);
                     }
+                    let _ = resp_done_tx.send(());
                     return Ok(());
                 }
 
@@ -275,17 +707,70 @@ where
                 }
             }
             Http1BodyFraming::Chunked => {
-                let close = velda_http1::server::response::send_response_head_chunked(
-                    &mut down_write,
-                    write_buf,
-                    server_head.version,
-                    server_head.status,
-                    &server_head.headers,
-                    *close_requested,
-                )
-                .await?;
-                if close {
-                    *close_requested = true;
+                let mut sent_via_coalesced = false;
+                if let Some((wire1, payload1, is_term1)) =
+                    velda_http1::parse_single_chunk(upstream_read_buf)?
+                {
+                    sent_via_coalesced = true;
+                    if is_term1 {
+                        upstream_read_buf.advance(wire1);
+                        let close =
+                            velda_http1::server::response::send_response_head_chunked_coalesced(
+                                &mut down_write,
+                                write_buf,
+                                &server_head,
+                                None,
+                                true,
+                                *close_requested,
+                            )
+                            .await?;
+                        if close {
+                            *close_requested = true;
+                        }
+                        let _ = resp_done_tx.send(());
+                        return Ok(());
+                    }
+
+                    let (is_terminated, total_wire) =
+                        match velda_http1::parse_single_chunk(&upstream_read_buf[wire1..])? {
+                            Some((wire2, _, true)) => (true, wire1 + wire2),
+                            _ => (false, wire1),
+                        };
+
+                    let close =
+                        velda_http1::server::response::send_response_head_chunked_coalesced(
+                            &mut down_write,
+                            write_buf,
+                            &server_head,
+                            Some(payload1),
+                            is_terminated,
+                            *close_requested,
+                        )
+                        .await?;
+                    if close {
+                        *close_requested = true;
+                    }
+                    upstream_read_buf.advance(total_wire);
+
+                    if is_terminated {
+                        let _ = resp_done_tx.send(());
+                        return Ok(());
+                    }
+                }
+
+                if !sent_via_coalesced {
+                    let close = velda_http1::server::response::send_response_head_chunked(
+                        &mut down_write,
+                        write_buf,
+                        server_head.version,
+                        server_head.status,
+                        &server_head.headers,
+                        *close_requested,
+                    )
+                    .await?;
+                    if close {
+                        *close_requested = true;
+                    }
                 }
 
                 while let Some(chunk) = read_next_chunk(&mut up_read, upstream_read_buf).await? {
@@ -310,12 +795,24 @@ where
 
         send_chunked_end(&mut down_write).await?;
         down_write.flush().await?;
+        let _ = resp_done_tx.send(());
         Ok::<(), Http1Error>(())
     };
 
     let duplex_res = tokio::try_join!(upload_task, download_task);
-    if duplex_res.is_err() {
-        upstream_lease.mark_closed();
+    if !upload_finished.load(std::sync::atomic::Ordering::Acquire) {
+        conn.mark_close();
     }
-    duplex_res.map(|_| ())
+    match duplex_res {
+        Ok((early_response, ())) => {
+            if early_response {
+                upstream_lease.mark_closed();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            upstream_lease.mark_closed();
+            Err(e)
+        }
+    }
 }

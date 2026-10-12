@@ -289,33 +289,35 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
             .unwrap();
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
-            let resp = http::Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/grpc")
-                .body(())
-                .unwrap();
+            tokio::spawn(async move {
+                let resp = http::Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
 
-            let mut send = stream.respond.send_response(resp, false).unwrap();
+                let mut send = stream.respond.send_response(resp, false).unwrap();
 
-            // Echo each incoming frame back to client
-            while let Some(chunk_res) = stream.recv_stream.data().await {
-                let chunk = chunk_res.unwrap();
-                let len = chunk.len();
-                let mut b = BytesMut::from(&chunk[..]);
-                let (_, payload) = decode_grpc_frame(&mut b).unwrap().unwrap();
+                // Echo each incoming frame back to client
+                while let Some(chunk_res) = stream.recv_stream.data().await {
+                    let chunk = chunk_res.unwrap();
+                    let len = chunk.len();
+                    let mut b = BytesMut::from(&chunk[..]);
+                    let (_, payload) = decode_grpc_frame(&mut b).unwrap().unwrap();
 
-                let mut echo_frame = BytesMut::new();
-                let mut echo_data = b"echo:".to_vec();
-                echo_data.extend_from_slice(&payload);
-                encode_grpc_frame(&echo_data, false, &mut echo_frame);
+                    let mut echo_frame = BytesMut::new();
+                    let mut echo_data = b"echo:".to_vec();
+                    echo_data.extend_from_slice(&payload);
+                    encode_grpc_frame(&echo_data, false, &mut echo_frame);
 
-                send.send_data(echo_frame.freeze(), false).unwrap();
-                let _ = stream.recv_stream.flow_control().release_capacity(len);
-            }
+                    send.send_data(echo_frame.freeze(), false).unwrap();
+                    let _ = stream.recv_stream.flow_control().release_capacity(len);
+                }
 
-            let mut trailers = HeaderMap::new();
-            trailers.insert("grpc-status", "0".parse().unwrap());
-            send.send_trailers(trailers).unwrap();
+                let mut trailers = HeaderMap::new();
+                trailers.insert("grpc-status", "0".parse().unwrap());
+                send.send_trailers(trailers).unwrap();
+            });
         }
     });
 

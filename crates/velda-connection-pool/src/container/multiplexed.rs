@@ -377,6 +377,11 @@ where
                     }
                 }
             }
+
+            if total < self.max_connections_per_key && min_load > 4 {
+                return None;
+            }
+
             best
         };
 
