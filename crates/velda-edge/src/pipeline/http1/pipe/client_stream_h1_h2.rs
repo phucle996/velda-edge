@@ -78,9 +78,28 @@ where
     };
 
     // 5. Initiate HTTP/2 stream
+    let scheme = if upstream.is_tls() { "https" } else { "http" };
+    let authority = head
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| head.uri.host())
+        .unwrap_or(upstream.target_host());
+    let path_and_query = head
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let uri = http::Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .unwrap_or_else(|_| head.uri.clone());
+
     let mut req = http::Request::builder()
         .method(head.method.clone())
-        .uri(head.uri.clone())
+        .uri(uri)
         .version(http::Version::HTTP_2);
     *req.headers_mut().unwrap() = head.headers.clone();
     let req = req.body(()).unwrap();
@@ -112,9 +131,20 @@ where
                 Some(None) => break,
                 None => {
                     use tokio::io::AsyncReadExt;
+                    const TARGET_RESERVE: usize = 65536;
+                    if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < TARGET_RESERVE
+                    {
+                        conn.read_buf.reserve(TARGET_RESERVE);
+                    }
                     let n = conn.stream.read_buf(&mut conn.read_buf).await?;
                     if n == 0 {
-                        break;
+                        if conn.read_buf.is_empty() {
+                            break;
+                        } else {
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading chunked body".into(),
+                            ));
+                        }
                     }
                 }
             }
@@ -134,7 +164,7 @@ where
                     continue;
                 }
                 let to_read = remaining.min(65536);
-                if conn.read_buf.capacity() < to_read {
+                if conn.read_buf.capacity().saturating_sub(conn.read_buf.len()) < to_read {
                     conn.read_buf.reserve(to_read);
                 }
                 use tokio::io::AsyncReadExt;

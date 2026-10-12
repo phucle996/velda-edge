@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
-use velda_http2::pipe::Http2PipeStrategy;
+use velda_http2::Http2PipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use crate::error::EdgeError;

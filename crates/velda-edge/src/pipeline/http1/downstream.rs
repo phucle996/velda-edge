@@ -21,8 +21,8 @@ use super::pipe;
 use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
-use velda_http2::pipe::Http2PipeStrategy;
-use velda_http3::pipe::Http3PipeStrategy;
+use velda_http2::Http2PipeStrategy;
+use velda_http3::Http3PipeStrategy;
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///

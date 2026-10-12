@@ -10,7 +10,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
-use velda_http3::pipe::Http3PipeStrategy;
+use velda_http3::Http3PipeStrategy;
 use velda_router::Http3RouteRequest;
 use velda_transport::{Datagram, UdpSocket};
 

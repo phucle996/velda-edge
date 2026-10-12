@@ -36,6 +36,26 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// Returns true if a header field is prohibited in HTTP/3 according to RFC 9114 Section 4.2.
+#[inline]
+pub fn is_prohibited_header(name: &HeaderName, val: &http::HeaderValue) -> bool {
+    if *name == http::header::CONNECTION
+        || *name == http::header::TRANSFER_ENCODING
+        || *name == http::header::UPGRADE
+        || name.as_str().eq_ignore_ascii_case("keep-alive")
+        || name.as_str().eq_ignore_ascii_case("proxy-connection")
+    {
+        return true;
+    }
+    if *name == http::header::TE {
+        let is_trailers = val
+            .to_str()
+            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("trailers"));
+        return !is_trailers;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

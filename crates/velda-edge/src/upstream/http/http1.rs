@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use velda_connection_pool::{PoolConfig, PoolManager, PoolableResource};
 use velda_core::StreamingMode;
+use velda_http1::Http1PipeStrategy;
 pub use velda_http1::UpstreamHttp1Stream;
-use velda_http1::pipe::Http1PipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use crate::error::EdgeError;

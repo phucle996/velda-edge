@@ -10,14 +10,14 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::L7Response;
-use velda_http1::pipe::Http1PipeStrategy;
+use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2Error;
+use velda_http2::Http2PipeStrategy;
 use velda_http2::config::Http2Config;
-use velda_http2::pipe::Http2PipeStrategy;
 use velda_http2::server::{
     Http2Responder, Http2ServerConnection, Http2ServerRequestHead, Http2StreamReceiver,
 };
-use velda_http3::pipe::Http3PipeStrategy;
+use velda_http3::Http3PipeStrategy;
 use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;

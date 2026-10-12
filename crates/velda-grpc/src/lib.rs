@@ -22,14 +22,14 @@ pub use frame::{GrpcFrame, decode_grpc_frame, encode_grpc_frame};
 pub use status::GrpcStatus;
 pub use tcp::{
     GrpcAccelerationPath, GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse,
-    GrpcClientResponseHead, GrpcResponder, GrpcServerConnection, GrpcServerRequest,
-    GrpcServerRequestHead, GrpcServerResponse, GrpcServerResponseHead, GrpcServerStream,
-    GrpcUpstreamConnector,
+    GrpcClientResponseHead, GrpcPipeStrategy, GrpcResponder, GrpcServerConnection,
+    GrpcServerRequest, GrpcServerRequestHead, GrpcServerResponse, GrpcServerResponseHead,
+    GrpcServerStream, GrpcUpstreamConnector,
 };
 pub use udp::{
     GrpcUdpClient, GrpcUdpClientRequest, GrpcUdpClientRequestHead, GrpcUdpClientResponse,
-    GrpcUdpClientResponseHead, GrpcUdpEngine, GrpcUdpRequestEvent, GrpcUdpResponder,
-    GrpcUdpServerRequest, GrpcUdpServerRequestHead, GrpcUdpServerResponse,
+    GrpcUdpClientResponseHead, GrpcUdpEngine, GrpcUdpPipeStrategy, GrpcUdpRequestEvent,
+    GrpcUdpResponder, GrpcUdpServerRequest, GrpcUdpServerRequestHead, GrpcUdpServerResponse,
     GrpcUdpServerResponseHead, GrpcUdpServerStream,
 };
 pub use wire::GrpcWire;

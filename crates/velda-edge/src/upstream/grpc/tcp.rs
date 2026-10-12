@@ -6,8 +6,8 @@ use std::sync::Arc;
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
 use velda_grpc::GrpcConfig;
+use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::client::{GrpcAccelerationPath, GrpcUpstreamConnector};
-use velda_grpc::tcp::pipe::GrpcPipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use super::super::lb::EdgeUpstream;

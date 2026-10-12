@@ -7,15 +7,14 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use velda_core::L7Request;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse,
 };
-use velda_http3::Http3Config;
 use velda_http3::error::Http3Error;
-use velda_http3::pipe::pipe_server_stream;
+use velda_http3::{Http3Config, sanitize_headers};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -80,7 +79,12 @@ where
         }
     };
 
-    // 4. Construct canonical L7Request
+    let req_method = head.method.clone();
+
+    // 4. Sanitize connection-specific headers forbidden by RFC 9114 §4.2 before H3 encoding
+    sanitize_headers(&mut head.headers);
+
+    // 5. Construct canonical L7Request
     let l7_req = L7Request::new(
         head.method,
         head.uri,
@@ -91,7 +95,7 @@ where
 
     let h3_config = Http3Config::auto();
 
-    // 5. Acquire pooled HTTP/3 client
+    // 6. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&h3_config).await {
         Ok(res) => res,
         Err(e) => {
@@ -114,29 +118,20 @@ where
         }
     };
 
-    // 6. Pipe server-streaming response with self-healing on connection close
-    let mut pipe_res = pipe_server_stream(&client, &l7_req, &h3_config).await;
-    if let Err(Http3Error::ConnectionClosed) = pipe_res {
+    // 6. Forward request over HTTP/3 stream and get progressive streaming response
+    let mut stream_res = client.send_stream_request(l7_req.clone()).await;
+    if let Err(Http3Error::ConnectionClosed) = stream_res {
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = pipe_server_stream(&fresh_client, &l7_req, &h3_config).await;
+            stream_res = fresh_client.send_stream_request(l7_req).await;
         }
     }
 
-    match pipe_res {
-        Ok(l7_resp) => {
-            let server_resp = Http1ServerResponse::new(
-                l7_resp.status,
-                http::Version::HTTP_11,
-                l7_resp.headers,
-                l7_resp.body,
-            );
-            conn.send_response(&server_resp).await?;
-            Ok(())
-        }
+    let mut h3_resp = match stream_res {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -153,7 +148,95 @@ where
             );
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
-            Err(Http1Error::ConnectionClosed)
+            return Err(Http1Error::ConnectionClosed);
+        }
+    };
+
+    // 7. Check if response has no body (RFC 9110: HEAD, 1xx, 204, 304)
+    let is_head = req_method == http::Method::HEAD;
+    let is_no_body = h3_resp.status.is_informational()
+        || h3_resp.status == StatusCode::NO_CONTENT
+        || h3_resp.status == StatusCode::NOT_MODIFIED;
+
+    if is_head || is_no_body {
+        let server_resp = Http1ServerResponse::new(
+            h3_resp.status,
+            http::Version::HTTP_11,
+            h3_resp.headers,
+            velda_core::Body::Empty,
+        );
+        conn.send_response(&server_resp).await?;
+        return Ok(());
+    }
+
+    // 8. Immediately send chunked response head downstream!
+    let resp_head = velda_http1::server::response::Http1ServerResponseHead::new(
+        h3_resp.status,
+        http::Version::HTTP_11,
+        std::mem::take(&mut h3_resp.headers),
+    );
+    conn.send_response_head_chunked(&resp_head).await?;
+
+    // 9. Stream response chunks downstream with batch coalescing and client disconnect propagation
+    let mut chunk_batch: [bytes::Bytes; 16] = Default::default();
+
+    loop {
+        let first_chunk = match h3_resp.next_chunk().await {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                tracing::debug!(error = %e, "Error reading HTTP/3 response stream chunk");
+                return Err(Http1Error::ConnectionClosed);
+            }
+            None => break,
+        };
+
+        chunk_batch[0] = first_chunk;
+        let mut count = 1;
+        let mut batch_bytes = chunk_batch[0].len();
+        let mut reached_eof = false;
+
+        // Drain up to 16 ready chunks already in the channel
+        while count < 16 && batch_bytes < 131_072 {
+            match h3_resp.chunk_rx.try_recv() {
+                Ok(Ok(next_chunk)) => {
+                    batch_bytes += next_chunk.len();
+                    chunk_batch[count] = next_chunk;
+                    count += 1;
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "Error reading opportunistic HTTP/3 chunk");
+                    return Err(Http1Error::ConnectionClosed);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    reached_eof = true;
+                    break;
+                }
+            }
+        }
+
+        let send_res = if count == 1 {
+            velda_http1::wire::send_chunk(&mut conn.stream, &chunk_batch[0]).await
+        } else {
+            velda_http1::wire::send_coalesced_chunks(&mut conn.stream, &chunk_batch[..count]).await
+        };
+
+        if let Err(e) = send_res {
+            tracing::debug!(
+                error = %e,
+                "Downstream client disconnected during HTTP/3 server response streaming"
+            );
+            return Err(Http1Error::ConnectionClosed);
+        }
+
+        if reached_eof {
+            break;
         }
     }
+
+    // 10. Conclude chunked stream downstream
+    velda_http1::wire::send_chunked_end(&mut conn.stream).await?;
+    conn.stream.flush().await?;
+    conn.compact_buffers();
+    Ok(())
 }

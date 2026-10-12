@@ -341,7 +341,7 @@ async fn test_http2_client_streaming_upload() {
 #[test]
 fn test_http2_pipe_strategy_mapping() {
     use velda_core::StreamingMode;
-    use velda_http2::pipe::Http2PipeStrategy;
+    use velda_http2::Http2PipeStrategy;
 
     assert_eq!(
         Http2PipeStrategy::from_streaming(StreamingMode::DISABLED),

@@ -15,9 +15,45 @@ use tokio::sync::{mpsc, oneshot};
 use velda_core::{L7Request, L7Response};
 
 use super::driver::{ClientCommand, run_client_driver};
+use super::response::Http3StreamResponse;
 use crate::config::Http3Config;
 use crate::error::Http3Error;
 use crate::frame::{Http3Frame, encode_frame, encode_varint, settings_id, stream_type};
+
+/// Upstream HTTP/3 progressive request chunk streaming handle.
+#[derive(Clone)]
+pub struct Http3StreamSender {
+    pub(crate) stream_id: quinn_proto::StreamId,
+    pub(crate) command_tx: mpsc::Sender<ClientCommand>,
+}
+
+impl Http3StreamSender {
+    /// Progressively sends a chunk of request DATA frame to the upstream HTTP/3 stream.
+    #[inline]
+    pub async fn send_chunk(&self, chunk: bytes::Bytes) -> Result<(), Http3Error> {
+        self.command_tx
+            .send(ClientCommand::SendChunk {
+                stream_id: self.stream_id,
+                chunk,
+                is_fin: false,
+            })
+            .await
+            .map_err(|_| Http3Error::ConnectionClosed)
+    }
+
+    /// Finishes the upstream HTTP/3 request stream (emits FIN bit).
+    #[inline]
+    pub async fn finish(&self) -> Result<(), Http3Error> {
+        self.command_tx
+            .send(ClientCommand::SendChunk {
+                stream_id: self.stream_id,
+                chunk: bytes::Bytes::new(),
+                is_fin: true,
+            })
+            .await
+            .map_err(|_| Http3Error::ConnectionClosed)
+    }
+}
 
 /// An active, persistent multiplexed HTTP/3 upstream client connection.
 ///
@@ -47,6 +83,56 @@ impl Http3Client {
         reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
     }
 
+    /// Dispatches an owned [`L7Request`] over a new multiplexed bidirectional stream, returning
+    /// a progressive streaming response handle [`Http3StreamResponse`].
+    pub async fn send_stream_request(
+        &self,
+        req: L7Request,
+    ) -> Result<Http3StreamResponse, Http3Error> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::SendStreamRequest {
+                request: req,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| Http3Error::ConnectionClosed)?;
+
+        reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
+    }
+
+    /// Initiates a progressive bidirectional stream on this HTTP/3 connection.
+    ///
+    /// Sends the request headers frame upstream immediately and returns a pair:
+    /// `(Http3StreamSender, oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>)`
+    /// - `Http3StreamSender` allows streaming request body chunks to upstream immediately.
+    /// - The receiver yields the upstream [`Http3StreamResponse`] once response headers arrive.
+    pub async fn open_stream(
+        &self,
+        method: http::Method,
+        uri: http::Uri,
+        headers: http::HeaderMap,
+    ) -> Result<
+        (
+            Http3StreamSender,
+            oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>,
+        ),
+        Http3Error,
+    > {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::OpenStream {
+                method,
+                uri,
+                headers,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| Http3Error::ConnectionClosed)?;
+
+        reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
+    }
+
     /// Dispatches an upstream [`Http3ClientRequest`] over a new multiplexed bidirectional stream on this connection.
     pub async fn send_client_request(
         &self,
@@ -61,6 +147,15 @@ impl Http3Client {
     #[inline]
     pub async fn send_request_ref(&self, req: &L7Request) -> Result<L7Response, Http3Error> {
         self.send_request(req.clone()).await
+    }
+
+    /// Dispatches a borrowed [`L7Request`] for streaming response by cloning it.
+    #[inline]
+    pub async fn send_stream_request_ref(
+        &self,
+        req: &L7Request,
+    ) -> Result<Http3StreamResponse, Http3Error> {
+        self.send_stream_request(req.clone()).await
     }
 
     /// Returns the target physical socket address of this client connection.
@@ -81,6 +176,7 @@ impl Http3Client {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn mock_for_test(target: SocketAddr) -> (Self, mpsc::Receiver<ClientCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(1);
         (
@@ -101,13 +197,24 @@ pub async fn connect(
     server_name: &str,
     config: &Http3Config,
 ) -> Result<Http3Client, Http3Error> {
-    // 1. Bind local UDP egress socket
+    // 1. Bind local UDP egress socket with tuned kernel buffers
+    let domain = if target.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(Http3Error::Io)?;
+    let _ = sock.set_recv_buffer_size(4 * 1024 * 1024);
+    let _ = sock.set_send_buffer_size(4 * 1024 * 1024);
+    sock.set_nonblocking(true).map_err(Http3Error::Io)?;
     let bind_addr: SocketAddr = if target.is_ipv4() {
         "0.0.0.0:0".parse().unwrap()
     } else {
         "[::]:0".parse().unwrap()
     };
-    let socket = Arc::new(UdpSocket::bind(bind_addr).await.map_err(Http3Error::Io)?);
+    sock.bind(&bind_addr.into()).map_err(Http3Error::Io)?;
+    let std_socket: std::net::UdpSocket = sock.into();
+    let socket = Arc::new(UdpSocket::from_std(std_socket).map_err(Http3Error::Io)?);
 
     // 2. Build QUIC client endpoint and config
     let endpoint_config = Arc::new(EndpointConfig::default());
@@ -220,6 +327,7 @@ pub async fn connect(
         conn,
         handle,
         command_rx,
+        command_tx.clone(),
         config.max_body_size,
     ));
 

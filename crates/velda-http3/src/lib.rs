@@ -20,13 +20,14 @@ pub mod error;
 pub mod frame;
 pub mod headers;
 pub mod huffman;
-pub mod pipe;
 pub mod qpack;
 pub mod server;
+pub mod strategy;
 
 pub use client::{
     Http3Client, Http3ClientRequest, Http3ClientRequestHead, Http3ClientResponse,
-    Http3ClientResponseHead, connect, extract_sni, forward_request, resolve_sni, strip_port,
+    Http3ClientResponseHead, Http3StreamResponse, Http3StreamSender, connect, extract_sni,
+    forward_request, resolve_sni, strip_port,
 };
 pub use config::Http3Config;
 pub use error::Http3Error;
@@ -36,9 +37,6 @@ pub use frame::{
 };
 pub use headers::sanitize_headers;
 pub use huffman::{decode_huffman, encode_huffman};
-pub use pipe::{
-    Http3PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
-};
 pub use qpack::{DecodedHeaders, decode_qpack, encode_qpack_request, encode_qpack_response};
 pub use quinn_proto;
 pub use server::{
@@ -46,3 +44,4 @@ pub use server::{
     Http3ServerResponse, Http3ServerResponseHead, OutgoingDatagram, build_edge_response_frames,
     enrich_headers, extract_host, is_clean_path, normalize_path, send_response,
 };
+pub use strategy::Http3PipeStrategy;

@@ -3,7 +3,7 @@
 //! Manages multiplexed bidirectional request-response streams over a persistent QUIC
 //! connection, driving stream reads, writes, timeouts, cancellation, and UDP I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use velda_core::{Body, L7Request, L7Response};
 
+use super::response::Http3StreamResponse;
 use crate::error::Http3Error;
 use crate::frame::{Http3Frame, decode_frame, encode_frame, error_code};
 use crate::qpack::{decode_qpack, encode_qpack_request};
@@ -21,25 +22,277 @@ use crate::qpack::{decode_qpack, encode_qpack_request};
 /// Internal command dispatched to the background QUIC connection driver loop.
 ///
 /// Note: `clippy::large_enum_variant` is deliberately permitted here to preserve zero heap
-/// allocation on the request dispatch hot path. `SendRequest` represents 99.999% of channel traffic,
-/// and keeping `L7Request` unboxed avoids `malloc`/`free` overhead per request.
+/// allocation on the request dispatch hot path. Keeping `L7Request` unboxed avoids `malloc`/`free` overhead per request.
+pub(crate) type OpenStreamReply = Result<
+    (
+        super::connector::Http3StreamSender,
+        oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>,
+    ),
+    Http3Error,
+>;
+
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ClientCommand {
-    /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream.
+    /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream (buffered response).
     SendRequest {
         request: L7Request,
         reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+    },
+    /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream (progressive streaming response).
+    SendStreamRequest {
+        request: L7Request,
+        reply_tx: oneshot::Sender<Result<Http3StreamResponse, Http3Error>>,
+    },
+    /// Opens a progressive bidirectional stream, returning an Http3StreamSender and a receiver for Http3StreamResponse.
+    OpenStream {
+        method: http::Method,
+        uri: http::Uri,
+        headers: HeaderMap,
+        reply_tx: oneshot::Sender<OpenStreamReply>,
+    },
+    /// Sends a chunk of request DATA frame or finishes the request stream.
+    SendChunk {
+        stream_id: StreamId,
+        chunk: bytes::Bytes,
+        is_fin: bool,
     },
     /// Gracefully closes the QUIC connection.
     Close,
 }
 
+type StreamHeadChannel = (
+    oneshot::Sender<Result<Http3StreamResponse, Http3Error>>,
+    mpsc::Receiver<Result<bytes::Bytes, Http3Error>>,
+);
+
+enum StreamReply {
+    Buffered {
+        reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+        data_payload: BytesMut,
+    },
+    Streaming {
+        head_tx: Option<StreamHeadChannel>,
+        chunk_tx: mpsc::Sender<Result<bytes::Bytes, Http3Error>>,
+    },
+}
+
 struct ActiveStreamSlot {
     method: http::Method,
-    reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+    reply: StreamReply,
     headers: Option<(Option<StatusCode>, HeaderMap)>,
     raw_buf: BytesMut,
-    data_payload: BytesMut,
+    outbound_buf: BytesMut,
+    outbound_finished: bool,
+}
+
+#[inline]
+fn flush_stream_outbound(
+    conn: &mut quinn_proto::Connection,
+    stream_id: StreamId,
+    slot: &mut ActiveStreamSlot,
+) {
+    use bytes::Buf;
+    while !slot.outbound_buf.is_empty() {
+        match conn.send_stream(stream_id).write(&slot.outbound_buf) {
+            Ok(n) if n > 0 => {
+                slot.outbound_buf.advance(n);
+            }
+            _ => break,
+        }
+    }
+    if slot.outbound_buf.is_empty() {
+        slot.outbound_buf.clear();
+        if slot.outbound_finished {
+            let _ = conn.send_stream(stream_id).finish();
+        }
+    }
+}
+
+const MAX_PENDING_STREAMS: usize = 4096;
+const PENDING_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[inline]
+fn is_open_command_cancelled(cmd: &ClientCommand) -> bool {
+    match cmd {
+        ClientCommand::SendRequest { reply_tx, .. } => reply_tx.is_closed(),
+        ClientCommand::SendStreamRequest { reply_tx, .. } => reply_tx.is_closed(),
+        ClientCommand::OpenStream { reply_tx, .. } => reply_tx.is_closed(),
+        _ => false,
+    }
+}
+
+#[inline]
+fn reject_open_command(cmd: ClientCommand, err: Http3Error) {
+    match cmd {
+        ClientCommand::SendRequest { reply_tx, .. } => {
+            let _ = reply_tx.send(Err(err));
+        }
+        ClientCommand::SendStreamRequest { reply_tx, .. } => {
+            let _ = reply_tx.send(Err(err));
+        }
+        ClientCommand::OpenStream { reply_tx, .. } => {
+            let _ = reply_tx.send(Err(err));
+        }
+        _ => {}
+    }
+}
+
+#[inline]
+fn dispatch_open_command(
+    cmd: ClientCommand,
+    stream_id: StreamId,
+    conn: &mut quinn_proto::Connection,
+    streams: &mut HashMap<StreamId, ActiveStreamSlot>,
+    sender_command_tx: &mpsc::Sender<ClientCommand>,
+) {
+    match cmd {
+        ClientCommand::SendRequest { request, reply_tx } => {
+            let req_method = request.method.clone();
+
+            // Encode QPACK request HEADERS frame
+            let mut header_buf = BytesMut::new();
+            encode_qpack_request(
+                &request.method,
+                &request.uri,
+                &request.headers,
+                &mut header_buf,
+            );
+            let header_frame = Http3Frame::Headers(header_buf.freeze());
+
+            let mut send_buf = BytesMut::new();
+            encode_frame(&header_frame, &mut send_buf);
+
+            // Encode optional DATA frame using move semantics (zero clone)
+            if let Body::Bytes(b) = request.body
+                && !b.is_empty()
+            {
+                let data_frame = Http3Frame::Data(b);
+                encode_frame(&data_frame, &mut send_buf);
+            }
+
+            let mut slot = ActiveStreamSlot {
+                method: req_method,
+                reply: StreamReply::Buffered {
+                    reply_tx,
+                    data_payload: BytesMut::new(),
+                },
+                headers: None,
+                raw_buf: BytesMut::new(),
+                outbound_buf: send_buf,
+                outbound_finished: true,
+            };
+            flush_stream_outbound(conn, stream_id, &mut slot);
+            streams.insert(stream_id, slot);
+        }
+        ClientCommand::SendStreamRequest { request, reply_tx } => {
+            let req_method = request.method.clone();
+
+            // Encode QPACK request HEADERS frame
+            let mut header_buf = BytesMut::new();
+            encode_qpack_request(
+                &request.method,
+                &request.uri,
+                &request.headers,
+                &mut header_buf,
+            );
+            let header_frame = Http3Frame::Headers(header_buf.freeze());
+
+            let mut send_buf = BytesMut::new();
+            encode_frame(&header_frame, &mut send_buf);
+
+            // Encode optional DATA frame using move semantics (zero clone)
+            if let Body::Bytes(b) = request.body
+                && !b.is_empty()
+            {
+                let data_frame = Http3Frame::Data(b);
+                encode_frame(&data_frame, &mut send_buf);
+            }
+
+            let (chunk_tx, chunk_rx) = mpsc::channel(32);
+            let mut slot = ActiveStreamSlot {
+                method: req_method,
+                reply: StreamReply::Streaming {
+                    head_tx: Some((reply_tx, chunk_rx)),
+                    chunk_tx,
+                },
+                headers: None,
+                raw_buf: BytesMut::new(),
+                outbound_buf: send_buf,
+                outbound_finished: true,
+            };
+            flush_stream_outbound(conn, stream_id, &mut slot);
+            streams.insert(stream_id, slot);
+        }
+        ClientCommand::OpenStream {
+            method,
+            uri,
+            headers,
+            reply_tx,
+        } => {
+            let req_method = method.clone();
+
+            // Encode QPACK request HEADERS frame
+            let mut header_buf = BytesMut::new();
+            encode_qpack_request(&method, &uri, &headers, &mut header_buf);
+            let header_frame = Http3Frame::Headers(header_buf.freeze());
+
+            let mut send_buf = BytesMut::new();
+            encode_frame(&header_frame, &mut send_buf);
+
+            let (resp_tx, resp_rx) = oneshot::channel();
+            let (chunk_tx, chunk_rx) = mpsc::channel(32);
+            let stream_sender = super::connector::Http3StreamSender {
+                stream_id,
+                command_tx: sender_command_tx.clone(),
+            };
+
+            let mut slot = ActiveStreamSlot {
+                method: req_method,
+                reply: StreamReply::Streaming {
+                    head_tx: Some((resp_tx, chunk_rx)),
+                    chunk_tx,
+                },
+                headers: None,
+                raw_buf: BytesMut::new(),
+                outbound_buf: send_buf,
+                outbound_finished: false,
+            };
+            flush_stream_outbound(conn, stream_id, &mut slot);
+            streams.insert(stream_id, slot);
+            let _ = reply_tx.send(Ok((stream_sender, resp_rx)));
+        }
+        _ => {}
+    }
+}
+
+#[inline]
+fn drain_pending_commands(
+    pending_commands: &mut VecDeque<(Instant, ClientCommand)>,
+    conn: &mut quinn_proto::Connection,
+    streams: &mut HashMap<StreamId, ActiveStreamSlot>,
+    sender_command_tx: &mpsc::Sender<ClientCommand>,
+) {
+    while let Some(front) = pending_commands.front() {
+        if front.0.elapsed() > PENDING_STREAM_TIMEOUT {
+            let (_, cmd) = pending_commands.pop_front().unwrap();
+            reject_open_command(
+                cmd,
+                Http3Error::H3("Pending stream request timed out".into()),
+            );
+            continue;
+        }
+        if is_open_command_cancelled(&front.1) {
+            pending_commands.pop_front();
+            continue;
+        }
+        match conn.streams().open(Dir::Bi) {
+            Some(stream_id) => {
+                let (_, cmd) = pending_commands.pop_front().unwrap();
+                dispatch_open_command(cmd, stream_id, conn, streams, sender_command_tx);
+            }
+            None => break,
+        }
+    }
 }
 
 /// Background QUIC connection driver loop.
@@ -52,9 +305,11 @@ pub(crate) async fn run_client_driver(
     mut conn: quinn_proto::Connection,
     _handle: quinn_proto::ConnectionHandle,
     mut command_rx: mpsc::Receiver<ClientCommand>,
+    sender_command_tx: mpsc::Sender<ClientCommand>,
     max_body_size: usize,
 ) {
     let mut streams: HashMap<StreamId, ActiveStreamSlot> = HashMap::with_capacity(256);
+    let mut pending_commands: VecDeque<(Instant, ClientCommand)> = VecDeque::with_capacity(128);
     let mut transmit_buf = Vec::with_capacity(65535);
     let mut socket_recv_buf = vec![0u8; 65535];
     let mut chunk_scratch_buf = Vec::with_capacity(65536);
@@ -79,80 +334,62 @@ pub(crate) async fn run_client_driver(
         tokio::select! {
             // Ingest new command from client handles with adaptive batch draining
             cmd = command_rx.recv() => {
+                drain_pending_commands(
+                    &mut pending_commands,
+                    &mut conn,
+                    &mut streams,
+                    &sender_command_tx,
+                );
+
                 let mut current_cmd = cmd;
                 let mut batch_count = 0;
                 let mut should_exit = false;
 
                 while let Some(c) = current_cmd {
                     match c {
-                        ClientCommand::SendRequest { request, reply_tx } => {
-                            let stream_id = match conn.streams().open(Dir::Bi) {
-                                Some(id) => id,
-                                None => {
-                                    let _ = reply_tx.send(Err(Http3Error::H3("No concurrent bidirectional streams available".into())));
-                                    batch_count += 1;
-                                    if batch_count >= 32 {
-                                        break;
-                                    }
-                                    current_cmd = command_rx.try_recv().ok();
-                                    continue;
+                        ClientCommand::SendRequest { .. }
+                        | ClientCommand::SendStreamRequest { .. }
+                        | ClientCommand::OpenStream { .. } => {
+                            if !pending_commands.is_empty() {
+                                if pending_commands.len() >= MAX_PENDING_STREAMS {
+                                    reject_open_command(
+                                        c,
+                                        Http3Error::H3("No concurrent bidirectional streams available (queue full)".into()),
+                                    );
+                                } else {
+                                    pending_commands.push_back((Instant::now(), c));
                                 }
-                            };
-
-                            let req_method = request.method.clone();
-
-                            // Encode QPACK request HEADERS frame
-                            let mut header_buf = BytesMut::new();
-                            encode_qpack_request(&request.method, &request.uri, &request.headers, &mut header_buf);
-                            let header_frame = Http3Frame::Headers(header_buf.freeze());
-
-                            let mut send_buf = BytesMut::new();
-                            encode_frame(&header_frame, &mut send_buf);
-
-                            // Encode optional DATA frame using move semantics (zero clone)
-                            if let Body::Bytes(b) = request.body
-                                && !b.is_empty()
-                            {
-                                let data_frame = Http3Frame::Data(b);
-                                encode_frame(&data_frame, &mut send_buf);
-                            }
-
-                            let mut written = 0;
-                            let mut write_err = None;
-                            while written < send_buf.len() {
-                                match conn.send_stream(stream_id).write(&send_buf[written..]) {
-                                    Ok(n) => {
-                                        if n == 0 {
-                                            break;
-                                        }
-                                        written += n;
-                                    }
-                                    Err(e) => {
-                                        write_err = Some(e);
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if let Some(e) = write_err {
-                                let _ = reply_tx.send(Err(Http3Error::H3(e.to_string())));
-                            } else if written < send_buf.len() {
-                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
-                                    "Client send stream window exhausted: {written}/{} bytes written",
-                                    send_buf.len()
-                                ))));
                             } else {
-                                let _ = conn.send_stream(stream_id).finish();
-                                streams.insert(
-                                    stream_id,
-                                    ActiveStreamSlot {
-                                        method: req_method,
-                                        reply_tx,
-                                        headers: None,
-                                        raw_buf: BytesMut::new(),
-                                        data_payload: BytesMut::new(),
-                                    },
-                                );
+                                match conn.streams().open(Dir::Bi) {
+                                    Some(stream_id) => {
+                                        dispatch_open_command(
+                                            c,
+                                            stream_id,
+                                            &mut conn,
+                                            &mut streams,
+                                            &sender_command_tx,
+                                        );
+                                    }
+                                    None => {
+                                        pending_commands.push_back((Instant::now(), c));
+                                    }
+                                }
+                            }
+                        }
+                        ClientCommand::SendChunk {
+                            stream_id,
+                            chunk,
+                            is_fin,
+                        } => {
+                            if let Some(slot) = streams.get_mut(&stream_id) {
+                                if !chunk.is_empty() {
+                                    let data_frame = Http3Frame::Data(chunk);
+                                    encode_frame(&data_frame, &mut slot.outbound_buf);
+                                }
+                                if is_fin {
+                                    slot.outbound_finished = true;
+                                }
+                                flush_stream_outbound(&mut conn, stream_id, slot);
                             }
                         }
                         ClientCommand::Close => {
@@ -215,6 +452,13 @@ pub(crate) async fn run_client_driver(
                     }
                     current_res = socket.try_recv_from(&mut socket_recv_buf).ok().map(Ok);
                 }
+
+                drain_pending_commands(
+                    &mut pending_commands,
+                    &mut conn,
+                    &mut streams,
+                    &sender_command_tx,
+                );
             }
 
             // Timeout expiration
@@ -228,14 +472,35 @@ pub(crate) async fn run_client_driver(
             }
         }
 
+        // Flush streams with pending outbound data
+        for (&id, slot) in streams.iter_mut() {
+            if !slot.outbound_buf.is_empty() {
+                flush_stream_outbound(&mut conn, id, slot);
+            }
+        }
+
         // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver
         let cancelled_streams: Vec<StreamId> = streams
             .iter()
-            .filter_map(|(&id, slot)| {
-                if slot.reply_tx.is_closed() {
-                    Some(id)
-                } else {
-                    None
+            .filter_map(|(&id, slot)| match &slot.reply {
+                StreamReply::Buffered { reply_tx, .. } => {
+                    if reply_tx.is_closed() {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                }
+                StreamReply::Streaming { head_tx, chunk_tx } => {
+                    let head_closed = head_tx
+                        .as_ref()
+                        .map(|(tx, _)| tx.is_closed())
+                        .unwrap_or(false);
+                    let chunk_closed = chunk_tx.is_closed();
+                    if head_closed || chunk_closed {
+                        Some(id)
+                    } else {
+                        None
+                    }
                 }
             })
             .collect();
@@ -270,6 +535,15 @@ pub(crate) async fn run_client_driver(
                             while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
                             let _ = chunks.finalize();
                         }
+                        continue;
+                    }
+
+                    // RFC 9114 Flow control backpressure: If stream is active and progressive chunk buffer is full,
+                    // do not read from Quinn yet to withhold receive window credit from peer.
+                    if let Some(slot) = streams.get(&id)
+                        && let StreamReply::Streaming { chunk_tx, .. } = &slot.reply
+                        && chunk_tx.capacity() == 0
+                    {
                         continue;
                     }
 
@@ -309,9 +583,27 @@ pub(crate) async fn run_client_driver(
 
                     if let Some(err) = stream_reset_err {
                         if let Some(slot) = streams.remove(&id) {
-                            let _ = slot
-                                .reply_tx
-                                .send(Err(Http3Error::H3(format!("Stream reset by peer: {err}"))));
+                            match slot.reply {
+                                StreamReply::Buffered { reply_tx, .. } => {
+                                    let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                        "Stream reset by peer: {err}"
+                                    ))));
+                                }
+                                StreamReply::Streaming {
+                                    mut head_tx,
+                                    chunk_tx,
+                                } => {
+                                    if let Some((tx, _)) = head_tx.take() {
+                                        let _ = tx.send(Err(Http3Error::H3(format!(
+                                            "Stream reset by peer: {err}"
+                                        ))));
+                                    } else {
+                                        let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                            "Stream reset by peer: {err}"
+                                        ))));
+                                    }
+                                }
+                            }
                         }
                         continue;
                     }
@@ -321,9 +613,26 @@ pub(crate) async fn run_client_driver(
                             error_code::H3_MESSAGE_ERROR as u32,
                         ));
                         if let Some(slot) = streams.remove(&id) {
-                            let _ = slot
-                                .reply_tx
-                                .send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
+                            match slot.reply {
+                                StreamReply::Buffered { reply_tx, .. } => {
+                                    let _ = reply_tx
+                                        .send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
+                                }
+                                StreamReply::Streaming {
+                                    mut head_tx,
+                                    chunk_tx,
+                                } => {
+                                    if let Some((tx, _)) = head_tx.take() {
+                                        let _ = tx.send(Err(Http3Error::PayloadTooLarge(
+                                            max_body_size + 1,
+                                        )));
+                                    } else {
+                                        let _ = chunk_tx.try_send(Err(
+                                            Http3Error::PayloadTooLarge(max_body_size + 1),
+                                        ));
+                                    }
+                                }
+                            }
                         }
                         continue;
                     }
@@ -336,18 +645,36 @@ pub(crate) async fn run_client_driver(
                             match frame {
                                 Http3Frame::Headers(payload) => {
                                     if let Ok(decoded) = decode_qpack(&payload) {
-                                        slot.headers = Some((decoded.status, decoded.headers));
+                                        slot.headers =
+                                            Some((decoded.status, decoded.headers.clone()));
+                                        if let StreamReply::Streaming {
+                                            ref mut head_tx, ..
+                                        } = slot.reply
+                                            && let Some((tx, chunk_rx)) = head_tx.take()
+                                        {
+                                            let status = decoded.status.unwrap_or(StatusCode::OK);
+                                            let _ = tx.send(Ok(Http3StreamResponse::new(
+                                                status,
+                                                decoded.headers,
+                                                chunk_rx,
+                                            )));
+                                        }
                                     }
                                 }
-                                Http3Frame::Data(payload) => {
-                                    slot.data_payload.extend_from_slice(&payload);
-                                }
+                                Http3Frame::Data(payload) => match &mut slot.reply {
+                                    StreamReply::Buffered { data_payload, .. } => {
+                                        data_payload.extend_from_slice(&payload);
+                                    }
+                                    StreamReply::Streaming { chunk_tx, .. } => {
+                                        let _ = chunk_tx.try_send(Ok(payload));
+                                    }
+                                },
                                 _ => {}
                             }
                         }
                     }
 
-                    // Only complete and emit the response when peer has finished sending stream data (FIN reached)
+                    // Complete stream handling upon FIN
                     let slot = if stream_finished {
                         streams.remove(&id)
                     } else {
@@ -358,46 +685,122 @@ pub(crate) async fn run_client_driver(
                             .headers
                             .unwrap_or((Some(StatusCode::OK), HeaderMap::new()));
                         let status_code = status.unwrap_or(StatusCode::OK);
-                        let is_no_body = slot.method == http::Method::HEAD
-                            || status_code.is_informational()
-                            || status_code == StatusCode::NO_CONTENT
-                            || status_code == StatusCode::NOT_MODIFIED;
 
-                        let body = if is_no_body || slot.data_payload.is_empty() {
-                            Body::Empty
-                        } else {
-                            Body::Bytes(slot.data_payload.freeze())
-                        };
+                        match slot.reply {
+                            StreamReply::Buffered {
+                                reply_tx,
+                                data_payload,
+                            } => {
+                                let is_no_body = slot.method == http::Method::HEAD
+                                    || status_code.is_informational()
+                                    || status_code == StatusCode::NO_CONTENT
+                                    || status_code == StatusCode::NOT_MODIFIED;
 
-                        let response = L7Response::new(status_code, Version::HTTP_3, headers, body);
-                        let _ = slot.reply_tx.send(Ok(response));
+                                let body = if is_no_body || data_payload.is_empty() {
+                                    Body::Empty
+                                } else {
+                                    Body::Bytes(data_payload.freeze())
+                                };
+
+                                let response =
+                                    L7Response::new(status_code, Version::HTTP_3, headers, body);
+                                let _ = reply_tx.send(Ok(response));
+                            }
+                            StreamReply::Streaming {
+                                mut head_tx,
+                                chunk_tx,
+                            } => {
+                                if let Some((tx, chunk_rx)) = head_tx.take() {
+                                    let _ = tx.send(Ok(Http3StreamResponse::new(
+                                        status_code,
+                                        headers,
+                                        chunk_rx,
+                                    )));
+                                }
+                                drop(chunk_tx);
+                            }
+                        }
                     }
                 }
                 Event::Stream(StreamEvent::Finished { .. }) => {
                     // Quinn's StreamEvent::Finished signals that our outgoing send stream has been
                     // acknowledged by peer, not that the incoming response stream has finished.
                 }
+                Event::Stream(StreamEvent::Writable { id }) => {
+                    if let Some(slot) = streams.get_mut(&id) {
+                        flush_stream_outbound(&mut conn, id, slot);
+                    }
+                }
                 Event::Stream(StreamEvent::Stopped { id, error_code }) => {
                     if id.dir() == Dir::Uni {
                         continue;
                     }
                     if let Some(slot) = streams.remove(&id) {
-                        let _ = slot.reply_tx.send(Err(Http3Error::H3(format!(
-                            "Stream reset by peer: {error_code}"
-                        ))));
+                        match slot.reply {
+                            StreamReply::Buffered { reply_tx, .. } => {
+                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                    "Stream reset by peer: {error_code}"
+                                ))));
+                            }
+                            StreamReply::Streaming {
+                                mut head_tx,
+                                chunk_tx,
+                            } => {
+                                if let Some((tx, _)) = head_tx.take() {
+                                    let _ = tx.send(Err(Http3Error::H3(format!(
+                                        "Stream reset by peer: {error_code}"
+                                    ))));
+                                } else {
+                                    let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                        "Stream reset by peer: {error_code}"
+                                    ))));
+                                }
+                            }
+                        }
                     }
                 }
                 Event::ConnectionLost { reason } => {
+                    for (_, cmd) in pending_commands.drain(..) {
+                        reject_open_command(
+                            cmd,
+                            Http3Error::H3(format!("Connection lost: {reason}")),
+                        );
+                    }
                     for (_, slot) in streams.drain() {
-                        let _ = slot
-                            .reply_tx
-                            .send(Err(Http3Error::H3(format!("Connection lost: {reason}"))));
+                        match slot.reply {
+                            StreamReply::Buffered { reply_tx, .. } => {
+                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                    "Connection lost: {reason}"
+                                ))));
+                            }
+                            StreamReply::Streaming {
+                                mut head_tx,
+                                chunk_tx,
+                            } => {
+                                if let Some((tx, _)) = head_tx.take() {
+                                    let _ = tx.send(Err(Http3Error::H3(format!(
+                                        "Connection lost: {reason}"
+                                    ))));
+                                } else {
+                                    let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                        "Connection lost: {reason}"
+                                    ))));
+                                }
+                            }
+                        }
                     }
                     return;
                 }
                 _ => {}
             }
         }
+
+        drain_pending_commands(
+            &mut pending_commands,
+            &mut conn,
+            &mut streams,
+            &sender_command_tx,
+        );
 
         // Flush any outgoing packets (ACKs, stream data, flow control) generated by event processing
         flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
@@ -407,9 +810,28 @@ pub(crate) async fn run_client_driver(
         }
     }
 
+    // Notify any remaining pending requests
+    for (_, cmd) in pending_commands.drain(..) {
+        reject_open_command(cmd, Http3Error::ConnectionClosed);
+    }
+
     // Notify any remaining in-flight requests
     for (_, slot) in streams.drain() {
-        let _ = slot.reply_tx.send(Err(Http3Error::ConnectionClosed));
+        match slot.reply {
+            StreamReply::Buffered { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(Http3Error::ConnectionClosed));
+            }
+            StreamReply::Streaming {
+                mut head_tx,
+                chunk_tx,
+            } => {
+                if let Some((tx, _)) = head_tx.take() {
+                    let _ = tx.send(Err(Http3Error::ConnectionClosed));
+                } else {
+                    let _ = chunk_tx.try_send(Err(Http3Error::ConnectionClosed));
+                }
+            }
+        }
     }
 }
 

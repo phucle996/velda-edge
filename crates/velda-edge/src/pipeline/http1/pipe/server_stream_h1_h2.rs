@@ -10,7 +10,7 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::server::response::Http1ServerResponseHead;
-use velda_http1::wire::{send_chunk, send_chunked_end};
+use velda_http1::wire::{send_chunk, send_chunked_end, send_coalesced_chunks};
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse,
@@ -19,6 +19,22 @@ use velda_http2::Http2Config;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
+
+/// Opportunistically checks if the next HTTP/2 DATA frame is already ready in memory.
+#[inline]
+fn poll_ready_chunk(
+    body_stream: &mut h2::RecvStream,
+) -> Option<Option<Result<bytes::Bytes, h2::Error>>> {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    let mut fut = body_stream.data();
+    // SAFETY: fut is pinned to stack and dropped before exiting function
+    let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
+    match pinned.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(res) => Some(res),
+        std::task::Poll::Pending => None,
+    }
+}
 
 /// Serves a server-streaming HTTP/1.1 downstream request bridged to an HTTP/2 backend.
 pub async fn serve<IO>(
@@ -114,9 +130,28 @@ where
     };
 
     // 6. Forward request over HTTP/2 stream
+    let scheme = if upstream.is_tls() { "https" } else { "http" };
+    let authority = head
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| head.uri.host())
+        .unwrap_or(upstream.target_host());
+    let path_and_query = head
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let uri = http::Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .unwrap_or_else(|_| head.uri.clone());
+
     let mut req = http::Request::builder()
         .method(head.method.clone())
-        .uri(head.uri.clone())
+        .uri(uri)
         .version(http::Version::HTTP_2);
     *req.headers_mut().unwrap() = head.headers.clone();
     let req = req.body(()).unwrap();
@@ -176,23 +211,62 @@ where
         Http1ServerResponseHead::new(parts.status, http::Version::HTTP_11, parts.headers);
     conn.send_response_head_chunked(&resp_head).await?;
 
-    // 8. Stream chunks downstream with backpressure & client disconnect detection
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
+    // 8. Stream chunks downstream with opportunistic batching & backpressure
+    let mut chunk_batch: [bytes::Bytes; 16] = Default::default();
+
+    loop {
+        let first_chunk = match body_stream.data().await {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
                 tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
                 return Err(Http1Error::ConnectionClosed);
             }
+            None => break,
         };
-        let len = chunk.len();
-        if let Err(e) = body_stream.flow_control().release_capacity(len) {
+
+        chunk_batch[0] = first_chunk;
+        let mut count = 1;
+        let mut batch_bytes = chunk_batch[0].len();
+        let mut reached_eof = false;
+
+        // Opportunistically drain ready chunks already buffered in H2 connection driver
+        while count < 16 && batch_bytes < 131_072 {
+            match poll_ready_chunk(&mut body_stream) {
+                Some(Some(Ok(next_chunk))) => {
+                    batch_bytes += next_chunk.len();
+                    chunk_batch[count] = next_chunk;
+                    count += 1;
+                }
+                Some(None) => {
+                    reached_eof = true;
+                    break;
+                }
+                Some(Some(Err(e))) => {
+                    tracing::debug!(error = %e, "Error reading opportunistic HTTP/2 chunk");
+                    return Err(Http1Error::ConnectionClosed);
+                }
+                None => break,
+            }
+        }
+
+        // Release flow control capacity for all drained chunks in a single call
+        if let Err(e) = body_stream.flow_control().release_capacity(batch_bytes) {
             tracing::debug!(error = %e, "Failed to release HTTP/2 flow control capacity");
         }
 
-        if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+        let send_res = if count == 1 {
+            send_chunk(&mut conn.stream, &chunk_batch[0]).await
+        } else {
+            send_coalesced_chunks(&mut conn.stream, &chunk_batch[..count]).await
+        };
+
+        if let Err(e) = send_res {
             tracing::debug!(error = %e, "Downstream client disconnected during streaming");
             return Err(Http1Error::ConnectionClosed);
+        }
+
+        if reached_eof {
+            break;
         }
     }
 

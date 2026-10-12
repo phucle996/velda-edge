@@ -344,15 +344,30 @@ async fn bench_proxy_pipe_turnaround() {
         {
             let body = body_rx.consume_all().await.unwrap();
             upstream_client = upstream_client.ready().await.unwrap();
-            velda_http2::pipe::pipe_buffered(
-                &head,
-                &body,
-                &mut responder,
-                &mut upstream_client,
-                &TEST_CONFIG,
-            )
-            .await
-            .unwrap();
+            let has_body = !body.is_empty();
+            let mut req = http::Request::new(());
+            *req.method_mut() = head.method.clone();
+            *req.uri_mut() = head.uri.clone();
+            *req.version_mut() = http::Version::HTTP_2;
+            *req.headers_mut() = head.headers.clone();
+            let (resp_fut, mut send_stream) = upstream_client.send_request(req, !has_body).unwrap();
+            if let velda_core::Body::Bytes(b) = body {
+                send_stream.send_data(b, true).unwrap();
+            }
+            let resp = resp_fut.await.unwrap();
+            let (parts, mut body_stream) = resp.into_parts();
+            let resp_body = if let Some(Ok(chunk)) = body_stream.data().await {
+                velda_core::Body::Bytes(chunk)
+            } else {
+                velda_core::Body::Empty
+            };
+            let l7_resp = velda_core::L7Response::new(
+                parts.status,
+                http::Version::HTTP_2,
+                parts.headers,
+                resp_body,
+            );
+            responder.send_response(&l7_resp).unwrap();
         }
     });
 

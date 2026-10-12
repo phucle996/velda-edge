@@ -14,8 +14,8 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod headers;
-pub mod pipe;
 pub mod server;
+pub mod strategy;
 
 // Top-level public re-exports
 pub use client::{
@@ -25,11 +25,9 @@ pub use client::{
 pub use config::Http2Config;
 pub use error::Http2Error;
 pub use headers::{filter_h2_headers, is_disallowed_h2_header, sanitize_h2_headers};
-pub use pipe::{
-    Http2PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex, pipe_server_stream,
-};
 pub use server::{
     Http2FloodTracker, Http2Priority, Http2Responder, Http2ServerConnection, Http2ServerRequest,
     Http2ServerRequestHead, Http2ServerResponse, Http2ServerResponseHead, Http2StreamReceiver,
     Http2StreamSender, build_h2_response, decode_request,
 };
+pub use strategy::Http2PipeStrategy;

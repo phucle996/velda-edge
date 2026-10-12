@@ -6,8 +6,8 @@ use std::sync::Arc;
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
 use velda_http3::Http3Config;
+use velda_http3::Http3PipeStrategy;
 use velda_http3::client::Http3Client;
-use velda_http3::pipe::Http3PipeStrategy;
 
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;

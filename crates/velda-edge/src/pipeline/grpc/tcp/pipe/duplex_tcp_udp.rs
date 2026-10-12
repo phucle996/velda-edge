@@ -2,15 +2,48 @@
 //!
 //! Handles full-duplex bidirectional streaming RPCs where downstream gRPC requests over TCP / HTTP/2
 //! are bridged and forwarded over upstream gRPC UDP / QUIC connections.
+//!
+//! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use velda_core::{Body, L7Request};
+use velda_core::{Body, L7Request, L7Response};
 use velda_grpc::tcp::server::GrpcServerStream;
-use velda_grpc::udp::pipe::pipe_duplex;
+use velda_grpc::udp::client::GrpcUdpClient;
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
 use crate::upstream::GrpcUdpUpstream;
+
+/// Dispatches a bidirectional streaming gRPC request over UDP / QUIC.
+async fn pipe_duplex_udp(
+    client: &GrpcUdpClient,
+    req: &L7Request,
+    config: &GrpcConfig,
+) -> Result<L7Response, GrpcError> {
+    let timeout = Duration::from_millis(config.max_call_duration_ms);
+
+    let workflow = async {
+        let resp = client.send_request_ref(req).await?;
+
+        // Validate response LPM length if present
+        if let Body::Bytes(ref b) = resp.body
+            && !b.is_empty()
+            && b.len() >= 5
+        {
+            let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
+            if declared_len > config.max_message_size {
+                return Err(GrpcError::PayloadTooLarge(declared_len));
+            }
+        }
+
+        Ok(resp)
+    };
+
+    tokio::time::timeout(timeout, workflow)
+        .await
+        .map_err(|_| GrpcError::Timeout)?
+}
 
 /// Serves a full-duplex bidirectional gRPC request over TCP bridged to a gRPC UDP / QUIC backend.
 pub async fn serve(
@@ -55,7 +88,7 @@ pub async fn serve(
         }
     };
 
-    let mut pipe_res = pipe_duplex(&client, &l7_req, config).await;
+    let mut pipe_res = pipe_duplex_udp(&client, &l7_req, config).await;
 
     // 1-Shot Self-Healing Retry
     if let Err(ref e) = pipe_res
@@ -67,7 +100,7 @@ pub async fn serve(
             "gRPC UDP connection dropped; self-healing with fresh connection"
         );
         if let Ok(fresh_client) = upstream.acquire_fresh(config).await {
-            pipe_res = pipe_duplex(&fresh_client, &l7_req, config).await;
+            pipe_res = pipe_duplex_udp(&fresh_client, &l7_req, config).await;
         }
     }
 

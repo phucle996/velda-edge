@@ -1,32 +1,6 @@
-//! # Low-Level HTTP/2 Wire Protocol Baseline (RFC 9113)
-//!
-//! **Architectural Role**: This module is the pure wire-framing engine ("thợ cơ khí đường truyền").
-//! It operates strictly on established HTTP/2 client connections without any knowledge of:
-//! - Gateway routing tables or listeners
-//! - Upstream connection pool leasing or lifecycle
-//! - Load balancing algorithms
-//! - Proxy metadata enrichment (`X-Forwarded-*`, `Host`, etc.)
-//!
-//! For high-level Gateway orchestration, connection leasing, self-healing, and
-//! cross-protocol bridging, see `velda_edge::pipeline::http2::pipe`.
-//!
-//! Submodules:
-//! - `buffered`: Pure in-memory request-response forwarding.
-//! - `server_stream`: Progressive response streaming (SSE, LLM tokens, large downloads).
-//! - `client_stream`: Progressive request body upload with single response.
-//! - `duplex`: Concurrent bidirectional streaming (full-duplex / tunnels).
-
-pub mod buffered;
-pub mod client_stream;
-pub mod duplex;
-pub mod server_stream;
+//! Discrete streaming execution strategy for HTTP/2 request handling.
 
 use velda_core::StreamingMode;
-
-pub use buffered::pipe_buffered;
-pub use client_stream::pipe_client_stream;
-pub use duplex::pipe_duplex;
-pub use server_stream::pipe_server_stream;
 
 /// Discrete streaming strategies for HTTP/2 request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

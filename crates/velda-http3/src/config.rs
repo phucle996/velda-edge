@@ -57,7 +57,7 @@ impl Http3Config {
                 max_pending_handshakes: 1_024,
             },
             MemoryTier::Medium => Self {
-                max_body_size: 10 * 1024 * 1024,
+                max_body_size: 32 * 1024 * 1024,
                 max_header_size: 64 * 1024,
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
@@ -215,7 +215,7 @@ mod tests {
 
         let medium = Http3Config::for_tier(MemoryTier::Medium);
         assert_eq!(medium.max_concurrent_streams, 512);
-        assert_eq!(medium.max_body_size, 10 * 1024 * 1024);
+        assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
         assert_eq!(medium.max_pending_handshakes, 2_048);
 
         let ultra = Http3Config::for_tier(MemoryTier::Ultra);

@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_grpc::tcp::pipe::GrpcPipeStrategy;
+use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
+use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::{GrpcConfig, GrpcStatus};
 use velda_router::GrpcRouteRequest;
 use velda_tls::TlsServerEngine;
@@ -202,16 +203,16 @@ async fn dispatch_grpc_tcp_request_stream(
             }
         },
         GrpcUpstream::Udp(upstream) => match upstream.strategy {
-            velda_grpc::udp::pipe::GrpcUdpPipeStrategy::Buffered => {
+            GrpcUdpPipeStrategy::Buffered => {
                 pipe::buffered_tcp_udp::serve(server_stream, upstream, config).await
             }
-            velda_grpc::udp::pipe::GrpcUdpPipeStrategy::ServerStream => {
+            GrpcUdpPipeStrategy::ServerStream => {
                 pipe::server_stream_tcp_udp::serve(server_stream, upstream, config).await
             }
-            velda_grpc::udp::pipe::GrpcUdpPipeStrategy::ClientStream => {
+            GrpcUdpPipeStrategy::ClientStream => {
                 pipe::client_stream_tcp_udp::serve(server_stream, upstream, config).await
             }
-            velda_grpc::udp::pipe::GrpcUdpPipeStrategy::Duplex => {
+            GrpcUdpPipeStrategy::Duplex => {
                 pipe::duplex_tcp_udp::serve(server_stream, upstream, config).await
             }
         },

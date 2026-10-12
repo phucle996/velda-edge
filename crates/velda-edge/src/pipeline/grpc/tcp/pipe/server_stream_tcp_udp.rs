@@ -2,15 +2,45 @@
 //!
 //! Handles server streaming RPCs where downstream gRPC requests over TCP / HTTP/2
 //! are bridged and forwarded over upstream gRPC UDP / QUIC connections.
+//!
+//! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use velda_core::{Body, L7Request};
+use velda_core::{Body, L7Request, L7Response};
 use velda_grpc::tcp::server::GrpcServerStream;
-use velda_grpc::udp::pipe::pipe_server_stream;
+use velda_grpc::udp::client::GrpcUdpClient;
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
 use crate::upstream::GrpcUdpUpstream;
+
+/// Dispatches a server-streaming gRPC call over UDP / QUIC.
+async fn pipe_server_stream_udp(
+    client: &GrpcUdpClient,
+    req: &L7Request,
+    config: &GrpcConfig,
+) -> Result<L7Response, GrpcError> {
+    let timeout = Duration::from_millis(config.max_call_duration_ms);
+
+    let workflow = async {
+        if let Body::Bytes(ref b) = req.body
+            && !b.is_empty()
+            && b.len() >= 5
+        {
+            let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
+            if declared_len > config.max_message_size {
+                return Err(GrpcError::PayloadTooLarge(declared_len));
+            }
+        }
+
+        client.send_request_ref(req).await
+    };
+
+    tokio::time::timeout(timeout, workflow)
+        .await
+        .map_err(|_| GrpcError::Timeout)?
+}
 
 /// Serves a server-streaming gRPC request over TCP bridged to a gRPC UDP / QUIC backend.
 pub async fn serve(
@@ -55,7 +85,7 @@ pub async fn serve(
         }
     };
 
-    let mut pipe_res = pipe_server_stream(&client, &l7_req, config).await;
+    let mut pipe_res = pipe_server_stream_udp(&client, &l7_req, config).await;
 
     // 1-Shot Self-Healing Retry
     if let Err(ref e) = pipe_res
@@ -67,7 +97,7 @@ pub async fn serve(
             "gRPC UDP connection dropped; self-healing with fresh connection"
         );
         if let Ok(fresh_client) = upstream.acquire_fresh(config).await {
-            pipe_res = pipe_server_stream(&fresh_client, &l7_req, config).await;
+            pipe_res = pipe_server_stream_udp(&fresh_client, &l7_req, config).await;
         }
     }
 

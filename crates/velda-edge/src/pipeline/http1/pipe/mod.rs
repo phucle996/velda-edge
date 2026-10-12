@@ -1,17 +1,16 @@
 //! # Layer 7 HTTP/1.1 Gateway Orchestration & Bridging Pipelines
 //!
-//! **Architectural Role**: Unlike the low-level wire baselines in protocol crates
-//! (`velda_http1::pipe`, `velda_http2::pipe`, `velda_http3::pipe`), these modules are
-//! **Gateway-Level Pipelines**.
+//! **Architectural Role**: In accordance with the Velda Edge Monorepo Contract:
+//! Protocol crates (`velda-http1`, `velda-http2`, `velda-http3`) are pure **Protocol Engines**
+//! providing protocol primitives, framing, codecs, and connection mechanics ("WHAT").
 //!
-//! While protocol baselines are pure wire-framing loops that operate on established
-//! connection handles, the pipelines here own the **end-to-end Gateway request lifecycle**:
+//! The pipeline modules here in `velda-edge` own the **Gateway Request & Proxying Pipelines** ("HOW"):
 //! 1. Managing Expect: 100-continue interim status transmission
 //! 2. Consuming downstream bodies and protecting upstream pools from slowloris / slow uploads
 //! 3. Enriching proxy forwarding headers (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, `Host`)
 //! 4. Upstream connection lifecycle: acquiring / leasing connections from [`UpstreamTable`]
 //! 5. Transparent 1-shot self-healing on stale pooled connections (`upstream.acquire_fresh(...)`)
-//! 6. Calling the underlying protocol wire baselines or executing multi-protocol bridging
+//! 6. Executing self-contained, linear, zero-alloc forward/streaming workflows
 //! 7. Emitting canonical error responses (400 Bad Request, 408 Request Timeout, 502 Bad Gateway)
 //!
 //! Contains all 12 dedicated, protocol-isolated pipeline implementations:

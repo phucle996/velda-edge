@@ -1,17 +1,16 @@
 //! Layer 7 HTTP/2 to HTTP/3 Duplex Bridge Pipeline.
 //!
 //! Handles full-duplex bidirectional streaming (e.g. WebTransport / tunnel over QUIC)
-//! where downstream HTTP/2 requests are forwarded over HTTP/3 / QUIC.
+//! between downstream HTTP/2 client and upstream HTTP/3 QUIC connection with true
+//! concurrent streaming pumps and zero whole-payload buffering.
 
 use std::sync::Arc;
 
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use velda_core::{L7Request, L7Response};
+use velda_core::L7Response;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::Http3Config;
-use velda_http3::error::Http3Error;
-use velda_http3::pipe::pipe_duplex;
+use velda_http3::{Http3Config, sanitize_headers};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -24,24 +23,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
 ) {
-    // 1. Consume downstream body
-    let body = match receiver.consume_all().await {
-        Ok(b) => b,
-        Err(e) => {
-            let err_resp = L7Response::from_bytes(
-                StatusCode::BAD_REQUEST,
-                format!("400 Bad Request: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-            let _ = responder.send_response(&err_resp);
-            return;
-        }
-    };
-
-    // 2. Enrich proxy forwarding headers
+    // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
         &mut head.headers,
         &head.uri,
@@ -50,25 +32,19 @@ pub async fn serve(
         meta.is_tls,
     );
 
-    // 3. Construct canonical L7Request
-    let l7_req = L7Request::new(
-        head.method,
-        head.uri,
-        http::Version::HTTP_3,
-        head.headers,
-        body,
-    );
+    // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
+    sanitize_headers(&mut head.headers);
 
     let h3_config = Http3Config::auto();
 
-    // 4. Acquire pooled HTTP/3 client
+    // 3. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&h3_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
-                "Failed to acquire upstream HTTP/3 client"
+                "Failed to acquire upstream HTTP/3 client for duplex stream"
             );
             let err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
@@ -83,37 +59,64 @@ pub async fn serve(
         }
     };
 
-    // 5. Pipe duplex stream with self-healing on connection close
-    let mut pipe_res = pipe_duplex(&client, &l7_req, &h3_config).await;
-    if let Err(Http3Error::ConnectionClosed) = pipe_res {
-        tracing::debug!(
-            upstream = %upstream.id(),
-            "HTTP/3 connection closed; self-healing with fresh QUIC connection"
-        );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = pipe_duplex(&fresh_client, &l7_req, &h3_config).await;
-        }
-    }
-
-    match pipe_res {
-        Ok(resp) => {
-            let _ = responder.send_response(&resp);
-        }
+    // 4. Open progressive bidirectional HTTP/3 stream
+    let (sender, response_rx) = match client
+        .open_stream(head.method, head.uri, head.headers)
+        .await
+    {
+        Ok(parts) => parts,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
-                "HTTP/3 upstream duplex pipe failed"
+                "Failed to open HTTP/3 duplex stream"
             );
             let err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
+            return;
         }
-    }
+    };
+
+    // Task 1: Upload Pump (Downstream H2 -> Upstream H3 QUIC)
+    let upload_task = async {
+        while let Ok(Some(chunk)) = receiver.recv_chunk().await {
+            if !chunk.is_empty() && sender.send_chunk(chunk).await.is_err() {
+                return Err(());
+            }
+        }
+        let _ = sender.finish().await;
+        Ok::<(), ()>(())
+    };
+
+    // Task 2: Download Pump (Upstream H3 QUIC -> Downstream H2 DATA frames)
+    let download_task = async {
+        let mut resp_stream = match response_rx.await {
+            Ok(Ok(r)) => r,
+            _ => return Err(()),
+        };
+
+        let mut stream_sender =
+            match responder.send_stream_response(resp_stream.status, &resp_stream.headers) {
+                Ok(s) => s,
+                Err(_) => return Err(()),
+            };
+
+        while let Some(chunk_res) = resp_stream.next_chunk().await {
+            match chunk_res {
+                Ok(chunk) => {
+                    if stream_sender.send_chunk(chunk).await.is_err() {
+                        return Err(());
+                    }
+                }
+                Err(_) => return Err(()),
+            }
+        }
+
+        Ok::<(), ()>(())
+    };
+
+    let _ = tokio::try_join!(upload_task, download_task);
 }

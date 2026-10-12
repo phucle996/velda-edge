@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
+use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::udp::pipe::GrpcUdpPipeStrategy;
 
 use super::super::lb::EdgeUpstream;
 use crate::error::EdgeError;

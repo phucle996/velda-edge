@@ -217,7 +217,7 @@ pub async fn send_request_parts<IO>(
     write_buf: &mut BytesMut,
 ) -> Result<(), Http1Error>
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncWrite + Unpin,
 {
     let body_len = match body {
         Body::Empty => None,
@@ -268,7 +268,7 @@ pub async fn send_request_head_chunked<IO>(
     write_buf: &mut BytesMut,
 ) -> Result<(), Http1Error>
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncWrite + Unpin,
 {
     write_buf.clear();
     encode_request_line(&head.method, &head.uri, write_buf);

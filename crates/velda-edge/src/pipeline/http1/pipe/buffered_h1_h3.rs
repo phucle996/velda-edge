@@ -14,8 +14,7 @@ use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse,
 };
-use velda_http3::Http3Config;
-use velda_http3::pipe::pipe_buffered;
+use velda_http3::{Http3Config, sanitize_headers};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -80,7 +79,10 @@ where
         }
     };
 
-    // 4. Construct canonical L7Request
+    // 4. Sanitize connection-specific headers forbidden by RFC 9114 §4.2 before H3 encoding
+    sanitize_headers(&mut head.headers);
+
+    // 5. Construct canonical L7Request
     let l7_req = L7Request::new(
         head.method,
         head.uri,
@@ -91,7 +93,7 @@ where
 
     let h3_config = Http3Config::auto();
 
-    // 5. Acquire pooled HTTP/3 client
+    // 6. Acquire pooled HTTP/3 client
     let (client, lease) = match upstream.acquire(&h3_config).await {
         Ok(res) => res,
         Err(e) => {
@@ -114,9 +116,9 @@ where
         }
     };
 
-    // 6. Pipe buffered request & response with self-healing on connection close
+    // 7. Send request directly with self-healing on connection close
     let req_retry = l7_req.clone();
-    let mut pipe_res = pipe_buffered(&client, l7_req, &h3_config).await;
+    let mut pipe_res = client.send_request(l7_req).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -130,7 +132,7 @@ where
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = pipe_buffered(&fresh_client, req_retry, &h3_config).await;
+            pipe_res = fresh_client.send_request(req_retry).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {

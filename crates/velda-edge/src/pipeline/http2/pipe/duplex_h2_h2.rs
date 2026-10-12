@@ -2,14 +2,19 @@
 //!
 //! Handles full-duplex bidirectional streaming (e.g. gRPC bidi, real-time sync)
 //! where downstream and upstream continuously exchange frames in both directions.
+//!
+//! In accordance with Velda Edge Hourglass Architecture:
+//! Protocol crates (`velda-http2`) strictly provide primitives ("WHAT"),
+//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
 
 use std::sync::Arc;
 
-use http::StatusCode;
+use bytes::Bytes;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use velda_core::L7Response;
+use http::{StatusCode, Version};
+use velda_core::{Body, L7Response};
+use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
-use velda_http2::pipe::pipe_duplex;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
 use crate::pipeline::DownstreamMeta;
@@ -18,7 +23,7 @@ use crate::upstream::Http2Upstream;
 /// Serves a full-duplex bidirectional HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
     mut head: Http2ServerRequestHead,
-    receiver: Http2StreamReceiver,
+    mut receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     config: Arc<Http2Config>,
@@ -61,7 +66,143 @@ pub async fn serve(
     };
 
     // 3. Pipe duplex frames concurrently
-    if let Err(e) = pipe_duplex(head, receiver, responder, &mut client, &config).await {
+    let duplex_res = async {
+        let is_head = head.method == http::Method::HEAD;
+        velda_http2::headers::sanitize_h2_headers(&mut head.headers);
+        let http_req = head.into_http_request();
+        let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
+
+        let upload_task = async move {
+            const UPLOAD_BATCH_RESERVE: usize = 131_072; // 128 KB
+            send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+
+            while let Some(mut chunk) = receiver.recv_chunk().await? {
+                while !chunk.is_empty() {
+                    let available = send_stream.capacity();
+                    if available == 0 {
+                        send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
+                        let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
+                        if let Some(err) = res {
+                            err?;
+                        }
+                        continue;
+                    }
+
+                    let to_send = chunk.len().min(available);
+                    let slice = chunk.split_to(to_send);
+                    send_stream.send_data(slice, false)?;
+
+                    if send_stream.capacity() < 32_768 {
+                        send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+                    }
+                }
+            }
+            send_stream.send_data(Bytes::new(), true)?;
+            Ok::<(), Http2Error>(())
+        };
+
+        let config_max_body = config.max_body_size;
+        let mut responder = responder;
+        let download_task = async move {
+            let response = response_fut.await?;
+            let (parts, mut body_stream) = response.into_parts();
+
+            let is_no_body_status = parts.status.is_informational()
+                || parts.status == StatusCode::NO_CONTENT
+                || parts.status == StatusCode::NOT_MODIFIED;
+
+            if is_head || is_no_body_status {
+                let resp =
+                    L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+                responder.send_response(&resp)?;
+                return Ok(());
+            }
+
+            let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
+
+            let batch_threshold =
+                (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
+            let mut total_bytes = 0;
+            let mut unreleased_bytes = 0;
+            const COALESCE_LIMIT: usize = 65_536;
+            let mut pending_buf = bytes::BytesMut::with_capacity(COALESCE_LIMIT);
+
+            while let Some(chunk) = body_stream.data().await {
+                let data = chunk?;
+                let len = data.len();
+                total_bytes += len;
+                unreleased_bytes += len;
+
+                if total_bytes > config_max_body {
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes);
+                    return Err(Http2Error::PayloadTooLarge(total_bytes));
+                }
+
+                if pending_buf.is_empty() && len >= COALESCE_LIMIT {
+                    if sender.send_chunk(data).await.is_err() {
+                        tracing::debug!(
+                            "Downstream client disconnected during H2 duplex streaming"
+                        );
+                        let _ = body_stream
+                            .flow_control()
+                            .release_capacity(unreleased_bytes);
+                        return Ok(());
+                    }
+                } else {
+                    pending_buf.extend_from_slice(&data);
+                    if pending_buf.len() >= COALESCE_LIMIT {
+                        let to_send = pending_buf.split().freeze();
+                        if sender.send_chunk(to_send).await.is_err() {
+                            tracing::debug!(
+                                "Downstream client disconnected during H2 duplex streaming"
+                            );
+                            let _ = body_stream
+                                .flow_control()
+                                .release_capacity(unreleased_bytes);
+                            return Ok(());
+                        }
+                    }
+                }
+
+                if unreleased_bytes >= batch_threshold {
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes);
+                    unreleased_bytes = 0;
+                }
+            }
+
+            if !pending_buf.is_empty() {
+                let to_send = pending_buf.freeze();
+                if sender.send_chunk(to_send).await.is_err() {
+                    tracing::debug!(
+                        "Downstream client disconnected during H2 duplex streaming tail"
+                    );
+                    let _ = body_stream
+                        .flow_control()
+                        .release_capacity(unreleased_bytes);
+                    return Ok(());
+                }
+            }
+
+            if unreleased_bytes > 0 {
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
+            }
+
+            let _ = sender.finish();
+            Ok(())
+        };
+
+        tokio::try_join!(upload_task, download_task)?;
+        Ok::<(), Http2Error>(())
+    }
+    .await;
+
+    if let Err(e) = duplex_res {
         tracing::warn!(
             error = %e,
             upstream = %upstream.id(),

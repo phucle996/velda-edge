@@ -1,22 +1,6 @@
-//! Dedicated gRPC wire pipe modules isolated by streaming strategy.
-//!
-//! Submodules:
-//! - `buffered`: Unary RPC pipe forwarding (1 request message, 1 response message).
-//! - `server_stream`: Server streaming RPC pipe (1 request message, progressive response stream).
-//! - `client_stream`: Client streaming RPC pipe (progressive request stream, 1 response message).
-//! - `duplex`: Full-duplex bidirectional RPC pipe (concurrent request and response streaming).
-
-pub mod buffered;
-pub mod client_stream;
-pub mod duplex;
-pub mod server_stream;
+//! Discrete streaming strategies for gRPC RPC request handling over TCP.
 
 use velda_core::StreamingMode;
-
-pub use buffered::pipe_buffered;
-pub use client_stream::pipe_client_stream;
-pub use duplex::pipe_duplex;
-pub use server_stream::pipe_server_stream;
 
 /// Discrete streaming strategies for gRPC RPC request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

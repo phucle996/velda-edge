@@ -2054,6 +2054,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "socket2 0.6.5",
  "thiserror",
  "tokio",
  "tracing",

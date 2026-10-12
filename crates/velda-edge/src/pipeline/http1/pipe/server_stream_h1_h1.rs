@@ -3,15 +3,23 @@
 //! Handles server-streaming RPCs (Server-Sent Events, progressive chunks, LLM tokens)
 //! where downstream request body is completely read into RAM first, and response chunks
 //! are pumped progressively downstream.
+//!
+//! In accordance with Velda Edge Hourglass Architecture:
+//! Protocol crates (`velda-http1`) strictly provide primitives ("WHAT"),
+//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
 
 use std::sync::Arc;
 
+use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
+use velda_core::Body;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
-    Http1ServerRequestHead, Http1ServerResponse, pipe_server_stream,
+    Http1ServerRequestHead, Http1ServerResponse, Http1ServerResponseHead, read_chunk_sized,
+    read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
+    send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -102,39 +110,261 @@ where
 
     let cfg = *conn.config();
     let mut req = Http1ServerRequest::from_parts(head, body);
+    sanitize_headers(&mut req.headers);
 
-    // 5. Pipe server-streaming response with self-healing retry on stale pooled connection
-    let mut res = pipe_server_stream(conn, &mut req, &mut *upstream_lease, &cfg).await;
-    if let Err(ref e) = res
-        && upstream_lease.is_reused()
-        && e.is_stale_connection()
-    {
-        upstream_lease.mark_closed();
-        drop(upstream_lease);
+    // 5. Send request and read response head with self-healing retry on stale pooled connection
+    let (mut resp_head, resp_framing) = {
+        if conn.upstream_read_buf.capacity() < 65536 {
+            conn.upstream_read_buf.reserve(65536);
+        }
 
-        tracing::debug!(
-            upstream = %upstream.id(),
-            "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
-        );
+        let exchange_attempt = async {
+            send_request(&req, &mut *upstream_lease, &mut conn.upstream_write_buf).await?;
+            read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await
+        };
 
-        match upstream.acquire_fresh().await {
-            Ok(mut fresh_lease) => {
-                res = pipe_server_stream(conn, &mut req, &mut *fresh_lease, &cfg).await;
-                if res.is_err() {
-                    fresh_lease.mark_closed();
+        match exchange_attempt.await {
+            Ok(head_and_framing) => head_and_framing,
+            Err(e) if upstream_lease.is_reused() && e.is_stale_connection() => {
+                upstream_lease.mark_closed();
+                drop(upstream_lease);
+
+                tracing::debug!(
+                    upstream = %upstream.id(),
+                    "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
+                );
+
+                match upstream.acquire_fresh().await {
+                    Ok(mut fresh_lease) => {
+                        let retry_res = async {
+                            send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
+                                .await?;
+                            read_response_head(&mut *fresh_lease, &mut conn.upstream_read_buf, &cfg)
+                                .await
+                        }
+                        .await;
+
+                        match retry_res {
+                            Ok(head_and_framing) => {
+                                upstream_lease = fresh_lease;
+                                head_and_framing
+                            }
+                            Err(retry_err) => {
+                                fresh_lease.mark_closed();
+                                return Err(retry_err);
+                            }
+                        }
+                    }
+                    Err(fresh_err) => {
+                        tracing::warn!(
+                            error = %fresh_err,
+                            upstream = %upstream.id(),
+                            "Failed to acquire fresh connection for self-healing retry"
+                        );
+                        return Err(e);
+                    }
                 }
             }
-            Err(fresh_err) => {
-                tracing::warn!(
-                    error = %fresh_err,
-                    upstream = %upstream.id(),
-                    "Failed to acquire fresh connection for self-healing retry"
-                );
+            Err(e) => {
+                upstream_lease.mark_closed();
+                return Err(e);
             }
         }
-    } else if res.is_err() {
-        upstream_lease.mark_closed();
+    };
+
+    sanitize_headers(&mut resp_head.headers);
+
+    // 6. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body_status = resp_head.status.is_informational()
+        || resp_head.status == StatusCode::NO_CONTENT
+        || resp_head.status == StatusCode::NOT_MODIFIED;
+
+    if is_head || is_no_body_status {
+        let resp = Http1ServerResponse::new(
+            resp_head.status,
+            resp_head.version,
+            resp_head.headers,
+            Body::Empty,
+        );
+        conn.send_response(&resp).await?;
+        return Ok(());
     }
 
-    res
+    // 7. Downstream framing decision:
+    // HTTP/1.0 does not support chunked transfer encoding!
+    let is_http10 = req.version == http::Version::HTTP_10;
+    if is_http10 {
+        resp_head.version = http::Version::HTTP_10;
+        resp_head.headers.remove(http::header::TRANSFER_ENCODING);
+        conn.mark_close();
+        let server_head =
+            Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
+        conn.send_response_parts(&server_head, &Body::Empty).await?;
+
+        let mut client_disconnected = false;
+        match resp_framing {
+            Http1BodyFraming::Chunked => {
+                while let Some(chunk) =
+                    read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
+                {
+                    if let Err(e) = conn.send_raw_bytes(&chunk).await {
+                        tracing::debug!(
+                            error = %e,
+                            "Downstream HTTP/1.0 client disconnected during server streaming"
+                        );
+                        client_disconnected = true;
+                        break;
+                    }
+                }
+            }
+            Http1BodyFraming::ContentLength(total_len) => {
+                let mut remaining = total_len;
+                while remaining > 0 {
+                    let to_read = remaining.min(65536);
+                    match read_chunk_sized(
+                        &mut *upstream_lease,
+                        &mut conn.upstream_read_buf,
+                        to_read,
+                    )
+                    .await?
+                    {
+                        Some(chunk) => {
+                            remaining = remaining.saturating_sub(chunk.len());
+                            if let Err(e) = conn.send_raw_bytes(&chunk).await {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Downstream HTTP/1.0 client disconnected during sized server streaming"
+                                );
+                                client_disconnected = true;
+                                break;
+                            }
+                        }
+                        None => {
+                            upstream_lease.mark_closed();
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Http1BodyFraming::Empty => {}
+        }
+
+        if client_disconnected {
+            upstream_lease.mark_closed();
+            return Err(Http1Error::ConnectionClosed);
+        }
+        return Ok(());
+    }
+
+    // 8. Pump response chunks downstream with single-write coalescing and client disconnect detection
+    let server_head =
+        Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
+    let mut client_disconnected = false;
+
+    match resp_framing {
+        Http1BodyFraming::ContentLength(total_len) => {
+            let available = conn.upstream_read_buf.len().min(total_len);
+            if available == total_len {
+                // [FAST-PATH]: Entire response body is already present in memory!
+                // Coalesce Head + Chunk + Terminator (0\r\n\r\n) into a single socket write syscall!
+                let body_slice = if total_len > 0 {
+                    Some(&conn.upstream_read_buf[..total_len])
+                } else {
+                    None
+                };
+                let close = velda_http1::server::response::send_response_head_chunked_coalesced(
+                    &mut conn.stream,
+                    &mut conn.write_buf,
+                    &server_head,
+                    body_slice,
+                    true,
+                    conn.close_requested,
+                )
+                .await?;
+                if close {
+                    conn.close_requested = true;
+                }
+                if total_len > 0 {
+                    conn.upstream_read_buf.advance(total_len);
+                }
+                return Ok(());
+            }
+
+            // Normal chunked progressive stream
+            conn.send_response_head_chunked(&server_head).await?;
+
+            if available > 0 {
+                let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
+                if let Err(e) = send_chunk(&mut conn.stream, &first_chunk).await {
+                    tracing::debug!(
+                        error = %e,
+                        "Downstream client disconnected while writing initial chunk"
+                    );
+                    client_disconnected = true;
+                }
+            }
+
+            if !client_disconnected {
+                let mut remaining = total_len - available;
+                while remaining > 0 {
+                    let to_read = remaining.min(65536);
+                    match read_chunk_sized(
+                        &mut *upstream_lease,
+                        &mut conn.upstream_read_buf,
+                        to_read,
+                    )
+                    .await?
+                    {
+                        Some(chunk) => {
+                            remaining = remaining.saturating_sub(chunk.len());
+                            if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Downstream client disconnected during Content-Length server streaming"
+                                );
+                                client_disconnected = true;
+                                break;
+                            }
+                        }
+                        None => {
+                            upstream_lease.mark_closed();
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Http1BodyFraming::Chunked => {
+            conn.send_response_head_chunked(&server_head).await?;
+
+            while let Some(chunk) =
+                read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
+            {
+                if let Err(e) = send_chunk(&mut conn.stream, &chunk).await {
+                    tracing::debug!(
+                        error = %e,
+                        "Downstream client disconnected during chunked server streaming"
+                    );
+                    client_disconnected = true;
+                    break;
+                }
+            }
+        }
+        Http1BodyFraming::Empty => {
+            conn.send_response_head_chunked(&server_head).await?;
+        }
+    }
+
+    if client_disconnected {
+        upstream_lease.mark_closed();
+        return Err(Http1Error::ConnectionClosed);
+    }
+
+    send_chunked_end(&mut conn.stream).await?;
+    Ok(())
 }

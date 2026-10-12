@@ -14,12 +14,13 @@
 pub mod client;
 pub mod config;
 pub mod error;
-pub mod pipe;
 pub mod server;
+pub mod strategy;
 pub mod wire;
 
 pub use config::Http1Config;
 pub use error::Http1Error;
+pub use strategy::Http1PipeStrategy;
 pub use velda_core::Body;
 
 // RFC 9112 Wire Framing & Codec re-exports
@@ -47,7 +48,7 @@ pub use server::response::{
 pub use client::connector::{
     Http1AccelerationPath, UpstreamHttp1Stream, connect, notsent_lowat_for_mem_tier,
 };
-pub use client::header::{extract_sni, resolve_sni, sanitize_headers, strip_port};
+pub use client::header::{HOP_BY_HOP, extract_sni, resolve_sni, sanitize_headers, strip_port};
 pub use client::request::{
     Http1ClientRequest, Http1ClientRequestHead, encode_request, encode_request_head,
     encode_request_line, forward_request, send_request, send_request_head_chunked,
@@ -56,10 +57,4 @@ pub use client::request::{
 pub use client::response::{
     Http1ClientResponse, Http1ClientResponseHead, decode_response, decode_response_head,
     parse_response_head, read_chunk_sized, read_next_chunk, read_response_head,
-};
-
-// Streaming Pipe re-exports
-pub use pipe::{
-    HOP_BY_HOP, Http1PipeStrategy, pipe_buffered, pipe_client_stream, pipe_duplex,
-    pipe_server_stream,
 };

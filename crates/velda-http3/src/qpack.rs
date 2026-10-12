@@ -572,10 +572,29 @@ pub fn encode_qpack_request(method: &Method, uri: &Uri, headers: &HeaderMap, dst
         encode_string_literal(host.as_bytes(), dst);
     }
 
-    // 6. Additional headers
+    // 6. Additional headers (RFC 9114 §4.2: connection-specific headers MUST NOT be sent)
     for (name, val) in headers {
+        // :authority already encoded from URI / HOST above
         if name == http::header::HOST {
-            continue; // Already handled as :authority
+            continue;
+        }
+        // Drop connection-specific headers that are forbidden in HTTP/3
+        if name == http::header::CONNECTION
+            || name == http::header::TRANSFER_ENCODING
+            || name == http::header::UPGRADE
+            || name.as_str().eq_ignore_ascii_case("keep-alive")
+            || name.as_str().eq_ignore_ascii_case("proxy-connection")
+        {
+            continue;
+        }
+        // RFC 9114 §4.2: TE, if present, MUST only contain "trailers"
+        if name == http::header::TE {
+            let is_trailers = val
+                .to_str()
+                .is_ok_and(|s| s.trim().eq_ignore_ascii_case("trailers"));
+            if !is_trailers {
+                continue;
+            }
         }
         let name_str = name.as_str();
         let val_bytes = val.as_bytes();
@@ -655,5 +674,78 @@ mod tests {
                 assert_eq!(consumed, buf.len());
             }
         }
+    }
+
+    #[test]
+    fn test_qpack_request_strips_rfc9114_prohibited_headers() {
+        let mut buf = BytesMut::new();
+        let mut headers = HeaderMap::new();
+        // These MUST be dropped by the encoder per RFC 9114 §4.2
+        headers.insert(
+            http::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        headers.insert(
+            http::header::CONNECTION,
+            HeaderValue::from_static("keep-alive"),
+        );
+        headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert(
+            HeaderName::from_static("keep-alive"),
+            HeaderValue::from_static("timeout=5"),
+        );
+        headers.insert(
+            HeaderName::from_static("proxy-connection"),
+            HeaderValue::from_static("close"),
+        );
+        // TE with non-"trailers" value must also be dropped
+        headers.insert(http::header::TE, HeaderValue::from_static("gzip"));
+        // This one must pass through
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+
+        let method = Method::POST;
+        let uri: Uri = "https://upstream.example.com/upload".parse().unwrap();
+        encode_qpack_request(&method, &uri, &headers, &mut buf);
+
+        let decoded = decode_qpack(&buf).unwrap();
+        // All prohibited headers must be absent from encoded output
+        assert!(
+            decoded
+                .headers
+                .get(http::header::TRANSFER_ENCODING)
+                .is_none()
+        );
+        assert!(decoded.headers.get(http::header::CONNECTION).is_none());
+        assert!(decoded.headers.get(http::header::UPGRADE).is_none());
+        assert!(decoded.headers.get("keep-alive").is_none());
+        assert!(decoded.headers.get("proxy-connection").is_none());
+        assert!(decoded.headers.get(http::header::TE).is_none());
+        // Allowed header must survive encoding
+        assert_eq!(
+            decoded.headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn test_debug_print_encoded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let mut buf = BytesMut::new();
+        let method = Method::POST;
+        let uri: Uri = "/upload-h3/5mb".parse().unwrap();
+        encode_qpack_request(&method, &uri, &headers, &mut buf);
+        let dec = decode_qpack(&buf).unwrap();
+        assert!(dec.headers.get(http::header::TRANSFER_ENCODING).is_none());
     }
 }

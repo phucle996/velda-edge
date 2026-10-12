@@ -6,8 +6,10 @@
 //! - `pipe`: Strategy-driven bidirectional stream pumping between downstream and upstream.
 
 pub mod client;
-pub mod pipe;
 pub mod server;
+pub mod strategy;
+
+pub use strategy::GrpcPipeStrategy;
 
 pub use client::{
     GrpcAccelerationPath, GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse,

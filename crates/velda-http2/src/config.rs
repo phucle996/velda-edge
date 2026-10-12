@@ -101,8 +101,8 @@ impl Http2Config {
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
                 max_concurrent_streams: 2048,
-                initial_connection_window_size: 32 * 1024 * 1024,
-                initial_stream_window_size: 8 * 1024 * 1024,
+                initial_connection_window_size: 64 * 1024 * 1024,
+                initial_stream_window_size: 16 * 1024 * 1024,
                 max_frame_size: 64 * 1024,
                 max_header_list_size: 64 * 1024,
                 enable_push: false,
@@ -349,8 +349,8 @@ mod tests {
 
         let medium = Http2Config::for_tier(MemoryTier::Medium);
         assert_eq!(medium.max_concurrent_streams, 2048);
-        assert_eq!(medium.initial_connection_window_size, 32 * 1024 * 1024);
-        assert_eq!(medium.initial_stream_window_size, 8 * 1024 * 1024);
+        assert_eq!(medium.initial_connection_window_size, 64 * 1024 * 1024);
+        assert_eq!(medium.initial_stream_window_size, 16 * 1024 * 1024);
         assert_eq!(medium.max_body_size, 64 * 1024 * 1024);
         assert_eq!(medium.max_frame_size, 64 * 1024);
 

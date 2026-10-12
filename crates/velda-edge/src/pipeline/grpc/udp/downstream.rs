@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
-use velda_grpc::tcp::pipe::GrpcPipeStrategy;
-use velda_grpc::udp::pipe::GrpcUdpPipeStrategy;
+use velda_grpc::tcp::GrpcPipeStrategy;
+use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
 use velda_grpc::{GrpcConfig, GrpcStatus};
 use velda_router::GrpcRouteRequest;
