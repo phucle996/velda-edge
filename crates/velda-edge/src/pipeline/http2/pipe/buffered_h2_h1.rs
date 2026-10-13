@@ -79,7 +79,7 @@ pub async fn serve(
         }
     };
 
-    let mut write_buf = bytes::BytesMut::with_capacity(1024 + body.len());
+    let mut write_buf = bytes::BytesMut::with_capacity(1024);
 
     // 5. Serialize & send HTTP/1.1 request
     let send_res = velda_http1::client::send_request_parts(

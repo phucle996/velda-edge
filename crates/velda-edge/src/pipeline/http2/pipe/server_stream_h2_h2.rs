@@ -136,7 +136,7 @@ pub async fn serve(
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
-    config: Arc<Http2Config>,
+    config: Http2Config,
     upstream: &Arc<Http2Upstream>,
 ) {
     // 1. Consume downstream body

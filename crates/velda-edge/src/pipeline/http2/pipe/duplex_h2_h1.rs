@@ -4,7 +4,6 @@
 //! and an HTTP/1.1 backend, simultaneously uploading chunked data and streaming chunked
 //! responses downstream with cancellation propagation.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -100,16 +99,18 @@ pub async fn serve(
         .client_body_buffer_size
         .clamp(32_768, 131_072);
     let upload_fut = async {
-        let mut chunk_buf = bytes::BytesMut::with_capacity(coalesce_limit + 64);
         loop {
             match receiver.recv_coalesced_chunk(coalesce_limit).await {
                 Ok(Some(chunk)) => {
-                    if !chunk.is_empty() {
-                        chunk_buf.clear();
-                        let _ = write!(chunk_buf, "{:x}\r\n", chunk.len());
-                        chunk_buf.extend_from_slice(&chunk);
-                        chunk_buf.extend_from_slice(b"\r\n");
-                        write_half.write_all(&chunk_buf).await?;
+                    if !chunk.is_empty()
+                        && velda_http1::client::send_chunk_vectored(&mut write_half, &chunk)
+                            .await
+                            .is_err()
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "failed to write chunk to upstream",
+                        ));
                     }
                     if receiver.is_end_stream() {
                         break;

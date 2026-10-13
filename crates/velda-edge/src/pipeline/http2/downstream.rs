@@ -109,9 +109,8 @@ pub async fn run_http2_loop<IO>(
     let mut is_draining = false;
 
     let meta = Arc::new(meta);
-    let config_arc = Arc::new(config);
 
-    match Http2ServerConnection::handshake(stream, *config_arc).await {
+    match Http2ServerConnection::handshake(stream, config).await {
         Ok(mut conn) => loop {
             let accept_result =
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
@@ -269,14 +268,13 @@ pub async fn run_http2_loop<IO>(
                     }
 
                     let meta_clone = Arc::clone(&meta);
-                    let cfg_clone = Arc::clone(&config_arc);
                     tokio::spawn(async move {
                         serve_http2_stream(
                             head,
                             receiver,
                             responder,
                             meta_clone,
-                            cfg_clone,
+                            config,
                             upstream_target,
                         )
                         .await;
@@ -303,7 +301,7 @@ pub async fn run_http2_loop<IO>(
                 Err(_) => {
                     tracing::debug!(
                         listener = %meta.listener_id,
-                        timeout_ms = config_arc.idle_timeout_ms,
+                        timeout_ms = config.idle_timeout_ms,
                         "HTTP/2 stream accept timed out"
                     );
                     break;
@@ -322,7 +320,7 @@ async fn serve_http2_stream(
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
-    config: Arc<Http2Config>,
+    config: Http2Config,
     upstream_target: Arc<HttpUpstream>,
 ) {
     match upstream_target.as_ref() {

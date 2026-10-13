@@ -88,11 +88,7 @@ async fn send_h1_client_stream(
     headers: &http::HeaderMap,
     cfg: &velda_http1::config::Http1Config,
 ) -> Result<L7Response, velda_http1::Http1Error> {
-    let body_len = match &req.body {
-        velda_core::Body::Bytes(b) => b.len(),
-        velda_core::Body::Empty => 0,
-    };
-    let mut write_buf = BytesMut::with_capacity(1024 + body_len);
+    let mut write_buf = BytesMut::with_capacity(1024);
     let read_cap = cfg.client_body_buffer_size.clamp(16_384, 65_536);
     let mut read_buf = BytesMut::with_capacity(read_cap);
 

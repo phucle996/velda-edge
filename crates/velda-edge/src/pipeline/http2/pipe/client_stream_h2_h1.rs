@@ -4,7 +4,6 @@
 //! by transforming incoming HTTP/2 DATA frames into RFC 9112 `Transfer-Encoding: chunked`
 //! byte streams towards the HTTP/1.1 upstream backend.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -85,8 +84,7 @@ pub async fn serve(
         }
     };
 
-    let first_len = first_chunk.as_ref().map(|c| c.len()).unwrap_or(0);
-    let mut write_buf = bytes::BytesMut::with_capacity(1024 + first_len + 64);
+    let mut write_buf = bytes::BytesMut::with_capacity(1024);
 
     // Encode HTTP/1.1 request head
     velda_http1::client::encode_request_head(
@@ -97,21 +95,9 @@ pub async fn serve(
         &mut write_buf,
     );
 
-    if let Some(chunk) = first_chunk
-        && !chunk.is_empty()
-    {
-        let _ = write!(write_buf, "{:x}\r\n", chunk.len());
-        write_buf.extend_from_slice(&chunk);
-        write_buf.extend_from_slice(b"\r\n");
-    }
-
-    if is_fin {
-        write_buf.extend_from_slice(b"0\r\n\r\n");
-    }
-
     if let Err(e) = lease.write_all(&write_buf).await {
         lease.mark_closed();
-        tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send chunked request head and initial payload");
+        tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send chunked request head");
         let err_resp = L7Response::from_bytes(
             StatusCode::BAD_GATEWAY,
             format!("502 Bad Gateway: {e}\n").into_bytes(),
@@ -120,31 +106,48 @@ pub async fn serve(
         return;
     }
 
+    if let Some(chunk) = first_chunk
+        && !chunk.is_empty()
+        && velda_http1::client::send_chunk_vectored(&mut *lease, &chunk)
+            .await
+            .is_err()
+    {
+        lease.mark_closed();
+        tracing::warn!(upstream = %upstream.id(), "Failed to send initial chunked payload");
+        let err_resp = L7Response::from_bytes(
+            StatusCode::BAD_GATEWAY,
+            b"502 Bad Gateway: failed to send initial payload\n".to_vec(),
+        );
+        let _ = responder.send_response(&err_resp);
+        return;
+    }
+
+    if is_fin {
+        let _ = lease.write_all(b"0\r\n\r\n").await;
+    }
+
     // 6. Progressively stream any remaining client DATA frames to HTTP/1.1 chunked stream
     if !is_fin {
         let coalesce_limit = upstream
             .config
             .client_body_buffer_size
             .clamp(32_768, 131_072);
-        let mut chunk_buf = bytes::BytesMut::with_capacity(coalesce_limit + 64);
         loop {
             match receiver.recv_coalesced_chunk(coalesce_limit).await {
                 Ok(Some(chunk)) => {
-                    if !chunk.is_empty() {
-                        chunk_buf.clear();
-                        let _ = write!(chunk_buf, "{:x}\r\n", chunk.len());
-                        chunk_buf.extend_from_slice(&chunk);
-                        chunk_buf.extend_from_slice(b"\r\n");
-                        if lease.write_all(&chunk_buf).await.is_err() {
-                            lease.mark_closed();
-                            tracing::warn!("Failed writing chunk to HTTP/1.1 backend");
-                            let err_resp = L7Response::from_bytes(
-                                StatusCode::BAD_GATEWAY,
-                                b"502 Bad Gateway: upstream stream broken\n".to_vec(),
-                            );
-                            let _ = responder.send_response(&err_resp);
-                            return;
-                        }
+                    if !chunk.is_empty()
+                        && velda_http1::client::send_chunk_vectored(&mut *lease, &chunk)
+                            .await
+                            .is_err()
+                    {
+                        lease.mark_closed();
+                        tracing::warn!("Failed writing chunk to HTTP/1.1 backend");
+                        let err_resp = L7Response::from_bytes(
+                            StatusCode::BAD_GATEWAY,
+                            b"502 Bad Gateway: upstream stream broken\n".to_vec(),
+                        );
+                        let _ = responder.send_response(&err_resp);
+                        return;
                     }
                     if receiver.is_end_stream() {
                         break;

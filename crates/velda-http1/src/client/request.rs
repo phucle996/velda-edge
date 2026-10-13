@@ -207,7 +207,9 @@ pub fn encode_request(req: &Http1ServerRequest, dst: &mut BytesMut) {
     }
 }
 
-/// Serializes and writes request parts directly to upstream stream using provided write buffer.
+/// Serializes and writes request parts directly to upstream stream using vectored I/O.
+///
+/// Eliminates user-space copying of body payload into `write_buf` and coalesces headers + body into a single syscall.
 pub async fn send_request_parts<IO>(
     method: &Method,
     uri: &Uri,
@@ -226,17 +228,94 @@ where
     write_buf.clear();
     encode_request_head(method, uri, headers, body_len, write_buf);
 
-    if let Body::Bytes(bytes) = body
-        && bytes.len() <= 65536
-    {
-        write_buf.extend_from_slice(bytes);
-        stream.write_all(write_buf).await?;
-        return Ok(());
+    match body {
+        Body::Empty => {
+            stream.write_all(write_buf).await?;
+        }
+        Body::Bytes(bytes) => {
+            let mut h_slice = &write_buf[..];
+            let mut b_slice = bytes.as_ref();
+            while !h_slice.is_empty() || !b_slice.is_empty() {
+                let mut io_slices = [
+                    std::io::IoSlice::new(h_slice),
+                    std::io::IoSlice::new(b_slice),
+                ];
+                let active = if h_slice.is_empty() {
+                    &mut io_slices[1..]
+                } else if b_slice.is_empty() {
+                    &mut io_slices[..1]
+                } else {
+                    &mut io_slices[..]
+                };
+                let n = stream.write_vectored(active).await?;
+                if n == 0 {
+                    return Err(Http1Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole request",
+                    )));
+                }
+                if n <= h_slice.len() {
+                    h_slice = &h_slice[n..];
+                } else {
+                    let rem = n - h_slice.len();
+                    h_slice = &[];
+                    b_slice = &b_slice[rem..];
+                }
+            }
+        }
     }
+    Ok(())
+}
 
-    stream.write_all(write_buf).await?;
-    if let Body::Bytes(bytes) = body {
-        stream.write_all(bytes).await?;
+/// Writes an RFC 9112 chunk to an HTTP/1.1 stream using vectored I/O without copying payload bytes.
+pub async fn send_chunk_vectored<IO>(stream: &mut IO, chunk: &[u8]) -> Result<(), Http1Error>
+where
+    IO: AsyncWrite + Unpin,
+{
+    use std::io::Write;
+    let mut header_buf = [0u8; 16];
+    let mut cursor = std::io::Cursor::new(&mut header_buf[..]);
+    write!(cursor, "{:x}\r\n", chunk.len())
+        .map_err(|e| Http1Error::Io(std::io::Error::other(e)))?;
+    let header_len = cursor.position() as usize;
+
+    let mut h_slice = &header_buf[..header_len];
+    let mut c_slice = chunk;
+    let mut t_slice = &b"\r\n"[..];
+
+    while !h_slice.is_empty() || !c_slice.is_empty() || !t_slice.is_empty() {
+        let mut io_slices = [
+            std::io::IoSlice::new(h_slice),
+            std::io::IoSlice::new(c_slice),
+            std::io::IoSlice::new(t_slice),
+        ];
+        let active = if !h_slice.is_empty() {
+            &mut io_slices[..]
+        } else if !c_slice.is_empty() {
+            &mut io_slices[1..]
+        } else {
+            &mut io_slices[2..]
+        };
+        let n = stream.write_vectored(active).await?;
+        if n == 0 {
+            return Err(Http1Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write whole chunk",
+            )));
+        }
+        if n <= h_slice.len() {
+            h_slice = &h_slice[n..];
+        } else {
+            let rem = n - h_slice.len();
+            h_slice = &[];
+            if rem <= c_slice.len() {
+                c_slice = &c_slice[rem..];
+            } else {
+                let rem2 = rem - c_slice.len();
+                c_slice = &[];
+                t_slice = &t_slice[rem2..];
+            }
+        }
     }
     Ok(())
 }
