@@ -124,6 +124,8 @@ pub struct Http1Upstream {
     pub strategy: Http1PipeStrategy,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     pub acceleration: velda_http1::Http1AccelerationPath,
+    /// [PRE-COMPILED]: Pre-computed HTTP/1.1 protocol engine configuration.
+    pub config: velda_http1::config::Http1Config,
 }
 
 impl std::fmt::Debug for Http1Upstream {
@@ -160,6 +162,7 @@ impl Http1Upstream {
             streaming,
             strategy,
             acceleration,
+            config: velda_http1::config::Http1Config::auto(),
         }
     }
 

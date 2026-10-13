@@ -59,9 +59,26 @@ pub async fn serve(
         }
     };
 
-    // 4. Open progressive bidirectional HTTP/3 stream
+    // 4. Fast-path: Ingest initial payload with opportunistic coalescing up to 64KB
+    let (first_chunk, mut is_fin) = match receiver.recv_coalesced_chunk(65_536).await {
+        Ok(Some(c)) => {
+            let fin = receiver.is_end_stream();
+            (Some(c), fin)
+        }
+        Ok(None) => (None, true),
+        Err(e) => {
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_REQUEST,
+                format!("400 Bad Request: {e}\n").into_bytes(),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
+        }
+    };
+
+    // Open progressive bidirectional HTTP/3 stream with fused initial chunk and optional FIN
     let (sender, response_rx) = match client
-        .open_stream(head.method, head.uri, head.headers, None, false)
+        .open_stream(head.method, head.uri, head.headers, first_chunk, is_fin)
         .await
     {
         Ok(parts) => parts,
@@ -82,12 +99,21 @@ pub async fn serve(
 
     // Task 1: Upload Pump (Downstream H2 -> Upstream H3 QUIC)
     let upload_task = async {
-        while let Ok(Some(chunk)) = receiver.recv_chunk().await {
-            if !chunk.is_empty() && sender.send_chunk(chunk).await.is_err() {
-                return Err(());
+        if !is_fin {
+            while let Ok(Some(chunk)) = receiver.recv_chunk().await {
+                let chunk_fin = receiver.is_end_stream();
+                if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {
+                    return Err(());
+                }
+                if chunk_fin {
+                    is_fin = true;
+                    break;
+                }
+            }
+            if !is_fin {
+                let _ = sender.finish().await;
             }
         }
-        let _ = sender.finish().await;
         Ok::<(), ()>(())
     };
 
@@ -115,6 +141,7 @@ pub async fn serve(
             }
         }
 
+        let _ = stream_sender.finish();
         Ok::<(), ()>(())
     };
 

@@ -81,7 +81,13 @@ async fn forward_buffered(
             let _ = body_stream.flow_control().release_capacity(len);
             Body::Bytes(data)
         } else {
-            let mut body_buf = BytesMut::with_capacity(len * 2);
+            let initial_cap = parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(len * 2);
+            let mut body_buf = BytesMut::with_capacity(initial_cap);
             body_buf.extend_from_slice(&data);
             let mut unreleased_bytes = len;
 

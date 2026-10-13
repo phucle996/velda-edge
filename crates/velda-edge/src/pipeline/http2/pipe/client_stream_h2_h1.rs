@@ -4,6 +4,7 @@
 //! by transforming incoming HTTP/2 DATA frames into RFC 9112 `Transfer-Encoding: chunked`
 //! byte streams towards the HTTP/1.1 upstream backend.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -67,10 +68,27 @@ pub async fn serve(
         }
     };
 
-    let cfg = velda_http1::config::Http1Config::auto();
-    let mut write_buf = bytes::BytesMut::with_capacity(cfg.upstream_write_base);
+    // 5. Ingest first chunk (coalesced) and send HTTP/1.1 request head in a fused buffer
+    let (first_chunk, is_fin) = match receiver.recv_coalesced_chunk(65_536).await {
+        Ok(Some(c)) => {
+            let fin = receiver.is_end_stream();
+            (Some(c), fin)
+        }
+        Ok(None) => (None, true),
+        Err(e) => {
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_REQUEST,
+                format!("400 Bad Request: {e}\n").into_bytes(),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
+        }
+    };
 
-    // 5. Encode and send HTTP/1.1 request head
+    let first_len = first_chunk.as_ref().map(|c| c.len()).unwrap_or(0);
+    let mut write_buf = bytes::BytesMut::with_capacity(1024 + first_len + 64);
+
+    // Encode HTTP/1.1 request head
     velda_http1::client::encode_request_head(
         &head.method,
         &head.uri,
@@ -79,9 +97,21 @@ pub async fn serve(
         &mut write_buf,
     );
 
+    if let Some(chunk) = first_chunk
+        && !chunk.is_empty()
+    {
+        let _ = write!(write_buf, "{:x}\r\n", chunk.len());
+        write_buf.extend_from_slice(&chunk);
+        write_buf.extend_from_slice(b"\r\n");
+    }
+
+    if is_fin {
+        write_buf.extend_from_slice(b"0\r\n\r\n");
+    }
+
     if let Err(e) = lease.write_all(&write_buf).await {
         lease.mark_closed();
-        tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send chunked request head");
+        tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send chunked request head and initial payload");
         let err_resp = L7Response::from_bytes(
             StatusCode::BAD_GATEWAY,
             format!("502 Bad Gateway: {e}\n").into_bytes(),
@@ -90,60 +120,62 @@ pub async fn serve(
         return;
     }
 
-    // 6. Progressively stream client DATA frames to HTTP/1.1 chunked stream
-    let mut hex_buf = [0u8; 32];
-    loop {
-        match receiver.recv_chunk().await {
-            Ok(Some(chunk)) => {
-                if !chunk.is_empty() {
-                    let hex_len = {
-                        use std::io::Write;
-                        let mut cursor = std::io::Cursor::new(&mut hex_buf[..]);
-                        let _ = write!(cursor, "{:x}\r\n", chunk.len());
-                        cursor.position() as usize
-                    };
-                    if lease.write_all(&hex_buf[..hex_len]).await.is_err()
-                        || lease.write_all(&chunk).await.is_err()
-                        || lease.write_all(b"\r\n").await.is_err()
-                    {
-                        lease.mark_closed();
-                        tracing::warn!("Failed writing chunk to HTTP/1.1 backend");
-                        let err_resp = L7Response::from_bytes(
-                            StatusCode::BAD_GATEWAY,
-                            b"502 Bad Gateway: upstream stream broken\n".to_vec(),
-                        );
-                        let _ = responder.send_response(&err_resp);
-                        return;
+    // 6. Progressively stream any remaining client DATA frames to HTTP/1.1 chunked stream
+    if !is_fin {
+        let mut chunk_buf = bytes::BytesMut::with_capacity(65_536 + 64);
+        loop {
+            match receiver.recv_coalesced_chunk(65_536).await {
+                Ok(Some(chunk)) => {
+                    if !chunk.is_empty() {
+                        chunk_buf.clear();
+                        let _ = write!(chunk_buf, "{:x}\r\n", chunk.len());
+                        chunk_buf.extend_from_slice(&chunk);
+                        chunk_buf.extend_from_slice(b"\r\n");
+                        if lease.write_all(&chunk_buf).await.is_err() {
+                            lease.mark_closed();
+                            tracing::warn!("Failed writing chunk to HTTP/1.1 backend");
+                            let err_resp = L7Response::from_bytes(
+                                StatusCode::BAD_GATEWAY,
+                                b"502 Bad Gateway: upstream stream broken\n".to_vec(),
+                            );
+                            let _ = responder.send_response(&err_resp);
+                            return;
+                        }
+                    }
+                    if receiver.is_end_stream() {
+                        break;
                     }
                 }
+                Ok(None) => break,
+                Err(e) => {
+                    lease.mark_closed();
+                    tracing::warn!(error = %e, "Client disconnected during H2 upload");
+                    return;
+                }
             }
-            Ok(None) => break,
-            Err(e) => {
-                lease.mark_closed();
-                tracing::warn!(error = %e, "Client disconnected during H2 upload");
-                return;
-            }
+        }
+
+        // Conclude chunked stream with terminal chunk 0\r\n\r\n
+        if lease.write_all(b"0\r\n\r\n").await.is_err() {
+            lease.mark_closed();
+            tracing::warn!("Failed concluding HTTP/1.1 chunked stream");
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                b"502 Bad Gateway: failed to complete chunked upload\n".to_vec(),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
         }
     }
 
-    // Conclude chunked stream with terminal chunk 0\r\n\r\n
-    if lease.write_all(b"0\r\n\r\n").await.is_err() || lease.flush().await.is_err() {
-        lease.mark_closed();
-        tracing::warn!("Failed concluding HTTP/1.1 chunked stream");
-        let err_resp = L7Response::from_bytes(
-            StatusCode::BAD_GATEWAY,
-            b"502 Bad Gateway: failed to complete chunked upload\n".to_vec(),
-        );
-        let _ = responder.send_response(&err_resp);
-        return;
-    }
-
     // 7. Read HTTP/1.1 response
-    let mut read_buf = bytes::BytesMut::with_capacity(cfg.upstream_read_capacity);
+    let mut read_buf = bytes::BytesMut::with_capacity(65_536);
     loop {
         match lease.read_buf(&mut read_buf).await {
             Ok(0) => {
-                if let Ok(Some(resp)) = velda_http1::client::decode_response(&mut read_buf, &cfg) {
+                if let Ok(Some(resp)) =
+                    velda_http1::client::decode_response(&mut read_buf, &upstream.config)
+                {
                     if check_connection_close(&resp.headers) {
                         lease.mark_closed();
                     }
@@ -159,7 +191,7 @@ pub async fn serve(
                 }
                 break;
             }
-            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, &cfg) {
+            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, &upstream.config) {
                 Ok(Some(resp)) => {
                     if check_connection_close(&resp.headers) {
                         lease.mark_closed();

@@ -4,6 +4,7 @@
 //! and an HTTP/1.1 backend, simultaneously uploading chunked data and streaming chunked
 //! responses downstream with cancellation propagation.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -68,8 +69,7 @@ pub async fn serve(
         }
     };
 
-    let cfg = velda_http1::config::Http1Config::auto();
-    let mut write_buf = bytes::BytesMut::with_capacity(cfg.upstream_write_base);
+    let mut write_buf = bytes::BytesMut::with_capacity(1024);
 
     // 5. Send HTTP/1.1 request head
     velda_http1::client::encode_request_head(
@@ -96,20 +96,19 @@ pub async fn serve(
 
     // Upload task: pipes downstream H2 DATA frames into upstream H1 chunked encoding
     let upload_fut = async {
-        let mut hex_buf = [0u8; 32];
+        let mut chunk_buf = bytes::BytesMut::with_capacity(65_536 + 64);
         loop {
-            match receiver.recv_chunk().await {
+            match receiver.recv_coalesced_chunk(65_536).await {
                 Ok(Some(chunk)) => {
                     if !chunk.is_empty() {
-                        let hex_len = {
-                            use std::io::Write;
-                            let mut cursor = std::io::Cursor::new(&mut hex_buf[..]);
-                            let _ = write!(cursor, "{:x}\r\n", chunk.len());
-                            cursor.position() as usize
-                        };
-                        write_half.write_all(&hex_buf[..hex_len]).await?;
-                        write_half.write_all(&chunk).await?;
-                        write_half.write_all(b"\r\n").await?;
+                        chunk_buf.clear();
+                        let _ = write!(chunk_buf, "{:x}\r\n", chunk.len());
+                        chunk_buf.extend_from_slice(&chunk);
+                        chunk_buf.extend_from_slice(b"\r\n");
+                        write_half.write_all(&chunk_buf).await?;
+                    }
+                    if receiver.is_end_stream() {
+                        break;
                     }
                 }
                 Ok(None) => break,
@@ -125,11 +124,14 @@ pub async fn serve(
 
     // Download task: reads upstream H1 response and streams H2 DATA frames downstream
     let download_fut = async {
-        let mut read_buf = bytes::BytesMut::with_capacity(cfg.upstream_read_capacity);
-        let (resp_head, framing) =
-            velda_http1::client::read_response_head(&mut read_half, &mut read_buf, &cfg)
-                .await
-                .map_err(std::io::Error::other)?;
+        let mut read_buf = bytes::BytesMut::with_capacity(65_536);
+        let (resp_head, framing) = velda_http1::client::read_response_head(
+            &mut read_half,
+            &mut read_buf,
+            &upstream.config,
+        )
+        .await
+        .map_err(std::io::Error::other)?;
 
         let mut clean_headers = resp_head.headers;
         velda_http1::client::sanitize_headers(&mut clean_headers);
@@ -157,7 +159,11 @@ pub async fn serve(
             Http1BodyFraming::ContentLength(total_len) => {
                 let mut remaining = total_len;
                 while remaining > 0 {
-                    let to_read = remaining.min(65536);
+                    let to_read = if remaining >= 1_048_576 {
+                        remaining.min(131_072)
+                    } else {
+                        remaining.min(65_536)
+                    };
                     match velda_http1::client::read_chunk_sized(
                         &mut read_half,
                         &mut read_buf,

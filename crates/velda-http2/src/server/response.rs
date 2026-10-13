@@ -248,10 +248,15 @@ impl Http2StreamSender {
         while !chunk.is_empty() {
             let available = self.send_stream.capacity();
             if available == 0 {
-                self.send_stream.reserve_capacity(chunk.len());
+                self.send_stream.reserve_capacity(chunk.len().max(65_536));
                 let res = std::future::poll_fn(|cx| self.send_stream.poll_capacity(cx)).await;
-                if let Some(err) = res {
-                    err?;
+                match res {
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(err.into()),
+                    None => return Err(Http2Error::ConnectionClosed),
+                }
+                if self.send_stream.capacity() == 0 {
+                    return Err(Http2Error::ConnectionClosed);
                 }
                 continue;
             }
@@ -278,5 +283,11 @@ impl Http2StreamSender {
     pub fn finish(&mut self) -> Result<(), Http2Error> {
         self.send_stream.send_data(Bytes::new(), true)?;
         Ok(())
+    }
+
+    /// Explicitly resets the stream (e.g. to cancel ongoing client upload after response sent).
+    #[inline]
+    pub fn reset(&mut self, reason: h2::Reason) {
+        self.send_stream.send_reset(reason);
     }
 }

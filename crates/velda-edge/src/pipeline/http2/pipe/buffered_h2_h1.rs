@@ -79,8 +79,7 @@ pub async fn serve(
         }
     };
 
-    let cfg = velda_http1::config::Http1Config::auto();
-    let mut write_buf = bytes::BytesMut::with_capacity(cfg.upstream_write_base + body.len());
+    let mut write_buf = bytes::BytesMut::with_capacity(1024 + body.len());
 
     // 5. Serialize & send HTTP/1.1 request
     let send_res = velda_http1::client::send_request_parts(
@@ -113,67 +112,102 @@ pub async fn serve(
     }
 
     // 6. Read and decode HTTP/1.1 response
-    let mut read_buf = bytes::BytesMut::with_capacity(cfg.upstream_read_capacity);
-    loop {
-        match lease.read_buf(&mut read_buf).await {
-            Ok(0) => {
-                if let Ok(Some(resp)) = velda_http1::client::decode_response(&mut read_buf, &cfg) {
-                    if check_connection_close(&resp.headers) {
-                        lease.mark_closed();
-                    }
-                    let l7_resp = resp.into_l7_response();
-                    let _ = responder.send_response(&l7_resp);
-                } else {
-                    lease.mark_closed();
-                    let err_resp = L7Response::from_bytes(
-                        StatusCode::BAD_GATEWAY,
-                        b"502 Bad Gateway: upstream closed connection prematurely\n".to_vec(),
-                    );
-                    let _ = responder.send_response(&err_resp);
-                }
-                break;
-            }
-            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, &cfg) {
-                Ok(Some(resp)) => {
-                    if check_connection_close(&resp.headers) {
-                        lease.mark_closed();
-                    }
-                    let l7_resp = resp.into_l7_response();
-                    let _ = responder.send_response(&l7_resp);
-                    break;
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    lease.mark_closed();
-                    tracing::warn!(
-                        error = %e,
-                        upstream = %upstream.id(),
-                        "Failed to decode upstream HTTP/1.1 response"
-                    );
-                    let err_resp = L7Response::from_bytes(
-                        StatusCode::BAD_GATEWAY,
-                        format!("502 Bad Gateway: {e}\n").into_bytes(),
-                    );
-                    let _ = responder.send_response(&err_resp);
-                    break;
-                }
-            },
+    let mut read_buf = bytes::BytesMut::with_capacity(65_536);
+    let (head, framing) =
+        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
+            .await
+        {
+            Ok(res) => res,
             Err(e) => {
                 lease.mark_closed();
                 tracing::warn!(
                     error = %e,
                     upstream = %upstream.id(),
-                    "Error reading upstream HTTP/1.1 response"
+                    "Failed to read HTTP/1.1 response head from upstream"
                 );
                 let err_resp = L7Response::from_bytes(
                     StatusCode::BAD_GATEWAY,
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                break;
+                return;
+            }
+        };
+
+    let conn_close = check_connection_close(&head.headers);
+
+    let body = match framing {
+        velda_http1::server::request::Http1BodyFraming::Empty => velda_core::Body::Empty,
+        velda_http1::server::request::Http1BodyFraming::ContentLength(body_len) => {
+            if body_len > upstream.config.max_body_size {
+                lease.mark_closed();
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    b"413 Payload Too Large\n".to_vec(),
+                );
+                let _ = responder.send_response(&err_resp);
+                return;
+            }
+            if body_len > 0 {
+                while read_buf.len() < body_len {
+                    let needed = body_len - read_buf.len();
+                    if read_buf.capacity() - read_buf.len() < needed {
+                        read_buf.reserve(needed);
+                    }
+                    match lease.read_buf(&mut read_buf).await {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(_) => {
+                            lease.mark_closed();
+                            break;
+                        }
+                    }
+                }
+                velda_core::Body::Bytes(read_buf.split_to(read_buf.len().min(body_len)).freeze())
+            } else {
+                velda_core::Body::Empty
             }
         }
+        velda_http1::server::request::Http1BodyFraming::Chunked => {
+            let mut chunked_body = bytes::BytesMut::new();
+            let mut failed = false;
+            loop {
+                match velda_http1::client::read_next_chunk(&mut *lease, &mut read_buf).await {
+                    Ok(Some(chunk)) => {
+                        if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
+                            failed = true;
+                            break;
+                        }
+                        chunked_body.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                lease.mark_closed();
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    b"502 Bad Gateway: upstream chunked read failed\n".to_vec(),
+                );
+                let _ = responder.send_response(&err_resp);
+                return;
+            }
+            velda_core::Body::Bytes(chunked_body.freeze())
+        }
+    };
+
+    if conn_close {
+        lease.mark_closed();
     }
+
+    let mut clean_headers = head.headers;
+    velda_http1::client::sanitize_headers(&mut clean_headers);
+    let l7_resp = L7Response::new(head.status, http::Version::HTTP_2, clean_headers, body);
+    let _ = responder.send_response(&l7_resp);
 }
 
 /// Helper to check whether upstream backend signaled `Connection: close`.

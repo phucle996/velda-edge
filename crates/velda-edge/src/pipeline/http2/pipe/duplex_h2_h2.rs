@@ -73,31 +73,37 @@ pub async fn serve(
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
         let upload_task = async move {
-            const UPLOAD_BATCH_RESERVE: usize = 131_072; // 128 KB
+            const UPLOAD_BATCH_RESERVE: usize = 262_144; // 256 KB
             send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
 
-            while let Some(mut chunk) = receiver.recv_chunk().await? {
+            while let Some(mut chunk) = receiver.recv_coalesced_chunk(65_536).await? {
                 while !chunk.is_empty() {
                     let available = send_stream.capacity();
                     if available == 0 {
                         send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
-                        let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
-                        if let Some(err) = res {
-                            err?;
+                        match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                            Some(Ok(_)) => {}
+                            Some(Err(err)) => return Err(err.into()),
+                            None => return Ok(()),
+                        }
+                        if send_stream.capacity() == 0 {
+                            return Ok(());
                         }
                         continue;
                     }
 
                     let to_send = chunk.len().min(available);
                     let slice = chunk.split_to(to_send);
-                    send_stream.send_data(slice, false)?;
+                    if send_stream.send_data(slice, false).is_err() {
+                        return Ok(());
+                    }
 
-                    if send_stream.capacity() < 32_768 {
+                    if send_stream.capacity() < 65_536 {
                         send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
                     }
                 }
             }
-            send_stream.send_data(Bytes::new(), true)?;
+            let _ = send_stream.send_data(Bytes::new(), true);
             Ok::<(), Http2Error>(())
         };
 
@@ -114,7 +120,7 @@ pub async fn serve(
             if is_head || is_no_body_status {
                 let resp =
                     L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
-                responder.send_response(&resp)?;
+                responder.send_response_and_cancel_upload(&resp)?;
                 return Ok(());
             }
 
@@ -197,7 +203,18 @@ pub async fn serve(
             Ok(())
         };
 
-        tokio::try_join!(upload_task, download_task)?;
+        let mut upload_pinned = std::pin::pin!(upload_task);
+        let mut download_pinned = std::pin::pin!(download_task);
+
+        tokio::select! {
+            res = &mut download_pinned => {
+                res?;
+            }
+            res = &mut upload_pinned => {
+                res?;
+                download_pinned.await?;
+            }
+        }
         Ok::<(), Http2Error>(())
     }
     .await;

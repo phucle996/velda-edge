@@ -86,8 +86,7 @@ pub async fn serve(
     };
 
     // 5. Send request directly with self-healing on connection close
-    let req_retry = l7_req.clone();
-    let mut pipe_res = client.send_request(l7_req).await;
+    let mut pipe_res = client.send_request_ref(&l7_req).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -101,7 +100,7 @@ pub async fn serve(
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = fresh_client.send_request(req_retry).await;
+            pipe_res = fresh_client.send_request(l7_req).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {

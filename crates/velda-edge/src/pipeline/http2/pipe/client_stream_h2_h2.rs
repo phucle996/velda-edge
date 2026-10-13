@@ -71,17 +71,32 @@ pub async fn serve(
         let http_req = head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-        const UPLOAD_BATCH_RESERVE: usize = 131_072; // 128 KB
+        const UPLOAD_BATCH_RESERVE: usize = 262_144; // 256 KB
         send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
 
-        while let Some(mut chunk) = receiver.recv_chunk().await? {
+        let mut response_fut = std::pin::pin!(response_fut);
+        let mut early_response = None;
+
+        'upload: while let Some(mut chunk) = receiver.recv_coalesced_chunk(65_536).await? {
             while !chunk.is_empty() {
                 let available = send_stream.capacity();
                 if available == 0 {
                     send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
-                    let res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await;
-                    if let Some(err) = res {
-                        err?;
+                    tokio::select! {
+                        resp = &mut response_fut => {
+                            early_response = Some(resp?);
+                            break 'upload;
+                        }
+                        res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)) => {
+                            match res {
+                                Some(Ok(_)) => {}
+                                Some(Err(err)) => return Err(err.into()),
+                                None => break 'upload,
+                            }
+                        }
+                    }
+                    if send_stream.capacity() == 0 && early_response.is_none() {
+                        break 'upload;
                     }
                     continue;
                 }
@@ -90,14 +105,19 @@ pub async fn serve(
                 let slice = chunk.split_to(to_send);
                 send_stream.send_data(slice, false)?;
 
-                if send_stream.capacity() < 32_768 {
+                if send_stream.capacity() < 65_536 {
                     send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
                 }
             }
         }
-        send_stream.send_data(Bytes::new(), true)?;
 
-        let response = response_fut.await?;
+        let response = match early_response {
+            Some(resp) => resp,
+            None => {
+                let _ = send_stream.send_data(Bytes::new(), true);
+                response_fut.await?
+            }
+        };
         let (parts, mut body_stream) = response.into_parts();
 
         if let Some(content_type) = parts.headers.get(http::header::CONTENT_TYPE)

@@ -108,22 +108,10 @@ impl<IO: AsyncRead + Unpin> AsyncRead for FloodGuardedStream<IO> {
             let n = buf.filled().len().saturating_sub(prev_len);
             if n > 0 {
                 self.tracker.on_bytes_read(n);
-                if self.tracker.is_flood_detected() {
-                    return Poll::Ready(Err(cold_flood_error()));
-                }
             }
         }
         res
     }
-}
-
-#[cold]
-#[inline(never)]
-fn cold_flood_error() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        "HTTP/2 control frame flood detected",
-    )
 }
 
 impl<IO: AsyncWrite + Unpin> AsyncWrite for FloodGuardedStream<IO> {

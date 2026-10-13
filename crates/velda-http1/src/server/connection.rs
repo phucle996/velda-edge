@@ -42,8 +42,8 @@ where
             stream,
             read_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
             write_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
-            upstream_read_buf: BytesMut::with_capacity(config.upstream_read_capacity),
-            upstream_write_buf: BytesMut::with_capacity(config.upstream_write_base),
+            upstream_read_buf: BytesMut::with_capacity(65_536),
+            upstream_write_buf: BytesMut::with_capacity(1024),
             close_requested: false,
             config,
         }
@@ -66,15 +66,13 @@ where
             self.write_buf = BytesMut::with_capacity(self.config.initial_buffer_capacity);
         }
         if self.upstream_read_buf.is_empty()
-            && (self.upstream_read_buf.capacity() < self.config.upstream_read_capacity
-                || self.upstream_read_buf.capacity() > self.config.shrink_threshold)
+            && (self.upstream_read_buf.capacity() < 65_536
+                || self.upstream_read_buf.capacity() > 262_144)
         {
-            self.upstream_read_buf = BytesMut::with_capacity(self.config.upstream_read_capacity);
+            self.upstream_read_buf = BytesMut::with_capacity(65_536);
         }
-        if self.upstream_write_buf.is_empty()
-            && self.upstream_write_buf.capacity() > self.config.shrink_threshold
-        {
-            self.upstream_write_buf = BytesMut::with_capacity(self.config.upstream_write_base);
+        if self.upstream_write_buf.is_empty() && self.upstream_write_buf.capacity() > 16_384 {
+            self.upstream_write_buf = BytesMut::with_capacity(1024);
         }
     }
 

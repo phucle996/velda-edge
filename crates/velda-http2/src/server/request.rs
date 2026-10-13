@@ -311,7 +311,7 @@ impl Http2StreamReceiver {
             ));
         }
 
-        const INGRESS_BATCH_THRESHOLD: usize = 131_072; // 128 KB
+        const INGRESS_BATCH_THRESHOLD: usize = 32_768; // 32 KB
         if self.unreleased_bytes >= INGRESS_BATCH_THRESHOLD {
             let _ = self
                 .body_stream
@@ -321,6 +321,80 @@ impl Http2StreamReceiver {
         }
 
         Ok(Some(chunk))
+    }
+
+    /// Opportunistically attempts to receive the next DATA chunk without parking if data is already queued.
+    pub fn try_recv_chunk(
+        &mut self,
+    ) -> Result<Option<Option<bytes::Bytes>>, crate::error::Http2Error> {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match self.body_stream.poll_data(&mut cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                let len = chunk.len();
+                self.bytes_received += len;
+                self.unreleased_bytes += len;
+                if let Some(tracker) = &self.flood_tracker {
+                    tracker.on_payload_read(len);
+                }
+                if self.bytes_received > self.max_body_size {
+                    let _ = self
+                        .body_stream
+                        .flow_control()
+                        .release_capacity(self.unreleased_bytes);
+                    return Err(crate::error::Http2Error::PayloadTooLarge(
+                        self.bytes_received,
+                    ));
+                }
+                const INGRESS_BATCH_THRESHOLD: usize = 32_768; // 32 KB
+                if self.unreleased_bytes >= INGRESS_BATCH_THRESHOLD {
+                    let _ = self
+                        .body_stream
+                        .flow_control()
+                        .release_capacity(self.unreleased_bytes);
+                    self.unreleased_bytes = 0;
+                }
+                Ok(Some(Some(chunk)))
+            }
+            std::task::Poll::Ready(None) => {
+                if self.unreleased_bytes > 0 {
+                    let _ = self
+                        .body_stream
+                        .flow_control()
+                        .release_capacity(self.unreleased_bytes);
+                    self.unreleased_bytes = 0;
+                }
+                Ok(Some(None))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => Err(crate::error::Http2Error::from(e)),
+            std::task::Poll::Pending => Ok(None),
+        }
+    }
+
+    /// Receives a chunk, opportunistically coalescing any immediately available subsequent chunks
+    /// up to `max_coalesce_bytes` without parking the task.
+    pub async fn recv_coalesced_chunk(
+        &mut self,
+        max_coalesce_bytes: usize,
+    ) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
+        let Some(first) = self.recv_chunk().await? else {
+            return Ok(None);
+        };
+        if first.len() >= max_coalesce_bytes || self.is_end_stream() {
+            return Ok(Some(first));
+        }
+        let mut buf =
+            bytes::BytesMut::with_capacity((first.len() + 16_384).min(max_coalesce_bytes));
+        buf.extend_from_slice(&first);
+        while buf.len() < max_coalesce_bytes && !self.is_end_stream() {
+            match self.try_recv_chunk()? {
+                Some(Some(chunk)) => {
+                    buf.extend_from_slice(&chunk);
+                }
+                _ => break,
+            }
+        }
+        Ok(Some(buf.freeze()))
     }
 
     /// Returns the total number of body bytes received so far on this stream.

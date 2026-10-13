@@ -147,11 +147,28 @@ impl Http2Upstream {
             .execute(|endpoint| async move {
                 // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let client = lease.client.clone();
-                    if let Ok(ready_client) = client.ready().await {
-                        return Ok::<_, String>((ready_client, lease));
-                    } else {
-                        lease.mark_goaway();
+                    let mut client = lease.client.clone();
+                    let ready_res = std::future::poll_fn(|cx| match client.poll_ready(cx) {
+                        std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Some(true)),
+                        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Some(false)),
+                        std::task::Poll::Pending => std::task::Poll::Ready(None),
+                    })
+                    .await;
+
+                    match ready_res {
+                        Some(true) => return Ok::<_, String>((client, lease)),
+                        Some(false) => {
+                            lease.mark_goaway();
+                        }
+                        None => {
+                            if let Ok(Ok(ready_client)) =
+                                tokio::time::timeout(connect_timeout, client.ready()).await
+                            {
+                                return Ok::<_, String>((ready_client, lease));
+                            } else {
+                                lease.mark_goaway();
+                            }
+                        }
                     }
                 }
 
@@ -160,11 +177,28 @@ impl Http2Upstream {
 
                 // Double-check: did a concurrent request finish connecting while we waited for the lock?
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let client = lease.client.clone();
-                    if let Ok(ready_client) = client.ready().await {
-                        return Ok::<_, String>((ready_client, lease));
-                    } else {
-                        lease.mark_goaway();
+                    let mut client = lease.client.clone();
+                    let ready_res = std::future::poll_fn(|cx| match client.poll_ready(cx) {
+                        std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Some(true)),
+                        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Some(false)),
+                        std::task::Poll::Pending => std::task::Poll::Ready(None),
+                    })
+                    .await;
+
+                    match ready_res {
+                        Some(true) => return Ok::<_, String>((client, lease)),
+                        Some(false) => {
+                            lease.mark_goaway();
+                        }
+                        None => {
+                            if let Ok(Ok(ready_client)) =
+                                tokio::time::timeout(connect_timeout, client.ready()).await
+                            {
+                                return Ok::<_, String>((ready_client, lease));
+                            } else {
+                                lease.mark_goaway();
+                            }
+                        }
                     }
                 }
 
@@ -183,9 +217,11 @@ impl Http2Upstream {
                 let lease = self.pool.register(endpoint, res, max_streams);
 
                 let ready_client = lease.client.clone();
-                let ready_client = ready_client
-                    .ready()
+                let ready_client = tokio::time::timeout(connect_timeout, ready_client.ready())
                     .await
+                    .map_err(|_| {
+                        "Timeout waiting for client ready after fresh connect".to_string()
+                    })?
                     .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
 
                 Ok::<_, String>((ready_client, lease))
@@ -231,9 +267,11 @@ impl Http2Upstream {
                 let lease = self.pool.register(endpoint, res, max_streams);
 
                 let ready_client = lease.client.clone();
-                let ready_client = ready_client
-                    .ready()
+                let ready_client = tokio::time::timeout(connect_timeout, ready_client.ready())
                     .await
+                    .map_err(|_| {
+                        "Timeout waiting for client ready after fresh connect".to_string()
+                    })?
                     .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
 
                 Ok::<_, String>((ready_client, lease))

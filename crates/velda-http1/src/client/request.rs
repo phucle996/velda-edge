@@ -309,10 +309,10 @@ pub async fn forward_request<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut write_buf = BytesMut::with_capacity(config.upstream_write_base);
+    let mut write_buf = BytesMut::with_capacity(1024);
     send_request(req, stream, &mut write_buf).await?;
 
-    let mut read_buf = BytesMut::with_capacity(config.upstream_read_capacity);
+    let mut read_buf = BytesMut::with_capacity(65_536);
 
     loop {
         let n = stream.read_buf(&mut read_buf).await?;

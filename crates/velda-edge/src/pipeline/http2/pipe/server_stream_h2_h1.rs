@@ -79,8 +79,7 @@ pub async fn serve(
         }
     };
 
-    let cfg = velda_http1::config::Http1Config::auto();
-    let mut write_buf = bytes::BytesMut::with_capacity(cfg.upstream_write_base + body.len());
+    let mut write_buf = bytes::BytesMut::with_capacity(1024 + body.len());
 
     // 5. Send HTTP/1.1 request head and body
     let send_res = velda_http1::client::send_request_parts(
@@ -113,9 +112,11 @@ pub async fn serve(
     }
 
     // 6. Read HTTP/1.1 response head from upstream
-    let mut read_buf = bytes::BytesMut::with_capacity(cfg.upstream_read_capacity);
+    let mut read_buf = bytes::BytesMut::with_capacity(65_536);
     let (resp_head, framing) =
-        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &cfg).await {
+        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
+            .await
+        {
             Ok(parts) => parts,
             Err(e) => {
                 lease.mark_closed();
@@ -174,7 +175,11 @@ pub async fn serve(
             let mut remaining = total_len;
             let mut failed = false;
             while remaining > 0 {
-                let to_read = remaining.min(65536);
+                let to_read = if remaining >= 1_048_576 {
+                    remaining.min(131_072)
+                } else {
+                    remaining.min(65_536)
+                };
                 match velda_http1::client::read_chunk_sized(&mut *lease, &mut read_buf, to_read)
                     .await
                 {

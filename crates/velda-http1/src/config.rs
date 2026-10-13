@@ -34,10 +34,6 @@ pub struct Http1Config {
     /// Read buffer size for client upload bodies (equivalent to Nginx's `client_body_buffer_size`).
     /// Determines the capacity reserved for reading payload chunks from the downstream socket into RAM.
     pub client_body_buffer_size: usize,
-    /// Initial read buffer capacity for upstream response reading (bytes).
-    pub upstream_read_capacity: usize,
-    /// Base write buffer capacity for upstream request encoding (bytes).
-    pub upstream_write_base: usize,
 }
 
 impl Http1Config {
@@ -56,8 +52,6 @@ impl Http1Config {
                 initial_buffer_capacity: 2 * KB,
                 shrink_threshold: 8 * KB,
                 client_body_buffer_size: 32 * KB,
-                upstream_read_capacity: 2 * KB,
-                upstream_write_base: 512,
             },
             MemoryTier::Small => Self {
                 max_body_size: 10 * MB,
@@ -69,8 +63,6 @@ impl Http1Config {
                 initial_buffer_capacity: 4 * KB,
                 shrink_threshold: 16 * KB,
                 client_body_buffer_size: 64 * KB,
-                upstream_read_capacity: 4 * KB,
-                upstream_write_base: KB,
             },
             MemoryTier::Medium => Self {
                 max_body_size: 10 * MB,
@@ -82,8 +74,6 @@ impl Http1Config {
                 initial_buffer_capacity: 4 * KB,
                 shrink_threshold: 16 * KB,
                 client_body_buffer_size: 128 * KB,
-                upstream_read_capacity: 4 * KB,
-                upstream_write_base: KB,
             },
             MemoryTier::Large => Self {
                 max_body_size: 20 * MB,
@@ -95,8 +85,6 @@ impl Http1Config {
                 initial_buffer_capacity: 8 * KB,
                 shrink_threshold: 32 * KB,
                 client_body_buffer_size: 128 * KB,
-                upstream_read_capacity: 8 * KB,
-                upstream_write_base: 2 * KB,
             },
             MemoryTier::XLarge => Self {
                 max_body_size: 50 * MB,
@@ -108,8 +96,6 @@ impl Http1Config {
                 initial_buffer_capacity: 8 * KB,
                 shrink_threshold: 64 * KB,
                 client_body_buffer_size: 256 * KB,
-                upstream_read_capacity: 8 * KB,
-                upstream_write_base: 2 * KB,
             },
             MemoryTier::TwoXLarge => Self {
                 max_body_size: 100 * MB,
@@ -121,8 +107,6 @@ impl Http1Config {
                 initial_buffer_capacity: 16 * KB,
                 shrink_threshold: 64 * KB,
                 client_body_buffer_size: 256 * KB,
-                upstream_read_capacity: 16 * KB,
-                upstream_write_base: 4 * KB,
             },
             MemoryTier::Ultra => Self {
                 max_body_size: 100 * MB,
@@ -134,8 +118,6 @@ impl Http1Config {
                 initial_buffer_capacity: 16 * KB,
                 shrink_threshold: 128 * KB,
                 client_body_buffer_size: 256 * KB,
-                upstream_read_capacity: 16 * KB,
-                upstream_write_base: 4 * KB,
             },
         }
     }

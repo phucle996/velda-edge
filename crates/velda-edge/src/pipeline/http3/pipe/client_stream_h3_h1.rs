@@ -45,8 +45,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
         }
     };
 
-    let cfg = velda_http1::config::Http1Config::auto();
-    let mut pipe_res = send_h1_client_stream(&mut lease, req, &headers, &cfg).await;
+    let mut pipe_res = send_h1_client_stream(&mut lease, req, &headers, &upstream.config).await;
 
     if pipe_res.is_err() {
         lease.mark_closed();
@@ -55,7 +54,8 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
             "HTTP/1.1 upstream connection failed; self-healing with fresh connection"
         );
         if let Ok(mut fresh_lease) = upstream.acquire_fresh().await {
-            pipe_res = send_h1_client_stream(&mut fresh_lease, req, &headers, &cfg).await;
+            pipe_res =
+                send_h1_client_stream(&mut fresh_lease, req, &headers, &upstream.config).await;
             if pipe_res.is_err() {
                 fresh_lease.mark_closed();
             }
@@ -92,8 +92,8 @@ async fn send_h1_client_stream(
         velda_core::Body::Bytes(b) => b.len(),
         velda_core::Body::Empty => 0,
     };
-    let mut write_buf = BytesMut::with_capacity(cfg.upstream_write_base + body_len);
-    let mut read_buf = BytesMut::with_capacity(cfg.upstream_read_capacity);
+    let mut write_buf = BytesMut::with_capacity(1024 + body_len);
+    let mut read_buf = BytesMut::with_capacity(65_536);
 
     velda_http1::client::send_request_parts(
         &req.method,

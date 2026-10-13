@@ -422,6 +422,10 @@ where
     IO: AsyncRead + Unpin,
 {
     while read_buf.len() < needed {
+        let remaining_needed = needed - read_buf.len();
+        if read_buf.capacity() - read_buf.len() < remaining_needed {
+            read_buf.reserve(remaining_needed.max(65_536));
+        }
         let n = stream.read_buf(read_buf).await?;
         if n == 0 {
             if !read_buf.is_empty() {
