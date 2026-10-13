@@ -81,12 +81,24 @@ async fn forward_buffered(
             let _ = body_stream.flow_control().release_capacity(len);
             Body::Bytes(data)
         } else {
+            if let Some(content_length) = parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                && content_length > config.max_body_size
+            {
+                let _ = body_stream.flow_control().release_capacity(len);
+                return Err(Http2Error::PayloadTooLarge(content_length));
+            }
+
             let initial_cap = parts
                 .headers
                 .get(http::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(len * 2);
+                .unwrap_or_else(|| (len.saturating_mul(2)).clamp(16_384, config.max_body_size))
+                .min(config.max_body_size);
             let mut body_buf = BytesMut::with_capacity(initial_cap);
             body_buf.extend_from_slice(&data);
             let mut unreleased_bytes = len;
@@ -102,6 +114,20 @@ async fn forward_buffered(
                 }
                 body_buf.extend_from_slice(&chunk_data);
                 unreleased_bytes += chunk_len;
+
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                while let std::task::Poll::Ready(Some(Ok(extra))) = body_stream.poll_data(&mut cx) {
+                    let extra_len = extra.len();
+                    if body_buf.len() + extra_len > config.max_body_size {
+                        let _ = body_stream
+                            .flow_control()
+                            .release_capacity(unreleased_bytes + extra_len);
+                        return Err(Http2Error::PayloadTooLarge(body_buf.len() + extra_len));
+                    }
+                    body_buf.extend_from_slice(&extra);
+                    unreleased_bytes += extra_len;
+                }
 
                 if unreleased_bytes >= batch_threshold {
                     let _ = body_stream

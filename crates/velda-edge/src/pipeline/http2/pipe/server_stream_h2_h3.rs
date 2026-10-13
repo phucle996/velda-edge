@@ -11,7 +11,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http3::error::Http3Error;
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http3::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -62,10 +62,8 @@ pub async fn serve(
         body,
     );
 
-    let h3_config = Http3Config::auto();
-
     // 5. Acquire pooled HTTP/3 client
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -93,7 +91,7 @@ pub async fn serve(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
+        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
             stream_res = fresh_client.send_stream_request(l7_req).await;
         }
     }

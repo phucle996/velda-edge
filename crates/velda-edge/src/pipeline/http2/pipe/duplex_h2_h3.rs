@@ -10,7 +10,7 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::L7Response;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http3::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -35,10 +35,8 @@ pub async fn serve(
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut head.headers);
 
-    let h3_config = Http3Config::auto();
-
     // 3. Acquire pooled HTTP/3 client
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -100,7 +98,8 @@ pub async fn serve(
     // Task 1: Upload Pump (Downstream H2 -> Upstream H3 QUIC)
     let upload_task = async {
         if !is_fin {
-            while let Ok(Some(chunk)) = receiver.recv_chunk().await {
+            let coalesce_limit = (upstream.config.max_body_size / 64).clamp(16_384, 65_536);
+            while let Ok(Some(chunk)) = receiver.recv_coalesced_chunk(coalesce_limit).await {
                 let chunk_fin = receiver.is_end_stream();
                 if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {
                     return Err(());
@@ -145,5 +144,16 @@ pub async fn serve(
         Ok::<(), ()>(())
     };
 
-    let _ = tokio::try_join!(upload_task, download_task);
+    let mut upload_pinned = std::pin::pin!(upload_task);
+    let mut download_pinned = std::pin::pin!(download_task);
+
+    tokio::select! {
+        res = &mut download_pinned => {
+            let _ = res;
+        }
+        res = &mut upload_pinned => {
+            let _ = res;
+            let _ = download_pinned.await;
+        }
+    }
 }

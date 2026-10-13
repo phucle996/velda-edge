@@ -71,17 +71,20 @@ pub async fn serve(
         let http_req = head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-        const UPLOAD_BATCH_RESERVE: usize = 262_144; // 256 KB
-        send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+        let upload_reserve =
+            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
+        let coalesce_limit = (upload_reserve / 2).clamp(16_384, 131_072);
+        let low_watermark = (upload_reserve / 4).clamp(8_192, 65_536);
+        send_stream.reserve_capacity(upload_reserve);
 
         let mut response_fut = std::pin::pin!(response_fut);
         let mut early_response = None;
 
-        'upload: while let Some(mut chunk) = receiver.recv_coalesced_chunk(65_536).await? {
+        'upload: while let Some(mut chunk) = receiver.recv_coalesced_chunk(coalesce_limit).await? {
             while !chunk.is_empty() {
                 let available = send_stream.capacity();
                 if available == 0 {
-                    send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
+                    send_stream.reserve_capacity(chunk.len().max(upload_reserve));
                     tokio::select! {
                         resp = &mut response_fut => {
                             early_response = Some(resp?);
@@ -105,8 +108,8 @@ pub async fn serve(
                 let slice = chunk.split_to(to_send);
                 send_stream.send_data(slice, false)?;
 
-                if send_stream.capacity() < 65_536 {
-                    send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+                if send_stream.capacity() < low_watermark {
+                    send_stream.reserve_capacity(upload_reserve);
                 }
             }
         }
@@ -153,7 +156,25 @@ pub async fn serve(
                 let _ = body_stream.flow_control().release_capacity(len);
                 Body::Bytes(data)
             } else {
-                let mut body_buf = BytesMut::with_capacity(len * 2);
+                if let Some(content_length) = parts
+                    .headers
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<usize>().ok())
+                    && content_length > config.max_body_size
+                {
+                    let _ = body_stream.flow_control().release_capacity(len);
+                    return Err(Http2Error::PayloadTooLarge(content_length));
+                }
+
+                let initial_cap = parts
+                    .headers
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or_else(|| (len.saturating_mul(2)).clamp(16_384, config.max_body_size))
+                    .min(config.max_body_size);
+                let mut body_buf = BytesMut::with_capacity(initial_cap);
                 body_buf.extend_from_slice(&data);
                 let mut unreleased_bytes = len;
 
@@ -168,6 +189,22 @@ pub async fn serve(
                     }
                     body_buf.extend_from_slice(&chunk_data);
                     unreleased_bytes += chunk_len;
+
+                    let waker = std::task::Waker::noop();
+                    let mut cx = std::task::Context::from_waker(waker);
+                    while let std::task::Poll::Ready(Some(Ok(extra))) =
+                        body_stream.poll_data(&mut cx)
+                    {
+                        let extra_len = extra.len();
+                        if body_buf.len() + extra_len > config.max_body_size {
+                            let _ = body_stream
+                                .flow_control()
+                                .release_capacity(unreleased_bytes + extra_len);
+                            return Err(Http2Error::PayloadTooLarge(body_buf.len() + extra_len));
+                        }
+                        body_buf.extend_from_slice(&extra);
+                        unreleased_bytes += extra_len;
+                    }
 
                     if unreleased_bytes >= batch_threshold {
                         let _ = body_stream

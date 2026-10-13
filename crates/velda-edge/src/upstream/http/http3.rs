@@ -57,6 +57,8 @@ pub struct Http3Upstream {
     pub max_concurrent_streams: u32,
     /// Serialization lock for establishing new QUIC connections to prevent thundering herd storms.
     connect_lock: tokio::sync::Mutex<()>,
+    /// [PRE-COMPILED]: Pre-computed HTTP/3 protocol configuration.
+    pub config: Http3Config,
 }
 
 impl std::fmt::Debug for Http3Upstream {
@@ -93,6 +95,7 @@ impl Http3Upstream {
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
             connect_lock: tokio::sync::Mutex::new(()),
+            config: Http3Config::auto(),
         }
     }
 

@@ -11,7 +11,7 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::L7Response;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http3::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -36,10 +36,8 @@ pub async fn serve(
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut head.headers);
 
-    let h3_config = Http3Config::auto();
-
     // 3. Acquire pooled HTTP/3 client
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -100,7 +98,8 @@ pub async fn serve(
 
     // 5. Progressively stream any remaining client DATA frames directly to HTTP/3
     if !is_fin {
-        while let Ok(Some(chunk)) = receiver.recv_chunk().await {
+        let coalesce_limit = (upstream.config.max_body_size / 64).clamp(16_384, 65_536);
+        while let Ok(Some(chunk)) = receiver.recv_coalesced_chunk(coalesce_limit).await {
             let chunk_fin = receiver.is_end_stream();
             if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {
                 tracing::warn!("Failed to stream DATA chunk to HTTP/3 upstream");
@@ -144,10 +143,22 @@ pub async fn serve(
     };
 
     // 6. Consume finite response body and send downstream
+    let max_body = upstream.config.max_body_size;
     let mut resp_body = BytesMut::new();
     while let Some(chunk_res) = resp_stream.next_chunk().await {
         match chunk_res {
-            Ok(chunk) => resp_body.extend_from_slice(&chunk),
+            Ok(chunk) => {
+                if resp_body.len() + chunk.len() > max_body {
+                    tracing::warn!("HTTP/3 upstream response exceeded max_body_size");
+                    let err_resp = L7Response::from_bytes(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        b"413 Payload Too Large\n".to_vec(),
+                    );
+                    let _ = responder.send_response(&err_resp);
+                    return;
+                }
+                resp_body.extend_from_slice(&chunk);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Error reading response chunk from HTTP/3 upstream");
                 let err_resp = L7Response::from_bytes(

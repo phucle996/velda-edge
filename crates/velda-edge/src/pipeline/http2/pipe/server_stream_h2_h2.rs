@@ -62,8 +62,9 @@ async fn forward_server_stream(
     let batch_threshold = (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
     let mut total_bytes = 0;
     let mut unreleased_bytes = 0;
-    const COALESCE_LIMIT: usize = 65_536;
-    let mut pending_buf = bytes::BytesMut::with_capacity(COALESCE_LIMIT);
+    let coalesce_limit = (config.initial_stream_window_size as usize / 8).clamp(16_384, 65_536);
+    let zero_copy_threshold = (coalesce_limit / 4).clamp(8_192, 16_384);
+    let mut pending_buf = bytes::BytesMut::with_capacity(coalesce_limit);
 
     while let Some(chunk) = body_stream.data().await {
         let data = chunk?;
@@ -78,7 +79,7 @@ async fn forward_server_stream(
             return Err(Http2Error::PayloadTooLarge(total_bytes));
         }
 
-        if pending_buf.is_empty() && len >= COALESCE_LIMIT {
+        if pending_buf.is_empty() && len >= zero_copy_threshold {
             if sender.send_chunk(data).await.is_err() {
                 tracing::debug!("Downstream client disconnected during H2 response streaming");
                 let _ = body_stream
@@ -88,7 +89,7 @@ async fn forward_server_stream(
             }
         } else {
             pending_buf.extend_from_slice(&data);
-            if pending_buf.len() >= COALESCE_LIMIT {
+            if pending_buf.len() >= coalesce_limit {
                 let to_send = pending_buf.split().freeze();
                 if sender.send_chunk(to_send).await.is_err() {
                     tracing::debug!("Downstream client disconnected during H2 response streaming");

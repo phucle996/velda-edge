@@ -95,10 +95,14 @@ pub async fn serve(
     let (mut read_half, mut write_half) = tokio::io::split(&mut *lease);
 
     // Upload task: pipes downstream H2 DATA frames into upstream H1 chunked encoding
+    let coalesce_limit = upstream
+        .config
+        .client_body_buffer_size
+        .clamp(32_768, 131_072);
     let upload_fut = async {
-        let mut chunk_buf = bytes::BytesMut::with_capacity(65_536 + 64);
+        let mut chunk_buf = bytes::BytesMut::with_capacity(coalesce_limit + 64);
         loop {
-            match receiver.recv_coalesced_chunk(65_536).await {
+            match receiver.recv_coalesced_chunk(coalesce_limit).await {
                 Ok(Some(chunk)) => {
                     if !chunk.is_empty() {
                         chunk_buf.clear();
@@ -124,7 +128,11 @@ pub async fn serve(
 
     // Download task: reads upstream H1 response and streams H2 DATA frames downstream
     let download_fut = async {
-        let mut read_buf = bytes::BytesMut::with_capacity(65_536);
+        let read_cap = upstream
+            .config
+            .client_body_buffer_size
+            .clamp(16_384, 65_536);
+        let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
         let (resp_head, framing) = velda_http1::client::read_response_head(
             &mut read_half,
             &mut read_buf,
@@ -158,12 +166,12 @@ pub async fn serve(
             },
             Http1BodyFraming::ContentLength(total_len) => {
                 let mut remaining = total_len;
+                let chunk_limit = upstream
+                    .config
+                    .client_body_buffer_size
+                    .clamp(32_768, 131_072);
                 while remaining > 0 {
-                    let to_read = if remaining >= 1_048_576 {
-                        remaining.min(131_072)
-                    } else {
-                        remaining.min(65_536)
-                    };
+                    let to_read = remaining.min(chunk_limit);
                     match velda_http1::client::read_chunk_sized(
                         &mut read_half,
                         &mut read_buf,
@@ -191,9 +199,25 @@ pub async fn serve(
         Ok::<(), std::io::Error>(())
     };
 
-    // Concurrently drive upload and download, aborting on whichever encounters a failure
-    if let Err(e) = tokio::try_join!(upload_fut, download_fut) {
+    // Concurrently drive upload and download, completing as soon as download terminates
+    let failed = {
+        let mut upload_pinned = std::pin::pin!(upload_fut);
+        let mut download_pinned = std::pin::pin!(download_fut);
+
+        tokio::select! {
+            res = &mut download_pinned => res.is_err(),
+            res = &mut upload_pinned => {
+                if res.is_err() {
+                    true
+                } else {
+                    download_pinned.await.is_err()
+                }
+            }
+        }
+    };
+
+    if failed {
         lease.mark_closed();
-        tracing::warn!(error = %e, upstream = %upstream.id(), "Duplex H2 to H1 bridge failed");
+        tracing::warn!(upstream = %upstream.id(), "Duplex H2 to H1 bridge encountered error");
     }
 }

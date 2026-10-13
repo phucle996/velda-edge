@@ -122,9 +122,13 @@ pub async fn serve(
 
     // 6. Progressively stream any remaining client DATA frames to HTTP/1.1 chunked stream
     if !is_fin {
-        let mut chunk_buf = bytes::BytesMut::with_capacity(65_536 + 64);
+        let coalesce_limit = upstream
+            .config
+            .client_body_buffer_size
+            .clamp(32_768, 131_072);
+        let mut chunk_buf = bytes::BytesMut::with_capacity(coalesce_limit + 64);
         loop {
-            match receiver.recv_coalesced_chunk(65_536).await {
+            match receiver.recv_coalesced_chunk(coalesce_limit).await {
                 Ok(Some(chunk)) => {
                     if !chunk.is_empty() {
                         chunk_buf.clear();
@@ -169,7 +173,11 @@ pub async fn serve(
     }
 
     // 7. Read HTTP/1.1 response
-    let mut read_buf = bytes::BytesMut::with_capacity(65_536);
+    let read_cap = upstream
+        .config
+        .client_body_buffer_size
+        .clamp(16_384, 65_536);
+    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
     loop {
         match lease.read_buf(&mut read_buf).await {
             Ok(0) => {

@@ -115,8 +115,16 @@ where
     // 6. Forward buffered request over HTTP/2 stream with self-healing retry
     let is_tls = upstream.is_tls();
     let upstream_host = upstream.target_host();
-    let mut pipe_res =
-        send_h2_buffered(&mut client, &head, &body_bytes, is_tls, upstream_host).await;
+    let max_body_size = h2_config.max_body_size.min(conn.config().max_body_size);
+    let mut pipe_res = send_h2_buffered(
+        &mut client,
+        &head,
+        &body_bytes,
+        is_tls,
+        upstream_host,
+        max_body_size,
+    )
+    .await;
     if let Err(ref e) = pipe_res
         && is_h2_refused_or_goaway(e)
     {
@@ -125,9 +133,15 @@ where
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
-            pipe_res =
-                send_h2_buffered(&mut fresh_client, &head, &body_bytes, is_tls, upstream_host)
-                    .await;
+            pipe_res = send_h2_buffered(
+                &mut fresh_client,
+                &head,
+                &body_bytes,
+                is_tls,
+                upstream_host,
+                max_body_size,
+            )
+            .await;
         }
     }
 
@@ -163,6 +177,7 @@ async fn send_h2_buffered(
     body: &bytes::Bytes,
     is_tls: bool,
     upstream_host: &str,
+    max_body_size: usize,
 ) -> Result<Http1ServerResponse, h2::Error> {
     let scheme = if is_tls { "https" } else { "http" };
     let authority = head
@@ -204,9 +219,22 @@ async fn send_h2_buffered(
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
         .unwrap_or(0);
-    let mut resp_body = BytesMut::with_capacity(expected_len);
+    if expected_len > max_body_size {
+        return Ok(Http1ServerResponse::from_bytes(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            b"413 Payload Too Large\n".to_vec(),
+        ));
+    }
+    let mut resp_body = BytesMut::with_capacity(expected_len.min(max_body_size));
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk?;
+        if resp_body.len() + chunk.len() > max_body_size {
+            let _ = body_stream.flow_control().release_capacity(chunk.len());
+            return Ok(Http1ServerResponse::from_bytes(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                b"413 Payload Too Large\n".to_vec(),
+            ));
+        }
         body_stream.flow_control().release_capacity(chunk.len())?;
         resp_body.extend_from_slice(&chunk);
     }

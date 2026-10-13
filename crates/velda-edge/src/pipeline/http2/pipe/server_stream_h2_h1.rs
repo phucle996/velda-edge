@@ -112,7 +112,11 @@ pub async fn serve(
     }
 
     // 6. Read HTTP/1.1 response head from upstream
-    let mut read_buf = bytes::BytesMut::with_capacity(65_536);
+    let read_cap = upstream
+        .config
+        .client_body_buffer_size
+        .clamp(16_384, 65_536);
+    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
     let (resp_head, framing) =
         match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
             .await
@@ -174,12 +178,12 @@ pub async fn serve(
         Http1BodyFraming::ContentLength(total_len) => {
             let mut remaining = total_len;
             let mut failed = false;
+            let chunk_limit = upstream
+                .config
+                .client_body_buffer_size
+                .clamp(32_768, 131_072);
             while remaining > 0 {
-                let to_read = if remaining >= 1_048_576 {
-                    remaining.min(131_072)
-                } else {
-                    remaining.min(65_536)
-                };
+                let to_read = remaining.min(chunk_limit);
                 match velda_http1::client::read_chunk_sized(&mut *lease, &mut read_buf, to_read)
                     .await
                 {

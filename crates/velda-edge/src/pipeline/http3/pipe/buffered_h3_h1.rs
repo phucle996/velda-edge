@@ -92,7 +92,8 @@ async fn send_h1_buffered(
         velda_core::Body::Empty => 0,
     };
     let mut write_buf = BytesMut::with_capacity(1024 + body_len);
-    let mut read_buf = BytesMut::with_capacity(65_536);
+    let read_cap = cfg.client_body_buffer_size.clamp(16_384, 65_536);
+    let mut read_buf = BytesMut::with_capacity(read_cap);
 
     velda_http1::client::send_request_parts(
         &req.method,

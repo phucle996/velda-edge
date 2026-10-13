@@ -72,15 +72,19 @@ pub async fn serve(
         let http_req = head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-        let upload_task = async move {
-            const UPLOAD_BATCH_RESERVE: usize = 262_144; // 256 KB
-            send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+        let upload_reserve =
+            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
+        let upload_coalesce = (upload_reserve / 2).clamp(16_384, 131_072);
+        let upload_low_wm = (upload_reserve / 4).clamp(8_192, 65_536);
 
-            while let Some(mut chunk) = receiver.recv_coalesced_chunk(65_536).await? {
+        let upload_task = async move {
+            send_stream.reserve_capacity(upload_reserve);
+
+            while let Some(mut chunk) = receiver.recv_coalesced_chunk(upload_coalesce).await? {
                 while !chunk.is_empty() {
                     let available = send_stream.capacity();
                     if available == 0 {
-                        send_stream.reserve_capacity(chunk.len().max(UPLOAD_BATCH_RESERVE));
+                        send_stream.reserve_capacity(chunk.len().max(upload_reserve));
                         match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
                             Some(Ok(_)) => {}
                             Some(Err(err)) => return Err(err.into()),
@@ -98,8 +102,8 @@ pub async fn serve(
                         return Ok(());
                     }
 
-                    if send_stream.capacity() < 65_536 {
-                        send_stream.reserve_capacity(UPLOAD_BATCH_RESERVE);
+                    if send_stream.capacity() < upload_low_wm {
+                        send_stream.reserve_capacity(upload_reserve);
                     }
                 }
             }
@@ -130,8 +134,10 @@ pub async fn serve(
                 (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
             let mut total_bytes = 0;
             let mut unreleased_bytes = 0;
-            const COALESCE_LIMIT: usize = 65_536;
-            let mut pending_buf = bytes::BytesMut::with_capacity(COALESCE_LIMIT);
+            let coalesce_limit =
+                (config.initial_stream_window_size as usize / 8).clamp(16_384, 65_536);
+            let zero_copy_threshold = (coalesce_limit / 4).clamp(8_192, 16_384);
+            let mut pending_buf = bytes::BytesMut::with_capacity(coalesce_limit);
 
             while let Some(chunk) = body_stream.data().await {
                 let data = chunk?;
@@ -146,7 +152,7 @@ pub async fn serve(
                     return Err(Http2Error::PayloadTooLarge(total_bytes));
                 }
 
-                if pending_buf.is_empty() && len >= COALESCE_LIMIT {
+                if pending_buf.is_empty() && len >= zero_copy_threshold {
                     if sender.send_chunk(data).await.is_err() {
                         tracing::debug!(
                             "Downstream client disconnected during H2 duplex streaming"
@@ -158,7 +164,7 @@ pub async fn serve(
                     }
                 } else {
                     pending_buf.extend_from_slice(&data);
-                    if pending_buf.len() >= COALESCE_LIMIT {
+                    if pending_buf.len() >= coalesce_limit {
                         let to_send = pending_buf.split().freeze();
                         if sender.send_chunk(to_send).await.is_err() {
                             tracing::debug!(

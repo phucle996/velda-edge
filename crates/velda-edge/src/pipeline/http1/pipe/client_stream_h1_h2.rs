@@ -194,14 +194,34 @@ where
         .map_err(|_| Http1Error::ConnectionClosed)?;
     let (parts, mut body_stream) = response.into_parts();
 
+    let max_body_size = conn.config().max_body_size;
     let expected_len = parts
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
         .unwrap_or(0);
-    let mut resp_body = BytesMut::with_capacity(expected_len);
+    if expected_len > max_body_size {
+        let err_resp = Http1ServerResponse::from_bytes(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            b"413 Payload Too Large\n".to_vec(),
+        );
+        conn.mark_close();
+        conn.send_response(&err_resp).await?;
+        return Ok(());
+    }
+    let mut resp_body = BytesMut::with_capacity(expected_len.min(max_body_size));
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk.map_err(|_| Http1Error::ConnectionClosed)?;
+        if resp_body.len() + chunk.len() > max_body_size {
+            let _ = body_stream.flow_control().release_capacity(chunk.len());
+            let err_resp = Http1ServerResponse::from_bytes(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                b"413 Payload Too Large\n".to_vec(),
+            );
+            conn.mark_close();
+            conn.send_response(&err_resp).await?;
+            return Ok(());
+        }
         let _ = body_stream.flow_control().release_capacity(chunk.len());
         resp_body.extend_from_slice(&chunk);
     }
