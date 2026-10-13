@@ -1,7 +1,18 @@
 //! HTTP/3 packet-driven server engine based on pure quinn-proto state machine (RFC 9114).
 //!
+//! # Architecture & Boundary Rationale
 //! Operates in a pure packet-in / packet-out manner without owning OS sockets,
 //! matching `velda-transport`'s `(listener_id, socket, Datagram)` handler model with zero I/O on hot paths.
+//!
+//! Unlike connection-oriented HTTP/1.1 and HTTP/2 which have separate `request.rs` modules
+//! for linear byte stream parsing, HTTP/3 stream lifecycle is bound to the underlying QUIC
+//! packet state machine (`quinn_proto::Connection`). [`Http3Engine`] is therefore the single
+//! cohesive owner of connection lifecycle, stream framing, and request assembly.
+//!
+//! Decoded streams emit canonical [`L7Request`] directly inside [`Http3RequestEvent`].
+//! There is deliberately no intermediate protocol wrapper (like `Http3ServerRequest`),
+//! keeping the hot path flat, zero-copy, and free of redundant allocations (consistent with
+//! `velda-grpc::udp::server::engine`).
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -32,6 +43,9 @@ pub struct OutgoingDatagram {
 }
 
 /// An incoming HTTP/3 request ready for application processing.
+///
+/// Emits canonical [`L7Request`] directly to downstream dispatchers without
+/// intermediate protocol-specific wrapping, preserving flat memory layout.
 #[derive(Debug)]
 pub struct Http3RequestEvent {
     /// Internal connection handle.
@@ -44,13 +58,19 @@ pub struct Http3RequestEvent {
     pub is_early_data: bool,
 }
 
+#[derive(Default)]
+struct StreamSlot {
+    wire_buf: BytesMut,
+    body_buf: Option<BytesMut>,
+    request: Option<L7Request>,
+}
+
 /// High-performance, packet-driven HTTP/3 server engine.
 pub struct Http3Engine {
     endpoint: Endpoint,
     connections: HashMap<ConnectionHandle, Connection>,
     control_streams: HashSet<ConnectionHandle>,
-    stream_buffers: HashMap<(ConnectionHandle, StreamId), BytesMut>,
-    stream_requests: HashMap<(ConnectionHandle, StreamId), L7Request>,
+    streams: HashMap<(ConnectionHandle, StreamId), StreamSlot>,
     config: Http3Config,
     transmit_buf: Vec<u8>,
 }
@@ -59,8 +79,7 @@ impl std::fmt::Debug for Http3Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Http3Engine")
             .field("connections", &self.connections.len())
-            .field("active_stream_buffers", &self.stream_buffers.len())
-            .field("active_requests", &self.stream_requests.len())
+            .field("active_streams", &self.streams.len())
             .finish()
     }
 }
@@ -80,8 +99,7 @@ impl Http3Engine {
             endpoint,
             connections: HashMap::new(),
             control_streams: HashSet::new(),
-            stream_buffers: HashMap::new(),
-            stream_requests: HashMap::new(),
+            streams: HashMap::new(),
             config,
             transmit_buf: Vec::with_capacity(65535),
         }
@@ -115,6 +133,7 @@ impl Http3Engine {
         }
 
         // 2. Handle connection events
+        let mut active_handle = None;
         if let Some(event) = event {
             match event {
                 quinn_proto::DatagramEvent::NewConnection(incoming) => {
@@ -129,136 +148,127 @@ impl Http3Engine {
                             });
                         }
                         self.connections.insert(handle, conn);
+                        active_handle = Some(handle);
                     }
                 }
                 quinn_proto::DatagramEvent::ConnectionEvent(handle, ev) => {
                     if let Some(conn) = self.connections.get_mut(&handle) {
                         conn.handle_event(ev);
+                        active_handle = Some(handle);
                     }
                 }
-                quinn_proto::DatagramEvent::Response(transmit) => {
-                    if transmit.size > 0 {
-                        outgoing.push(OutgoingDatagram {
-                            peer: transmit.destination,
-                            payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
-                        });
-                    }
-                }
+                quinn_proto::DatagramEvent::Response(_) => {}
             }
         }
 
-        // 3. Poll connection events & read streams across connections
-        let mut closed_handles = Vec::new();
-
-        for (&handle, conn) in self.connections.iter_mut() {
-            // RFC 9114 Section 6.2.1: As soon as the QUIC handshake completes, open the
-            // server unidirectional Control Stream and transmit the mandatory SETTINGS frame.
-            if !conn.is_handshaking()
-                && !self.control_streams.contains(&handle)
-                && let Some(ctrl_stream_id) = conn.streams().open(Dir::Uni)
-            {
-                let mut ctrl_buf = BytesMut::new();
-                // Stream Type 0x00 = Control Stream
-                encode_varint(stream_type::CONTROL, &mut ctrl_buf);
-                // Mandatory first frame: SETTINGS (Type 0x04)
-                let settings = vec![
-                    (
-                        settings_id::QPACK_MAX_TABLE_CAPACITY,
-                        self.config.max_qpack_table_capacity as u64,
-                    ),
-                    (
-                        settings_id::MAX_FIELD_SECTION_SIZE,
-                        self.config.max_header_size as u64,
-                    ),
-                    (settings_id::QPACK_BLOCKED_STREAMS, 0),
-                ];
-                encode_frame(&Http3Frame::Settings(settings), &mut ctrl_buf);
-                let _ = conn.send_stream(ctrl_stream_id).write(&ctrl_buf);
-                self.control_streams.insert(handle);
-            }
-
-            // Drain outgoing transmits for this connection
-            self.transmit_buf.clear();
-            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
-                if transmit.size > 0 {
-                    let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
-                    outgoing.push(OutgoingDatagram {
-                        peer: transmit.destination,
-                        payload: packet,
-                    });
+        // 3. Poll connection events & read streams for the active connection (targeted O(1) processing)
+        if let Some(handle) = active_handle {
+            let mut is_lost = false;
+            if let Some(conn) = self.connections.get_mut(&handle) {
+                // RFC 9114 Section 6.2.1: As soon as the QUIC handshake completes, open the
+                // server unidirectional Control Stream and transmit the mandatory SETTINGS frame.
+                if !conn.is_handshaking()
+                    && !self.control_streams.contains(&handle)
+                    && let Some(ctrl_stream_id) = conn.streams().open(Dir::Uni)
+                {
+                    let mut ctrl_buf = BytesMut::new();
+                    // Stream Type 0x00 = Control Stream
+                    encode_varint(stream_type::CONTROL, &mut ctrl_buf);
+                    // Mandatory first frame: SETTINGS (Type 0x04)
+                    let settings = vec![
+                        (
+                            settings_id::QPACK_MAX_TABLE_CAPACITY,
+                            self.config.max_qpack_table_capacity as u64,
+                        ),
+                        (
+                            settings_id::MAX_FIELD_SECTION_SIZE,
+                            self.config.max_header_size as u64,
+                        ),
+                        (settings_id::QPACK_BLOCKED_STREAMS, 0),
+                    ];
+                    encode_frame(&Http3Frame::Settings(settings), &mut ctrl_buf);
+                    let _ = conn.send_stream(ctrl_stream_id).write(&ctrl_buf);
+                    self.control_streams.insert(handle);
                 }
-                self.transmit_buf.clear();
-            }
 
-            // Drain connection events
-            while let Some(event) = conn.poll() {
-                match event {
-                    Event::Stream(StreamEvent::Opened { dir }) => {
-                        while let Some(id) = conn.streams().accept(dir) {
-                            if id.dir() == Dir::Bi {
+                // Drain outgoing transmits for this connection
+                self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                    if transmit.size > 0 {
+                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
+                        outgoing.push(OutgoingDatagram {
+                            peer: transmit.destination,
+                            payload: packet,
+                        });
+                    }
+                    self.transmit_buf.clear();
+                }
+
+                // Drain connection events
+                while let Some(event) = conn.poll() {
+                    match event {
+                        Event::Stream(StreamEvent::Opened { dir }) => {
+                            while let Some(id) = conn.streams().accept(dir) {
+                                if id.dir() == Dir::Bi {
+                                    Self::process_readable_stream(
+                                        handle,
+                                        id,
+                                        conn,
+                                        &mut self.streams,
+                                        &mut ready_requests,
+                                        self.config.max_body_size,
+                                    );
+                                }
+                            }
+                        }
+                        Event::Stream(StreamEvent::Readable { id }) => {
+                            if id.dir() == Dir::Uni {
+                                if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
+                                    while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
+                                }
+                            } else {
                                 Self::process_readable_stream(
                                     handle,
                                     id,
                                     conn,
-                                    &mut self.stream_buffers,
-                                    &mut self.stream_requests,
+                                    &mut self.streams,
                                     &mut ready_requests,
                                     self.config.max_body_size,
                                 );
                             }
                         }
-                    }
-                    Event::Stream(StreamEvent::Readable { id }) => {
-                        if id.dir() == Dir::Uni {
-                            if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
-                                while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
-                            }
-                        } else {
-                            Self::process_readable_stream(
-                                handle,
-                                id,
-                                conn,
-                                &mut self.stream_buffers,
-                                &mut self.stream_requests,
-                                &mut ready_requests,
-                                self.config.max_body_size,
-                            );
+                        Event::Stream(StreamEvent::Finished { .. }) => {
+                            // Finished signals that our outgoing send stream was ACKed by client.
                         }
+                        Event::Stream(StreamEvent::Stopped { id, .. }) => {
+                            self.streams.remove(&(handle, id));
+                        }
+                        Event::ConnectionLost { .. } => {
+                            is_lost = true;
+                        }
+                        _ => {}
                     }
-                    Event::Stream(StreamEvent::Finished { .. }) => {
-                        // Finished signals that our outgoing send stream was ACKed by client.
-                    }
-                    Event::Stream(StreamEvent::Stopped { id, .. }) => {
-                        self.stream_buffers.remove(&(handle, id));
-                        self.stream_requests.remove(&(handle, id));
-                    }
-                    Event::ConnectionLost { .. } => {
-                        closed_handles.push(handle);
-                    }
-                    _ => {}
                 }
-            }
 
-            // Drain outgoing transmits generated during event processing
-            self.transmit_buf.clear();
-            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
-                if transmit.size > 0 {
-                    let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
-                    outgoing.push(OutgoingDatagram {
-                        peer: transmit.destination,
-                        payload: packet,
-                    });
-                }
+                // Drain outgoing transmits generated during event processing
                 self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                    if transmit.size > 0 {
+                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
+                        outgoing.push(OutgoingDatagram {
+                            peer: transmit.destination,
+                            payload: packet,
+                        });
+                    }
+                    self.transmit_buf.clear();
+                }
             }
-        }
 
-        // Clean up closed connections and all associated stream state
-        for handle in closed_handles {
-            self.connections.remove(&handle);
-            self.control_streams.remove(&handle);
-            self.stream_buffers.retain(|(h, _), _| *h != handle);
-            self.stream_requests.retain(|(h, _), _| *h != handle);
+            if is_lost {
+                self.connections.remove(&handle);
+                self.control_streams.remove(&handle);
+                self.streams.retain(|(h, _), _| *h != handle);
+            }
         }
 
         (outgoing, ready_requests)
@@ -269,12 +279,11 @@ impl Http3Engine {
         handle: ConnectionHandle,
         id: StreamId,
         conn: &mut Connection,
-        stream_buffers: &mut HashMap<(ConnectionHandle, StreamId), BytesMut>,
-        stream_requests: &mut HashMap<(ConnectionHandle, StreamId), L7Request>,
+        streams: &mut HashMap<(ConnectionHandle, StreamId), StreamSlot>,
         ready_requests: &mut Vec<Http3RequestEvent>,
         max_body_size: usize,
     ) {
-        let buf = stream_buffers.entry((handle, id)).or_default();
+        let slot = streams.entry((handle, id)).or_default();
         let mut stream_finished = false;
         let mut payload_too_large = false;
 
@@ -282,11 +291,11 @@ impl Http3Engine {
             loop {
                 match chunks.next(65535) {
                     Ok(Some(chunk)) => {
-                        if buf.len() + chunk.bytes.len() > max_body_size + 65536 {
+                        if slot.wire_buf.len() + chunk.bytes.len() > max_body_size + 65536 {
                             payload_too_large = true;
                             break;
                         }
-                        buf.extend_from_slice(&chunk.bytes);
+                        slot.wire_buf.extend_from_slice(&chunk.bytes);
                     }
                     Ok(None) => {
                         stream_finished = true;
@@ -296,8 +305,7 @@ impl Http3Engine {
                         break;
                     }
                     Err(quinn_proto::ReadError::Reset(_)) => {
-                        stream_buffers.remove(&(handle, id));
-                        stream_requests.remove(&(handle, id));
+                        streams.remove(&(handle, id));
                         return;
                     }
                 }
@@ -309,14 +317,13 @@ impl Http3Engine {
             let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                 error_code::H3_MESSAGE_ERROR as u32,
             ));
-            stream_buffers.remove(&(handle, id));
-            stream_requests.remove(&(handle, id));
+            streams.remove(&(handle, id));
             return;
         }
 
         // Try decoding HTTP/3 frames
         loop {
-            match decode_frame(buf) {
+            match decode_frame(&mut slot.wire_buf) {
                 Ok(Some(frame)) => match frame {
                     Http3Frame::Headers(payload) => match decode_qpack(&payload) {
                         Ok(decoded) => {
@@ -327,30 +334,38 @@ impl Http3Engine {
                                 decoded.headers,
                                 Body::Empty,
                             );
-                            stream_requests.insert((handle, id), req);
+                            slot.request = Some(req);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to decode QPACK headers");
                             let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                                 error_code::H3_FRAME_ERROR as u32,
                             ));
-                            stream_buffers.remove(&(handle, id));
-                            stream_requests.remove(&(handle, id));
+                            streams.remove(&(handle, id));
                             return;
                         }
                     },
                     Http3Frame::Data(payload) => {
-                        if let Some(req) = stream_requests.get_mut(&(handle, id)) {
+                        if let Some(ref mut req) = slot.request {
                             match req.body {
                                 Body::Empty => {
-                                    req.body = Body::Bytes(payload);
+                                    if let Some(ref mut body_buf) = slot.body_buf {
+                                        body_buf.extend_from_slice(&payload);
+                                    } else {
+                                        req.body = Body::Bytes(payload);
+                                    }
                                 }
                                 Body::Bytes(ref existing) => {
-                                    let mut merged =
-                                        BytesMut::with_capacity(existing.len() + payload.len());
-                                    merged.extend_from_slice(existing);
-                                    merged.extend_from_slice(&payload);
-                                    req.body = Body::Bytes(merged.freeze());
+                                    // Multi-chunk upload: migrate to expandable BytesMut buffer to eliminate O(N^2) copying
+                                    let mut body_buf = BytesMut::with_capacity(
+                                        (existing.len() + payload.len())
+                                            .max(8192)
+                                            .next_power_of_two(),
+                                    );
+                                    body_buf.extend_from_slice(existing);
+                                    body_buf.extend_from_slice(&payload);
+                                    req.body = Body::Empty;
+                                    slot.body_buf = Some(body_buf);
                                 }
                             }
                         }
@@ -363,26 +378,67 @@ impl Http3Engine {
                     let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                         error_code::H3_FRAME_ERROR as u32,
                     ));
-                    stream_buffers.remove(&(handle, id));
-                    stream_requests.remove(&(handle, id));
+                    streams.remove(&(handle, id));
                     return;
                 }
             }
         }
 
         // Emit request ONLY once the downstream client has finished transmitting (FIN reached)
-        if stream_finished {
-            stream_buffers.remove(&(handle, id));
-            if let Some(req) = stream_requests.remove(&(handle, id)) {
-                let is_early_data = conn.is_handshaking();
-                ready_requests.push(Http3RequestEvent {
-                    handle,
-                    stream_id: id,
-                    request: req,
-                    is_early_data,
-                });
+        if stream_finished
+            && let Some(mut slot) = streams.remove(&(handle, id))
+            && let Some(mut req) = slot.request.take()
+        {
+            if let Some(buf) = slot.body_buf.take() {
+                req.body = Body::Bytes(buf.freeze());
+            }
+            let is_early_data = conn.is_handshaking();
+            ready_requests.push(Http3RequestEvent {
+                handle,
+                stream_id: id,
+                request: req,
+                is_early_data,
+            });
+        }
+    }
+
+    /// Advances timers and drives retransmissions/keep-alives across active connections.
+    pub fn handle_timeouts(&mut self, now: Instant) -> Vec<OutgoingDatagram> {
+        let mut outgoing = Vec::new();
+        let mut closed_handles = Vec::new();
+
+        for (&handle, conn) in self.connections.iter_mut() {
+            if let Some(timeout) = conn.poll_timeout()
+                && timeout <= now
+            {
+                conn.handle_timeout(now);
+
+                self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                    if transmit.size > 0 {
+                        outgoing.push(OutgoingDatagram {
+                            peer: transmit.destination,
+                            payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
+                        });
+                    }
+                    self.transmit_buf.clear();
+                }
+
+                while let Some(event) = conn.poll() {
+                    if matches!(event, Event::ConnectionLost { .. }) {
+                        closed_handles.push(handle);
+                    }
+                }
             }
         }
+
+        for handle in closed_handles {
+            self.connections.remove(&handle);
+            self.control_streams.remove(&handle);
+            self.streams.retain(|(h, _), _| *h != handle);
+        }
+
+        outgoing
     }
 
     /// Serializes an [`L7Response`] into HTTP/3 frames and queues them on the specified stream.
@@ -418,6 +474,6 @@ impl Http3Engine {
     /// Returns the number of active stream buffers.
     #[inline]
     pub fn active_stream_count(&self) -> usize {
-        self.stream_buffers.len()
+        self.streams.len()
     }
 }

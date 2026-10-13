@@ -12,7 +12,7 @@ use quinn_proto::{Connection, StreamId};
 use velda_core::{Body, L7Response};
 
 use crate::error::Http3Error;
-use crate::frame::{Http3Frame, encode_frame};
+use crate::frame::{Http3Frame, encode_frame, encode_varint, frame_id};
 use crate::qpack::encode_qpack_response;
 use crate::server::connection::OutgoingDatagram;
 
@@ -148,26 +148,70 @@ impl Http3ServerResponse {
         transmit_buf: &mut Vec<u8>,
         now: Instant,
     ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
-        let write_buf = self.encode_frames();
+        // 1. Encode HEADERS frame into small write_buf
+        let mut header_payload = BytesMut::new();
+        encode_qpack_response(self.status, &self.headers, &mut header_payload);
+        let header_frame = Http3Frame::Headers(header_payload.freeze());
+
+        let mut write_buf = BytesMut::with_capacity(512);
+        encode_frame(&header_frame, &mut write_buf);
 
         let mut written = 0;
         while written < write_buf.len() {
             match conn.send_stream(stream_id).write(&write_buf[written..]) {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    written += n;
-                }
+                Ok(n) if n > 0 => written += n,
+                Ok(_) => break,
                 Err(e) => return Err(Http3Error::H3(e.to_string())),
             }
         }
-
         if written < write_buf.len() {
             return Err(Http3Error::H3(format!(
-                "Failed to write complete response: stream flow control window exhausted ({written}/{} bytes written)",
+                "Failed to write complete response headers: stream flow control window exhausted ({written}/{} bytes written)",
                 write_buf.len()
             )));
+        }
+
+        // 2. Stream DATA frame directly without copying payload
+        let is_no_body = self.status.is_informational()
+            || self.status == StatusCode::NO_CONTENT
+            || self.status == StatusCode::NOT_MODIFIED;
+
+        if !is_no_body
+            && let Body::Bytes(ref b) = self.body
+            && !b.is_empty()
+        {
+            let mut hdr_buf = BytesMut::with_capacity(16);
+            encode_varint(frame_id::DATA, &mut hdr_buf);
+            encode_varint(b.len() as u64, &mut hdr_buf);
+
+            let mut hdr_written = 0;
+            while hdr_written < hdr_buf.len() {
+                match conn.send_stream(stream_id).write(&hdr_buf[hdr_written..]) {
+                    Ok(n) if n > 0 => hdr_written += n,
+                    Ok(_) => break,
+                    Err(e) => return Err(Http3Error::H3(e.to_string())),
+                }
+            }
+            if hdr_written < hdr_buf.len() {
+                return Err(Http3Error::H3(
+                    "Flow control window exhausted for DATA frame header".into(),
+                ));
+            }
+
+            let mut body_written = 0;
+            while body_written < b.len() {
+                match conn.send_stream(stream_id).write(&b[body_written..]) {
+                    Ok(n) if n > 0 => body_written += n,
+                    Ok(_) => break,
+                    Err(e) => return Err(Http3Error::H3(e.to_string())),
+                }
+            }
+            if body_written < b.len() {
+                return Err(Http3Error::H3(format!(
+                    "Failed to write complete response body: stream flow control window exhausted ({body_written}/{} bytes written)",
+                    b.len()
+                )));
+            }
         }
 
         let _ = conn.send_stream(stream_id).finish();
@@ -221,15 +265,30 @@ pub fn send_response(
     transmit_buf: &mut Vec<u8>,
     now: Instant,
 ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
-    // 1. Encode QPACK HEADERS frame
+    // 1. Encode QPACK HEADERS frame into small write_buf
     let mut header_payload = BytesMut::new();
     encode_qpack_response(response.status, &response.headers, &mut header_payload);
     let header_frame = Http3Frame::Headers(header_payload.freeze());
 
-    let mut write_buf = BytesMut::new();
+    let mut write_buf = BytesMut::with_capacity(512);
     encode_frame(&header_frame, &mut write_buf);
 
-    // 2. Encode DATA frame if body is present and status permits body (RFC 9114 §4.1)
+    let mut written = 0;
+    while written < write_buf.len() {
+        match conn.send_stream(stream_id).write(&write_buf[written..]) {
+            Ok(n) if n > 0 => written += n,
+            Ok(_) => break,
+            Err(e) => return Err(Http3Error::H3(e.to_string())),
+        }
+    }
+    if written < write_buf.len() {
+        return Err(Http3Error::H3(format!(
+            "Failed to write complete response headers: stream flow control window exhausted ({written}/{} bytes written)",
+            write_buf.len()
+        )));
+    }
+
+    // 2. Stream DATA frame directly without copying payload
     let is_no_body = response.status.is_informational()
         || response.status == StatusCode::NO_CONTENT
         || response.status == StatusCode::NOT_MODIFIED;
@@ -238,29 +297,38 @@ pub fn send_response(
         && let Body::Bytes(ref b) = response.body
         && !b.is_empty()
     {
-        let data_frame = Http3Frame::Data(b.clone());
-        encode_frame(&data_frame, &mut write_buf);
-    }
+        let mut hdr_buf = BytesMut::with_capacity(16);
+        encode_varint(frame_id::DATA, &mut hdr_buf);
+        encode_varint(b.len() as u64, &mut hdr_buf);
 
-    // 3. Write frames to send stream with full buffer coverage
-    let mut written = 0;
-    while written < write_buf.len() {
-        match conn.send_stream(stream_id).write(&write_buf[written..]) {
-            Ok(n) => {
-                if n == 0 {
-                    break;
-                }
-                written += n;
+        let mut hdr_written = 0;
+        while hdr_written < hdr_buf.len() {
+            match conn.send_stream(stream_id).write(&hdr_buf[hdr_written..]) {
+                Ok(n) if n > 0 => hdr_written += n,
+                Ok(_) => break,
+                Err(e) => return Err(Http3Error::H3(e.to_string())),
             }
-            Err(e) => return Err(Http3Error::H3(e.to_string())),
         }
-    }
+        if hdr_written < hdr_buf.len() {
+            return Err(Http3Error::H3(
+                "Flow control window exhausted for DATA frame header".into(),
+            ));
+        }
 
-    if written < write_buf.len() {
-        return Err(Http3Error::H3(format!(
-            "Failed to write complete response: stream flow control window exhausted ({written}/{} bytes written)",
-            write_buf.len()
-        )));
+        let mut body_written = 0;
+        while body_written < b.len() {
+            match conn.send_stream(stream_id).write(&b[body_written..]) {
+                Ok(n) if n > 0 => body_written += n,
+                Ok(_) => break,
+                Err(e) => return Err(Http3Error::H3(e.to_string())),
+            }
+        }
+        if body_written < b.len() {
+            return Err(Http3Error::H3(format!(
+                "Failed to write complete response body: stream flow control window exhausted ({body_written}/{} bytes written)",
+                b.len()
+            )));
+        }
     }
 
     // Finish stream cleanly

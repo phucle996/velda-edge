@@ -55,6 +55,8 @@ pub struct Http2Upstream {
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     pub acceleration: velda_http2::Http2AccelerationPath,
+    /// [PRE-COMPILED]: Pre-computed HTTP/2 protocol configuration.
+    pub config: velda_http2::Http2Config,
     /// Cold-start / saturation synchronization lock preventing thundering-herd connection storms.
     connect_lock: tokio::sync::Mutex<()>,
 }
@@ -94,6 +96,7 @@ impl Http2Upstream {
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
             acceleration,
+            config: velda_http2::Http2Config::auto(),
             connect_lock: tokio::sync::Mutex::new(()),
         }
     }

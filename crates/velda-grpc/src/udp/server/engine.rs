@@ -43,13 +43,19 @@ pub struct GrpcUdpRequestEvent {
     pub request: L7Request,
 }
 
+#[derive(Default)]
+struct StreamSlot {
+    wire_buf: BytesMut,
+    body_buf: Option<BytesMut>,
+    request: Option<L7Request>,
+}
+
 /// Packet-driven Layer 7 gRPC engine over UDP.
 pub struct GrpcUdpEngine {
     endpoint: Endpoint,
     connections: HashMap<ConnectionHandle, Connection>,
     control_streams: HashSet<ConnectionHandle>,
-    stream_buffers: HashMap<(ConnectionHandle, StreamId), BytesMut>,
-    stream_requests: HashMap<(ConnectionHandle, StreamId), L7Request>,
+    streams: HashMap<(ConnectionHandle, StreamId), StreamSlot>,
     config: GrpcConfig,
     transmit_buf: Vec<u8>,
 }
@@ -58,8 +64,7 @@ impl std::fmt::Debug for GrpcUdpEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrpcUdpEngine")
             .field("connections", &self.connections.len())
-            .field("active_stream_buffers", &self.stream_buffers.len())
-            .field("active_requests", &self.stream_requests.len())
+            .field("active_streams", &self.streams.len())
             .finish()
     }
 }
@@ -73,8 +78,7 @@ impl GrpcUdpEngine {
             endpoint,
             connections: HashMap::new(),
             control_streams: HashSet::new(),
-            stream_buffers: HashMap::new(),
-            stream_requests: HashMap::new(),
+            streams: HashMap::new(),
             config,
             transmit_buf: Vec::with_capacity(65535),
         }
@@ -108,6 +112,7 @@ impl GrpcUdpEngine {
         }
 
         // 2. Handle connection events
+        let mut active_handle = None;
         if let Some(event) = event {
             match event {
                 quinn_proto::DatagramEvent::NewConnection(incoming) => {
@@ -122,128 +127,158 @@ impl GrpcUdpEngine {
                             });
                         }
                         self.connections.insert(handle, conn);
+                        active_handle = Some(handle);
                     }
                 }
                 quinn_proto::DatagramEvent::ConnectionEvent(handle, ev) => {
                     if let Some(conn) = self.connections.get_mut(&handle) {
                         conn.handle_event(ev);
+                        active_handle = Some(handle);
                     }
                 }
-                quinn_proto::DatagramEvent::Response(transmit) => {
+                quinn_proto::DatagramEvent::Response(_) => {}
+            }
+        }
+
+        // 3. Poll connection events & read streams for active connection (targeted O(1) processing)
+        if let Some(handle) = active_handle {
+            let mut is_lost = false;
+            if let Some(conn) = self.connections.get_mut(&handle) {
+                // Send SETTINGS on control stream once handshake completes
+                if !conn.is_handshaking()
+                    && !self.control_streams.contains(&handle)
+                    && let Some(ctrl_stream_id) = conn.streams().open(Dir::Uni)
+                {
+                    let mut ctrl_buf = BytesMut::new();
+                    // Stream Type 0x00 = Control Stream
+                    encode_varint(0x00, &mut ctrl_buf);
+                    // SETTINGS frame (Type 0x04)
+                    let settings = vec![
+                        (0x01, 0),     // QPACK max table capacity = 0 (static only)
+                        (0x06, 16384), // Max field section size
+                    ];
+                    encode_udp_frame(&UdpFrame::Settings(settings), &mut ctrl_buf);
+                    let _ = conn.send_stream(ctrl_stream_id).write(&ctrl_buf);
+                    self.control_streams.insert(handle);
+                }
+
+                // Drain outgoing transmits for this connection
+                self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                    if transmit.size > 0 {
+                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
+                        outgoing.push(OutgoingDatagram {
+                            peer: transmit.destination,
+                            payload: packet,
+                        });
+                    }
+                    self.transmit_buf.clear();
+                }
+
+                // Drain connection stream events
+                while let Some(event) = conn.poll() {
+                    match event {
+                        Event::Stream(StreamEvent::Opened { dir }) => {
+                            while let Some(id) = conn.streams().accept(dir) {
+                                if id.dir() == Dir::Bi {
+                                    Self::process_readable_stream(
+                                        handle,
+                                        id,
+                                        conn,
+                                        &mut self.streams,
+                                        &mut ready_requests,
+                                        self.config.max_message_size,
+                                    );
+                                }
+                            }
+                        }
+                        Event::Stream(StreamEvent::Readable { id }) => {
+                            if id.dir() == Dir::Uni {
+                                if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
+                                    while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
+                                }
+                            } else {
+                                Self::process_readable_stream(
+                                    handle,
+                                    id,
+                                    conn,
+                                    &mut self.streams,
+                                    &mut ready_requests,
+                                    self.config.max_message_size,
+                                );
+                            }
+                        }
+                        Event::Stream(StreamEvent::Stopped { id, .. }) => {
+                            self.streams.remove(&(handle, id));
+                        }
+                        Event::ConnectionLost { .. } => {
+                            is_lost = true;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Drain outgoing transmits generated during event processing
+                self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                    if transmit.size > 0 {
+                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
+                        outgoing.push(OutgoingDatagram {
+                            peer: transmit.destination,
+                            payload: packet,
+                        });
+                    }
+                    self.transmit_buf.clear();
+                }
+            }
+
+            if is_lost {
+                self.connections.remove(&handle);
+                self.control_streams.remove(&handle);
+                self.streams.retain(|(h, _), _| *h != handle);
+            }
+        }
+
+        (outgoing, ready_requests)
+    }
+
+    /// Advances timers and drives retransmissions/keep-alives across active connections.
+    pub fn handle_timeouts(&mut self, now: Instant) -> Vec<OutgoingDatagram> {
+        let mut outgoing = Vec::new();
+        let mut closed_handles = Vec::new();
+
+        for (&handle, conn) in self.connections.iter_mut() {
+            if let Some(timeout) = conn.poll_timeout()
+                && timeout <= now
+            {
+                conn.handle_timeout(now);
+
+                self.transmit_buf.clear();
+                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
                     if transmit.size > 0 {
                         outgoing.push(OutgoingDatagram {
                             peer: transmit.destination,
                             payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
                         });
                     }
+                    self.transmit_buf.clear();
                 }
-            }
-        }
 
-        // 3. Poll connection events & read streams across connections
-        let mut closed_handles = Vec::new();
-
-        for (&handle, conn) in self.connections.iter_mut() {
-            // Send SETTINGS on control stream once handshake completes
-            if !conn.is_handshaking()
-                && !self.control_streams.contains(&handle)
-                && let Some(ctrl_stream_id) = conn.streams().open(Dir::Uni)
-            {
-                let mut ctrl_buf = BytesMut::new();
-                // Stream Type 0x00 = Control Stream
-                encode_varint(0x00, &mut ctrl_buf);
-                // SETTINGS frame (Type 0x04)
-                let settings = vec![
-                    (0x01, 0),     // QPACK max table capacity = 0 (static only)
-                    (0x06, 16384), // Max field section size
-                ];
-                encode_udp_frame(&UdpFrame::Settings(settings), &mut ctrl_buf);
-                let _ = conn.send_stream(ctrl_stream_id).write(&ctrl_buf);
-                self.control_streams.insert(handle);
-            }
-
-            // Drain outgoing transmits for this connection
-            self.transmit_buf.clear();
-            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
-                if transmit.size > 0 {
-                    let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
-                    outgoing.push(OutgoingDatagram {
-                        peer: transmit.destination,
-                        payload: packet,
-                    });
-                }
-                self.transmit_buf.clear();
-            }
-
-            // Drain connection stream events
-            while let Some(event) = conn.poll() {
-                match event {
-                    Event::Stream(StreamEvent::Opened { dir }) => {
-                        while let Some(id) = conn.streams().accept(dir) {
-                            if id.dir() == Dir::Bi {
-                                Self::process_readable_stream(
-                                    handle,
-                                    id,
-                                    conn,
-                                    &mut self.stream_buffers,
-                                    &mut self.stream_requests,
-                                    &mut ready_requests,
-                                    self.config.max_message_size,
-                                );
-                            }
-                        }
-                    }
-                    Event::Stream(StreamEvent::Readable { id }) => {
-                        if id.dir() == Dir::Uni {
-                            if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
-                                while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
-                            }
-                        } else {
-                            Self::process_readable_stream(
-                                handle,
-                                id,
-                                conn,
-                                &mut self.stream_buffers,
-                                &mut self.stream_requests,
-                                &mut ready_requests,
-                                self.config.max_message_size,
-                            );
-                        }
-                    }
-                    Event::Stream(StreamEvent::Stopped { id, .. }) => {
-                        self.stream_buffers.remove(&(handle, id));
-                        self.stream_requests.remove(&(handle, id));
-                    }
-                    Event::ConnectionLost { .. } => {
+                while let Some(event) = conn.poll() {
+                    if matches!(event, Event::ConnectionLost { .. }) {
                         closed_handles.push(handle);
                     }
-                    _ => {}
                 }
-            }
-
-            // Drain outgoing transmits generated during event processing
-            self.transmit_buf.clear();
-            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
-                if transmit.size > 0 {
-                    let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
-                    outgoing.push(OutgoingDatagram {
-                        peer: transmit.destination,
-                        payload: packet,
-                    });
-                }
-                self.transmit_buf.clear();
             }
         }
 
-        // Clean up closed connections
         for handle in closed_handles {
             self.connections.remove(&handle);
             self.control_streams.remove(&handle);
-            self.stream_buffers.retain(|(h, _), _| *h != handle);
-            self.stream_requests.retain(|(h, _), _| *h != handle);
+            self.streams.retain(|(h, _), _| *h != handle);
         }
 
-        (outgoing, ready_requests)
+        outgoing
     }
 
     /// Reads incoming stream chunks, decodes gRPC frames, and produces complete requests.
@@ -251,12 +286,11 @@ impl GrpcUdpEngine {
         handle: ConnectionHandle,
         id: StreamId,
         conn: &mut Connection,
-        stream_buffers: &mut HashMap<(ConnectionHandle, StreamId), BytesMut>,
-        stream_requests: &mut HashMap<(ConnectionHandle, StreamId), L7Request>,
+        streams: &mut HashMap<(ConnectionHandle, StreamId), StreamSlot>,
         ready_requests: &mut Vec<GrpcUdpRequestEvent>,
         max_message_size: usize,
     ) {
-        let buf = stream_buffers.entry((handle, id)).or_default();
+        let slot = streams.entry((handle, id)).or_default();
         let mut stream_finished = false;
         let mut payload_too_large = false;
 
@@ -264,11 +298,11 @@ impl GrpcUdpEngine {
             loop {
                 match chunks.next(65535) {
                     Ok(Some(chunk)) => {
-                        if buf.len() + chunk.bytes.len() > max_message_size + 65536 {
+                        if slot.wire_buf.len() + chunk.bytes.len() > max_message_size + 65536 {
                             payload_too_large = true;
                             break;
                         }
-                        buf.extend_from_slice(&chunk.bytes);
+                        slot.wire_buf.extend_from_slice(&chunk.bytes);
                     }
                     Ok(None) => {
                         stream_finished = true;
@@ -276,8 +310,7 @@ impl GrpcUdpEngine {
                     }
                     Err(quinn_proto::ReadError::Blocked) => break,
                     Err(quinn_proto::ReadError::Reset(_)) => {
-                        stream_buffers.remove(&(handle, id));
-                        stream_requests.remove(&(handle, id));
+                        streams.remove(&(handle, id));
                         return;
                     }
                 }
@@ -289,14 +322,13 @@ impl GrpcUdpEngine {
             let _ = conn
                 .recv_stream(id)
                 .stop(quinn_proto::VarInt::from_u32(0x0107)); // excessive load
-            stream_buffers.remove(&(handle, id));
-            stream_requests.remove(&(handle, id));
+            streams.remove(&(handle, id));
             return;
         }
 
         // Try decoding frames
         loop {
-            match decode_udp_frame(buf) {
+            match decode_udp_frame(&mut slot.wire_buf) {
                 Ok(Some(frame)) => match frame {
                     UdpFrame::Headers(payload) => match decode_qpack_headers(&payload) {
                         Ok(decoded) => {
@@ -307,30 +339,38 @@ impl GrpcUdpEngine {
                                 decoded.headers,
                                 Body::Empty,
                             );
-                            stream_requests.insert((handle, id), req);
+                            slot.request = Some(req);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to decode QPACK headers on gRPC UDP stream");
                             let _ = conn
                                 .recv_stream(id)
                                 .stop(quinn_proto::VarInt::from_u32(0x0106));
-                            stream_buffers.remove(&(handle, id));
-                            stream_requests.remove(&(handle, id));
+                            streams.remove(&(handle, id));
                             return;
                         }
                     },
                     UdpFrame::Data(payload) => {
-                        if let Some(req) = stream_requests.get_mut(&(handle, id)) {
+                        if let Some(ref mut req) = slot.request {
                             match req.body {
                                 Body::Empty => {
-                                    req.body = Body::Bytes(payload);
+                                    if let Some(ref mut body_buf) = slot.body_buf {
+                                        body_buf.extend_from_slice(&payload);
+                                    } else {
+                                        req.body = Body::Bytes(payload);
+                                    }
                                 }
                                 Body::Bytes(ref existing) => {
-                                    let mut merged =
-                                        BytesMut::with_capacity(existing.len() + payload.len());
-                                    merged.extend_from_slice(existing);
-                                    merged.extend_from_slice(&payload);
-                                    req.body = Body::Bytes(merged.freeze());
+                                    // Multi-chunk upload: migrate to expandable BytesMut buffer to eliminate O(N^2) copying
+                                    let mut body_buf = BytesMut::with_capacity(
+                                        (existing.len() + payload.len())
+                                            .max(8192)
+                                            .next_power_of_two(),
+                                    );
+                                    body_buf.extend_from_slice(existing);
+                                    body_buf.extend_from_slice(&payload);
+                                    req.body = Body::Empty;
+                                    slot.body_buf = Some(body_buf);
                                 }
                             }
                         }
@@ -343,21 +383,25 @@ impl GrpcUdpEngine {
                     let _ = conn
                         .recv_stream(id)
                         .stop(quinn_proto::VarInt::from_u32(0x0106));
-                    stream_buffers.remove(&(handle, id));
-                    stream_requests.remove(&(handle, id));
+                    streams.remove(&(handle, id));
                     return;
                 }
             }
         }
 
         // Emit request if finished or body present
-        if stream_finished && let Some(request) = stream_requests.remove(&(handle, id)) {
+        if stream_finished
+            && let Some(mut slot) = streams.remove(&(handle, id))
+            && let Some(mut request) = slot.request.take()
+        {
+            if let Some(buf) = slot.body_buf.take() {
+                request.body = Body::Bytes(buf.freeze());
+            }
             ready_requests.push(GrpcUdpRequestEvent {
                 handle,
                 stream_id: id,
                 request,
             });
-            stream_buffers.remove(&(handle, id));
         }
     }
 
@@ -431,5 +475,11 @@ impl GrpcUdpEngine {
     ) -> Result<Vec<OutgoingDatagram>, GrpcError> {
         let resp = status.to_l7_response(message);
         self.send_response(now, handle, stream_id, &resp)
+    }
+
+    /// Returns the number of currently active streams.
+    #[inline]
+    pub fn active_stream_count(&self) -> usize {
+        self.streams.len()
     }
 }

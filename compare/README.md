@@ -6,13 +6,16 @@ Thư mục này chứa tài liệu và số liệu đo kiểm thực nghiệm hi
 
 ## 1. Cấu Trúc Tài Liệu
 
-- **[HTTP/1.1 Benchmark Suite (44 Kịch Bản)](file:///home/phucle/Desktop/velda-edge/compare/http1.md)**:
+- **[HTTP/1.1 Benchmark Suite (44 Kịch Bản)](../compare/http1.md)**:
   - **12 Pipeline Strategies $\times$ 3 Dải Payload** (Micro ~64B, Medium 12K-64K, Large 1M-10M) = 36 kịch bản.
   - **Dual Upstream**: Kiểm thử độc lập trên cả 2 nhánh **Cleartext (No-SSL)** và **TLS 1.3 ALPN (SSL)**.
   - **8 Kịch bản Dị dạng & Thảm họa**: HTTP Request Smuggling, Corrupted Chunk, Header Flooding, Slowloris, Chaos Upstream RST, Cgroup 60MB RAM OOM Containment, CPU 100% Adaptive Shedding, Atomic Hot-Reload Contention.
-- **[HTTP/2 Dual-Upstream Benchmark (7 Kịch Bản Chuyên Sâu)](file:///home/phucle/Desktop/velda-edge/compare/http2.md)**:
-  - Đối sánh bắn tải tỷ lệ đều 50/50 giữa Upstream Cleartext `h2c` và Upstream TLS `h2` ALPN.
-  - Phân tích chi tiết 3 tầng số liệu: Vĩ mô (Network/L7), Vi mô (HPC/CPU `perf stat`), Vi mô (Kernel/Locks `perf trace`).
+- **[HTTP/2 Benchmark Suite (44 Kịch Bản)](../compare/http2.md)**:
+  - **12 Pipeline Strategies $\times$ 3 Dải Payload** (Micro ~64B, Medium 12K-64K, Large 1M-10M) = 36 kịch bản.
+  - **8 Kịch bản Dị dạng & Thảm họa RFC 9113**: Rapid Reset Flood, CONTINUATION Flood, HPACK Bomb, Zero-Window Deadlock, Chaos RST, Cgroup 60MB RAM OOM, CPU 100% CoDel Shedding, Atomic Hot-Reload Contention.
+- **[HTTP/3 Benchmark Suite (44 Kịch Bản)](../compare/http3.md)**:
+  - **12 Pipeline Strategies $\times$ 3 Dải Payload** (Micro ~64B, Medium 12K-64K, Large 1M-10M) = 36 kịch bản.
+  - **8 Kịch bản Dị dạng & Thảm họa RFC 9000 / RFC 9114**: QUIC Initial Flood & Amplification Attack, QPACK Dynamic Table Bomb, CID Churn & Migration Storm, Flow-Control Deadlock, Chaos Upstream Sudden Death, Cgroup 60MB RAM OOM, CPU 100% CoDel Shedding, Atomic Hot-Reload Contention.
 
 ---
 

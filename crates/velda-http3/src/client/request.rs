@@ -7,7 +7,6 @@ use velda_core::{Body, L7Request};
 
 use crate::frame::{Http3Frame, encode_frame};
 use crate::qpack::encode_qpack_request;
-use crate::server::request::Http3ServerRequest;
 
 /// Upstream HTTP/3 client request head metadata.
 #[derive(Debug, Clone)]
@@ -79,15 +78,6 @@ impl Http3ClientRequest {
             self.head.headers,
             self.body,
         )
-    }
-
-    /// Converts from downstream [`Http3ServerRequest`].
-    #[inline]
-    pub fn from_server_request(req: Http3ServerRequest) -> Self {
-        Self {
-            head: Http3ClientRequestHead::new(req.head.method, req.head.uri, req.head.headers),
-            body: req.body,
-        }
     }
 
     /// Appends a header using fluent builder pattern.

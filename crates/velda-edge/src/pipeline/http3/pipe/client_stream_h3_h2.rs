@@ -9,7 +9,6 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
-use velda_http2::Http2Config;
 
 use crate::upstream::Http2Upstream;
 
@@ -23,9 +22,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
         velda_core::Body::Empty => bytes::Bytes::new(),
     };
 
-    let h2_config = Http2Config::auto();
-
-    let (mut client, _lease) = match upstream.acquire(&h2_config).await {
+    let (mut client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -52,7 +49,8 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
             upstream = %upstream.id(),
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
+        if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
+        {
             pipe_res = send_h2_client_stream(&mut fresh_client, req, &headers, &body_bytes).await;
         }
     }

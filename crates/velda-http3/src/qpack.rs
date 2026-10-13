@@ -193,7 +193,7 @@ pub fn decode_string_literal(slice: &[u8]) -> Option<(String, usize)> {
     let s = if is_huffman {
         decode_huffman(data)?
     } else {
-        String::from_utf8(data.to_vec()).ok()?
+        std::str::from_utf8(data).ok()?.to_string()
     };
     Some((s, end))
 }
@@ -215,7 +215,7 @@ pub fn decode_string_literal_prefixed(slice: &[u8], prefix_bits: u8) -> Option<(
     let s = if is_huffman {
         decode_huffman(data)?
     } else {
-        String::from_utf8(data.to_vec()).ok()?
+        std::str::from_utf8(data).ok()?.to_string()
     };
     Some((s, end))
 }

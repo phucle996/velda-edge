@@ -65,9 +65,7 @@ async fn forward_buffered(
 
 /// Serves a buffered HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response {
-    let h3_config = Http3Config::auto();
-
-    let (client, lease) = match upstream.acquire(&h3_config).await {
+    let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -86,7 +84,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
         }
     };
 
-    let mut pipe_res = forward_buffered(&client, req.clone(), &h3_config).await;
+    let mut pipe_res = forward_buffered(&client, req.clone(), &upstream.config).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -99,8 +97,8 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = forward_buffered(&fresh_client, req.clone(), &h3_config).await;
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            pipe_res = forward_buffered(&fresh_client, req.clone(), &upstream.config).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {

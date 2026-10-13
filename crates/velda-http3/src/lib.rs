@@ -40,8 +40,8 @@ pub use huffman::{decode_huffman, encode_huffman};
 pub use qpack::{DecodedHeaders, decode_qpack, encode_qpack_request, encode_qpack_response};
 pub use quinn_proto;
 pub use server::{
-    Http3Engine, Http3RequestEvent, Http3ServerRequest, Http3ServerRequestHead,
-    Http3ServerResponse, Http3ServerResponseHead, OutgoingDatagram, build_edge_response_frames,
-    enrich_headers, extract_host, is_clean_path, normalize_path, send_response,
+    Http3Engine, Http3RequestEvent, Http3ServerResponse, Http3ServerResponseHead, OutgoingDatagram,
+    build_edge_response_frames, enrich_headers, extract_host, is_clean_path, normalize_path,
+    send_response,
 };
 pub use strategy::Http3PipeStrategy;

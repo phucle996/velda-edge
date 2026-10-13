@@ -54,9 +54,7 @@ async fn forward_server_stream(
 
 /// Serves a server-streaming HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response {
-    let h3_config = Http3Config::auto();
-
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -75,14 +73,14 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
         }
     };
 
-    let mut pipe_res = forward_server_stream(&client, req, &h3_config).await;
+    let mut pipe_res = forward_server_stream(&client, req, &upstream.config).await;
     if let Err(Http3Error::ConnectionClosed) = pipe_res {
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = forward_server_stream(&fresh_client, req, &h3_config).await;
+        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            pipe_res = forward_server_stream(&fresh_client, req, &upstream.config).await;
         }
     }
 

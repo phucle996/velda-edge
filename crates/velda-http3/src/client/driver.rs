@@ -1,7 +1,15 @@
 //! Background QUIC connection driver loop for HTTP/3 upstream client (RFC 9114).
 //!
-//! Manages multiplexed bidirectional request-response streams over a persistent QUIC
-//! connection, driving stream reads, writes, timeouts, cancellation, and UDP I/O.
+//! # Concurrency Architecture
+//! Unlike HTTP/1.1 and HTTP/2, QUIC manages encryption keys, congestion control, loss
+//! recovery timers, packet numbering, and flow control across all multiplexed streams in a
+//! single unified connection state machine ([`quinn_proto::Connection`]).
+//!
+//! Because `quinn_proto` is strictly non-I/O and non-thread-safe:
+//! - A dedicated Tokio task ("Driver") exclusively owns the `Connection` and `UdpSocket`.
+//! - Edge pipelines interact with this driver by passing [`ClientCommand`]s over an async channel.
+//! - This actor pattern eliminates mutex contention on the hot path, ensures lock-free packet
+//!   processing, and keeps request execution fully asynchronous across concurrent streams.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -19,10 +27,10 @@ use crate::error::Http3Error;
 use crate::frame::{Http3Frame, decode_frame, encode_frame, error_code};
 use crate::qpack::{decode_qpack, encode_qpack_request};
 
-/// Internal command dispatched to the background QUIC connection driver loop.
+/// Return type for [`ClientCommand::OpenStream`].
 ///
-/// Note: `clippy::large_enum_variant` is deliberately permitted here to preserve zero heap
-/// allocation on the request dispatch hot path. Keeping `L7Request` unboxed avoids `malloc`/`free` overhead per request.
+/// Contains an [`Http3StreamSender`] handle (allowing callers to push request chunks concurrently)
+/// and a oneshot receiver for incoming [`Http3StreamResponse`] headers and chunks.
 pub(crate) type OpenStreamReply = Result<
     (
         super::connector::Http3StreamSender,
@@ -31,19 +39,26 @@ pub(crate) type OpenStreamReply = Result<
     Http3Error,
 >;
 
+/// Internal commands dispatched from proxy pipelines to the background QUIC connection driver loop.
+///
+/// Permitting large enum variants keeps `L7Request` unboxed on the stack, eliminating extra heap
+/// allocations (`malloc`/`free`) on the upstream request dispatch path.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ClientCommand {
-    /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream (buffered response).
+    /// Dispatches an L7 request over a newly opened stream expecting a fully buffered response.
+    /// Suited for typical REST/JSON RPC where payload sizes are small and known in advance.
     SendRequest {
         request: L7Request,
         reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
     },
-    /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream (progressive streaming response).
+    /// Dispatches an L7 request over a newly opened stream expecting progressive response streaming.
+    /// Emits headers immediately and forwards chunks through `mpsc` with flow control (e.g. SSE, large downloads).
     SendStreamRequest {
         request: L7Request,
         reply_tx: oneshot::Sender<Result<Http3StreamResponse, Http3Error>>,
     },
-    /// Opens a progressive bidirectional stream, returning an Http3StreamSender and a receiver for Http3StreamResponse.
+    /// Opens a progressive bidirectional (duplex) stream.
+    /// Used for gRPC-Web over H3, chunked uploads, and bidirectional tunneling where request and response stream concurrently.
     OpenStream {
         method: http::Method,
         uri: http::Uri,
@@ -52,13 +67,15 @@ pub(crate) enum ClientCommand {
         is_fin: bool,
         reply_tx: oneshot::Sender<OpenStreamReply>,
     },
-    /// Sends a chunk of request DATA frame or finishes the request stream.
+    /// Sends a progressive request DATA chunk or signals stream completion (FIN).
+    /// Used by client-streaming and duplex pipelines to transmit chunks incrementally without buffering the full request in RAM.
     SendChunk {
         stream_id: StreamId,
         chunk: bytes::Bytes,
         is_fin: bool,
     },
     /// Gracefully closes the QUIC connection.
+    /// Sends an immediate `H3_NO_ERROR` CONNECTION_CLOSE frame to the peer and drains pending packets.
     Close,
 }
 
@@ -67,6 +84,9 @@ type StreamHeadChannel = (
     mpsc::Receiver<Result<bytes::Bytes, Http3Error>>,
 );
 
+/// Response dispatch mechanism tailored to the proxy pipeline strategy:
+/// - `Buffered`: Accumulates payload in a single `BytesMut` buffer, emitting `L7Response` on FIN.
+/// - `Streaming`: Hands off `Http3StreamResponse` headers immediately and feeds incoming chunks into `chunk_tx`.
 enum StreamReply {
     Buffered {
         reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
@@ -78,15 +98,28 @@ enum StreamReply {
     },
 }
 
+/// State slot tracking an active in-flight bidirectional HTTP/3 stream.
+/// Consolidated into a single slot for O(1) lookups without multi-map fragmentation.
 struct ActiveStreamSlot {
     method: http::Method,
     reply: StreamReply,
     headers: Option<(Option<StatusCode>, HeaderMap)>,
+    /// Accumulates incoming wire bytes until complete HTTP/3 frames can be parsed.
+    /// QUIC delivers stream fragments across arbitrary UDP datagram boundaries.
     raw_buf: BytesMut,
+    /// Retains outbound encoded frames when QUIC flow control limits write capacity.
+    /// Flushed whenever Quinn signals `StreamEvent::Writable`.
     outbound_buf: BytesMut,
+    /// Indicates all request data has been provided and Quinn's send stream should be finalized.
     outbound_finished: bool,
 }
 
+/// Flushes pending outbound bytes into Quinn's send stream buffer.
+///
+/// QUIC enforces stream-level and connection-level flow control windows (RFC 9000 Section 4).
+/// If the peer's receive window is partially filled, `write()` consumes fewer bytes than available.
+/// Unwritten bytes remain in `outbound_buf` until Quinn emits `StreamEvent::Writable`.
+/// Once `outbound_buf` is empty and `outbound_finished` is set, `.finish()` transmits the FIN flag.
 #[inline]
 fn flush_stream_outbound(
     conn: &mut quinn_proto::Connection,
@@ -110,9 +143,16 @@ fn flush_stream_outbound(
     }
 }
 
+/// Maximum number of pending stream requests to queue when upstream reaches `MAX_STREAMS` limit.
+/// Caps memory growth when an upstream server throttles stream concurrency.
 const MAX_PENDING_STREAMS: usize = 4096;
+
+/// Timeout after which a queued pending stream request is dropped with an error.
+/// Prevents head-of-line blocking if upstream concurrency credits never arrive.
 const PENDING_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Checks whether the caller has abandoned a queued request before it was assigned a stream ID.
+/// Avoids opening an upstream QUIC stream if the downstream client already disconnected or timed out.
 #[inline]
 fn is_open_command_cancelled(cmd: &ClientCommand) -> bool {
     match cmd {
@@ -123,6 +163,7 @@ fn is_open_command_cancelled(cmd: &ClientCommand) -> bool {
     }
 }
 
+/// Rejects an unassigned open command by notifying the waiting caller channel.
 #[inline]
 fn reject_open_command(cmd: ClientCommand, err: Http3Error) {
     match cmd {
@@ -139,6 +180,11 @@ fn reject_open_command(cmd: ClientCommand, err: Http3Error) {
     }
 }
 
+/// Dispatches an open command onto an allocated bidirectional QUIC stream.
+///
+/// Coalescing the QPACK-encoded HEADERS frame and initial request DATA into the outbound buffer
+/// allows Quinn to pack both into the first flight of QUIC packets (often a single 1-RTT UDP datagram),
+/// cutting upstream round-trip latency to the bare minimum.
 #[inline]
 fn dispatch_open_command(
     cmd: ClientCommand,
@@ -164,7 +210,7 @@ fn dispatch_open_command(
             let mut send_buf = BytesMut::new();
             encode_frame(&header_frame, &mut send_buf);
 
-            // Encode optional DATA frame using move semantics (zero clone)
+            // Move bytes directly into Http3Frame::Data to avoid copying buffer memory
             if let Body::Bytes(b) = request.body
                 && !b.is_empty()
             {
@@ -202,7 +248,7 @@ fn dispatch_open_command(
             let mut send_buf = BytesMut::new();
             encode_frame(&header_frame, &mut send_buf);
 
-            // Encode optional DATA frame using move semantics (zero clone)
+            // Move bytes directly into Http3Frame::Data to avoid copying buffer memory
             if let Body::Bytes(b) = request.body
                 && !b.is_empty()
             {
@@ -210,6 +256,7 @@ fn dispatch_open_command(
                 encode_frame(&data_frame, &mut send_buf);
             }
 
+            // Channel capacity of 32 chunks provides sufficient pipeline credit while bounding memory under slow consumers
             let (chunk_tx, chunk_rx) = mpsc::channel(32);
             let mut slot = ActiveStreamSlot {
                 method: req_method,
@@ -277,6 +324,7 @@ fn dispatch_open_command(
     }
 }
 
+/// Drains pending queued stream requests in FIFO order when QUIC stream concurrency credits arrive.
 #[inline]
 fn drain_pending_commands(
     pending_commands: &mut VecDeque<(Instant, ClientCommand)>,
@@ -328,11 +376,11 @@ pub(crate) async fn run_client_driver(
     let mut cancelled_streams_buf = Vec::with_capacity(64);
     let mut resp_buf = Vec::with_capacity(2048);
 
-    // Initial flush of connection transmits before entering event loop
+    // Transmit ClientHello immediately to initiate the QUIC handshake
     flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
 
     loop {
-        // Determine next timeout deadline
+        // Query timer deadline from Quinn for QUIC loss detection (PTO), ACK delay, congestion pacing, and keep-alive
         let timeout_sleep = match conn.poll_timeout() {
             Some(t) => {
                 let now = Instant::now();
@@ -346,8 +394,10 @@ pub(crate) async fn run_client_driver(
         };
 
         tokio::select! {
-            // Ingest new command from client handles with adaptive batch draining
+            // Branch 1: Ingest new commands from proxy pipelines.
+            // Draining up to 128 commands in a batch amortizes channel wakeup and context switch overhead under high concurrency.
             cmd = command_rx.recv() => {
+                // First attempt to drain any queued commands waiting for peer stream credits
                 drain_pending_commands(
                     &mut pending_commands,
                     &mut conn,
@@ -365,7 +415,9 @@ pub(crate) async fn run_client_driver(
                         | ClientCommand::SendStreamRequest { .. }
                         | ClientCommand::OpenStream { .. } => {
                             if !pending_commands.is_empty() {
+                                // Maintain strict FIFO order if commands are already queued
                                 if pending_commands.len() >= MAX_PENDING_STREAMS {
+                                    // Fast-reject when queue is full (4096) to shed upstream overload and prevent unbounded memory growth
                                     reject_open_command(
                                         c,
                                         Http3Error::H3("No concurrent bidirectional streams available (queue full)".into()),
@@ -385,6 +437,7 @@ pub(crate) async fn run_client_driver(
                                         );
                                     }
                                     None => {
+                                        // Upstream reached `MAX_STREAMS` concurrency limit; queue briefly for peer credit grant
                                         pending_commands.push_back((Instant::now(), c));
                                     }
                                 }
@@ -395,6 +448,7 @@ pub(crate) async fn run_client_driver(
                             chunk,
                             is_fin,
                         } => {
+                            // Encode DATA frame dynamically for progressive streaming uploads
                             if let Some(slot) = streams.get_mut(&stream_id) {
                                 if !chunk.is_empty() {
                                     let data_frame = Http3Frame::Data(chunk);
@@ -407,6 +461,7 @@ pub(crate) async fn run_client_driver(
                             }
                         }
                         ClientCommand::Close => {
+                            // Graceful shutdown: RFC 9114 Section 8.1 requires H3_NO_ERROR CONNECTION_CLOSE frame to let peer close cleanly
                             conn.close(
                                 Instant::now(),
                                 quinn_proto::VarInt::from_u32(error_code::H3_NO_ERROR as u32),
@@ -430,7 +485,8 @@ pub(crate) async fn run_client_driver(
                 }
             }
 
-            // Ingest incoming UDP packets from network with opportunistic batch draining
+            // Branch 2: Ingest incoming UDP datagrams from network with opportunistic batch draining.
+            // Non-blocking try_recv_from loop drains up to 64 packets in bulk to feed Quinn with minimal epoll wakeups.
             res = socket.recv_from(&mut socket_recv_buf) => {
                 let mut current_res = Some(res);
                 let mut drain_count = 0;
@@ -450,6 +506,7 @@ pub(crate) async fn run_client_driver(
                         Some(quinn_proto::DatagramEvent::Response(transmit))
                             if transmit.size > 0 =>
                         {
+                            // Stateless resets or version negotiation packets produced during handling must be bounced back immediately
                             let _ = socket
                                 .send_to(&resp_buf[..transmit.size], transmit.destination)
                                 .await;
@@ -464,6 +521,7 @@ pub(crate) async fn run_client_driver(
                     current_res = socket.try_recv_from(&mut socket_recv_buf).ok().map(Ok);
                 }
 
+                // Check if incoming packets opened new streams or updated peer stream credits
                 drain_pending_commands(
                     &mut pending_commands,
                     &mut conn,
@@ -472,7 +530,7 @@ pub(crate) async fn run_client_driver(
                 );
             }
 
-            // Timeout expiration
+            // Branch 3: Timer tick for QUIC loss recovery, pacing, and keepalive probes
             _ = tokio::time::sleep(timeout_sleep) => {
                 let now = Instant::now();
                 if let Some(timeout) = conn.poll_timeout()
@@ -483,14 +541,14 @@ pub(crate) async fn run_client_driver(
             }
         }
 
-        // Flush streams with pending outbound data
+        // Flush any streams that have outbound data pending due to prior flow control blocking
         for (&id, slot) in streams.iter_mut() {
             if !slot.outbound_buf.is_empty() {
                 flush_stream_outbound(&mut conn, id, slot);
             }
         }
 
-        // RFC 9114 Section 4.1: Sweep cancelled streams where caller dropped receiver (zero-alloc)
+        // RFC 9114 Section 4.1 & 8.1: sweep cancelled streams where caller dropped receiver to release upstream server resources
         cancelled_streams_buf.clear();
         for (&id, slot) in streams.iter() {
             let is_cancelled = match &slot.reply {
@@ -510,7 +568,7 @@ pub(crate) async fn run_client_driver(
 
         for id in cancelled_streams_buf.drain(..) {
             streams.remove(&id);
-            // H3_REQUEST_CANCELLED (RFC 9114 Section 4.1 & 8.1)
+            // H3_REQUEST_CANCELLED (0x010c) informs peer that request was cancelled before completion
             let _ = conn.send_stream(id).reset(quinn_proto::VarInt::from_u32(
                 error_code::H3_REQUEST_CANCELLED as u32,
             ));
@@ -519,13 +577,12 @@ pub(crate) async fn run_client_driver(
             ));
         }
 
-        // Poll QUIC stream events
+        // Poll QUIC stream events emitted by the state machine after datagram ingestion
         while let Some(event) = conn.poll() {
             match event {
                 Event::Stream(StreamEvent::Readable { id }) => {
                     if id.dir() == Dir::Uni {
-                        // Server unidirectional stream (Control Stream, QPACK encoder/decoder).
-                        // Drain incoming bytes to avoid blocking flow control.
+                        // Server unidirectional stream (Control Stream, QPACK encoder/decoder); drain to advance flow control windows (RFC 9114 Section 6.2)
                         if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
                             while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
                         }
@@ -533,7 +590,7 @@ pub(crate) async fn run_client_driver(
                     }
 
                     if !streams.contains_key(&id) {
-                        // Stream was cancelled or already completed. Drain bytes to advance flow control.
+                        // Stream cancelled or completed previously; drain late arrivals to advance connection-level receive window
                         if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
                             while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
                             let _ = chunks.finalize();
@@ -541,8 +598,7 @@ pub(crate) async fn run_client_driver(
                         continue;
                     }
 
-                    // RFC 9114 Flow control backpressure: If stream is active and progressive chunk buffer is full,
-                    // do not read from Quinn yet to withhold receive window credit from peer.
+                    // Backpressure propagation: if downstream chunk buffer is full, pause reading from Quinn to withhold window credit from upstream
                     if let Some(slot) = streams.get(&id)
                         && let StreamReply::Streaming { chunk_tx, .. } = &slot.reply
                         && chunk_tx.capacity() == 0
@@ -565,8 +621,9 @@ pub(crate) async fn run_client_driver(
                             match chunks.next(65535) {
                                 Ok(Some(chunk)) => {
                                     // Security: Enforce max_body_size buffer limits strictly for buffered
-                                    // responses that accumulate into RAM. Progressive Streaming streams are
-                                    // forwarded chunk-by-chunk with constant memory footprint and flow control.
+                                    // responses that accumulate into RAM. Progressive streaming responses are
+                                    // forwarded chunk-by-chunk with constant memory footprint and flow control,
+                                    // so they do not risk unbounded memory accumulation here.
                                     if is_buffered
                                         && current_raw_len
                                             + chunk_scratch_buf.len()
@@ -579,6 +636,7 @@ pub(crate) async fn run_client_driver(
                                     chunk_scratch_buf.extend_from_slice(&chunk.bytes);
                                 }
                                 Ok(None) => {
+                                    // FIN received: peer finished transmitting this stream.
                                     stream_finished = true;
                                     break;
                                 }
@@ -622,6 +680,7 @@ pub(crate) async fn run_client_driver(
                     }
 
                     if payload_too_large {
+                        // RFC 9114 Section 4.1: Message too large error (0x010e).
                         let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
                             error_code::H3_MESSAGE_ERROR as u32,
                         ));
@@ -653,13 +712,15 @@ pub(crate) async fn run_client_driver(
                     if let Some(slot) = streams.get_mut(&id) {
                         slot.raw_buf.extend_from_slice(&chunk_scratch_buf);
 
-                        // Decode incoming frames
+                        // Ingest stream bytes and parse complete HTTP/3 frames.
+                        // A single QUIC read may yield partial frames or multiple concatenated frames.
                         while let Ok(Some(frame)) = decode_frame(&mut slot.raw_buf) {
                             match frame {
                                 Http3Frame::Headers(payload) => {
                                     if let Ok(decoded) = decode_qpack(&payload) {
                                         slot.headers =
                                             Some((decoded.status, decoded.headers.clone()));
+                                        // For streaming responses, dispatch headers immediately to unblock downstream TTFB
                                         if let StreamReply::Streaming {
                                             ref mut head_tx, ..
                                         } = slot.reply
@@ -704,6 +765,8 @@ pub(crate) async fn run_client_driver(
                                 reply_tx,
                                 data_payload,
                             } => {
+                                // RFC 9110 Section 6.4.1: HEAD responses, informational (1xx), 204 No Content,
+                                // and 304 Not Modified must not carry a body even if Content-Length is present.
                                 let is_no_body = slot.method == http::Method::HEAD
                                     || status_code.is_informational()
                                     || status_code == StatusCode::NO_CONTENT
@@ -954,6 +1017,7 @@ pub(crate) async fn flush_conn_transmits(
                 }
             }
 
+            // Fallback for systems without UDP_SEGMENT support or unsegmented single datagrams
             if !sent_via_gso {
                 let seg = transmit.segment_size.unwrap_or(data.len());
                 for chunk in data.chunks(seg) {

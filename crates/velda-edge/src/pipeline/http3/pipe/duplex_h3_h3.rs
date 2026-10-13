@@ -11,7 +11,7 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
-use velda_http3::{Http3Client, Http3Config, Http3Error};
+use velda_http3::{Http3Client, Http3Error};
 
 use crate::upstream::Http3Upstream;
 
@@ -36,9 +36,7 @@ async fn forward_duplex(client: &Http3Client, req: &L7Request) -> Result<L7Respo
 
 /// Serves a full-duplex HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response {
-    let h3_config = Http3Config::auto();
-
-    let (client, _lease) = match upstream.acquire(&h3_config).await {
+    let (client, _lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -63,7 +61,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
+        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
             pipe_res = forward_duplex(&fresh_client, req).await;
         }
     }
