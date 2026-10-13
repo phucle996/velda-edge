@@ -27,10 +27,6 @@
       "recv_buffer_size": 262144,
       "send_buffer_size": 262144,
       "copy_buffer_size": 16384
-    },
-    "udp": {
-      "recv_buffer_size": 1048576,
-      "send_buffer_size": 1048576
     }
   },
   "tls": {

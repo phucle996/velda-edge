@@ -62,7 +62,10 @@ impl UdpSocket {
                 )
             };
             if ret != 0 {
-                return Err(TransportError::Io(std::io::Error::last_os_error()));
+                tracing::trace!(
+                    errno = std::io::Error::last_os_error().raw_os_error(),
+                    "SO_REUSEPORT socket option skipped or unsupported on UDP socket"
+                );
             }
         }
 
@@ -307,6 +310,24 @@ impl UdpSocket {
         Ok((n, peer))
     }
 
+    /// Attempts non-blocking datagram receipt via `try_recv_from`.
+    ///
+    /// Returns:
+    /// - `Some(Ok((bytes, peer)))` on immediate non-blocking kernel delivery (zero epoll overhead).
+    /// - `Some(Err(e))` on permanent I/O error.
+    /// - `None` if the socket ingress buffer is empty (`WouldBlock`), requiring asynchronous waiting.
+    #[inline]
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<Result<(usize, SocketAddr)>> {
+        match self.socket.try_recv_from(buf) {
+            Ok((n, peer)) => {
+                self.bytes_received.0.fetch_add(n as u64, Ordering::Relaxed);
+                Some(Ok((n, peer)))
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+            Err(e) => Some(Err(TransportError::Io(e))),
+        }
+    }
+
     /// Receives an entire datagram dynamically allocated up to `max_size`.
     pub async fn recv_datagram(&self, max_size: usize) -> Result<Datagram> {
         let mut buf = vec![0u8; max_size];
@@ -315,8 +336,29 @@ impl UdpSocket {
         Ok(Datagram::new(peer, self.local_addr, buf))
     }
 
+    /// Attempts non-blocking datagram transmission via `try_send_to`.
+    ///
+    /// Returns:
+    /// - `Some(Ok(bytes))` on immediate non-blocking kernel delivery (zero epoll overhead).
+    /// - `Some(Err(e))` on permanent I/O error.
+    /// - `None` if the socket egress buffer is full (`WouldBlock`), requiring asynchronous waiting.
+    #[inline]
+    pub fn try_send_to(&self, buf: &[u8], target: SocketAddr) -> Option<Result<usize>> {
+        match self.socket.try_send_to(buf, target) {
+            Ok(n) => {
+                self.bytes_sent.0.fetch_add(n as u64, Ordering::Relaxed);
+                Some(Ok(n))
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+            Err(e) => Some(Err(TransportError::Io(e))),
+        }
+    }
+
     /// Sends a datagram buffer to the specified remote address, tracking the sent byte count.
     pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
+        if let Some(res) = self.try_send_to(buf, target) {
+            return res;
+        }
         let n = self
             .socket
             .send_to(buf, target)

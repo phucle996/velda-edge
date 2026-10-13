@@ -165,6 +165,28 @@ impl UdpIngress {
                             // avoids a task spawn per packet. Handlers must stay short; long work
                             // (e.g. HTTP/3 request processing, L4 session pumps) is spawned by them.
                             handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
+
+                            // High-throughput non-blocking batch drain: drain up to 64 datagrams
+                            // directly from socket receive queue without re-entering epoll select!
+                            for _ in 0..64 {
+                                match socket.try_recv_from(&mut buf) {
+                                    Some(Ok((n, peer))) => {
+                                        let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
+                                        handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
+                                    }
+                                    Some(Err(err)) => {
+                                        tracing::error!(
+                                            listener_id = %listener_id,
+                                            listen_addr = %local_addr,
+                                            shard = shard_idx,
+                                            error = %err,
+                                            "UDP batch recv error"
+                                        );
+                                        break;
+                                    }
+                                    None => break,
+                                }
+                            }
                         }
                         Err(err) => {
                             tracing::error!(

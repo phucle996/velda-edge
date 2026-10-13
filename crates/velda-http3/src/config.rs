@@ -44,8 +44,8 @@ impl Http3Config {
                 max_header_size: 16 * 1024,
                 max_headers: 32,
                 idle_timeout_ms: 15_000,
-                max_concurrent_streams: 128,
-                max_concurrent_uni_streams: 32,
+                max_concurrent_streams: 1_024,
+                max_concurrent_uni_streams: 128,
                 max_qpack_table_capacity: 4096,
                 max_pending_handshakes: 512,
             },
@@ -54,8 +54,8 @@ impl Http3Config {
                 max_header_size: 32 * 1024,
                 max_headers: 48,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 256,
-                max_concurrent_uni_streams: 64,
+                max_concurrent_streams: 4_096,
+                max_concurrent_uni_streams: 256,
                 max_qpack_table_capacity: 4096,
                 max_pending_handshakes: 1_024,
             },
@@ -64,8 +64,8 @@ impl Http3Config {
                 max_header_size: 64 * 1024,
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 512,
-                max_concurrent_uni_streams: 128,
+                max_concurrent_streams: 16_384,
+                max_concurrent_uni_streams: 1_024,
                 max_qpack_table_capacity: 8192,
                 max_pending_handshakes: 2_048,
             },
@@ -74,8 +74,8 @@ impl Http3Config {
                 max_header_size: 64 * 1024,
                 max_headers: 96,
                 idle_timeout_ms: 45_000,
-                max_concurrent_streams: 1024,
-                max_concurrent_uni_streams: 256,
+                max_concurrent_streams: 32_768,
+                max_concurrent_uni_streams: 2_048,
                 max_qpack_table_capacity: 16384,
                 max_pending_handshakes: 4_096,
             },
@@ -84,8 +84,8 @@ impl Http3Config {
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 2048,
-                max_concurrent_uni_streams: 512,
+                max_concurrent_streams: 65_536,
+                max_concurrent_uni_streams: 4_096,
                 max_qpack_table_capacity: 32768,
                 max_pending_handshakes: 8_192,
             },
@@ -94,8 +94,8 @@ impl Http3Config {
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 4096,
-                max_concurrent_uni_streams: 1024,
+                max_concurrent_streams: 65_536,
+                max_concurrent_uni_streams: 4_096,
                 max_qpack_table_capacity: 65536,
                 max_pending_handshakes: 16_384,
             },
@@ -104,8 +104,8 @@ impl Http3Config {
                 max_header_size: 256 * 1024,
                 max_headers: 256,
                 idle_timeout_ms: 120_000,
-                max_concurrent_streams: 8192,
-                max_concurrent_uni_streams: 2048,
+                max_concurrent_streams: 65_536,
+                max_concurrent_uni_streams: 4_096,
                 max_qpack_table_capacity: 65536,
                 max_pending_handshakes: 32_768,
             },
@@ -214,14 +214,14 @@ impl Http3Config {
         );
 
         // 3. Edge-to-Backend Low Latency & High Throughput:
-        // - Initial RTT of 1ms (eliminates 333ms RFC 9002 default lag on LAN/loopback backends)
+        // - Initial RTT of 10ms (low latency while preventing false-positive PTO loss under concurrency spikes)
         // - 64MB - 256MB send_window to prevent upload pipe starvation across concurrent streams
-        // - BBR congestion controller for high bandwidth with fast ACK convergence
+        // - Cubic congestion controller for ultra-stable multi-stream throughput without BBR probe_rtt pauses
         // - Explicit segmentation offload enablement
-        transport.initial_rtt(std::time::Duration::from_millis(1));
+        transport.initial_rtt(std::time::Duration::from_millis(10));
         transport.send_window(conn_window);
         transport.congestion_controller_factory(std::sync::Arc::new(
-            quinn_proto::congestion::BbrConfig::default(),
+            quinn_proto::congestion::CubicConfig::default(),
         ));
         transport.enable_segmentation_offload(true);
     }
@@ -248,17 +248,17 @@ mod tests {
     #[test]
     fn test_for_tier_explicit_all_tiers() {
         let constrained = Http3Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 128);
+        assert_eq!(constrained.max_concurrent_streams, 1_024);
         assert_eq!(constrained.max_body_size, 2 * 1024 * 1024);
         assert_eq!(constrained.max_pending_handshakes, 512);
 
         let medium = Http3Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 512);
+        assert_eq!(medium.max_concurrent_streams, 16_384);
         assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
         assert_eq!(medium.max_pending_handshakes, 2_048);
 
         let ultra = Http3Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 8192);
+        assert_eq!(ultra.max_concurrent_streams, 65_536);
         assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
         assert_eq!(ultra.max_pending_handshakes, 32_768);
     }

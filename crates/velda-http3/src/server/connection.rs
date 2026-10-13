@@ -243,7 +243,8 @@ impl Http3Engine {
                         Event::Stream(StreamEvent::Stopped { id, .. }) => {
                             self.streams.remove(&(handle, id));
                         }
-                        Event::ConnectionLost { .. } => {
+                        Event::ConnectionLost { reason } => {
+                            tracing::warn!(handle = ?handle, reason = ?reason, "HTTP/3 server connection lost in datagram event");
                             is_lost = true;
                         }
                         _ => {}
@@ -385,20 +386,25 @@ impl Http3Engine {
         }
 
         // Emit request ONLY once the downstream client has finished transmitting (FIN reached)
-        if stream_finished
-            && let Some(mut slot) = streams.remove(&(handle, id))
-            && let Some(mut req) = slot.request.take()
-        {
-            if let Some(buf) = slot.body_buf.take() {
-                req.body = Body::Bytes(buf.freeze());
+        if stream_finished {
+            if let Some(mut slot) = streams.remove(&(handle, id)) {
+                if let Some(mut req) = slot.request.take() {
+                    if let Some(buf) = slot.body_buf.take() {
+                        req.body = Body::Bytes(buf.freeze());
+                    }
+                    let is_early_data = conn.is_handshaking();
+                    ready_requests.push(Http3RequestEvent {
+                        handle,
+                        stream_id: id,
+                        request: req,
+                        is_early_data,
+                    });
+                } else {
+                    tracing::warn!(handle = ?handle, stream = %id, "Stream finished but slot.request was None!");
+                }
+            } else {
+                tracing::warn!(handle = ?handle, stream = %id, "Stream finished but slot was not in streams!");
             }
-            let is_early_data = conn.is_handshaking();
-            ready_requests.push(Http3RequestEvent {
-                handle,
-                stream_id: id,
-                request: req,
-                is_early_data,
-            });
         }
     }
 
@@ -408,24 +414,29 @@ impl Http3Engine {
         let mut closed_handles = Vec::new();
 
         for (&handle, conn) in self.connections.iter_mut() {
+            let mut handle_timeout = false;
             if let Some(timeout) = conn.poll_timeout()
                 && timeout <= now
             {
                 conn.handle_timeout(now);
+                handle_timeout = true;
+            }
 
-                self.transmit_buf.clear();
-                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
-                    if transmit.size > 0 {
-                        outgoing.push(OutgoingDatagram {
-                            peer: transmit.destination,
-                            payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
-                        });
-                    }
-                    self.transmit_buf.clear();
+            self.transmit_buf.clear();
+            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                if transmit.size > 0 {
+                    outgoing.push(OutgoingDatagram {
+                        peer: transmit.destination,
+                        payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
+                    });
                 }
+                self.transmit_buf.clear();
+            }
 
+            if handle_timeout {
                 while let Some(event) = conn.poll() {
-                    if matches!(event, Event::ConnectionLost { .. }) {
+                    if let Event::ConnectionLost { reason } = event {
+                        tracing::warn!(handle = ?handle, reason = ?reason, "HTTP/3 server connection lost in timeout handler");
                         closed_handles.push(handle);
                     }
                 }

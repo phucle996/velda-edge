@@ -57,7 +57,10 @@ pub fn enrich_headers(
     if let Some(h) = host_str
         && let Ok(val) = HeaderValue::from_str(h)
     {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
+        headers.insert(HeaderName::from_static("x-forwarded-host"), val.clone());
+        if !headers.contains_key(http::header::HOST) {
+            headers.insert(http::header::HOST, val);
+        }
     }
 
     // RFC 7239 Forwarded

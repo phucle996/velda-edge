@@ -16,7 +16,7 @@ Tài liệu này đặc tả và định hình khung đo chuẩn cho **toàn b�
 - **Hệ điều hành**: Ubuntu 24.04 LTS (Kernel Linux 6.8.0-45-generic).
 - **Cấu hình máy ảo Gateway**: KVM QEMU VM với **4 vCPUs (pinned 1-1 vật lý)**, **8 GB RAM**, cgroup v2 enabled.
 - **Máy phát tải (Load Generator)**: Host vật lý (12 CPU cores, 32 GB RAM) dội tải trực tiếp qua giao diện mạng `virtio-net` (MTU 1500, UDP offloading bật).
-- **Công cụ sinh tải**: `h2load` (nghttp2 v1.68) hỗ trợ ALPN HTTP/3 (`--alpn=h3`), kết hợp bộ test scripts chuyên dụng mô phỏng dị dạng gói tin QUIC (Initial flood, QPACK bomb, Path migration storm, Flow-control deadlock).
+- **Công cụ sinh tải**: `oha` (v1.16 với `--http-version 3` trên nền QUIC/UDP, latency percentiles P50–P99.9, zero-TUI automation), kết hợp bộ test scripts chuyên dụng mô phỏng dị dạng gói tin QUIC (Initial flood, QPACK bomb, Path migration storm, Flow-control deadlock).
 
 ### 1.2 Phân Lớp 3 Tầng Tiêu Chí Đo Lường
 Mọi kịch bản đều được phân tích qua 3 tầng số liệu chuẩn hóa:
@@ -87,51 +87,51 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 01: buffered_h3_h1 — Micro Payload (Ping-Pong ~64B)
 - **Mục tiêu thử nghiệm**: Đo chi phí giải mã gói tin QUIC, parse HTTP/3 frame, giải nén QPACK HEADERS tĩnh/động, chuyển đổi sang HTTP/1.1 wire text và mượn connection từ pool.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes HTTP headers (GET /ping HTTP/3)
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 50000 -c 100 -m 10 https://192.168.122.14:8445/plain/ping https://192.168.122.14:8445/tls12/ping https://192.168.122.14:8445/tls13/ping
+- **Lệnh thực thi chuẩn**: h3bench -u https://192.168.122.14:8444/plain/ping -u https://192.168.122.14:8444/tls12/ping -u https://192.168.122.14:8444/tls13/ping -n 50000 -c 100 --host backend.local --json
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | 0.00 | 0.00 | 0.00 | Chưa đo nghiệm |
-| | **Băng thông truyền tải (Throughput MB/s)** | 0.00 MB/s | 0.00 MB/s | 0.00 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
-| | **Độ trễ trung bình (Mean Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 0.00 ms | 0.00 ms | 0.00 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Đồng pha với mean latency |
-| | **Thời gian kết nối (Connect Time Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Bắt tay kết nối downstream (QUIC Handshake) |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | 0 2xx | 0 2xx | 0 2xx | 100% 200 OK |
-| | **Tỷ lệ thành công (Success Rate %)** | 0.0% | 0.0% | 0.0% | Không rớt gói, không lỗi |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 0.00 MB | 0.00 MB | 0.00 MB | Bộ nhớ RSS thường trú đỉnh |
-| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 0 | 0 | 0 | Tổng số lệnh CPU thực thi |
-| | **Số lệnh CPU / Request (`insn / req`)** | 0.00 | 0.00 | 0.00 | Số lệnh CPU tiêu thụ trên mỗi request |
-| | **Tổng chu kỳ CPU (`cycles`)** | 0 | 0 | 0 | Tổng chu kỳ xung nhịp CPU |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | 0.00 | 0.00 | 0.00 | Chu kỳ xung CPU trên mỗi request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.00 | 0.00 | 0.00 | Hiệu suất IPC khai thác CPU |
-| | **Tổng số lệnh rẽ nhánh (`branches`)** | 0 | 0 | 0 | Lệnh rẽ nhánh phần cứng |
-| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 0.00 | 0.00 | 0.00 | Rẽ nhánh trên mỗi request |
-| | **CPU đoán sai nhánh (`branch-misses`)** | 0 | 0 | 0 | Đoán sai nhánh |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 0.00% | 0.00% | 0.00% | Tỷ lệ đoán sai nhánh |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 0.00% | 0.00% | 0.00% | Miss cache L1 dữ liệu |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | 0.08% | 0.08% | 0.08% | Bảo vệ bộ nhớ LLC |
-| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | 0 | 0 | 0 | Chuyển ngữ cảnh tiến trình |
-| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.00 | 0.00 | 0.00 | Chuyển ngữ cảnh / request |
-| | **Tổng số System Calls (`syscalls`)** | 0 | 0 | 0 | System calls vào nhân Linux |
-| | **System Calls / Request (`syscalls / req`)** | 0.00 | 0.00 | 0.00 | Syscalls trên mỗi request |
-| | **Thời gian chạy trong kernel (Kernel Time)** | 0.00s | 0.00s | 0.00s | Thời gian thực thi không gian nhân Linux |
-| | **Số lần gọi khóa Futex (Futex Calls)** | 0 | 0 | 0 | Số lần gọi khóa futex |
-| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 0.00% | 0.00% | 0.00% | Tỷ lệ khóa futex |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | 39,682.99 | **51,959.06** | 16,401.13 | Velda đạt 39,682.99 req/s (-23.6% vs Nginx, +142.0% vs Envoy) |
+| | **Băng thông truyền tải (Throughput MB/s)** | 0.15 MB/s | **0.20 MB/s** | 0.06 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
+| | **Độ trễ trung bình (Mean Latency)** | 2.51 ms | **1.92 ms** | 6.09 ms | Độ trễ trung bình xử lý luồng |
+| | **Độ trễ tối thiểu (Min Latency)** | 0.11 ms | **0.10 ms** | 1.32 ms | Ngưỡng trễ phản hồi gói đầu tiên |
+| | **Độ trễ phân vị P50** | 2.31 ms | **1.74 ms** | 5.73 ms | Phân vị P50 hoàn tất request |
+| | **Độ trễ phân vị P90** | 4.01 ms | **3.14 ms** | 8.85 ms | Phân vị P90 |
+| | **Độ trễ phân vị P99 (Tail Latency)** | 6.69 ms | **5.20 ms** | 12.78 ms | Đuôi trễ P99 kiểm soát độ giật |
+| | **Độ trễ phân vị P99.9** | 13.04 ms | **9.33 ms** | 24.54 ms | Đuôi trễ sâu P99.9 |
+| | **Độ trễ tối đa (Max Latency)** | **17.55 ms** | 19.31 ms | 50.61 ms | Max jitter phản hồi |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | 1.29 ms | **1.03 ms** | 2.25 ms | Phương sai độ ổn định |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | 2.51 ms | **1.92 ms** | 6.09 ms | Đồng pha với mean latency |
+| | **Thời gian kết nối (Connect Time Avg)** | 4.51 ms | **3.91 ms** | 4.91 ms | Bắt tay kết nối downstream (QUIC Handshake) |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **50,000 2xx** | 50,000 2xx | 50,000 2xx | 100% 200 OK |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không lỗi |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 210.62 MB | 163.99 MB | **6.84 MB** | Bộ nhớ RSS thường trú đỉnh |
+| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 11,519,772,121 | **7,753,419,739** | 16,907,198,906 | Tổng số lệnh CPU thực thi |
+| | **Số lệnh CPU / Request (`insn / req`)** | 58,059.00 | **29,844.30** | 206,171.10 | Số lệnh CPU tiêu thụ trên mỗi request |
+| | **Tổng chu kỳ CPU (`cycles`)** | 13,363,467,378 | **9,502,323,957** | 26,182,303,277 | Tổng chu kỳ xung nhịp CPU |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | 67,351.10 | **36,576.20** | 319,274.40 | Chu kỳ xung CPU trên mỗi request |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | **0.86** | 0.82 | 0.65 | Hiệu suất IPC khai thác CPU |
+| | **Tổng số lệnh rẽ nhánh (`branches`)** | 2,021,255,371 | **1,404,084,574** | 2,949,985,545 | Lệnh rẽ nhánh phần cứng |
+| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 10,187.00 | **5,404.60** | 35,973.00 | Rẽ nhánh trên mỗi request |
+| | **CPU đoán sai nhánh (`branch-misses`)** | 28,230,824 | **20,132,142** | 71,749,309 | Đoán sai nhánh |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | **1.40%** | 1.43% | 2.43% | Tỷ lệ đoán sai nhánh |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 9.99% | **8.87%** | 9.20% | Miss cache L1 dữ liệu |
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | **0.08%** | Bảo vệ bộ nhớ LLC |
+| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | 119,022 | **58,446** | 67,083 | Chuyển ngữ cảnh tiến trình |
+| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.60 | **0.22** | 0.82 | Chuyển ngữ cảnh / request |
+| | **Tổng số System Calls (`syscalls`)** | 532,161 | 332,354 | **326,925** | System calls vào nhân Linux |
+| | **System Calls / Request (`syscalls / req`)** | 2.68 | **1.28** | 3.99 | Syscalls trên mỗi request |
+| | **Thời gian chạy trong kernel (Kernel Time)** | **1.75s** | 1.75s | 1.75s | Thời gian thực thi không gian nhân Linux |
+| | **Số lần gọi khóa Futex (Futex Calls)** | 66,074 | **10,236** | 10,604 | Số lần gọi khóa futex |
+| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 12.42% | **3.08%** | 3.24% | Tỷ lệ khóa futex |
 
 ---
 
 ### KB 02: buffered_h3_h1 — Medium Payload (REST JSON 12KB)
 - **Mục tiêu thử nghiệm**: Nạp trọn vẹn 12KB DATA frame từ client HTTP/3 QUIC, assemble buffer in-memory và serialize thành HTTP/1.1 Content-Length body gửi tới upstream backend.
 - **Kích thước tải trọng & Quy chuẩn**: 12,288 bytes Content-Length JSON body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 10 https://192.168.122.14:8445/plain/12kb https://192.168.122.14:8445/tls12/12kb https://192.168.122.14:8445/tls13/12kb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/12kb https://192.168.122.14:8445/tls12/12kb https://192.168.122.14:8445/tls13/12kb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -175,7 +175,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 03: buffered_h3_h1 — Large Payload (RAM Blob 1MB)
 - **Mục tiêu thử nghiệm**: Đo chi phí cấp phát vector bộ đệm nạp trọn vẹn 1MB DATA frames từ QUIC stream, chuyển tiếp qua H1 keep-alive upstream không chunking.
 - **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes Content-Length body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 2000 -c 50 -m 5 https://192.168.122.14:8445/plain/1mb https://192.168.122.14:8445/tls12/1mb https://192.168.122.14:8445/tls13/1mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 2000 -c 50 --insecure https://192.168.122.14:8445/plain/1mb https://192.168.122.14:8445/tls12/1mb https://192.168.122.14:8445/tls13/1mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -219,7 +219,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 04: buffered_h3_h2 — Micro Payload (Ping-Pong H3 to H2 Mux ~64B)
 - **Mục tiêu thử nghiệm**: Chuyển tiếp yêu cầu HTTP/3 QUIC downstream sang stream ghép kênh trên HTTP/2 TCP upstream connection pool, đo chi phí dịch chuyển framing giữa QUIC và H2.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes headers (GET /ping HTTP/3)
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 50000 -c 100 -m 10 https://192.168.122.14:8445/plain/ping https://192.168.122.14:8445/tls12/ping https://192.168.122.14:8445/tls13/ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 50000 -c 100 --insecure https://192.168.122.14:8445/plain/ping https://192.168.122.14:8445/tls12/ping https://192.168.122.14:8445/tls13/ping
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -263,7 +263,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 05: buffered_h3_h2 — Medium Payload (REST H3 to H2 Mux 12KB)
 - **Mục tiêu thử nghiệm**: Ghép tải 12KB REST JSON từ QUIC stream downstream sang DATA frames trên HTTP/2 upstream multiplexed connection pool.
 - **Kích thước tải trọng & Quy chuẩn**: 12,288 bytes JSON body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 10 https://192.168.122.14:8445/plain/12kb https://192.168.122.14:8445/tls12/12kb https://192.168.122.14:8445/tls13/12kb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/12kb https://192.168.122.14:8445/tls12/12kb https://192.168.122.14:8445/tls13/12kb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -307,7 +307,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 06: buffered_h3_h2 — Large Payload (Heavy H3 to H2 Mux 1MB)
 - **Mục tiêu thử nghiệm**: Chia nhỏ tải nặng 1MB từ QUIC stream thành các HTTP/2 DATA frames 16KB truyền qua multiplexed H2 pipe upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes body (~1MB)
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 2000 -c 50 -m 5 https://192.168.122.14:8445/plain/1mb https://192.168.122.14:8445/tls12/1mb https://192.168.122.14:8445/tls13/1mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 2000 -c 50 --insecure https://192.168.122.14:8445/plain/1mb https://192.168.122.14:8445/tls12/1mb https://192.168.122.14:8445/tls13/1mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -351,7 +351,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 07: buffered_h3_h3 — Micro Payload (Pure QUIC Ping-Pong ~64B)
 - **Mục tiêu thử nghiệm**: Thuần QUIC hai đầu (Pure QUIC End-to-End), đo chi phí định tuyến UDP datagram, QPACK decode/re-encode và stream dispatching giữa 2 kết nối QUIC độc lập.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes headers (GET /ping HTTP/3)
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 50000 -c 100 -m 10 https://192.168.122.14:8445/plain/ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 50000 -c 100 --insecure https://192.168.122.14:8445/plain/ping
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -395,7 +395,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 08: buffered_h3_h3 — Medium Payload (Pure QUIC REST JSON 12KB)
 - **Mục tiêu thử nghiệm**: Chuyển tiếp 12KB REST payload qua 2 tầng QUIC multiplexing, kiểm tra khả năng phối hợp flow-control window (RFC 9000) giữa downstream và upstream H3 stream.
 - **Kích thước tải trọng & Quy chuẩn**: 12,288 bytes JSON body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 10 https://192.168.122.14:8445/plain/12kb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/12kb
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -439,7 +439,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 09: buffered_h3_h3 — Large Payload (Pure QUIC RAM Blob 1MB)
 - **Mục tiêu thử nghiệm**: Truyền tải nặng 1MB trên đồng thời 50 kết nối QUIC thuần, kiểm soát nén QPACK header và phân mảnh UDP GSO segments giữa downstream và upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 2000 -c 50 -m 5 https://192.168.122.14:8445/plain/1mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 2000 -c 50 --insecure https://192.168.122.14:8445/plain/1mb
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -483,7 +483,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 10: server_stream_h3_h1 — Micro Payload (SSE Heartbeat from H1 ~64B)
 - **Mục tiêu thử nghiệm**: Nhận các SSE ping events 64B từ H1 upstream chunked và đóng gói tức thì thành các QUIC STREAM frames HTTP/3 đẩy về downstream client.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes SSE heartbeat chunks
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/sse-ping https://192.168.122.14:8445/tls12/sse-ping https://192.168.122.14:8445/tls13/sse-ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/sse-ping https://192.168.122.14:8445/tls12/sse-ping https://192.168.122.14:8445/tls13/sse-ping
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -527,7 +527,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 11: server_stream_h3_h1 — Medium Payload (SSE Chunked from H1 64KB)
 - **Mục tiêu thử nghiệm**: Chuyển đổi luồng chunked 64KB từ H1 upstream sang các STREAM frames QUIC HTTP/3, duy trì độ trễ gói tin tối thiểu không đọng buffer.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes streaming data chunks
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/sse-64k https://192.168.122.14:8445/tls12/sse-64k https://192.168.122.14:8445/tls13/sse-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/sse-64k https://192.168.122.14:8445/tls12/sse-64k https://192.168.122.14:8445/tls13/sse-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -571,7 +571,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 12: server_stream_h3_h1 — Large Payload (File Stream from H1 10MB)
 - **Mục tiêu thử nghiệm**: Tải file streaming 10MB từ H1 upstream, stream liên tục về client H3 với zero intermediate buffering, duy trì bộ nhớ O(1).
 - **Kích thước tải trọng & Quy chuẩn**: 10,485,760 bytes streaming file download
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 200 -c 20 -m 2 https://192.168.122.14:8445/plain/10mb https://192.168.122.14:8445/tls12/10mb https://192.168.122.14:8445/tls13/10mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 200 -c 20 --insecure https://192.168.122.14:8445/plain/10mb https://192.168.122.14:8445/tls12/10mb https://192.168.122.14:8445/tls13/10mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -615,7 +615,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 13: server_stream_h3_h2 — Micro Payload (SSE Bridge from H2 ~64B)
 - **Mục tiêu thử nghiệm**: Nhận các gói tin HTTP/2 DATA frame nhỏ từ H2 upstream và bridge tức thời thành QUIC STREAM frames HTTP/3 downstream.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes headers + SSE event frame
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/sse-ping https://192.168.122.14:8445/tls12/sse-ping https://192.168.122.14:8445/tls13/sse-ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/sse-ping https://192.168.122.14:8445/tls12/sse-ping https://192.168.122.14:8445/tls13/sse-ping
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -659,7 +659,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 14: server_stream_h3_h2 — Medium Payload (Data Stream from H2 64KB)
 - **Mục tiêu thử nghiệm**: Chuyển luồng DATA frames H2 64KB sang HTTP/3 stream downstream với zero-copy Bytes slicing.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes DATA frames payload
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/stream-64k https://192.168.122.14:8445/tls12/stream-64k https://192.168.122.14:8445/tls13/stream-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/stream-64k https://192.168.122.14:8445/tls12/stream-64k https://192.168.122.14:8445/tls13/stream-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -703,7 +703,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 15: server_stream_h3_h2 — Large Payload (File Stream from H2 10MB)
 - **Mục tiêu thử nghiệm**: Kéo luồng file 10MB từ Upstream H2 về Downstream H3, kiểm tra cơ chế kiểm soát backpressure flow control liên giao thức.
 - **Kích thước tải trọng & Quy chuẩn**: 10,485,760 bytes DATA stream
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 200 -c 20 -m 2 https://192.168.122.14:8445/plain/10mb https://192.168.122.14:8445/tls12/10mb https://192.168.122.14:8445/tls13/10mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 200 -c 20 --insecure https://192.168.122.14:8445/plain/10mb https://192.168.122.14:8445/tls12/10mb https://192.168.122.14:8445/tls13/10mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -747,7 +747,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 16: server_stream_h3_h3 — Micro Payload (Pure QUIC SSE Stream ~64B)
 - **Mục tiêu thử nghiệm**: Chuyển tiếp luồng sự kiện SSE 64B giữa 2 kênh multiplexing QUIC mà không nén lại payload, điều phối tín hiệu ping.
 - **Kích thước tải trọng & Quy chuẩn**: ~64 bytes QUIC frames stream
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/sse-ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/sse-ping
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -791,7 +791,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 17: server_stream_h3_h3 — Medium Payload (Pure QUIC Chunked Stream 64KB)
 - **Mục tiêu thử nghiệm**: Stream liên tục dữ liệu 64KB giữa downstream H3 và upstream H3, kiểm tra hiệu năng window update và frame relay thuần UDP.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes UDP QUIC stream
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/stream-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/stream-64k
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -835,7 +835,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 18: server_stream_h3_h3 — Large Payload (Pure QUIC File Stream 10MB)
 - **Mục tiêu thử nghiệm**: Chuyển tiếp luồng file 10MB qua 2 kết nối QUIC multiplexed, đo throughput bão hòa băng thông và khả năng kiểm soát UDP flow control.
 - **Kích thước tải trọng & Quy chuẩn**: 10,485,760 bytes stream
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 200 -c 20 -m 2 https://192.168.122.14:8445/plain/10mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 200 -c 20 --insecure https://192.168.122.14:8445/plain/10mb
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -879,7 +879,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 19: client_stream_h3_h1 — Micro Payload (QUIC Drip Upload to H1 ~64B)
 - **Mục tiêu thử nghiệm**: Client H3 đẩy sự kiện IoT nhỏ dạng STREAM frames liên tục, gateway assemble và forward sang H1 keep-alive upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes streaming upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/drip https://192.168.122.14:8445/tls12/drip https://192.168.122.14:8445/tls13/drip
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/drip https://192.168.122.14:8445/tls12/drip https://192.168.122.14:8445/tls13/drip
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -923,7 +923,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 20: client_stream_h3_h1 — Medium Payload (QUIC Doc Upload to H1 64KB)
 - **Mục tiêu thử nghiệm**: Upload tài liệu 64KB từ client H3 stream sang HTTP/1.1 chunked encoding upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes streaming upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/upload-64k https://192.168.122.14:8445/tls12/upload-64k https://192.168.122.14:8445/tls13/upload-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/upload-64k https://192.168.122.14:8445/tls12/upload-64k https://192.168.122.14:8445/tls13/upload-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -967,7 +967,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 21: client_stream_h3_h1 — Large Payload (QUIC Bulk Upload to H1 200MB)
 - **Mục tiêu thử nghiệm**: Đẩy luồng file cực lớn 200MB/request từ QUIC client lên H1 upstream qua 5 kết nối đồng thời, kiểm tra zero-alloc stream forwarding.
 - **Kích thước tải trọng & Quy chuẩn**: 209,715,200 bytes (200 MB) upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 50 -c 5 -m 1 https://192.168.122.14:8445/plain/bulk-200mb https://192.168.122.14:8445/tls12/bulk-200mb https://192.168.122.14:8445/tls13/bulk-200mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 50 -c 5 --insecure https://192.168.122.14:8445/plain/bulk-200mb https://192.168.122.14:8445/tls12/bulk-200mb https://192.168.122.14:8445/tls13/bulk-200mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1011,7 +1011,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 22: client_stream_h3_h2 — Micro Payload (QUIC Drip Upload to H2 ~64B)
 - **Mục tiêu thử nghiệm**: Nhận stream upload 64B từ client QUIC và chuyển đổi thành H2 DATA frames đẩy vào upstream connection pool.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/drip https://192.168.122.14:8445/tls12/drip https://192.168.122.14:8445/tls13/drip
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/drip https://192.168.122.14:8445/tls12/drip https://192.168.122.14:8445/tls13/drip
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1055,7 +1055,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 23: client_stream_h3_h2 — Medium Payload (QUIC Doc Upload to H2 64KB)
 - **Mục tiêu thử nghiệm**: Chuyển 64KB stream upload từ client H3 sang HTTP/2 DATA frames upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/upload-64k https://192.168.122.14:8445/tls12/upload-64k https://192.168.122.14:8445/tls13/upload-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/upload-64k https://192.168.122.14:8445/tls12/upload-64k https://192.168.122.14:8445/tls13/upload-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1099,7 +1099,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 24: client_stream_h3_h2 — Large Payload (QUIC Bulk Upload to H2 5MB)
 - **Mục tiêu thử nghiệm**: Chuyển luồng upload 5MB từ client H3 sang H2 upstream có backpressure flow-control window.
 - **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 1000 -c 20 -m 2 https://192.168.122.14:8445/plain/upload-5mb https://192.168.122.14:8445/tls12/upload-5mb https://192.168.122.14:8445/tls13/upload-5mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 1000 -c 20 --insecure https://192.168.122.14:8445/plain/upload-5mb https://192.168.122.14:8445/tls12/upload-5mb https://192.168.122.14:8445/tls13/upload-5mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1143,7 +1143,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 25: client_stream_h3_h3 — Micro Payload (Pure QUIC Drip Upload ~64B)
 - **Mục tiêu thử nghiệm**: Client H3 upload micro chunks, gateway forward trực tiếp sang QUIC upstream stream thuần.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/drip
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/drip
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1187,7 +1187,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 26: client_stream_h3_h3 — Medium Payload (Pure QUIC Doc Upload 64KB)
 - **Mục tiêu thử nghiệm**: Client upload 64KB stream sang QUIC upstream stream với điều phối UDP window.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/upload-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/upload-64k
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1231,7 +1231,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 27: client_stream_h3_h3 — Large Payload (Pure QUIC Bulk Upload 5MB)
 - **Mục tiêu thử nghiệm**: Client upload 5MB stream sang QUIC upstream stream với Linux GSO offload.
 - **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes upload body
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 1000 -c 20 -m 2 https://192.168.122.14:8445/plain/upload-5mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 1000 -c 20 --insecure https://192.168.122.14:8445/plain/upload-5mb
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1275,7 +1275,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 28: duplex_h3_h1 — Micro Payload (Bidi Echo with H1 ~64B)
 - **Mục tiêu thử nghiệm**: Client vừa gửi vừa nhận đồng thời từng gói 64B qua giao thức QUIC downstream bridge với H1 upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes bidi frames
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/echo https://192.168.122.14:8445/tls12/echo https://192.168.122.14:8445/tls13/echo
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/echo https://192.168.122.14:8445/tls12/echo https://192.168.122.14:8445/tls13/echo
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1319,7 +1319,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 29: duplex_h3_h1 — Medium Payload (Bidi Messaging with H1 64KB)
 - **Mục tiêu thử nghiệm**: Vừa stream 64KB lên từ QUIC, vừa nhận 64KB về đồng thời từ H1 upstream connection.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes in / 65,536 bytes out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/bidi-64k https://192.168.122.14:8445/tls12/bidi-64k https://192.168.122.14:8445/tls13/bidi-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/bidi-64k https://192.168.122.14:8445/tls12/bidi-64k https://192.168.122.14:8445/tls13/bidi-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1363,7 +1363,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 30: duplex_h3_h1 — Large Payload (Heavy Duplex Pump with H1 5MB)
 - **Mục tiêu thử nghiệm**: Bơm liên tục 5MB hai chiều đồng thời giữa QUIC downstream và H1 upstream, kiểm tra điều phối asymmetric backpressure.
 - **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes in / 5,242,880 bytes out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 1000 -c 20 -m 2 https://192.168.122.14:8445/plain/pump-5mb https://192.168.122.14:8445/tls12/pump-5mb https://192.168.122.14:8445/tls13/pump-5mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 1000 -c 20 --insecure https://192.168.122.14:8445/plain/pump-5mb https://192.168.122.14:8445/tls12/pump-5mb https://192.168.122.14:8445/tls13/pump-5mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1407,7 +1407,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 31: duplex_h3_h2 — Micro Payload (Bidi Echo with H2 ~64B)
 - **Mục tiêu thử nghiệm**: Ghép luồng duplex QUIC downstream vào HTTP/2 bidirectional stream upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes bidi frames
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/echo https://192.168.122.14:8445/tls12/echo https://192.168.122.14:8445/tls13/echo
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/echo https://192.168.122.14:8445/tls12/echo https://192.168.122.14:8445/tls13/echo
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1451,7 +1451,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 32: duplex_h3_h2 — Medium Payload (Bidi Data with H2 64KB)
 - **Mục tiêu thử nghiệm**: Bơm song công 64KB giữa QUIC stream downstream và HTTP/2 multiplexing upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes in / out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/bidi-64k https://192.168.122.14:8445/tls12/bidi-64k https://192.168.122.14:8445/tls13/bidi-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/bidi-64k https://192.168.122.14:8445/tls12/bidi-64k https://192.168.122.14:8445/tls13/bidi-64k
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1495,7 +1495,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 33: duplex_h3_h2 — Large Payload (Heavy Duplex Pump with H2 5MB)
 - **Mục tiêu thử nghiệm**: Đẩy 5MB in / 5MB out đồng thời giữa QUIC stream và HTTP/2 DATA frames.
 - **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes in / out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 1000 -c 20 -m 2 https://192.168.122.14:8445/plain/pump-5mb https://192.168.122.14:8445/tls12/pump-5mb https://192.168.122.14:8445/tls13/pump-5mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 1000 -c 20 --insecure https://192.168.122.14:8445/plain/pump-5mb https://192.168.122.14:8445/tls12/pump-5mb https://192.168.122.14:8445/tls13/pump-5mb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% h2c Cleartext : 30% TLS 1.2 h2 : 30% TLS 1.3 h2)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1539,7 +1539,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 34: duplex_h3_h3 — Micro Payload (Pure QUIC Bidi Echo ~64B)
 - **Mục tiêu thử nghiệm**: Bidi stream QUIC downstream ghép vào QUIC bidirectional stream upstream.
 - **Kích thước tải trọng & Quy chuẩn**: 64 bytes bidi frames
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 20000 -c 100 -m 5 https://192.168.122.14:8445/plain/echo
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/echo
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1583,7 +1583,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 35: duplex_h3_h3 — Medium Payload (Pure QUIC Bidi Messaging 64KB)
 - **Mục tiêu thử nghiệm**: Bơm song công 64KB qua 2 kênh QUIC bidi stream.
 - **Kích thước tải trọng & Quy chuẩn**: 65,536 bytes in / out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 50 -m 5 https://192.168.122.14:8445/plain/bidi-64k
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 50 --insecure https://192.168.122.14:8445/plain/bidi-64k
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1627,7 +1627,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 36: duplex_h3_h3 — Large Payload (Pure QUIC Heavy Duplex Pump 5MB)
 - **Mục tiêu thử nghiệm**: Bơm 5MB song công qua 2 kênh QUIC stream với Linux GSO offload.
 - **Kích thước tải trọng & Quy chuẩn**: 5,242,880 bytes in / out
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 1000 -c 20 -m 2 https://192.168.122.14:8445/plain/pump-5mb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 1000 -c 20 --insecure https://192.168.122.14:8445/plain/pump-5mb
 - **Nhánh Upstream**: Upstream HTTP/3 (QUIC / UDP trên port 8445 TLS 1.3)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1891,7 +1891,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 42: Cgroup RAM 60MB Starvation (O(1) UDP Memory under 1,000 Multiplexed Streams)
 - **Mục tiêu thử nghiệm**: Giới hạn cgroup RAM 60MB và mở 1,000 streams multiplexed cùng lúc truyền tải dữ liệu, kiểm tra khả năng sinh tồn trước Linux OOM killer.
 - **Kích thước tải trọng & Quy chuẩn**: 1,000 streams đồng thời trong cgroup memory.max=60MB
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 10000 -c 100 -m 10 https://192.168.122.14:8445/plain/12kb
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 10000 -c 100 --insecure https://192.168.122.14:8445/plain/12kb
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1935,7 +1935,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 43: CPU 100% Saturation & Overload Shedding (CoDel Shedder, H3_REQUEST_REJECTED 0x010b)
 - **Mục tiêu thử nghiệm**: Ép CPU máy chủ chạm 100% bằng cách dội 200,000 stream/s vượt năng lực xử lý, kiểm tra thuật toán cắt tỉa tải sớm (load shedding).
 - **Kích thước tải trọng & Quy chuẩn**: 200,000 requests bão hòa 100% 4 vCPUs
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 200000 -c 200 -m 50 https://192.168.122.14:8445/plain/ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 200000 -c 200 --insecure https://192.168.122.14:8445/plain/ping
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -1979,7 +1979,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 44: Atomic Hot-Reload Contention (100 Reloads/s at 100K QUIC Packets, Zero Dropped UDP Sessions)
 - **Mục tiêu thử nghiệm**: Kích hoạt 100 lần reload runtime snapshot mỗi giây trong khi đang phục vụ 100,000 gói tin QUIC ghép kênh.
 - **Kích thước tải trọng & Quy chuẩn**: 100,000 streams + 100 atomic snapshot swaps/sec
-- **Lệnh thực thi chuẩn**: h2load --alpn=h3 -n 100000 -c 100 -m 20 https://192.168.122.14:8445/plain/ping
+- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 100000 -c 100 --insecure https://192.168.122.14:8445/plain/ping
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |

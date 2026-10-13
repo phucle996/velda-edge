@@ -16,16 +16,6 @@ use crate::upstream::Http1Upstream;
 
 /// Serves a buffered HTTP/3 downstream request bridged to an HTTP/1.1 backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response {
-    let mut headers = req.headers.clone();
-
-    // Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
-    if !headers.contains_key(http::header::HOST)
-        && let Some(host) = velda_http3::server::header::extract_host(&headers, &req.uri)
-        && let Ok(hv) = HeaderValue::from_str(host)
-    {
-        headers.insert(http::header::HOST, hv);
-    }
-
     let mut lease = match upstream.acquire().await {
         Ok(l) => l,
         Err(e) => {
@@ -45,7 +35,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
         }
     };
 
-    let mut pipe_res = send_h1_buffered(&mut lease, req, &headers, &upstream.config).await;
+    let mut pipe_res = send_h1_buffered(&mut lease, req, &req.headers, &upstream.config).await;
 
     if pipe_res.is_err() {
         lease.mark_closed();
@@ -54,7 +44,8 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
             "HTTP/1.1 upstream connection failed; self-healing with fresh connection"
         );
         if let Ok(mut fresh_lease) = upstream.acquire_fresh().await {
-            pipe_res = send_h1_buffered(&mut fresh_lease, req, &headers, &upstream.config).await;
+            pipe_res =
+                send_h1_buffered(&mut fresh_lease, req, &req.headers, &upstream.config).await;
             if pipe_res.is_err() {
                 fresh_lease.mark_closed();
             }

@@ -23,6 +23,7 @@ use crate::error::TlsError;
 pub struct SniResolver {
     exact_matches: HashMap<String, Arc<CertifiedKey>>,
     wildcard_matches: HashMap<String, Arc<CertifiedKey>>,
+    default_key: Option<Arc<CertifiedKey>>,
 }
 
 impl fmt::Debug for SniResolver {
@@ -30,6 +31,7 @@ impl fmt::Debug for SniResolver {
         f.debug_struct("SniResolver")
             .field("exact_count", &self.exact_matches.len())
             .field("wildcard_count", &self.wildcard_matches.len())
+            .field("has_default", &self.default_key.is_some())
             .finish()
     }
 }
@@ -49,6 +51,7 @@ impl SniResolver {
         Self {
             exact_matches: HashMap::new(),
             wildcard_matches: HashMap::new(),
+            default_key: None,
         }
     }
 
@@ -63,6 +66,9 @@ impl SniResolver {
             .map_err(|e| TlsError::InvalidPrivateKey(e.to_string()))?;
 
         let certified_key = Arc::new(CertifiedKey::new(certs, signing_key));
+        if self.default_key.is_none() {
+            self.default_key = Some(certified_key.clone());
+        }
 
         for sni in snis {
             let s = sni.trim().to_ascii_lowercase();
@@ -133,8 +139,10 @@ impl SniResolver {
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let server_name = client_hello.server_name()?;
-        self.lookup(server_name)
+        match client_hello.server_name() {
+            Some(server_name) => self.lookup(server_name),
+            None => self.default_key.clone(),
+        }
     }
 }
 

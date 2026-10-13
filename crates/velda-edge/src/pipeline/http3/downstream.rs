@@ -19,6 +19,9 @@ use super::pipe;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
 
+pub static H3_TOTAL_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static H3_TOTAL_RESP_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Dispatches incoming UDP datagrams to the persistent HTTP/3 state machine.
 ///
 /// Ingests the packet, drives QUIC handshake/flow control, transmits outgoing datagrams,
@@ -29,22 +32,30 @@ pub async fn handle_http3_udp(
     datagram: Datagram,
     _config: velda_http3::Http3Config,
     runtime: &SharedRuntime,
+    precomputed_shards: Option<&super::engine::H3EngineShards>,
 ) {
     let peer = datagram.peer();
     let local_addr = datagram.local_addr();
 
-    let Some(engine_lock) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
-        tracing::warn!(
-            listener = %listener_id,
-            peer = %peer,
-            "Received UDP datagram, but no HTTP/3 engine is compiled"
-        );
-        return;
+    let shard = if let Some(pool) = precomputed_shards {
+        pool.get_shard_for_peer(peer)
+    } else {
+        let Some(s) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
+            tracing::warn!(
+                listener = %listener_id,
+                peer = %peer,
+                "Received UDP datagram, but no HTTP/3 engine is compiled"
+            );
+            return;
+        };
+        s
     };
+
+    shard.register_socket(&socket);
 
     let now = std::time::Instant::now();
     let (outgoing, requests) = {
-        let mut engine = engine_lock.lock().await;
+        let mut engine = shard.engine.lock();
         engine.handle_datagram(
             now,
             datagram.peer(),
@@ -55,13 +66,31 @@ pub async fn handle_http3_udp(
 
     // 1. Send all outgoing handshake / ACK datagrams immediately outside the engine lock
     for pkt in outgoing {
-        let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
+            if let Err(e) = res {
+                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send outgoing datagram via try_send_to");
+            }
+        } else if let Err(e) = socket.send_to(&pkt.payload, pkt.peer).await {
+            tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send outgoing datagram via send_to");
+        }
+    }
+
+    let n_reqs = requests.len() as u64;
+    if n_reqs > 0 {
+        let dec = H3_TOTAL_DECODED.fetch_add(n_reqs, std::sync::atomic::Ordering::Relaxed) + n_reqs;
+        let sent = H3_TOTAL_RESP_SENT.load(std::sync::atomic::Ordering::Relaxed);
+        tracing::trace!(
+            decoded = dec,
+            sent = sent,
+            in_flight = dec - sent,
+            "H3 INGRESS STATS"
+        );
     }
 
     // 2. Process complete L7 requests concurrently without blocking other datagrams
     for req_event in requests {
         let socket = socket.clone();
-        let engine_lock = engine_lock.clone();
+        let shard = shard.clone();
         let lid = listener_id.clone();
         let runtime = runtime.clone();
 
@@ -98,7 +127,7 @@ pub async fn handle_http3_udp(
                 );
                 let resp_now = std::time::Instant::now();
                 let resp_pkts = {
-                    let mut engine = engine_lock.lock().await;
+                    let mut engine = shard.engine.lock();
                     engine.send_response(
                         resp_now,
                         req_event.handle,
@@ -108,7 +137,11 @@ pub async fn handle_http3_udp(
                 };
                 if let Ok(pkts) = resp_pkts {
                     for pkt in pkts {
-                        let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
+                            let _ = res;
+                        } else {
+                            let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                        }
                     }
                 }
                 return;
@@ -132,12 +165,16 @@ pub async fn handle_http3_udp(
                 );
                 let resp_now = std::time::Instant::now();
                 let resp_pkts = {
-                    let mut engine = engine_lock.lock().await;
+                    let mut engine = shard.engine.lock();
                     engine.send_response(resp_now, req_event.handle, req_event.stream_id, &bad_req)
                 };
                 if let Ok(pkts) = resp_pkts {
                     for pkt in pkts {
-                        let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
+                            let _ = res;
+                        } else {
+                            let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+                        }
                     }
                 }
                 return;
@@ -150,18 +187,58 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
+            let t_req = std::time::Instant::now();
             let response = process_http3_request(&req, &lid, &runtime).await;
+            let req_dur = t_req.elapsed();
+            if req_dur > std::time::Duration::from_millis(100) {
+                tracing::warn!(
+                    stream = %req_event.stream_id,
+                    dur_ms = req_dur.as_millis(),
+                    "process_http3_request took >100ms!"
+                );
+            }
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
-                let mut engine = engine_lock.lock().await;
+                let mut engine = shard.engine.lock();
                 engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
             };
 
-            if let Ok(pkts) = resp_pkts {
-                for pkt in pkts {
-                    let _ = socket.send_to(&pkt.payload, pkt.peer).await;
+            match resp_pkts {
+                Ok(pkts) => {
+                    if pkts.is_empty() {
+                        tracing::warn!(
+                            listener = %lid,
+                            peer = %peer,
+                            handle = ?req_event.handle,
+                            stream = %req_event.stream_id,
+                            "send_response returned ZERO outgoing packets!"
+                        );
+                    }
+                    for pkt in pkts {
+                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
+                            if let Err(e) = res {
+                                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send response packet via try_send_to");
+                            }
+                        } else if let Err(e) = socket.send_to(&pkt.payload, pkt.peer).await {
+                            tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send response packet via send_to");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        listener = %lid,
+                        peer = %peer,
+                        handle = ?req_event.handle,
+                        stream = %req_event.stream_id,
+                        error = %e,
+                        "Failed to send HTTP/3 downstream response"
+                    );
                 }
             }
+
+            let sent = H3_TOTAL_RESP_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let dec = H3_TOTAL_DECODED.load(std::sync::atomic::Ordering::Relaxed);
+            tracing::trace!(decoded = dec, sent = sent, "H3 COMPLETED STATS");
         });
     }
 }

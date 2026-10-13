@@ -87,27 +87,7 @@ impl RuntimeProfile {
                         None
                     },
                 },
-                udp: UdpRuntimeConfig {
-                    recv_buffer_size: engine_config.udp.recv_buffer_size,
-                    send_buffer_size: engine_config.udp.send_buffer_size,
-                    reuseport: engine_config.udp.reuseport,
-                    concurrency_shards: engine_config.udp.concurrency_shards,
-                    freebind: if engine_config.udp.freebind {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                    gro: if engine_config.udp.gro {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                    rxq_ovfl: if engine_config.udp.rxq_ovfl {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                },
+                udp: UdpRuntimeConfig::default(),
             },
             tls: TlsRuntimeConfig {
                 session_cache_capacity: tls_params.session_cache_capacity,
@@ -190,14 +170,27 @@ impl RuntimeProfile {
 
     /// Converts the transport section into a strongly-typed [`UdpSocketConfig`].
     pub fn to_udp_socket_config(&self) -> UdpSocketConfig {
-        let mut cfg = UdpSocketConfig::new()
-            .with_reuseport(self.transport.udp.reuseport)
-            .with_concurrency_shards(self.transport.udp.concurrency_shards);
+        let topo = velda_core::hardware::global_hardware_topology();
+        let mut cfg = UdpSocketConfig::for_topology(topo);
+
+        let mem = self.memory_tier();
+        let cpu = self.cpu_tier();
+        let tiered = UdpSocketConfig::for_tiers(cpu, mem);
+        cfg.recv_buffer_size = tiered.recv_buffer_size;
+        cfg.send_buffer_size = tiered.send_buffer_size;
+        cfg.concurrency_shards = self.transport.io_workers.max(1);
+
         if let Some(r) = self.transport.udp.recv_buffer_size {
             cfg = cfg.with_recv_buffer_size(r);
         }
         if let Some(s) = self.transport.udp.send_buffer_size {
             cfg = cfg.with_send_buffer_size(s);
+        }
+        if let Some(rp) = self.transport.udp.reuseport {
+            cfg = cfg.with_reuseport(rp);
+        }
+        if let Some(shards) = self.transport.udp.concurrency_shards {
+            cfg = cfg.with_concurrency_shards(shards);
         }
         if let Some(fb) = self.transport.udp.freebind {
             cfg = cfg.with_freebind(fb);

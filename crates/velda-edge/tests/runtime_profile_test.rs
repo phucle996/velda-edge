@@ -325,19 +325,19 @@ fn test_exact_cores_pinning_for_odd_topologies() {
     let p_1 = RuntimeProfile::from_hardware(&hw_1);
     assert_eq!(p_1.transport.io_workers, 1);
     assert_eq!(p_1.transport.tcp.concurrency_shards, 1);
-    assert_eq!(p_1.transport.udp.concurrency_shards, 1);
+    assert_eq!(p_1.to_udp_socket_config().concurrency_shards, 1);
 
     // 3-cores instance (e.g. Hetzner cloud or custom cloud quota)
     let hw_3 = HardwareTopology::with_workers_and_memory(3, 4 * 1024 * 1024 * 1024);
     let p_3 = RuntimeProfile::from_hardware(&hw_3);
     assert_eq!(p_3.transport.io_workers, 3);
     assert_eq!(p_3.transport.tcp.concurrency_shards, 3);
-    assert_eq!(p_3.transport.udp.concurrency_shards, 3);
+    assert_eq!(p_3.to_udp_socket_config().concurrency_shards, 3);
 
     // 6-cores instance
     let hw_6 = HardwareTopology::with_workers_and_memory(6, 16 * 1024 * 1024 * 1024);
     let p_6 = RuntimeProfile::from_hardware(&hw_6);
     assert_eq!(p_6.transport.io_workers, 6);
     assert_eq!(p_6.transport.tcp.concurrency_shards, 6);
-    assert_eq!(p_6.transport.udp.concurrency_shards, 6);
+    assert_eq!(p_6.to_udp_socket_config().concurrency_shards, 6);
 }

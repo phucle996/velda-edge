@@ -380,17 +380,22 @@ pub(crate) async fn run_client_driver(
     flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
 
     loop {
-        // Query timer deadline from Quinn for QUIC loss detection (PTO), ACK delay, congestion pacing, and keep-alive
-        let timeout_sleep = match conn.poll_timeout() {
-            Some(t) => {
-                let now = Instant::now();
-                if t <= now {
-                    Duration::from_millis(0)
-                } else {
-                    t - now
+        // Query timer deadline from Quinn for QUIC loss detection (PTO), ACK delay, congestion pacing, and keep-alive.
+        // If commands are pending stream credits from peer, tick at 1ms to drain instantly upon credit grant.
+        let timeout_sleep = if !pending_commands.is_empty() {
+            Duration::from_millis(1)
+        } else {
+            match conn.poll_timeout() {
+                Some(t) => {
+                    let now = Instant::now();
+                    if t <= now {
+                        Duration::from_millis(0)
+                    } else {
+                        t - now
+                    }
                 }
+                None => Duration::from_millis(100),
             }
-            None => Duration::from_millis(100),
         };
 
         tokio::select! {
@@ -483,6 +488,9 @@ pub(crate) async fn run_client_driver(
                     flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
                     break;
                 }
+
+                // Immediately flush newly generated QUIC packets (HEADERS, initial DATA) onto the wire
+                flush_conn_transmits(&mut conn, &socket, &mut transmit_buf).await;
             }
 
             // Branch 2: Ingest incoming UDP datagrams from network with opportunistic batch draining.
@@ -911,123 +919,24 @@ pub(crate) async fn run_client_driver(
     }
 }
 
-/// Maximum datagrams to batch into a single GSO transmission (64 datagrams ~= 76-96KB).
-const MAX_GSO_SEGMENTS: usize = 64;
-
-#[cfg(target_os = "linux")]
-static GSO_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-#[cfg(target_os = "linux")]
-fn send_gso_datagrams(
-    fd: std::os::unix::io::RawFd,
-    data: &[u8],
-    destination: std::net::SocketAddr,
-    segment_size: u16,
-) -> std::io::Result<usize> {
-    use std::mem;
-
-    let sock_addr = socket2::SockAddr::from(destination);
-
-    let mut iov = libc::iovec {
-        iov_base: data.as_ptr() as *mut libc::c_void,
-        iov_len: data.len(),
-    };
-
-    const UDP_SEGMENT: libc::c_int = 103;
-    let mut ctrl_buf = [0u8; 64];
-
-    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
-    msg.msg_name = sock_addr.as_ptr() as *mut libc::c_void;
-    msg.msg_namelen = sock_addr.len();
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = ctrl_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(mem::size_of::<libc::c_ushort>() as libc::c_uint) } as usize;
-
-    unsafe {
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if !cmsg.is_null() {
-            (*cmsg).cmsg_level = libc::IPPROTO_UDP;
-            (*cmsg).cmsg_type = UDP_SEGMENT;
-            (*cmsg).cmsg_len =
-                libc::CMSG_LEN(mem::size_of::<libc::c_ushort>() as libc::c_uint) as usize;
-            let data_ptr = libc::CMSG_DATA(cmsg) as *mut libc::c_ushort;
-            *data_ptr = segment_size;
-        }
-    }
-
-    let ret = unsafe { libc::sendmsg(fd, &msg, 0) };
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        // If kernel denies UDP_SEGMENT (e.g. EINVAL or ENOPROTOOPT), disable permanently
-        if let Some(code) = err.raw_os_error()
-            && (code == libc::EINVAL || code == libc::ENOPROTOOPT)
-        {
-            GSO_AVAILABLE.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-        Err(err)
-    } else {
-        Ok(ret as usize)
-    }
-}
-
 /// Helper to drain and transmit newly generated QUIC packets onto the UDP socket.
-/// Supports generic UDP segmentation offload (GSO) on Linux to batch multiple packets
-/// in a single syscall regardless of request/stream payload size.
 pub(crate) async fn flush_conn_transmits(
     conn: &mut quinn_proto::Connection,
     socket: &UdpSocket,
     transmit_buf: &mut Vec<u8>,
 ) {
-    #[cfg(target_os = "linux")]
-    use std::os::unix::io::AsRawFd;
-
     let now = Instant::now();
     transmit_buf.clear();
-    while let Some(transmit) = conn.poll_transmit(now, MAX_GSO_SEGMENTS, transmit_buf) {
+    while let Some(transmit) = conn.poll_transmit(now, 1, transmit_buf) {
         if transmit.size > 0 {
-            let data = &transmit_buf[..transmit.size];
-            let mut sent_via_gso = false;
-
-            if let Some(seg_size) = transmit.segment_size {
-                #[cfg(target_os = "linux")]
-                if GSO_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) {
-                    let seg_u16 = seg_size as u16;
-                    let fd = socket.as_raw_fd();
-                    let res = socket.try_io(tokio::io::Interest::WRITABLE, || {
-                        send_gso_datagrams(fd, data, transmit.destination, seg_u16)
-                    });
-                    match res {
-                        Ok(_) => {
-                            sent_via_gso = true;
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            let async_res = socket
-                                .async_io(tokio::io::Interest::WRITABLE, || {
-                                    send_gso_datagrams(fd, data, transmit.destination, seg_u16)
-                                })
-                                .await;
-                            if async_res.is_ok() {
-                                sent_via_gso = true;
-                            }
-                        }
-                        Err(_) => {} // fallback to uncoalesced chunks below
-                    }
+            let chunk = &transmit_buf[..transmit.size];
+            match socket.try_send_to(chunk, transmit.destination) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let _ = socket.send_to(chunk, transmit.destination).await;
                 }
-            }
-
-            // Fallback for systems without UDP_SEGMENT support or unsegmented single datagrams
-            if !sent_via_gso {
-                let seg = transmit.segment_size.unwrap_or(data.len());
-                for chunk in data.chunks(seg) {
-                    match socket.try_send_to(chunk, transmit.destination) {
-                        Ok(_) => {}
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            let _ = socket.send_to(chunk, transmit.destination).await;
-                        }
-                        Err(_) => {}
-                    }
+                Err(err) => {
+                    tracing::warn!(destination = %transmit.destination, error = %err, "Failed to send client UDP datagram");
                 }
             }
         }

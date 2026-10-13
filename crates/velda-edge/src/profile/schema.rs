@@ -82,22 +82,43 @@ pub struct TcpRuntimeConfig {
 }
 
 /// UDP-specific runtime configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Hardware and kernel acceleration paths—including GRO (`UDP_GRO`), GSO (`UDP_SEGMENT`),
+/// queue overflow monitoring (`SO_RXQ_OVFL`), busy polling (`SO_PREFER_BUSY_POLL`),
+/// multi-worker sharding (`SO_REUSEPORT`), and topology-aware buffer sizing—are dynamically
+/// probed and applied at runtime via [`velda_transport::UdpSocketConfig::for_topology`].
+///
+/// Fields here represent purely optional operator overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UdpRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recv_buffer_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_buffer_size: Option<usize>,
-    #[serde(default = "default_reuseport")]
-    pub reuseport: bool,
-    #[serde(default = "default_concurrency_shards")]
-    pub concurrency_shards: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuseport: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_shards: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freebind: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gro: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rxq_ovfl: Option<bool>,
+}
+
+impl UdpRuntimeConfig {
+    /// Returns `true` if no operator overrides are defined.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.recv_buffer_size.is_none()
+            && self.send_buffer_size.is_none()
+            && self.reuseport.is_none()
+            && self.concurrency_shards.is_none()
+            && self.freebind.is_none()
+            && self.gro.is_none()
+            && self.rxq_ovfl.is_none()
+    }
 }
 
 /// Transport subsystem tuning parameters.
@@ -114,7 +135,8 @@ pub struct TransportRuntimeConfig {
     pub cpu_pinning: bool,
     /// TCP socket options and buffer sizing.
     pub tcp: TcpRuntimeConfig,
-    /// UDP socket options and buffer sizing.
+    /// UDP socket options and buffer sizing (omitted if using auto-probed acceleration defaults).
+    #[serde(default, skip_serializing_if = "UdpRuntimeConfig::is_empty")]
     pub udp: UdpRuntimeConfig,
 }
 

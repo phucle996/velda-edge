@@ -29,8 +29,13 @@ impl TcpListener {
         socket.set_reuseaddr(true).map_err(TransportError::Io)?;
 
         #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-        if config.reuseport {
-            socket.set_reuseport(true).map_err(TransportError::Io)?;
+        if config.reuseport
+            && let Err(err) = socket.set_reuseport(true)
+        {
+            tracing::trace!(
+                error = %err,
+                "SO_REUSEPORT socket option skipped or unsupported on TCP listener"
+            );
         }
 
         #[cfg(target_os = "linux")]

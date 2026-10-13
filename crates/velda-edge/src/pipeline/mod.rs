@@ -169,12 +169,22 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
     match pipeline {
         Some(UdpPipeline::Http3 { config, .. }) => {
             let lid = Arc::clone(&lid);
+            let shards = http3::get_or_init_h3_shards(&lid, &runtime);
             Arc::new(
                 move |_id: Arc<str>, socket: Arc<UdpSocket>, datagram: Datagram| {
                     let rt = runtime.clone();
                     let lid = Arc::clone(&lid);
+                    let shards = shards.clone();
                     Box::pin(async move {
-                        http3::handle_http3_udp(lid, socket, datagram, config, &rt).await;
+                        http3::handle_http3_udp(
+                            lid,
+                            socket,
+                            datagram,
+                            config,
+                            &rt,
+                            shards.as_ref(),
+                        )
+                        .await;
                     })
                 },
             )
