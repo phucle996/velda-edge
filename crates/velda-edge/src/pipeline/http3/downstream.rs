@@ -21,8 +21,21 @@ use super::pipe;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
 
-pub static H3_TOTAL_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static H3_TOTAL_RESP_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Cache-line aligned (64-byte) 64-bit atomic counter to completely eliminate false sharing.
+///
+/// # Hardware Rationale
+/// On modern multi-core x86-64 CPUs, adjacent 8-byte atomic variables in static memory share
+/// the same 64-byte L1 data cache line. If ingress threads mutate `H3_TOTAL_DECODED` while response
+/// writer threads mutate `H3_TOTAL_RESP_SENT`, the cache line bounces between cores in the MESI
+/// Modified state, causing severe L1 cache invalidation and bus locking under high packet load.
+/// Aligning each counter to 64 bytes isolates them into dedicated cache lines.
+#[repr(align(64))]
+pub struct CacheAlignedAtomicU64(pub std::sync::atomic::AtomicU64);
+
+pub static H3_TOTAL_DECODED: CacheAlignedAtomicU64 =
+    CacheAlignedAtomicU64(std::sync::atomic::AtomicU64::new(0));
+pub static H3_TOTAL_RESP_SENT: CacheAlignedAtomicU64 =
+    CacheAlignedAtomicU64(std::sync::atomic::AtomicU64::new(0));
 
 /// Sends outgoing QUIC packets using GSO-aware path (UDP_SEGMENT cmsg) when available,
 /// and `sendmmsg` batching for non-GSO control, ACK, and individual datagrams.
@@ -142,8 +155,13 @@ pub async fn handle_http3_udp(
 
     let n_reqs = requests.len() as u64;
     if n_reqs > 0 {
-        let dec = H3_TOTAL_DECODED.fetch_add(n_reqs, std::sync::atomic::Ordering::Relaxed) + n_reqs;
-        let sent = H3_TOTAL_RESP_SENT.load(std::sync::atomic::Ordering::Relaxed);
+        let dec = H3_TOTAL_DECODED
+            .0
+            .fetch_add(n_reqs, std::sync::atomic::Ordering::Relaxed)
+            + n_reqs;
+        let sent = H3_TOTAL_RESP_SENT
+            .0
+            .load(std::sync::atomic::Ordering::Relaxed);
         tracing::trace!(
             decoded = dec,
             sent = sent,

@@ -145,6 +145,7 @@ impl Http3Worker {
                                             ) {
                                                 Ok(pkts) => {
                                                     super::downstream::H3_TOTAL_RESP_SENT
+                                                        .0
                                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                     all_outgoing.extend(pkts);
                                                 }

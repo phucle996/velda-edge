@@ -1,0 +1,16 @@
+# Velda Edge - Datacenter / Cloud Bare-Metal Acceleration Configuration
+#
+# Copy this file to `.cargo/config.toml` when building production release binaries
+# targeting modern cloud/datacenter servers.
+#
+# Option A: Modern Cloud & VPS Baseline (x86-64-v3) - RECOMMENDED FOR BINARY DISTRIBUTION
+# Enables 256-bit AVX2, FMA, and BMI1/BMI2 instructions across all modern cloud instances
+# (AWS EC2 C5/M5/T3+, GCP N2/C2, Azure v3+, Hetzner, DigitalOcean) without crashing older nodes.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Option B: Dedicated Bare-Metal Host Acceleration (target-cpu=native)
+# Uncomment the line below (and comment Option A) when compiling specifically for the local machine's
+# exact hardware CPU model to unlock host-specific vector pipeline scheduling.
+# [build]
+# rustflags = ["-C", "target-cpu=native"]

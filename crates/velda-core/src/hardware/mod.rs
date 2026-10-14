@@ -22,7 +22,7 @@ pub mod overload;
 
 use std::sync::OnceLock;
 
-pub use cpu::{CpuProfile, CpuTier, probe_cpu};
+pub use cpu::{CpuProfile, CpuTier, CpuVectorCapabilities, copy_bulk_payload, probe_cpu};
 pub use kernel::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
     KernelAccelerationLadder, KernelProfile, KernelVersion, MultipathResilienceTier,

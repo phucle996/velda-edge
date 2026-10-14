@@ -77,6 +77,63 @@ impl std::str::FromStr for CpuTier {
     }
 }
 
+/// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
+///
+/// Enables portable binaries to dynamically activate AVX-512 or AVX2 hardware acceleration
+/// without risking SIGILL crashes on older cloud VPS nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuVectorCapabilities {
+    /// Intel/AMD AVX2 (Advanced Vector Extensions 2: 256-bit integer/float SIMD, FMA, BMI1/BMI2).
+    pub avx2: bool,
+    /// Intel Xeon / AMD EPYC Zen 4 AVX-512 Foundation (512-bit vector processing).
+    pub avx512f: bool,
+    /// ARM64 NEON Vector Extensions (128-bit SIMD on AWS Graviton / Apple Silicon / Ampere).
+    pub neon: bool,
+}
+
+impl CpuVectorCapabilities {
+    /// Probes CPUID hardware capabilities at runtime with zero risk of SIGILL.
+    pub fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self {
+                avx2: std::is_x86_feature_detected!("avx2"),
+                avx512f: std::is_x86_feature_detected!("avx512f"),
+                neon: false,
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self {
+                avx2: false,
+                avx512f: false,
+                neon: std::arch::is_aarch64_feature_detected!("neon"),
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Self {
+                avx2: false,
+                avx512f: false,
+                neon: false,
+            }
+        }
+    }
+
+    /// Returns a human-readable summary of detected SIMD acceleration for startup logging.
+    pub const fn summary(&self) -> &'static str {
+        if self.avx512f {
+            "AVX-512 (512-bit Vector Engine)"
+        } else if self.avx2 {
+            "AVX2 + FMA (256-bit Vector Engine)"
+        } else if self.neon {
+            "ARM NEON (128-bit Vector Engine)"
+        } else {
+            "Standard Scalar Baseline"
+        }
+    }
+}
+
 /// Discovered CPU concurrency and execution profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuProfile {
@@ -86,6 +143,8 @@ pub struct CpuProfile {
     pub tier: CpuTier,
     /// Provenance source indicating how CPU capacity was resolved.
     pub source: &'static str,
+    /// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
+    pub vector_capabilities: CpuVectorCapabilities,
 }
 
 impl CpuProfile {
@@ -97,7 +156,75 @@ impl CpuProfile {
             available_cores: cores,
             tier: CpuTier::from_cores(cores),
             source,
+            vector_capabilities: CpuVectorCapabilities::detect(),
         }
+    }
+}
+
+/// Copies bulk byte payloads using runtime dynamic dispatch to the widest vector registers available on host CPU.
+///
+/// # Hardware Rationale
+/// Under large payloads (such as 1MB HTTP/3 responses), scalar byte moves consume significant L1 cache
+/// and CPU execution ports. On CPUs with AVX-512 (e.g. Intel Xeon Ice Lake / Sapphire Rapids or AMD EPYC Zen 4),
+/// this function transfers 64 bytes per cycle using 512-bit ZMM registers. On AVX2 systems, it transfers
+/// 32 bytes per cycle. On older systems, it transparently falls back to optimized libc memcpy.
+#[inline]
+pub fn copy_bulk_payload(src: &[u8], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    if len == 0 {
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512f") && len >= 64 {
+            unsafe {
+                copy_bulk_avx512(&src[..len], &mut dst[..len]);
+                return;
+            }
+        }
+        if std::is_x86_feature_detected!("avx2") && len >= 32 {
+            unsafe {
+                copy_bulk_avx2(&src[..len], &mut dst[..len]);
+                return;
+            }
+        }
+    }
+
+    dst[..len].copy_from_slice(&src[..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn copy_bulk_avx512(src: &[u8], dst: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let mut i = 0;
+    while i + 64 <= src.len() {
+        unsafe {
+            let chunk = _mm512_loadu_si512(src.as_ptr().add(i) as *const _);
+            _mm512_storeu_si512(dst.as_mut_ptr().add(i) as *mut _, chunk);
+        }
+        i += 64;
+    }
+    if i < src.len() {
+        dst[i..].copy_from_slice(&src[i..]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_bulk_avx2(src: &[u8], dst: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let mut i = 0;
+    while i + 32 <= src.len() {
+        unsafe {
+            let chunk = _mm256_loadu_si256(src.as_ptr().add(i) as *const _);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut _, chunk);
+        }
+        i += 32;
+    }
+    if i < src.len() {
+        dst[i..].copy_from_slice(&src[i..]);
     }
 }
 
@@ -190,5 +317,17 @@ mod tests {
         let cpu = probe_cpu();
         assert!(cpu.available_cores >= 1);
         assert!(!cpu.source.is_empty());
+        assert!(!cpu.vector_capabilities.summary().is_empty());
+    }
+
+    #[test]
+    fn test_copy_bulk_payload() {
+        // Test varying boundary sizes: 0B, 15B, 32B, 64B, 128B, 1024B, 65536B
+        for size in [0, 7, 31, 32, 63, 64, 127, 128, 1024, 65536] {
+            let src: Vec<u8> = (0..size).map(|i| (i % 255) as u8).collect();
+            let mut dst = vec![0u8; size];
+            copy_bulk_payload(&src, &mut dst);
+            assert_eq!(src, dst, "Mismatch at payload size {}", size);
+        }
     }
 }

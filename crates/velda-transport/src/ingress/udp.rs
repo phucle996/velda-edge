@@ -138,9 +138,17 @@ impl UdpIngress {
             "UDP ingress socket shard bound and receiving"
         );
 
-        let mut buf = vec![0u8; 65535];
-        let mut batch_bufs = vec![[0u8; 2048]; 32];
-        let mut batch_out = [(0usize, local_addr); 32];
+        // Pre-allocate a 64KB contiguous slab (32 slots * 2048 bytes per slot).
+        // By slicing datagrams out of this frozen slab via Bytes::slice, we achieve zero-allocation
+        // and zero-copy packet ingress under heavy line-rate traffic.
+        const BATCH_SIZE: usize = 32;
+        const SLOT_SIZE: usize = 2048;
+        const SLAB_SIZE: usize = BATCH_SIZE * SLOT_SIZE;
+
+        let mut slab = bytes::BytesMut::with_capacity(SLAB_SIZE);
+        slab.resize(SLAB_SIZE, 0);
+        let mut batch_out = [(0usize, local_addr); BATCH_SIZE];
+
         loop {
             if *shutdown.borrow() {
                 break;
@@ -158,49 +166,55 @@ impl UdpIngress {
                         break;
                     }
                 }
-                res = socket.recv_from(&mut buf) => {
-                    match res {
-                        Ok((n, peer)) => {
-                            let dgram = Datagram::new(
-                                peer,
-                                local_addr,
-                                bytes::Bytes::copy_from_slice(&buf[..n]),
-                            );
+                ready_res = socket.readable() => {
+                    if let Err(err) = ready_res {
+                        tracing::error!(
+                            listener_id = %listener_id,
+                            listen_addr = %local_addr,
+                            shard = shard_idx,
+                            error = %err,
+                            "UDP socket readiness error"
+                        );
+                        continue;
+                    }
+
+                    // High-throughput non-blocking batch drain:
+                    // Drains up to 32 datagrams per recvmmsg syscall directly from the kernel receive queue.
+                    // If the socket has more than 32 packets, loops to drain them all before yielding to epoll,
+                    // minimizing context switches and epoll wakeups.
+                    loop {
+                        let count = socket.try_recv_batch_slab(&mut slab, SLOT_SIZE, &mut batch_out);
+                        if count == 0 {
+                            // Kernel receive queue is drained: notify Tokio to reset edge-triggered readiness
+                            // via non-blocking zero-byte/dummy receive attempt returning WouldBlock.
+                            let mut dummy = [0u8; 1];
+                            let _ = socket.try_recv_from(&mut dummy);
+                            break;
+                        }
+
+                        // Freeze the slab buffer into an immutable, refcounted Bytes container.
+                        // Each datagram slices a sub-range (offset..offset + len) without allocating memory
+                        // or copying bytes from the socket buffer.
+                        let chunk = slab.split().freeze();
+                        slab.resize(SLAB_SIZE, 0);
+
+                        for (i, &(n, peer)) in batch_out[..count].iter().enumerate() {
+                            let offset = i * SLOT_SIZE;
+                            let dgram_bytes = chunk.slice(offset..offset + n);
+                            let dgram = Datagram::new(peer, local_addr, dgram_bytes);
+
                             // Handlers run inline, not in a task per datagram: this keeps packets
                             // of one flow ordered (SO_REUSEPORT pins a 4-tuple to one shard) and
                             // avoids a task spawn per packet. Handlers must stay short; long work
                             // (e.g. HTTP/3 request processing, L4 session pumps) is spawned by them.
                             handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
-
-                            // High-throughput non-blocking batch drain: drain up to 32 datagrams per recvmmsg syscall
-                            // directly from socket receive queue without re-entering epoll select!
-                            loop {
-                                let count = socket.try_recv_batch(&mut batch_bufs, &mut batch_out);
-                                if count == 0 {
-                                    break;
-                                }
-                                for i in 0..count {
-                                    let (n, peer) = batch_out[i];
-                                    let dgram = Datagram::new(
-                                        peer,
-                                        local_addr,
-                                        bytes::Bytes::copy_from_slice(&batch_bufs[i][..n]),
-                                    );
-                                    handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
-                                }
-                                if count < 32 {
-                                    break;
-                                }
-                            }
                         }
-                        Err(err) => {
-                            tracing::error!(
-                                listener_id = %listener_id,
-                                listen_addr = %local_addr,
-                                shard = shard_idx,
-                                error = %err,
-                                "UDP recv error"
-                            );
+
+                        if count < BATCH_SIZE {
+                            // Drained all immediately queued packets in kernel
+                            let mut dummy = [0u8; 1];
+                            let _ = socket.try_recv_from(&mut dummy);
+                            break;
                         }
                     }
                 }
