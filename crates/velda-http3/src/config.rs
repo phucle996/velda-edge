@@ -44,8 +44,8 @@ impl Http3Config {
                 max_header_size: 16 * 1024,
                 max_headers: 32,
                 idle_timeout_ms: 15_000,
-                max_concurrent_streams: 1_024,
-                max_concurrent_uni_streams: 128,
+                max_concurrent_streams: 128,
+                max_concurrent_uni_streams: 16,
                 max_qpack_table_capacity: 4096,
                 max_pending_handshakes: 512,
             },
@@ -54,8 +54,8 @@ impl Http3Config {
                 max_header_size: 32 * 1024,
                 max_headers: 48,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 4_096,
-                max_concurrent_uni_streams: 256,
+                max_concurrent_streams: 256,
+                max_concurrent_uni_streams: 32,
                 max_qpack_table_capacity: 4096,
                 max_pending_handshakes: 1_024,
             },
@@ -64,8 +64,8 @@ impl Http3Config {
                 max_header_size: 64 * 1024,
                 max_headers: 64,
                 idle_timeout_ms: 30_000,
-                max_concurrent_streams: 16_384,
-                max_concurrent_uni_streams: 1_024,
+                max_concurrent_streams: 512,
+                max_concurrent_uni_streams: 64,
                 max_qpack_table_capacity: 8192,
                 max_pending_handshakes: 2_048,
             },
@@ -74,8 +74,8 @@ impl Http3Config {
                 max_header_size: 64 * 1024,
                 max_headers: 96,
                 idle_timeout_ms: 45_000,
-                max_concurrent_streams: 32_768,
-                max_concurrent_uni_streams: 2_048,
+                max_concurrent_streams: 1_024,
+                max_concurrent_uni_streams: 128,
                 max_qpack_table_capacity: 16384,
                 max_pending_handshakes: 4_096,
             },
@@ -84,8 +84,8 @@ impl Http3Config {
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 65_536,
-                max_concurrent_uni_streams: 4_096,
+                max_concurrent_streams: 2_048,
+                max_concurrent_uni_streams: 256,
                 max_qpack_table_capacity: 32768,
                 max_pending_handshakes: 8_192,
             },
@@ -94,8 +94,8 @@ impl Http3Config {
                 max_header_size: 128 * 1024,
                 max_headers: 128,
                 idle_timeout_ms: 60_000,
-                max_concurrent_streams: 65_536,
-                max_concurrent_uni_streams: 4_096,
+                max_concurrent_streams: 4_096,
+                max_concurrent_uni_streams: 256,
                 max_qpack_table_capacity: 65536,
                 max_pending_handshakes: 16_384,
             },
@@ -104,8 +104,8 @@ impl Http3Config {
                 max_header_size: 256 * 1024,
                 max_headers: 256,
                 idle_timeout_ms: 120_000,
-                max_concurrent_streams: 65_536,
-                max_concurrent_uni_streams: 4_096,
+                max_concurrent_streams: 8_192,
+                max_concurrent_uni_streams: 512,
                 max_qpack_table_capacity: 65536,
                 max_pending_handshakes: 32_768,
             },
@@ -170,18 +170,18 @@ impl Http3Config {
         self
     }
 
-    /// Baseline per-stream receive flow-control window (8 MB).
+    /// Baseline per-stream receive flow-control window (2 MB).
     ///
     /// Provides optimal in-flight credit for high-bandwidth/high-RTT backends out-of-the-box,
     /// avoiding user-side tuning in configuration files. As streams consume and forward data,
     /// QUIC continuously updates credits automatically (`MAX_STREAM_DATA`).
-    pub const DEFAULT_STREAM_WINDOW: u32 = 8 * 1024 * 1024; // 8 MB
+    pub const DEFAULT_STREAM_WINDOW: u32 = 2 * 1024 * 1024; // 2 MB
 
-    /// Baseline connection-level receive flow-control window (64 MB).
+    /// Baseline connection-level receive flow-control window (8 MB).
     ///
     /// Accommodates high-concurrency multiplexing across dozens of active streams without
     /// connection-level window starvation. Automatically scaled up if host has large RAM.
-    pub const DEFAULT_CONN_WINDOW: u32 = 64 * 1024 * 1024; // 64 MB
+    pub const DEFAULT_CONN_WINDOW: u32 = 8 * 1024 * 1024; // 8 MB
 
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
     ///
@@ -200,14 +200,14 @@ impl Http3Config {
             self.max_concurrent_uni_streams,
         ));
 
-        // 1. Stream-level flow control: 8 MB baseline.
+        // 1. Stream-level flow control: 2 MB baseline.
         // As data is read and consumed, Quinn automatically issues MAX_STREAM_DATA frames to replenish credit.
         transport.stream_receive_window(quinn_proto::VarInt::from_u32(Self::DEFAULT_STREAM_WINDOW));
 
-        // 2. Connection-level flow control: 64 MB - 256 MB budget scaled smoothly by host RAM.
+        // 2. Connection-level flow control: 8 MB - 32 MB budget scaled smoothly by host RAM.
         let topology = velda_core::global_hardware_topology();
         let total_ram = topology.memory.total_bytes;
-        let conn_window = ((total_ram / 128) as u64).clamp(64 * 1024 * 1024, 256 * 1024 * 1024);
+        let conn_window = ((total_ram / 2048) as u64).clamp(8 * 1024 * 1024, 32 * 1024 * 1024);
         transport.receive_window(
             quinn_proto::VarInt::from_u64(conn_window)
                 .unwrap_or(quinn_proto::VarInt::from_u32(Self::DEFAULT_CONN_WINDOW)),
@@ -215,7 +215,7 @@ impl Http3Config {
 
         // 3. Edge-to-Backend Low Latency & High Throughput:
         // - Initial RTT of 10ms (low latency while preventing false-positive PTO loss under concurrency spikes)
-        // - 64MB - 256MB send_window to prevent upload pipe starvation across concurrent streams
+        // - 8MB - 32MB send_window to prevent upload pipe starvation across concurrent streams
         // - Cubic congestion controller for ultra-stable multi-stream throughput without BBR probe_rtt pauses
         // - Explicit segmentation offload enablement
         transport.initial_rtt(std::time::Duration::from_millis(10));
@@ -250,17 +250,17 @@ mod tests {
     #[test]
     fn test_for_tier_explicit_all_tiers() {
         let constrained = Http3Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 1_024);
+        assert_eq!(constrained.max_concurrent_streams, 128);
         assert_eq!(constrained.max_body_size, 2 * 1024 * 1024);
         assert_eq!(constrained.max_pending_handshakes, 512);
 
         let medium = Http3Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 16_384);
+        assert_eq!(medium.max_concurrent_streams, 512);
         assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
         assert_eq!(medium.max_pending_handshakes, 2_048);
 
         let ultra = Http3Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 65_536);
+        assert_eq!(ultra.max_concurrent_streams, 8_192);
         assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
         assert_eq!(ultra.max_pending_handshakes, 32_768);
     }

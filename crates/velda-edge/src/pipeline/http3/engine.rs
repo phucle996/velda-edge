@@ -7,22 +7,34 @@
 //! evaluate against the latest swapped runtime snapshot.
 
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use velda_core::L7Response;
 use velda_http3::Http3Engine;
+use velda_http3::quinn_proto::{ConnectionHandle, StreamId};
 use velda_tls::TlsServerEngine;
 use velda_transport::UdpSocket;
 
 use crate::error::EdgeError;
 use crate::runtime::SharedRuntime;
 
+/// A response message queued from upstream processing to be written to the HTTP/3 QUIC connection.
+pub struct Http3ResponseMsg {
+    pub handle: ConnectionHandle,
+    pub stream_id: StreamId,
+    pub response: L7Response,
+}
+
 /// A single per-core HTTP/3 QUIC worker state machine with direct 1:1 socket association
 /// and a high-efficiency event-driven background ticker for loss recovery and ACK timer flushes.
 pub struct Http3Worker {
     pub worker_id: usize,
     pub engine: Mutex<Http3Engine>,
+    pub response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
+    response_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Http3ResponseMsg>>>,
     socket: ArcSwapOption<UdpSocket>,
     ticker_started: std::sync::atomic::AtomicBool,
 }
@@ -35,9 +47,12 @@ impl Http3Worker {
         h3_config: velda_http3::Http3Config,
     ) -> Arc<Self> {
         let engine = Http3Engine::new_with_config(quic_cfg, h3_config);
+        let (response_tx, rx) = tokio::sync::mpsc::channel(8192);
         Arc::new(Self {
             worker_id,
             engine: Mutex::new(engine),
+            response_tx,
+            response_rx: Mutex::new(Some(rx)),
             socket: ArcSwapOption::empty(),
             ticker_started: std::sync::atomic::AtomicBool::new(false),
         })
@@ -61,62 +76,119 @@ impl Http3Worker {
             .ticker_started
             .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
+            let rx_opt = self.response_rx.lock().take();
+            let Some(mut rx) = rx_opt else {
+                return;
+            };
             let worker_weak = Arc::downgrade(self);
             tokio::spawn(async move {
+                let mut batch = Vec::with_capacity(64);
                 loop {
-                    let (outgoing, has_conns, min_timeout) = {
+                    let (min_timeout, has_conns) = {
                         let Some(worker) = worker_weak.upgrade() else {
                             break;
                         };
                         let mut engine = worker.engine.lock();
-                        if engine.connection_count() == 0 {
-                            (Vec::new(), false, None)
-                        } else {
-                            let now = std::time::Instant::now();
-                            let pkts = engine.handle_timeouts(now);
-                            let next = engine.poll_timeout();
-                            (pkts, true, next)
+                        (engine.poll_timeout(), engine.connection_count() > 0)
+                    };
+
+                    let sleep_dur = match min_timeout {
+                        Some(t) => {
+                            let now = Instant::now();
+                            if t <= now {
+                                Duration::from_millis(1)
+                            } else {
+                                (t - now).clamp(Duration::from_millis(1), Duration::from_millis(25))
+                            }
+                        }
+                        None => {
+                            if has_conns {
+                                Duration::from_millis(10)
+                            } else {
+                                Duration::from_millis(50)
+                            }
                         }
                     };
 
-                    if !outgoing.is_empty()
-                        && let Some(worker) = worker_weak.upgrade()
-                        && let Some(socket) = worker.socket.load_full()
-                    {
-                        for pkt in outgoing {
-                            if let Some(res) =
-                                socket.try_send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
-                            {
-                                if let Err(e) = res {
-                                    tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via try_send_gso_aware");
+                    tokio::select! {
+                        biased;
+
+                        msg = rx.recv() => {
+                            match msg {
+                                Some(first_msg) => {
+                                    batch.push(first_msg);
+                                    while batch.len() < 64 {
+                                        match rx.try_recv() {
+                                            Ok(m) => batch.push(m),
+                                            Err(_) => break,
+                                        }
+                                    }
+
+                                    let Some(worker) = worker_weak.upgrade() else {
+                                        break;
+                                    };
+                                    let Some(socket) = worker.socket.load_full() else {
+                                        batch.clear();
+                                        continue;
+                                    };
+
+                                    let mut all_outgoing = Vec::new();
+                                    let now = Instant::now();
+                                    {
+                                        let mut engine = worker.engine.lock();
+                                        for item in batch.drain(..) {
+                                            match engine.send_response(
+                                                now,
+                                                item.handle,
+                                                item.stream_id,
+                                                &item.response,
+                                            ) {
+                                                Ok(pkts) => {
+                                                    super::downstream::H3_TOTAL_RESP_SENT
+                                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    all_outgoing.extend(pkts);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        stream = %item.stream_id,
+                                                        error = %e,
+                                                        "Failed to send HTTP/3 response"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if !all_outgoing.is_empty() {
+                                        super::downstream::send_outgoing_packets(&socket, all_outgoing).await;
+                                    }
                                 }
-                            } else if let Err(e) = socket
-                                .send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
-                                .await
-                            {
-                                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via send_gso_aware");
+                                None => break,
                             }
                         }
-                    }
 
-                    if !has_conns {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    } else {
-                        let sleep_dur = match min_timeout {
-                            Some(t) => {
-                                let now = std::time::Instant::now();
-                                if t <= now {
-                                    std::time::Duration::from_millis(1)
+                        _ = tokio::time::sleep(sleep_dur) => {
+                            let Some(worker) = worker_weak.upgrade() else {
+                                break;
+                            };
+                            let Some(socket) = worker.socket.load_full() else {
+                                continue;
+                            };
+
+                            let outgoing = {
+                                let mut engine = worker.engine.lock();
+                                if engine.connection_count() == 0 {
+                                    Vec::new()
                                 } else {
-                                    (t - now).clamp(
-                                        std::time::Duration::from_millis(1),
-                                        std::time::Duration::from_millis(25),
-                                    )
+                                    let now = Instant::now();
+                                    engine.handle_timeouts(now)
                                 }
+                            };
+
+                            if !outgoing.is_empty() {
+                                super::downstream::send_outgoing_packets(&socket, outgoing).await;
                             }
-                            None => std::time::Duration::from_millis(10),
-                        };
-                        tokio::time::sleep(sleep_dur).await;
+                        }
                     }
                 }
             });

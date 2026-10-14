@@ -17,8 +17,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 // Adaptive Container & Datacenter Jemalloc profile:
 // - background_thread:true: Purges dirty pages in dedicated background thread, eliminating latency spikes on worker threads.
-// - metadata_thp:auto: Uses Transparent Huge Pages for internal metadata.
-// - dirty_decay_ms / muzzy_decay_ms: 5000ms: Smoothly purges idle dirty pages within 5s, preventing cgroup OOMKilled evictions
+// - dirty_decay_ms / muzzy_decay_ms: 1000ms: Smoothly purges idle dirty pages within 1s, preventing cgroup OOMKilled evictions
 //   in constrained container environments (e.g. K8s pods, Docker limits, embedded edge) while preserving burst reuse.
 #[cfg(all(
     feature = "jemalloc",
@@ -26,8 +25,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[unsafe(export_name = "malloc_conf")]
-pub static MALLOC_CONF: &[u8] =
-    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";
+pub static MALLOC_CONF: &[u8] = b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\0";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check CLI arguments first before runtime bootstrap

@@ -497,6 +497,112 @@ impl UdpSocket {
         sent
     }
 
+    /// Receives a batch of incoming UDP datagrams using `recvmmsg` (Linux) for minimal syscall overhead.
+    ///
+    /// Reads up to `max_batch` packets (capped at 32) into the provided buffers in a single system call.
+    /// Stack-allocated structures ensure zero heap allocations on the ingress hot path.
+    #[cfg(target_os = "linux")]
+    pub fn try_recv_batch(
+        &self,
+        buffers: &mut [[u8; 2048]],
+        out: &mut [(usize, SocketAddr)],
+    ) -> usize {
+        let max_batch = buffers.len().min(out.len()).min(32);
+        if max_batch == 0 {
+            return 0;
+        }
+
+        use std::os::fd::AsRawFd;
+        let fd = self.socket.as_raw_fd();
+
+        let mut sock_storage: [libc::sockaddr_storage; 32] = unsafe { std::mem::zeroed() };
+        let mut iovecs = [libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }; 32];
+        let mut msgs = unsafe { std::mem::zeroed::<[libc::mmsghdr; 32]>() };
+
+        for i in 0..max_batch {
+            iovecs[i].iov_base = buffers[i].as_mut_ptr() as *mut libc::c_void;
+            iovecs[i].iov_len = 2048;
+
+            msgs[i].msg_hdr.msg_name = &mut sock_storage[i] as *mut _ as *mut libc::c_void;
+            msgs[i].msg_hdr.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msgs[i].msg_hdr.msg_iov = &mut iovecs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        let ret = unsafe {
+            libc::recvmmsg(
+                fd,
+                msgs.as_mut_ptr(),
+                max_batch as u32,
+                libc::MSG_DONTWAIT,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if ret > 0 {
+            let count = ret as usize;
+            let mut total_bytes = 0u64;
+            for i in 0..count {
+                let n = msgs[i].msg_len as usize;
+                total_bytes += n as u64;
+
+                let sa = &sock_storage[i];
+                let addr = match sa.ss_family as libc::c_int {
+                    libc::AF_INET => {
+                        let sin = unsafe { &*(sa as *const _ as *const libc::sockaddr_in) };
+                        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                        let port = u16::from_be(sin.sin_port);
+                        SocketAddr::V4(std::net::SocketAddrV4::new(ip, port))
+                    }
+                    libc::AF_INET6 => {
+                        let sin6 = unsafe { &*(sa as *const _ as *const libc::sockaddr_in6) };
+                        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                        let port = u16::from_be(sin6.sin6_port);
+                        SocketAddr::V6(std::net::SocketAddrV6::new(
+                            ip,
+                            port,
+                            sin6.sin6_flowinfo,
+                            sin6.sin6_scope_id,
+                        ))
+                    }
+                    _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+                };
+                out[i] = (n, addr);
+            }
+            self.bytes_received
+                .0
+                .fetch_add(total_bytes, Ordering::Relaxed);
+            count
+        } else {
+            0
+        }
+    }
+
+    /// Fallback for non-Linux platforms receiving sequentially.
+    #[cfg(not(target_os = "linux"))]
+    pub fn try_recv_batch(
+        &self,
+        buffers: &mut [[u8; 2048]],
+        out: &mut [(usize, SocketAddr)],
+    ) -> usize {
+        let max_batch = buffers.len().min(out.len());
+        let mut count = 0;
+        for i in 0..max_batch {
+            match self.try_recv_from(&mut buffers[i]) {
+                Some(Ok(res)) => {
+                    out[i] = res;
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+        count
+    }
+
     /// Sends a GSO-segmented datagram with proper `UDP_SEGMENT` cmsg (Linux).
     ///
     /// When `segment_size` is `Some(size)`, the kernel segments the large buffer into
@@ -511,7 +617,7 @@ impl UdpSocket {
         target: SocketAddr,
     ) -> Option<Result<usize>> {
         match segment_size {
-            Some(seg) if seg > 0 => {
+            Some(seg) if seg > 0 && buf.len() > seg as usize => {
                 if self.config.gso {
                     match self.try_send_gso_to(buf, seg, target) {
                         Some(Err(TransportError::Io(ref e)))
@@ -559,7 +665,7 @@ impl UdpSocket {
         target: SocketAddr,
     ) -> Result<usize> {
         match segment_size {
-            Some(seg) if seg > 0 => {
+            Some(seg) if seg > 0 && buf.len() > seg as usize => {
                 if self.config.gso {
                     match self.try_send_gso_to(buf, seg, target) {
                         Some(Err(TransportError::Io(ref e)))

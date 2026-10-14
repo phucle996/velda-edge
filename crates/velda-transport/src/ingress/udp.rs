@@ -139,6 +139,8 @@ impl UdpIngress {
         );
 
         let mut buf = vec![0u8; 65535];
+        let mut batch_bufs = vec![[0u8; 2048]; 32];
+        let mut batch_out = [(0usize, local_addr); 32];
         loop {
             if *shutdown.borrow() {
                 break;
@@ -170,29 +172,24 @@ impl UdpIngress {
                             // (e.g. HTTP/3 request processing, L4 session pumps) is spawned by them.
                             handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
 
-                            // High-throughput non-blocking batch drain: drain up to 64 datagrams
+                            // High-throughput non-blocking batch drain: drain up to 32 datagrams per recvmmsg syscall
                             // directly from socket receive queue without re-entering epoll select!
-                            for _ in 0..64 {
-                                match socket.try_recv_from(&mut buf) {
-                                    Some(Ok((n, peer))) => {
-                                        let dgram = Datagram::new(
-                                            peer,
-                                            local_addr,
-                                            bytes::Bytes::copy_from_slice(&buf[..n]),
-                                        );
-                                        handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
-                                    }
-                                    Some(Err(err)) => {
-                                        tracing::error!(
-                                            listener_id = %listener_id,
-                                            listen_addr = %local_addr,
-                                            shard = shard_idx,
-                                            error = %err,
-                                            "UDP batch recv error"
-                                        );
-                                        break;
-                                    }
-                                    None => break,
+                            loop {
+                                let count = socket.try_recv_batch(&mut batch_bufs, &mut batch_out);
+                                if count == 0 {
+                                    break;
+                                }
+                                for i in 0..count {
+                                    let (n, peer) = batch_out[i];
+                                    let dgram = Datagram::new(
+                                        peer,
+                                        local_addr,
+                                        bytes::Bytes::copy_from_slice(&batch_bufs[i][..n]),
+                                    );
+                                    handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
+                                }
+                                if count < 32 {
+                                    break;
                                 }
                             }
                         }

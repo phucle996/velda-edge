@@ -55,13 +55,13 @@ pub fn concurrency_shards_for_cpu_tier(tier: CpuTier) -> usize {
 #[inline]
 pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
     match tier {
-        MemoryTier::Constrained => 32,
-        MemoryTier::Small => 128,
-        MemoryTier::Medium => 1024,
-        MemoryTier::Large => 2048,
-        MemoryTier::XLarge => 4096,
-        MemoryTier::TwoXLarge => 8192,
-        MemoryTier::Ultra => 16384,
+        MemoryTier::Constrained => 16,
+        MemoryTier::Small => 32,
+        MemoryTier::Medium => 32,
+        MemoryTier::Large => 64,
+        MemoryTier::XLarge => 128,
+        MemoryTier::TwoXLarge => 256,
+        MemoryTier::Ultra => 512,
     }
 }
 

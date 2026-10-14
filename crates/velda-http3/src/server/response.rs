@@ -256,15 +256,16 @@ pub fn build_edge_response_frames(status: StatusCode, body: &[u8]) -> BytesMut {
 /// Serializes an [`L7Response`] into HTTP/3 HEADERS and DATA frames, writes them
 /// to the QUIC stream, and drains newly generated outgoing UDP packets.
 ///
-/// Pure behavior: caller provides the connection and response reference;
-/// the protocol processes and returns outgoing datagrams immediately.
+/// If the stream flow control window is partially filled, writes as much payload as possible
+/// and returns the remaining unwritten [`Bytes`] slice for subsequent draining on flow-control credit.
+/// If the entire payload is written, closes the stream with `.finish()` and returns `None` for remaining.
 pub fn send_response(
     conn: &mut Connection,
     stream_id: StreamId,
     response: &L7Response,
     transmit_buf: &mut Vec<u8>,
     now: Instant,
-) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Error> {
     // 1. Encode QPACK HEADERS frame into small write_buf
     let mut header_payload = BytesMut::new();
     encode_qpack_response(response.status, &response.headers, &mut header_payload);
@@ -293,6 +294,8 @@ pub fn send_response(
         || response.status == StatusCode::NO_CONTENT
         || response.status == StatusCode::NOT_MODIFIED;
 
+    let mut remaining_body: Option<Bytes> = None;
+
     if !is_no_body
         && let Body::Bytes(ref b) = response.body
         && !b.is_empty()
@@ -320,19 +323,19 @@ pub fn send_response(
             match conn.send_stream(stream_id).write(&b[body_written..]) {
                 Ok(n) if n > 0 => body_written += n,
                 Ok(_) => break,
+                Err(quinn_proto::WriteError::Blocked) => break,
                 Err(e) => return Err(Http3Error::H3(e.to_string())),
             }
         }
         if body_written < b.len() {
-            return Err(Http3Error::H3(format!(
-                "Failed to write complete response body: stream flow control window exhausted ({body_written}/{} bytes written)",
-                b.len()
-            )));
+            remaining_body = Some(b.slice(body_written..));
         }
     }
 
-    // Finish stream cleanly
-    let _ = conn.send_stream(stream_id).finish();
+    // Finish stream cleanly only if all body bytes have been completely written
+    if remaining_body.is_none() {
+        let _ = conn.send_stream(stream_id).finish();
+    }
 
     // 4. Drain newly generated packets with GSO batching
     let mut outgoing = Vec::new();
@@ -348,5 +351,5 @@ pub fn send_response(
         transmit_buf.clear();
     }
 
-    Ok(outgoing)
+    Ok((outgoing, remaining_body))
 }

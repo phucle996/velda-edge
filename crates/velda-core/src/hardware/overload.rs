@@ -253,14 +253,16 @@ impl OverloadTracker {
     }
 }
 
-/// Probes the active memory usage of the process or container in bytes.
-///
-/// Priority ladder:
-/// 1. Container cgroup v2: `/sys/fs/cgroup/memory.current`
-/// 2. Container cgroup v1: `/sys/fs/cgroup/memory/memory.usage_in_bytes`
-/// 3. Linux proc statm: `/proc/self/statm` (Resident Set Size pages * 4096)
-/// 4. Fallback: 0 bytes.
-pub fn probe_memory_usage() -> usize {
+#[derive(Debug)]
+enum MemoryProbeSource {
+    Cgroup(std::path::PathBuf),
+    Statm,
+    None,
+}
+
+static PROBE_SOURCE: std::sync::OnceLock<MemoryProbeSource> = std::sync::OnceLock::new();
+
+fn resolve_memory_probe_source() -> MemoryProbeSource {
     // 1. Process-specific cgroup v2 path from /proc/self/cgroup
     if let Ok(cgroup_content) = std::fs::read_to_string("/proc/self/cgroup") {
         for line in cgroup_content.lines() {
@@ -268,11 +270,10 @@ pub fn probe_memory_usage() -> usize {
             if parts.len() == 3 {
                 let sub = parts[2].trim_start_matches('/');
                 if !sub.is_empty() {
-                    let path = format!("/sys/fs/cgroup/{sub}/memory.current");
-                    if let Ok(content) = std::fs::read_to_string(&path)
-                        && let Ok(bytes) = content.trim().parse::<usize>()
-                    {
-                        return bytes;
+                    let path =
+                        std::path::PathBuf::from(format!("/sys/fs/cgroup/{sub}/memory.current"));
+                    if path.exists() {
+                        return MemoryProbeSource::Cgroup(path);
                     }
                 }
             }
@@ -280,32 +281,58 @@ pub fn probe_memory_usage() -> usize {
     }
 
     // 2. Container cgroup v2: /sys/fs/cgroup/memory.current
-    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
-        && let Ok(bytes) = content.trim().parse::<usize>()
-    {
-        return bytes;
+    let cgroup_v2 = std::path::Path::new("/sys/fs/cgroup/memory.current");
+    if cgroup_v2.exists() {
+        return MemoryProbeSource::Cgroup(cgroup_v2.to_path_buf());
     }
 
-    // 2. Container cgroup v1: /sys/fs/cgroup/memory/memory.usage_in_bytes
-    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-        && let Ok(bytes) = content.trim().parse::<usize>()
-    {
-        return bytes;
+    // 3. Container cgroup v1: /sys/fs/cgroup/memory/memory.usage_in_bytes
+    let cgroup_v1 = std::path::Path::new("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+    if cgroup_v1.exists() {
+        return MemoryProbeSource::Cgroup(cgroup_v1.to_path_buf());
     }
 
-    // 3. Linux /proc/self/statm (2nd column is resident set size in pages)
-    if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
-        let mut parts = content.split_whitespace();
-        let _size_pages = parts.next();
-        if let Some(resident_pages_str) = parts.next()
-            && let Ok(resident_pages) = resident_pages_str.parse::<usize>()
-        {
-            // Typical page size on Linux is 4096 bytes (4 KB)
-            return resident_pages.saturating_mul(4096);
+    // 4. Linux proc statm
+    if std::path::Path::new("/proc/self/statm").exists() {
+        return MemoryProbeSource::Statm;
+    }
+
+    MemoryProbeSource::None
+}
+
+/// Probes the active memory usage of the process or container in bytes.
+///
+/// Priority ladder (resolved once at startup, zero redundant syscalls):
+/// 1. Container cgroup v2: `/sys/fs/cgroup/<scope>/memory.current` or `/sys/fs/cgroup/memory.current`
+/// 2. Container cgroup v1: `/sys/fs/cgroup/memory/memory.usage_in_bytes`
+/// 3. Linux proc statm: `/proc/self/statm` (Resident Set Size pages * 4096)
+/// 4. Fallback: 0 bytes.
+pub fn probe_memory_usage() -> usize {
+    let source = PROBE_SOURCE.get_or_init(resolve_memory_probe_source);
+    match source {
+        MemoryProbeSource::Cgroup(path) => {
+            if let Ok(content) = std::fs::read_to_string(path)
+                && let Ok(bytes) = content.trim().parse::<usize>()
+            {
+                bytes
+            } else {
+                0
+            }
         }
+        MemoryProbeSource::Statm => {
+            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+                let mut parts = content.split_whitespace();
+                let _size_pages = parts.next();
+                if let Some(resident_pages_str) = parts.next()
+                    && let Ok(resident_pages) = resident_pages_str.parse::<usize>()
+                {
+                    return resident_pages.saturating_mul(4096);
+                }
+            }
+            0
+        }
+        MemoryProbeSource::None => 0,
     }
-
-    0
 }
 
 #[cfg(test)]

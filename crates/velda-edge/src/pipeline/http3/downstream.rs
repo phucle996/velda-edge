@@ -24,33 +24,73 @@ use crate::upstream::HttpUpstream;
 pub static H3_TOTAL_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static H3_TOTAL_RESP_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Sends outgoing QUIC packets using GSO-aware path (UDP_SEGMENT cmsg) when available.
-///
-/// For GSO-segmented packets (quinn-proto `poll_transmit` with `segment_size`),
-/// the kernel transmits the coalesced buffer as individual datagrams in a single `sendmsg`
-/// syscall, reducing per-response syscalls from ~800 to ~13 for 1MB payloads.
-async fn send_outgoing_packets(socket: &UdpSocket, packets: Vec<OutgoingDatagram>) {
-    for pkt in packets {
-        if let Some(res) = socket.try_send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer) {
-            if let Err(e) = res {
+/// Sends outgoing QUIC packets using GSO-aware path (UDP_SEGMENT cmsg) when available,
+/// and `sendmmsg` batching for non-GSO control, ACK, and individual datagrams.
+pub(crate) async fn send_outgoing_packets(socket: &UdpSocket, packets: Vec<OutgoingDatagram>) {
+    if packets.is_empty() {
+        return;
+    }
+
+    let mut non_gso_batch: [(&[u8], std::net::SocketAddr); 64] = [(&[], packets[0].peer); 64];
+    let mut batch_count = 0;
+
+    for pkt in &packets {
+        if let Some(seg) = pkt.segment_size
+            && seg > 0
+            && pkt.payload.len() > seg as usize
+        {
+            if batch_count > 0 {
+                flush_non_gso_batch(socket, &non_gso_batch[..batch_count]).await;
+                batch_count = 0;
+            }
+
+            if let Some(res) = socket.try_send_gso_aware(&pkt.payload, Some(seg), pkt.peer) {
+                if let Err(e) = res {
+                    tracing::warn!(
+                        peer = %pkt.peer,
+                        segment_size = seg,
+                        error = %e,
+                        "Failed to send outgoing QUIC packet via try_send_gso_aware"
+                    );
+                }
+            } else if let Err(e) = socket
+                .send_gso_aware(&pkt.payload, Some(seg), pkt.peer)
+                .await
+            {
                 tracing::warn!(
                     peer = %pkt.peer,
-                    segment_size = ?pkt.segment_size,
+                    segment_size = seg,
                     error = %e,
-                    "Failed to send outgoing QUIC packet via try_send_gso_aware"
+                    "Failed to send outgoing QUIC packet via send_gso_aware"
                 );
             }
-        } else if let Err(e) = socket
-            .send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
-            .await
-        {
+        } else {
+            non_gso_batch[batch_count] = (&pkt.payload, pkt.peer);
+            batch_count += 1;
+            if batch_count == 64 {
+                flush_non_gso_batch(socket, &non_gso_batch[..batch_count]).await;
+                batch_count = 0;
+            }
+        }
+    }
+
+    if batch_count > 0 {
+        flush_non_gso_batch(socket, &non_gso_batch[..batch_count]).await;
+    }
+}
+
+async fn flush_non_gso_batch(socket: &UdpSocket, batch: &[(&[u8], std::net::SocketAddr)]) {
+    let mut sent = socket.try_send_batch(batch);
+    while sent < batch.len() {
+        let (buf, target) = batch[sent];
+        if let Err(e) = socket.send_to(buf, target).await {
             tracing::warn!(
-                peer = %pkt.peer,
-                segment_size = ?pkt.segment_size,
+                peer = %target,
                 error = %e,
-                "Failed to send outgoing QUIC packet via send_gso_aware"
+                "Failed to send packet via fallback send_to in flush_non_gso_batch"
             );
         }
+        sent += 1;
     }
 }
 
@@ -114,7 +154,6 @@ pub async fn handle_http3_udp(
 
     // 2. Process complete L7 requests concurrently without blocking other datagrams
     for req_event in requests {
-        let socket = socket.clone();
         let worker = worker.clone();
         let lid = listener_id.clone();
         let runtime = runtime.clone();
@@ -151,19 +190,12 @@ pub async fn handle_http3_udp(
                     CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 );
-                let resp_now = std::time::Instant::now();
-                let resp_pkts = {
-                    let mut engine = worker.engine.lock();
-                    engine.send_response(
-                        resp_now,
-                        req_event.handle,
-                        req_event.stream_id,
-                        &too_early,
-                    )
+                let msg = super::engine::Http3ResponseMsg {
+                    handle: req_event.handle,
+                    stream_id: req_event.stream_id,
+                    response: too_early,
                 };
-                if let Ok(pkts) = resp_pkts {
-                    send_outgoing_packets(&socket, pkts).await;
-                }
+                let _ = worker.response_tx.send(msg).await;
                 return;
             }
 
@@ -183,14 +215,12 @@ pub async fn handle_http3_udp(
                     CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 );
-                let resp_now = std::time::Instant::now();
-                let resp_pkts = {
-                    let mut engine = worker.engine.lock();
-                    engine.send_response(resp_now, req_event.handle, req_event.stream_id, &bad_req)
+                let msg = super::engine::Http3ResponseMsg {
+                    handle: req_event.handle,
+                    stream_id: req_event.stream_id,
+                    response: bad_req,
                 };
-                if let Ok(pkts) = resp_pkts {
-                    send_outgoing_packets(&socket, pkts).await;
-                }
+                let _ = worker.response_tx.send(msg).await;
                 return;
             }
 
@@ -211,40 +241,19 @@ pub async fn handle_http3_udp(
                     "process_http3_request took >100ms!"
                 );
             }
-            let resp_now = std::time::Instant::now();
-            let resp_pkts = {
-                let mut engine = worker.engine.lock();
-                engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
+
+            let msg = super::engine::Http3ResponseMsg {
+                handle: req_event.handle,
+                stream_id: req_event.stream_id,
+                response,
             };
-
-            match resp_pkts {
-                Ok(pkts) => {
-                    if pkts.is_empty() {
-                        tracing::warn!(
-                            listener = %lid,
-                            peer = %peer,
-                            handle = ?req_event.handle,
-                            stream = %req_event.stream_id,
-                            "send_response returned ZERO outgoing packets!"
-                        );
-                    }
-                    send_outgoing_packets(&socket, pkts).await;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        listener = %lid,
-                        peer = %peer,
-                        handle = ?req_event.handle,
-                        stream = %req_event.stream_id,
-                        error = %e,
-                        "Failed to send HTTP/3 downstream response"
-                    );
-                }
+            if let Err(e) = worker.response_tx.send(msg).await {
+                tracing::warn!(
+                    stream = %req_event.stream_id,
+                    error = %e,
+                    "Failed to queue HTTP/3 response to worker"
+                );
             }
-
-            let sent = H3_TOTAL_RESP_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let dec = H3_TOTAL_DECODED.load(std::sync::atomic::Ordering::Relaxed);
-            tracing::trace!(decoded = dec, sent = sent, "H3 COMPLETED STATS");
         });
     }
 }

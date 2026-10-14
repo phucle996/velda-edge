@@ -104,6 +104,8 @@ pub struct UdpRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gro: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gso: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rxq_ovfl: Option<bool>,
 }
 
@@ -117,6 +119,7 @@ impl UdpRuntimeConfig {
             && self.concurrency_shards.is_none()
             && self.freebind.is_none()
             && self.gro.is_none()
+            && self.gso.is_none()
             && self.rxq_ovfl.is_none()
     }
 }

@@ -96,25 +96,25 @@ mod tests {
         // Constrained CPU + Constrained Memory
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
         assert_eq!(shards, 2);
-        assert_eq!(cfg.max_idle_per_key, 32);
+        assert_eq!(cfg.max_idle_per_key, 16);
         assert_eq!(cfg.max_concurrent_streams, 256);
 
         // Ultra CPU + Constrained Memory (Compute-heavy, low RAM)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Constrained);
         assert_eq!(shards, 128);
-        assert_eq!(cfg.max_idle_per_key, 32);
+        assert_eq!(cfg.max_idle_per_key, 16);
         assert_eq!(cfg.max_concurrent_streams, 256);
 
         // Constrained CPU + Ultra Memory (Low core, massive RAM)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Ultra);
         assert_eq!(shards, 2);
-        assert_eq!(cfg.max_idle_per_key, 16384);
+        assert_eq!(cfg.max_idle_per_key, 512);
         assert_eq!(cfg.max_concurrent_streams, 65536);
 
         // Ultra CPU + Ultra Memory (Hyperscale server)
         let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Ultra);
         assert_eq!(shards, 128);
-        assert_eq!(cfg.max_idle_per_key, 16384);
+        assert_eq!(cfg.max_idle_per_key, 512);
         assert_eq!(cfg.max_concurrent_streams, 65536);
     }
 }

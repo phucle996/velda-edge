@@ -67,12 +67,26 @@ struct StreamSlot {
     request: Option<L7Request>,
 }
 
+struct PendingStreamWrite {
+    remaining: Bytes,
+    created_at: Instant,
+}
+
+/// Maximum aggregate pending outbound response bytes across all streams in an engine worker (64 MB).
+/// Prevents memory exhaustion if malicious or stalled downstream clients stop acknowledging data.
+const MAX_ENGINE_PENDING_BYTES: usize = 64 * 1024 * 1024;
+
+/// Timeout after which a stalled pending response stream is forcibly reset (10 seconds).
+const PENDING_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// High-performance, packet-driven HTTP/3 server engine.
 pub struct Http3Engine {
     endpoint: Endpoint,
     connections: HashMap<ConnectionHandle, Connection>,
     control_streams: HashSet<ConnectionHandle>,
     streams: HashMap<(ConnectionHandle, StreamId), StreamSlot>,
+    pending_writes: HashMap<(ConnectionHandle, StreamId), PendingStreamWrite>,
+    total_pending_bytes: usize,
     config: Http3Config,
     transmit_buf: Vec<u8>,
 }
@@ -82,6 +96,8 @@ impl std::fmt::Debug for Http3Engine {
         f.debug_struct("Http3Engine")
             .field("connections", &self.connections.len())
             .field("active_streams", &self.streams.len())
+            .field("pending_writes", &self.pending_writes.len())
+            .field("total_pending_bytes", &self.total_pending_bytes)
             .finish()
     }
 }
@@ -102,6 +118,8 @@ impl Http3Engine {
             connections: HashMap::new(),
             control_streams: HashSet::new(),
             streams: HashMap::new(),
+            pending_writes: HashMap::new(),
+            total_pending_bytes: 0,
             config,
             transmit_buf: Vec::with_capacity(65535),
         }
@@ -241,17 +259,66 @@ impl Http3Engine {
                                 );
                             }
                         }
+                        Event::Stream(StreamEvent::Writable { id }) => {
+                            if let Some(pending) = self.pending_writes.get_mut(&(handle, id)) {
+                                while !pending.remaining.is_empty() {
+                                    match conn.send_stream(id).write(&pending.remaining) {
+                                        Ok(n) if n > 0 => {
+                                            self.total_pending_bytes =
+                                                self.total_pending_bytes.saturating_sub(n);
+                                            pending.remaining = pending.remaining.slice(n..);
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                if pending.remaining.is_empty() {
+                                    let _ = conn.send_stream(id).finish();
+                                    self.pending_writes.remove(&(handle, id));
+                                }
+                            }
+                        }
                         Event::Stream(StreamEvent::Finished { .. }) => {
                             // Finished signals that our outgoing send stream was ACKed by client.
                         }
                         Event::Stream(StreamEvent::Stopped { id, .. }) => {
                             self.streams.remove(&(handle, id));
+                            if let Some(removed) = self.pending_writes.remove(&(handle, id)) {
+                                self.total_pending_bytes = self
+                                    .total_pending_bytes
+                                    .saturating_sub(removed.remaining.len());
+                            }
                         }
                         Event::ConnectionLost { reason } => {
                             tracing::warn!(handle = ?handle, reason = ?reason, "HTTP/3 server connection lost in datagram event");
                             is_lost = true;
                         }
                         _ => {}
+                    }
+                }
+
+                // Immediately pump any pending writes for this active connection when credit arrives
+                if !self.pending_writes.is_empty() {
+                    let mut finished_streams = Vec::new();
+                    for (&(h, sid), pending) in self.pending_writes.iter_mut() {
+                        if h == handle {
+                            while !pending.remaining.is_empty() {
+                                match conn.send_stream(sid).write(&pending.remaining) {
+                                    Ok(n) if n > 0 => {
+                                        self.total_pending_bytes =
+                                            self.total_pending_bytes.saturating_sub(n);
+                                        pending.remaining = pending.remaining.slice(n..);
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if pending.remaining.is_empty() {
+                                let _ = conn.send_stream(sid).finish();
+                                finished_streams.push(sid);
+                            }
+                        }
+                    }
+                    for sid in finished_streams {
+                        self.pending_writes.remove(&(handle, sid));
                     }
                 }
 
@@ -273,6 +340,16 @@ impl Http3Engine {
                 self.connections.remove(&handle);
                 self.control_streams.remove(&handle);
                 self.streams.retain(|(h, _), _| *h != handle);
+                self.pending_writes.retain(|(h, _), write| {
+                    if *h == handle {
+                        self.total_pending_bytes = self
+                            .total_pending_bytes
+                            .saturating_sub(write.remaining.len());
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
         }
 
@@ -417,6 +494,40 @@ impl Http3Engine {
         let mut outgoing = Vec::new();
         let mut closed_handles = Vec::new();
 
+        // 1. Evict timed-out pending writes (>10s) and attempt flushing active pending writes
+        let mut evicted_streams = Vec::new();
+        for (&(handle, stream_id), write) in self.pending_writes.iter_mut() {
+            if now.saturating_duration_since(write.created_at) > PENDING_STREAM_TIMEOUT {
+                evicted_streams.push((handle, stream_id, write.remaining.len()));
+                if let Some(conn) = self.connections.get_mut(&handle) {
+                    let _ = conn
+                        .send_stream(stream_id)
+                        .reset(quinn_proto::VarInt::from_u32(
+                            crate::frame::error_code::H3_REQUEST_CANCELLED as u32,
+                        ));
+                }
+            } else if let Some(conn) = self.connections.get_mut(&handle) {
+                while !write.remaining.is_empty() {
+                    match conn.send_stream(stream_id).write(&write.remaining) {
+                        Ok(n) if n > 0 => {
+                            self.total_pending_bytes = self.total_pending_bytes.saturating_sub(n);
+                            write.remaining = write.remaining.slice(n..);
+                        }
+                        _ => break,
+                    }
+                }
+                if write.remaining.is_empty() {
+                    let _ = conn.send_stream(stream_id).finish();
+                    evicted_streams.push((handle, stream_id, 0));
+                }
+            }
+        }
+        for (handle, stream_id, len) in evicted_streams {
+            self.pending_writes.remove(&(handle, stream_id));
+            self.total_pending_bytes = self.total_pending_bytes.saturating_sub(len);
+        }
+
+        // 2. Poll timeouts and drain outgoing transmits
         for (&handle, conn) in self.connections.iter_mut() {
             let mut handle_timeout = false;
             if let Some(timeout) = conn.poll_timeout()
@@ -452,6 +563,16 @@ impl Http3Engine {
             self.connections.remove(&handle);
             self.control_streams.remove(&handle);
             self.streams.retain(|(h, _), _| *h != handle);
+            self.pending_writes.retain(|(h, _), write| {
+                if *h == handle {
+                    self.total_pending_bytes = self
+                        .total_pending_bytes
+                        .saturating_sub(write.remaining.len());
+                    false
+                } else {
+                    true
+                }
+            });
         }
 
         outgoing
@@ -472,13 +593,37 @@ impl Http3Engine {
             .get_mut(&handle)
             .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
 
-        crate::server::response::send_response(
+        let (outgoing, remaining) = crate::server::response::send_response(
             conn,
             stream_id,
             response,
             &mut self.transmit_buf,
             now,
-        )
+        )?;
+
+        if let Some(rem) = remaining {
+            if self.total_pending_bytes + rem.len() > MAX_ENGINE_PENDING_BYTES {
+                let _ = conn
+                    .send_stream(stream_id)
+                    .reset(quinn_proto::VarInt::from_u32(
+                        crate::frame::error_code::H3_REQUEST_CANCELLED as u32,
+                    ));
+                return Err(Http3Error::H3(
+                    "HTTP/3 response pending buffer overflow: client throttled or slow reader"
+                        .into(),
+                ));
+            }
+            self.total_pending_bytes += rem.len();
+            self.pending_writes.insert(
+                (handle, stream_id),
+                PendingStreamWrite {
+                    remaining: rem,
+                    created_at: now,
+                },
+            );
+        }
+
+        Ok(outgoing)
     }
 
     /// Returns the number of currently active connections.
@@ -505,6 +650,13 @@ impl Http3Engine {
                     None => t,
                 });
             }
+        }
+        if !self.pending_writes.is_empty() {
+            let soon = Instant::now() + std::time::Duration::from_millis(5);
+            earliest = Some(match earliest {
+                Some(cur) => cur.min(soon),
+                None => soon,
+            });
         }
         earliest
     }

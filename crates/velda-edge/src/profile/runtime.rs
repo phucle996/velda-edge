@@ -198,6 +198,9 @@ impl RuntimeProfile {
         if let Some(gro) = self.transport.udp.gro {
             cfg = cfg.with_gro(gro);
         }
+        if let Some(gso) = self.transport.udp.gso {
+            cfg = cfg.with_gso(gso);
+        }
         if let Some(rxq_ovfl) = self.transport.udp.rxq_ovfl {
             cfg = cfg.with_rxq_ovfl(rxq_ovfl);
         }
