@@ -80,7 +80,13 @@ async fn spawn_echo_server(
                     let now = Instant::now();
                     let (outgoing, requests) = engine.handle_datagram(now, remote, None, &buf[..len]);
                     for out in outgoing {
-                        let _ = s_socket.send_to(&out.payload, out.peer).await;
+                        if let Some(seg) = out.segment_size {
+                            for chunk in out.payload.chunks(seg as usize) {
+                                let _ = s_socket.send_to(chunk, out.peer).await;
+                            }
+                        } else {
+                            let _ = s_socket.send_to(&out.payload, out.peer).await;
+                        }
                     }
                     for req_event in requests {
                         let path = req_event.request.uri.path();
@@ -108,7 +114,13 @@ async fn spawn_echo_server(
                         };
                         if let Ok(resp_outgoing) = engine.send_response(now, req_event.handle, req_event.stream_id, &resp) {
                             for out in resp_outgoing {
-                                let _ = s_socket.send_to(&out.payload, out.peer).await;
+                                if let Some(seg) = out.segment_size {
+                                    for chunk in out.payload.chunks(seg as usize) {
+                                        let _ = s_socket.send_to(chunk, out.peer).await;
+                                    }
+                                } else {
+                                    let _ = s_socket.send_to(&out.payload, out.peer).await;
+                                }
                             }
                         }
                     }

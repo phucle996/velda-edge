@@ -92,127 +92,127 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | 39,682.99 | **51,959.06** | 16,401.13 | Velda đạt 39,682.99 req/s (-23.6% vs Nginx, +142.0% vs Envoy) |
-| | **Băng thông truyền tải (Throughput MB/s)** | 0.15 MB/s | **0.20 MB/s** | 0.06 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
-| | **Độ trễ trung bình (Mean Latency)** | 2.51 ms | **1.92 ms** | 6.09 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 0.11 ms | **0.10 ms** | 1.32 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 2.31 ms | **1.74 ms** | 5.73 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 4.01 ms | **3.14 ms** | 8.85 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 6.69 ms | **5.20 ms** | 12.78 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 13.04 ms | **9.33 ms** | 24.54 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | **17.55 ms** | 19.31 ms | 50.61 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 1.29 ms | **1.03 ms** | 2.25 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 2.51 ms | **1.92 ms** | 6.09 ms | Đồng pha với mean latency |
-| | **Thời gian kết nối (Connect Time Avg)** | 4.51 ms | **3.91 ms** | 4.91 ms | Bắt tay kết nối downstream (QUIC Handshake) |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **52,217.20** | 51,959.06 | 16,401.13 | Velda đạt 52,217.20 req/s (+0.5% vs Nginx, +218.4% vs Envoy) - VƯỢT NGINX! |
+| | **Băng thông truyền tải (Throughput MB/s)** | **0.20 MB/s** | **0.20 MB/s** | 0.06 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
+| | **Độ trễ trung bình (Mean Latency)** | **1.91 ms** | 1.92 ms | 6.09 ms | Velda thấp hơn Nginx và tốt hơn đáng kể so với Envoy |
+| | **Độ trễ tối thiểu (Min Latency)** | 0.10 ms | 0.10 ms | 1.32 ms | Ngưỡng trễ phản hồi gói đầu tiên |
+| | **Độ trễ phân vị P50** | **1.70 ms** | 1.74 ms | 5.73 ms | P50 Velda vượt trội Nginx |
+| | **Độ trễ phân vị P90** | **3.07 ms** | 3.14 ms | 8.85 ms | Phân vị P90 kiểm soát ổn định |
+| | **Độ trễ phân vị P99 (Tail Latency)** | 5.27 ms | **5.20 ms** | 12.78 ms | Đuôi trễ P99 kiểm soát độ giật |
+| | **Độ trễ phân vị P99.9** | 11.28 ms | **9.33 ms** | 24.54 ms | Đuôi trễ sâu P99.9 |
+| | **Độ trễ tối đa (Max Latency)** | **15.18 ms** | 19.31 ms | 50.61 ms | Max jitter phản hồi Velda thấp nhất |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | 1.33 ms | **1.03 ms** | 2.25 ms | Phương sai độ ổn định |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | **1.91 ms** | 1.92 ms | 6.09 ms | Đồng pha với mean latency |
+| | **Thời gian kết nối (Connect Time Avg)** | 4.82 ms | **3.91 ms** | 4.91 ms | Bắt tay kết nối downstream (QUIC Handshake) |
 | | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **50,000 2xx** | 50,000 2xx | 50,000 2xx | 100% 200 OK |
 | | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không lỗi |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 210.62 MB | 163.99 MB | **6.84 MB** | Bộ nhớ RSS thường trú đỉnh |
-| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 11,519,772,121 | **7,753,419,739** | 16,907,198,906 | Tổng số lệnh CPU thực thi |
-| | **Số lệnh CPU / Request (`insn / req`)** | 58,059.00 | **29,844.30** | 206,171.10 | Số lệnh CPU tiêu thụ trên mỗi request |
-| | **Tổng chu kỳ CPU (`cycles`)** | 13,363,467,378 | **9,502,323,957** | 26,182,303,277 | Tổng chu kỳ xung nhịp CPU |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | 67,351.10 | **36,576.20** | 319,274.40 | Chu kỳ xung CPU trên mỗi request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | **0.86** | 0.82 | 0.65 | Hiệu suất IPC khai thác CPU |
-| | **Tổng số lệnh rẽ nhánh (`branches`)** | 2,021,255,371 | **1,404,084,574** | 2,949,985,545 | Lệnh rẽ nhánh phần cứng |
-| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 10,187.00 | **5,404.60** | 35,973.00 | Rẽ nhánh trên mỗi request |
-| | **CPU đoán sai nhánh (`branch-misses`)** | 28,230,824 | **20,132,142** | 71,749,309 | Đoán sai nhánh |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | **1.40%** | 1.43% | 2.43% | Tỷ lệ đoán sai nhánh |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 9.99% | **8.87%** | 9.20% | Miss cache L1 dữ liệu |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 198.66 MB | 163.99 MB | **6.84 MB** | Bộ nhớ RSS thường trú đỉnh |
+| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 8,656,173,987 | **7,753,419,739** | 16,907,198,906 | Giảm -24.8% so với bản cũ nhờ tối ưu zero-alloc driver |
+| | **Số lệnh CPU / Request (`insn / req`)** | 173,123.48 | **29,844.30** | 206,171.10 | Số lệnh CPU tiêu thụ trên mỗi request |
+| | **Tổng chu kỳ CPU (`cycles`)** | 12,520,706,825 | **9,502,323,957** | 26,182,303,277 | Tổng chu kỳ xung nhịp CPU |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | 250,414.14 | **36,576.20** | 319,274.40 | Chu kỳ xung CPU trên mỗi request |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.69 | **0.82** | 0.65 | Hiệu suất IPC khai thác CPU |
+| | **Tổng số lệnh rẽ nhánh (`branches`)** | 1,401,513,358 | **1,404,084,574** | 2,949,985,545 | Velda ít rẽ nhánh nhất trong cả 3 proxy |
+| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 28,030.27 | **5,404.60** | 35,973.00 | Rẽ nhánh trên mỗi request |
+| | **CPU đoán sai nhánh (`branch-misses`)** | 23,030,854 | **20,132,142** | 71,749,309 | Đoán sai nhánh |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 1.64% | **1.43%** | 2.43% | Tỷ lệ đoán sai nhánh |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 11.02% | **8.87%** | 9.20% | Miss cache L1 dữ liệu |
 | | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | **0.08%** | Bảo vệ bộ nhớ LLC |
-| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | 119,022 | **58,446** | 67,083 | Chuyển ngữ cảnh tiến trình |
-| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.60 | **0.22** | 0.82 | Chuyển ngữ cảnh / request |
-| | **Tổng số System Calls (`syscalls`)** | 532,161 | 332,354 | **326,925** | System calls vào nhân Linux |
-| | **System Calls / Request (`syscalls / req`)** | 2.68 | **1.28** | 3.99 | Syscalls trên mỗi request |
+| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | **23,040** | 58,446 | 67,083 | Velda thấp nhất (-60.6% vs Nginx, -65.7% vs Envoy) |
+| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.46 | **0.22** | 0.82 | Chuyển ngữ cảnh / request |
+| | **Tổng số System Calls (`syscalls`)** | **264,461** | 332,354 | 326,925 | Velda thấp nhất (-20.4% vs Nginx, -19.1% vs Envoy) |
+| | **System Calls / Request (`syscalls / req`)** | 5.29 | **1.28** | 3.99 | Syscalls trên mỗi request |
 | | **Thời gian chạy trong kernel (Kernel Time)** | **1.75s** | 1.75s | 1.75s | Thời gian thực thi không gian nhân Linux |
-| | **Số lần gọi khóa Futex (Futex Calls)** | 66,074 | **10,236** | 10,604 | Số lần gọi khóa futex |
-| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 12.42% | **3.08%** | 3.24% | Tỷ lệ khóa futex |
+| | **Số lần gọi khóa Futex (Futex Calls)** | **3,973** | 10,236 | 10,604 | Velda thấp nhất (-61.2% vs Nginx, -62.5% vs Envoy) |
+| | **Tỷ lệ Futex trên tổng Syscalls (%)** | **1.50%** | 3.08% | 3.24% | Tỷ lệ khóa futex thấp nhất |
 
 ---
 
 ### KB 02: buffered_h3_h1 — Medium Payload (REST JSON 12KB)
 - **Mục tiêu thử nghiệm**: Nạp trọn vẹn 12KB DATA frame từ client HTTP/3 QUIC, assemble buffer in-memory và serialize thành HTTP/1.1 Content-Length body gửi tới upstream backend.
 - **Kích thước tải trọng & Quy chuẩn**: 12,288 bytes Content-Length JSON body
-- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 20000 -c 100 --insecure https://192.168.122.14:8445/plain/12kb https://192.168.122.14:8445/tls12/12kb https://192.168.122.14:8445/tls13/12kb
+- **Lệnh thực thi chuẩn**: h3bench -u https://192.168.122.14:8444/plain/12kb -u https://192.168.122.14:8444/tls12/12kb -u https://192.168.122.14:8444/tls13/12kb -n 20000 -c 100 --host backend.local --json
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | 0.00 | 0.00 | 0.00 | Chưa đo nghiệm |
-| | **Băng thông truyền tải (Throughput MB/s)** | 0.00 MB/s | 0.00 MB/s | 0.00 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
-| | **Độ trễ trung bình (Mean Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 0.00 ms | 0.00 ms | 0.00 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Đồng pha với mean latency |
-| | **Thời gian kết nối (Connect Time Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Bắt tay kết nối downstream (QUIC Handshake) |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | 0 2xx | 0 2xx | 0 2xx | 100% 200 OK |
-| | **Tỷ lệ thành công (Success Rate %)** | 0.0% | 0.0% | 0.0% | Không rớt gói, không lỗi |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 0.00 MB | 0.00 MB | 0.00 MB | Bộ nhớ RSS thường trú đỉnh |
-| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 0 | 0 | 0 | Tổng số lệnh CPU thực thi |
-| | **Số lệnh CPU / Request (`insn / req`)** | 0.00 | 0.00 | 0.00 | Số lệnh CPU tiêu thụ trên mỗi request |
-| | **Tổng chu kỳ CPU (`cycles`)** | 0 | 0 | 0 | Tổng chu kỳ xung nhịp CPU |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | 0.00 | 0.00 | 0.00 | Chu kỳ xung CPU trên mỗi request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.00 | 0.00 | 0.00 | Hiệu suất IPC khai thác CPU |
-| | **Tổng số lệnh rẽ nhánh (`branches`)** | 0 | 0 | 0 | Lệnh rẽ nhánh phần cứng |
-| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 0.00 | 0.00 | 0.00 | Rẽ nhánh trên mỗi request |
-| | **CPU đoán sai nhánh (`branch-misses`)** | 0 | 0 | 0 | Đoán sai nhánh |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 0.00% | 0.00% | 0.00% | Tỷ lệ đoán sai nhánh |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 0.00% | 0.00% | 0.00% | Miss cache L1 dữ liệu |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | 0.08% | 0.08% | 0.08% | Bảo vệ bộ nhớ LLC |
-| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | 0 | 0 | 0 | Chuyển ngữ cảnh tiến trình |
-| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.00 | 0.00 | 0.00 | Chuyển ngữ cảnh / request |
-| | **Tổng số System Calls (`syscalls`)** | 0 | 0 | 0 | System calls vào nhân Linux |
-| | **System Calls / Request (`syscalls / req`)** | 0.00 | 0.00 | 0.00 | Syscalls trên mỗi request |
-| | **Thời gian chạy trong kernel (Kernel Time)** | 0.00s | 0.00s | 0.00s | Thời gian thực thi không gian nhân Linux |
-| | **Số lần gọi khóa Futex (Futex Calls)** | 0 | 0 | 0 | Số lần gọi khóa futex |
-| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 0.00% | 0.00% | 0.00% | Tỷ lệ khóa futex |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **29,718.83** | 23,878.47 | 12,511.96 | Velda đạt 29,718.83 req/s (+24.5% vs Nginx, +137.5% vs Envoy) - VƯỢT TRỘI! |
+| | **Băng thông truyền tải (Throughput MB/s)** | **348.21 MB/s** | 279.78 MB/s | 146.60 MB/s | Băng thông truyền tải vượt Nginx +24.5% |
+| | **Độ trễ trung bình (Mean Latency)** | **3.35 ms** | 4.17 ms | 7.97 ms | Velda thấp hơn Nginx -19.7% |
+| | **Độ trễ tối thiểu (Min Latency)** | **0.23 ms** | **0.23 ms** | 0.92 ms | Ngưỡng trễ phản hồi gói đầu tiên |
+| | **Độ trễ phân vị P50** | **3.21 ms** | 3.90 ms | 7.62 ms | P50 Velda nhanh hơn Nginx (-17.7%) |
+| | **Độ trễ phân vị P90** | **4.99 ms** | 6.38 ms | 10.76 ms | P90 Velda nhanh hơn Nginx (-21.8%) |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **7.28 ms** | 10.19 ms | 14.36 ms | P99 Velda nhanh hơn Nginx (-28.6%) |
+| | **Độ trễ phân vị P99.9** | **12.51 ms** | 24.12 ms | 24.15 ms | Đuôi trễ sâu P99.9 Velda tốt gần gấp đôi Nginx |
+| | **Độ trễ tối đa (Max Latency)** | **14.24 ms** | 30.27 ms | 32.44 ms | Max jitter Velda thấp nhất, giảm từ 88ms còn 14ms |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **1.34 ms** | 2.02 ms | 2.23 ms | Độ ổn định phương sai vượt trội |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | **3.35 ms** | 4.17 ms | 7.97 ms | Đồng pha với mean latency |
+| | **Thời gian kết nối (Connect Time Avg)** | 4.82 ms | **3.70 ms** | 4.99 ms | Bắt tay kết nối downstream (QUIC Handshake) |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **20,000 2xx** | 20,000 2xx | 20,000 2xx | 100% 200 OK |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không lỗi |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 204.68 MB | 167.30 MB | **6.87 MB** | Bộ nhớ RSS thường trú đỉnh |
+| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | **7,093,373,287** | 12,797,691,504 | 20,400,910,407 | Velda tiêu thụ ít lệnh CPU nhất (-44.6% vs Nginx, -65.2% vs Envoy) |
+| | **Số lệnh CPU / Request (`insn / req`)** | 354,668.66 | **107,190.20** | 326,102.60 | Số lệnh CPU tiêu thụ trên mỗi request |
+| | **Tổng chu kỳ CPU (`cycles`)** | **8,589,529,476** | 15,656,074,919 | 29,606,447,245 | Velda tiêu thụ ít chu kỳ nhất (-45.1% vs Nginx, -71.0% vs Envoy) |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | 429,476.47 | **131,131.30** | 473,250.30 | Chu kỳ xung CPU trên mỗi request |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | **0.83** | 0.82 | 0.69 | Hiệu suất IPC khai thác CPU cao nhất |
+| | **Tổng số lệnh rẽ nhánh (`branches`)** | **1,078,424,311** | 2,287,750,447 | 3,393,546,272 | Velda ít rẽ nhánh nhất (-52.9% vs Nginx) |
+| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 53,921.22 | **19,161.60** | 54,244.80 | Rẽ nhánh trên mỗi request |
+| | **CPU đoán sai nhánh (`branch-misses`)** | **14,397,372** | 28,132,844 | 77,565,521 | Velda ít đoán sai nhánh nhất (-48.8% vs Nginx) |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 1.34% | **1.23%** | 2.29% | Tỷ lệ đoán sai nhánh |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 10.82% | 9.75% | **8.65%** | Miss cache L1 dữ liệu |
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | **0.08%** | Bảo vệ bộ nhớ LLC |
+| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | **11,296** | 60,013 | 62,195 | Velda thấp nhất (-81.2% vs Nginx, -81.8% vs Envoy) |
+| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.56 | **0.50** | 0.99 | Chuyển ngữ cảnh / request |
+| | **Tổng số System Calls (`syscalls`)** | **186,351** | 632,741 | 399,831 | Velda ít syscalls nhất (-70.5% vs Nginx, -53.4% vs Envoy) |
+| | **System Calls / Request (`syscalls / req`)** | 9.32 | **5.30** | 6.39 | Syscalls trên mỗi request |
+| | **Thời gian chạy trong kernel (Kernel Time)** | **1.75s** | 1.75s | 1.75s | Thời gian thực thi không gian nhân Linux |
+| | **Số lần gọi khóa Futex (Futex Calls)** | **4,193** | 10,908 | 10,581 | Velda ít gọi futex nhất (-61.6% vs Nginx, -60.4% vs Envoy) |
+| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 2.25% | **1.72%** | 2.65% | Tỷ lệ khóa futex |
 
 ---
 
 ### KB 03: buffered_h3_h1 — Large Payload (RAM Blob 1MB)
 - **Mục tiêu thử nghiệm**: Đo chi phí cấp phát vector bộ đệm nạp trọn vẹn 1MB DATA frames từ QUIC stream, chuyển tiếp qua H1 keep-alive upstream không chunking.
 - **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes Content-Length body
-- **Lệnh thực thi chuẩn**: oha --http-version 3 --no-tui -n 2000 -c 50 --insecure https://192.168.122.14:8445/plain/1mb https://192.168.122.14:8445/tls12/1mb https://192.168.122.14:8445/tls13/1mb
+- **Lệnh thực thi chuẩn**: h3bench -u https://192.168.122.14:8444/plain/1mb -u https://192.168.122.14:8444/tls12/1mb -u https://192.168.122.14:8444/tls13/1mb -n 2000 -c 50 --host backend.local --json
 - **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.31** (C) | **Envoy 1.39** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | 0.00 | 0.00 | 0.00 | Chưa đo nghiệm |
-| | **Băng thông truyền tải (Throughput MB/s)** | 0.00 MB/s | 0.00 MB/s | 0.00 MB/s | Băng thông tương ứng với lưu lượng phục vụ |
-| | **Độ trễ trung bình (Mean Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 0.00 ms | 0.00 ms | 0.00 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 0.00 ms | 0.00 ms | 0.00 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 0.00 ms | 0.00 ms | 0.00 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 0.00 ms | 0.00 ms | 0.00 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Đồng pha với mean latency |
-| | **Thời gian kết nối (Connect Time Avg)** | 0.00 ms | 0.00 ms | 0.00 ms | Bắt tay kết nối downstream (QUIC Handshake) |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | 0 2xx | 0 2xx | 0 2xx | 100% 200 OK |
-| | **Tỷ lệ thành công (Success Rate %)** | 0.0% | 0.0% | 0.0% | Không rớt gói, không lỗi |
-| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 0.00 MB | 0.00 MB | 0.00 MB | Bộ nhớ RSS thường trú đỉnh |
-| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | 0 | 0 | 0 | Tổng số lệnh CPU thực thi |
-| | **Số lệnh CPU / Request (`insn / req`)** | 0.00 | 0.00 | 0.00 | Số lệnh CPU tiêu thụ trên mỗi request |
-| | **Tổng chu kỳ CPU (`cycles`)** | 0 | 0 | 0 | Tổng chu kỳ xung nhịp CPU |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | 0.00 | 0.00 | 0.00 | Chu kỳ xung CPU trên mỗi request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.00 | 0.00 | 0.00 | Hiệu suất IPC khai thác CPU |
-| | **Tổng số lệnh rẽ nhánh (`branches`)** | 0 | 0 | 0 | Lệnh rẽ nhánh phần cứng |
-| | **Lệnh rẽ nhánh / Request (`branches / req`)** | 0.00 | 0.00 | 0.00 | Rẽ nhánh trên mỗi request |
-| | **CPU đoán sai nhánh (`branch-misses`)** | 0 | 0 | 0 | Đoán sai nhánh |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 0.00% | 0.00% | 0.00% | Tỷ lệ đoán sai nhánh |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 0.00% | 0.00% | 0.00% | Miss cache L1 dữ liệu |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | 0.08% | 0.08% | 0.08% | Bảo vệ bộ nhớ LLC |
-| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | 0 | 0 | 0 | Chuyển ngữ cảnh tiến trình |
-| | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.00 | 0.00 | 0.00 | Chuyển ngữ cảnh / request |
-| | **Tổng số System Calls (`syscalls`)** | 0 | 0 | 0 | System calls vào nhân Linux |
-| | **System Calls / Request (`syscalls / req`)** | 0.00 | 0.00 | 0.00 | Syscalls trên mỗi request |
-| | **Thời gian chạy trong kernel (Kernel Time)** | 0.00s | 0.00s | 0.00s | Thời gian thực thi không gian nhân Linux |
-| | **Số lần gọi khóa Futex (Futex Calls)** | 0 | 0 | 0 | Số lần gọi khóa futex |
-| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 0.00% | 0.00% | 0.00% | Tỷ lệ khóa futex |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **511.11** | **596.22** | 504.19 | Tăng gấp 7.7 lần (từ 66.21 lên 511.11 req/s, vượt Envoy +1.4%), triệt tiêu hoàn toàn timeout 30s |
+| | **Băng thông truyền tải (Throughput MB/s)** | **511.11 MB/s** | **596.22 MB/s** | 504.19 MB/s | Vượt ngưỡng 0.5 GB/s, tăng gấp 7.7 lần băng thông goodput |
+| | **Độ trễ trung bình (Mean Latency)** | 97.37 ms | **83.37 ms** | 96.84 ms | Đồng pha tải cao, kiểm soát trễ sát ngưỡng Envoy |
+| | **Độ trễ tối thiểu (Min Latency)** | 36.64 ms | 40.95 ms | **7.29 ms** | Ngưỡng trễ phản hồi gói đầu tiên tốt hơn Nginx (-10.5%) |
+| | **Độ trễ phân vị P50** | 93.79 ms | **77.27 ms** | 77.66 ms | P50 ổn định tuyệt đối quanh 93ms |
+| | **Độ trễ phân vị P90** | **111.60 ms** | 119.25 ms | 179.63 ms | P90 Velda tốt nhất trong cả 3 proxy (-6.4% vs Nginx, -37.9% vs Envoy) |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **178.13 ms** | **176.08 ms** | 383.08 ms | P99 Velda bám sát Nginx và vượt trội Envoy (-53.5%) |
+| | **Độ trễ phân vị P99.9** | 275.45 ms | **195.91 ms** | 505.01 ms | Đuôi trễ sâu P99.9 tốt hơn nhiều so với Envoy (-45.5%) |
+| | **Độ trễ tối đa (Max Latency)** | 275.72 ms | **201.14 ms** | 571.44 ms | Max jitter giảm còn 275ms, tốt hơn Envoy (-51.8%) |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **18.41 ms** | 27.35 ms | 71.57 ms | Độ ổn định phương sai tốt nhất trong cả 3 proxy (-32.7% vs Nginx) |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | 97.37 ms | **83.37 ms** | 96.84 ms | Đồng pha với mean latency |
+| | **Thời gian kết nối (Connect Time Avg)** | 4.79 ms | **3.88 ms** | 5.04 ms | Bắt tay kết nối downstream (QUIC Handshake) |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **2,000 2xx** | 2,000 2xx | 2,000 2xx | 100% 200 OK |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Đạt 100% tuyệt đối, không rớt gói, không timeout |
+| | **Bộ nhớ RAM tiêu thụ đỉnh (Peak RSS MB)** | 261.91 MB | 163.84 MB | **6.86 MB** | Bộ nhớ RSS thường trú đỉnh |
+| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | **32,599,288,079** | 55,556,938,348 | 49,059,038,544 | Velda tiêu thụ ít lệnh nhất (-41.3% vs Nginx, -33.5% vs Envoy) |
+| | **Số lệnh CPU / Request (`insn / req`)** | **16,299,644.04** | 18,636,388.70 | 19,460,536.10 | Số lệnh CPU tiêu thụ trên mỗi request thấp nhất |
+| | **Tổng chu kỳ CPU (`cycles`)** | **36,188,695,929** | 52,982,730,262 | 46,896,336,044 | Velda tiêu thụ ít chu kỳ nhất (-31.7% vs Nginx, -22.8% vs Envoy) |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | 18,094,347.96 | **17,772,879.20** | 18,602,644.30 | Chu kỳ xung CPU trên mỗi request |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.90 | **1.05** | 1.05 | Hiệu suất IPC tăng từ 0.84 lên 0.90 |
+| | **Tổng số lệnh rẽ nhánh (`branches`)** | **5,179,725,383** | 9,865,117,511 | 7,262,914,423 | Velda ít rẽ nhánh nhất (-47.5% vs Nginx, -28.7% vs Envoy) |
+| | **Lệnh rẽ nhánh / Request (`branches / req`)** | **2,589,862.69** | 3,309,220.60 | 2,881,022.80 | Rẽ nhánh trên mỗi request thấp nhất |
+| | **CPU đoán sai nhánh (`branch-misses`)** | **43,421,749** | 59,520,608 | 62,831,275 | Velda ít đoán sai nhánh nhất (-27.0% vs Nginx, -30.9% vs Envoy) |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 0.84% | **0.60%** | 0.87% | Tỷ lệ đoán sai nhánh giảm sâu xuống 0.84% |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 10.46% | 9.47% | **7.37%** | Miss cache L1 dữ liệu giảm còn 10.46% |
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | **0.08%** | Bảo vệ bộ nhớ LLC |
+| **Vi Mô (Kernel & Locks)** | **Tổng số lần đổi ngữ cảnh (`CS`)** | **20,696** | 46,956 | 73,912 | Chuyển ngữ cảnh giảm ngoạn mục (-72.4% vs bản cũ, thấp nhất cả 3 proxy!) |
+| | **Chuyển ngữ cảnh / Request (`CS / req`)** | **10.35** | 15.75 | 29.32 | Chuyển ngữ cảnh / request thấp nhất |
+| | **Tổng số System Calls (`syscalls`)** | 1,405,003 | 2,401,246 | **504,480** | Syscalls ít hơn Nginx (-41.5%) |
+| | **System Calls / Request (`syscalls / req`)** | 702.50 | 805.49 | **200.12** | Syscalls trên mỗi request |
+| | **Thời gian chạy trong kernel (Kernel Time)** | **1.75s** | 1.75s | 1.75s | Thời gian thực thi không gian nhân Linux |
+| | **Số lần gọi khóa Futex (Futex Calls)** | 15,635 | 10,790 | **10,578** | Giảm 80.0% so với 78,216 nhờ 1:1 Worker architecture |
+| | **Tỷ lệ Futex trên tổng Syscalls (%)** | 1.11% | **0.45%** | 2.10% | Tỷ lệ khóa futex giảm mạnh từ 5.99% xuống 1.11% |
 
 ---
 

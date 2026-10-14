@@ -254,29 +254,8 @@ fn tune_udp_socket(sock: &socket2::Socket) {
             }
         }
 
-        // 2. Opportunistic UDP Generic Receive Offload (UDP_GRO, Linux 5.0+)
-        // Fast-path: Coalesces multiple incoming UDP datagrams into single batches, dramatically reducing
-        // userspace recvfrom syscall rate.
-        // Fallback: If unsupported by kernel or denied by permissions, gracefully falls back to disabled.
-        if topology.kernel.supports_udp_gro() {
-            const UDP_GRO: libc::c_int = 104;
-            let gro_val: libc::c_int = 1;
-            unsafe {
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_UDP,
-                    UDP_GRO,
-                    &gro_val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&gro_val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(
-                        errno = std::io::Error::last_os_error().raw_os_error(),
-                        "Kernel UDP_GRO not supported or denied, gracefully fell back to disabled"
-                    );
-                }
-            }
-        }
+        // Note: UDP_GRO requires recvmsg with UDP_GRO cmsg segment size parsing to demux packets.
+        // Plain recvfrom receives coalesced blobs which breaks QUIC datagram boundaries.
     }
 
     #[cfg(not(target_os = "linux"))]

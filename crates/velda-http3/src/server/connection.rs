@@ -40,6 +40,8 @@ pub struct OutgoingDatagram {
     pub peer: SocketAddr,
     /// Packet payload.
     pub payload: Bytes,
+    /// Optional segmentation offload payload size (Linux UDP_SEGMENT).
+    pub segment_size: Option<u16>,
 }
 
 /// An incoming HTTP/3 request ready for application processing.
@@ -129,6 +131,7 @@ impl Http3Engine {
             outgoing.push(OutgoingDatagram {
                 peer: remote,
                 payload: Bytes::from(resp_buf),
+                segment_size: None,
             });
         }
 
@@ -145,6 +148,7 @@ impl Http3Engine {
                             outgoing.push(OutgoingDatagram {
                                 peer: remote,
                                 payload: Bytes::from(accept_resp),
+                                segment_size: None,
                             });
                         }
                         self.connections.insert(handle, conn);
@@ -191,14 +195,14 @@ impl Http3Engine {
                     self.control_streams.insert(handle);
                 }
 
-                // Drain outgoing transmits for this connection
+                // Drain outgoing transmits for this connection with GSO batching
                 self.transmit_buf.clear();
-                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                while let Some(transmit) = conn.poll_transmit(now, 64, &mut self.transmit_buf) {
                     if transmit.size > 0 {
-                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
                         outgoing.push(OutgoingDatagram {
                             peer: transmit.destination,
-                            payload: packet,
+                            payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
+                            segment_size: transmit.segment_size.map(|s| s as u16),
                         });
                     }
                     self.transmit_buf.clear();
@@ -251,14 +255,14 @@ impl Http3Engine {
                     }
                 }
 
-                // Drain outgoing transmits generated during event processing
+                // Drain outgoing transmits generated during event processing with GSO batching
                 self.transmit_buf.clear();
-                while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+                while let Some(transmit) = conn.poll_transmit(now, 64, &mut self.transmit_buf) {
                     if transmit.size > 0 {
-                        let packet = Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]);
                         outgoing.push(OutgoingDatagram {
                             peer: transmit.destination,
-                            payload: packet,
+                            payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
+                            segment_size: transmit.segment_size.map(|s| s as u16),
                         });
                     }
                     self.transmit_buf.clear();
@@ -423,11 +427,12 @@ impl Http3Engine {
             }
 
             self.transmit_buf.clear();
-            while let Some(transmit) = conn.poll_transmit(now, 1, &mut self.transmit_buf) {
+            while let Some(transmit) = conn.poll_transmit(now, 64, &mut self.transmit_buf) {
                 if transmit.size > 0 {
                     outgoing.push(OutgoingDatagram {
                         peer: transmit.destination,
                         payload: Bytes::copy_from_slice(&self.transmit_buf[..transmit.size]),
+                        segment_size: transmit.segment_size.map(|s| s as u16),
                     });
                 }
                 self.transmit_buf.clear();
@@ -486,5 +491,21 @@ impl Http3Engine {
     #[inline]
     pub fn active_stream_count(&self) -> usize {
         self.streams.len()
+    }
+
+    /// Computes the earliest timeout deadline across all active connections.
+    /// Used by event-driven worker tickers to sleep precisely until next required action.
+    #[inline]
+    pub fn poll_timeout(&mut self) -> Option<Instant> {
+        let mut earliest: Option<Instant> = None;
+        for conn in self.connections.values_mut() {
+            if let Some(t) = conn.poll_timeout() {
+                earliest = Some(match earliest {
+                    Some(cur) => cur.min(t),
+                    None => t,
+                });
+            }
+        }
+        earliest
     }
 }

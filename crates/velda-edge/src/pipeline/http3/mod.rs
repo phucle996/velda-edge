@@ -16,6 +16,5 @@ pub mod pipe;
 
 pub use downstream::handle_http3_udp;
 pub use engine::{
-    H3EngineShards, H3Shard, clear_h3_engines, get_or_init_h3_engine,
-    get_or_init_h3_engine_for_peer, get_or_init_h3_shards, has_h3_engine, init_h3_engine,
+    Http3Worker, Http3WorkerPool, clear_h3_engines, get_or_init_h3_workers, init_h3_engine,
 };

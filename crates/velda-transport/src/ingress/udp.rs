@@ -159,7 +159,11 @@ impl UdpIngress {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((n, peer)) => {
-                            let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
+                            let dgram = Datagram::new(
+                                peer,
+                                local_addr,
+                                bytes::Bytes::copy_from_slice(&buf[..n]),
+                            );
                             // Handlers run inline, not in a task per datagram: this keeps packets
                             // of one flow ordered (SO_REUSEPORT pins a 4-tuple to one shard) and
                             // avoids a task spawn per packet. Handlers must stay short; long work
@@ -171,7 +175,11 @@ impl UdpIngress {
                             for _ in 0..64 {
                                 match socket.try_recv_from(&mut buf) {
                                     Some(Ok((n, peer))) => {
-                                        let dgram = Datagram::new(peer, local_addr, buf[..n].to_vec());
+                                        let dgram = Datagram::new(
+                                            peer,
+                                            local_addr,
+                                            bytes::Bytes::copy_from_slice(&buf[..n]),
+                                        );
                                         handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
                                     }
                                     Some(Err(err)) => {

@@ -28,6 +28,7 @@ pub struct UdpSocket {
     socket: TokioUdpSocket,
     local_addr: SocketAddr,
     config: UdpSocketConfig,
+    pub worker_id: usize,
     bytes_received: CacheAlignedAtomicU64,
     bytes_sent: CacheAlignedAtomicU64,
 }
@@ -96,27 +97,8 @@ impl UdpSocket {
             }
         }
 
-        #[cfg(target_os = "linux")]
-        if config.gro {
-            use std::os::fd::AsRawFd;
-            let fd = sock.as_raw_fd();
-            let val: libc::c_int = 1;
-            unsafe {
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_UDP,
-                    libc::UDP_GRO,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(
-                        errno = std::io::Error::last_os_error().raw_os_error(),
-                        "UDP_GRO socket option skipped or unsupported by kernel"
-                    );
-                }
-            }
-        }
+        // Note: UDP_GRO requires recvmsg with UDP_GRO cmsg segment size demuxing.
+        // Standard recvfrom returns coalesced buffers which corrupts QUIC packet framing.
 
         #[cfg(target_os = "linux")]
         if config.rxq_ovfl {
@@ -142,25 +124,9 @@ impl UdpSocket {
 
         #[cfg(target_os = "linux")]
         if config.gso {
-            use std::os::fd::AsRawFd;
-            let fd = sock.as_raw_fd();
-            const UDP_SEGMENT: libc::c_int = 103;
-            let val: libc::c_int = 1472;
-            unsafe {
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_UDP,
-                    UDP_SEGMENT,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(
-                        errno = std::io::Error::last_os_error().raw_os_error(),
-                        "UDP_SEGMENT (GSO) socket option skipped or unsupported by kernel"
-                    );
-                }
-            }
+            // Kernel GSO capability acknowledged. Datagrams are segmented dynamically per-packet
+            // via sendmsg control messages (cmsg: UDP_SEGMENT) in `try_send_gso_to` / `send_gso_to`,
+            // avoiding socket-level global segment enforcement that conflicts with discrete packets.
         }
 
         #[cfg(target_os = "linux")]
@@ -219,6 +185,7 @@ impl UdpSocket {
             socket,
             local_addr,
             config,
+            worker_id: 0,
             bytes_received: CacheAlignedAtomicU64::new(0),
             bytes_sent: CacheAlignedAtomicU64::new(0),
         })
@@ -230,7 +197,8 @@ impl UdpSocket {
     /// `config.concurrency_shards` sockets to the same port.
     /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
     pub fn bind_shards(addr: SocketAddr, config: UdpSocketConfig) -> Result<Vec<Self>> {
-        let first = Self::bind(addr, config.clone())?;
+        let mut first = Self::bind(addr, config.clone())?;
+        first.worker_id = 0;
         let actual_addr = first.local_addr();
         let target_shards = if config.reuseport {
             config.concurrency_shards.max(1)
@@ -247,7 +215,10 @@ impl UdpSocket {
 
         for shard_idx in 1..target_shards {
             match Self::bind(actual_addr, config.clone()) {
-                Ok(shard) => shards.push(shard),
+                Ok(mut shard) => {
+                    shard.worker_id = shard_idx;
+                    shards.push(shard);
+                }
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,
@@ -270,6 +241,7 @@ impl UdpSocket {
             socket,
             local_addr,
             config,
+            worker_id: 0,
             bytes_received: CacheAlignedAtomicU64::new(0),
             bytes_sent: CacheAlignedAtomicU64::new(0),
         })
@@ -368,9 +340,278 @@ impl UdpSocket {
         Ok(n)
     }
 
+    /// Attempts non-blocking GSO datagram transmission via Linux kernel `UDP_SEGMENT` cmsg.
+    ///
+    /// If `segment_size == 0` or unsupported on host OS, degrades gracefully to standard datagram send.
+    #[inline]
+    pub fn try_send_gso_to(
+        &self,
+        buf: &[u8],
+        segment_size: u16,
+        target: SocketAddr,
+    ) -> Option<Result<usize>> {
+        #[cfg(target_os = "linux")]
+        {
+            if segment_size == 0 {
+                return self.try_send_to(buf, target);
+            }
+
+            use std::os::fd::AsRawFd;
+            let fd = self.socket.as_raw_fd();
+            let sock_addr = socket2::SockAddr::from(target);
+
+            let mut iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+
+            let mut cmsg_buf = [0u8; 64];
+            let mut msg = unsafe { std::mem::zeroed::<libc::msghdr>() };
+            msg.msg_name = sock_addr.as_ptr() as *mut libc::c_void;
+            msg.msg_namelen = sock_addr.len();
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen =
+                unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) as _ };
+
+            const UDP_SEGMENT: libc::c_int = 103;
+            let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+            if !cmsg.is_null() {
+                unsafe {
+                    (*cmsg).cmsg_level = libc::IPPROTO_UDP;
+                    (*cmsg).cmsg_type = UDP_SEGMENT;
+                    (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
+                    let data_ptr = libc::CMSG_DATA(cmsg) as *mut u16;
+                    std::ptr::write_unaligned(data_ptr, segment_size);
+                }
+            }
+
+            let ret = unsafe { libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT) };
+            if ret >= 0 {
+                self.bytes_sent.0.fetch_add(ret as u64, Ordering::Relaxed);
+                Some(Ok(ret as usize))
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    None
+                } else {
+                    Some(Err(TransportError::Io(err)))
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = segment_size;
+            self.try_send_to(buf, target)
+        }
+    }
+
+    /// Sends a GSO datagram batch to the destination peer with automatic async backpressure.
+    pub async fn send_gso_to(
+        &self,
+        buf: &[u8],
+        segment_size: u16,
+        target: SocketAddr,
+    ) -> Result<usize> {
+        if let Some(res) = self.try_send_gso_to(buf, segment_size, target) {
+            return res;
+        }
+        loop {
+            self.socket.writable().await.map_err(TransportError::Io)?;
+            if let Some(res) = self.try_send_gso_to(buf, segment_size, target) {
+                return res;
+            }
+        }
+    }
+
     /// Sends a [`Datagram`] to its destination peer, tracking the sent byte count.
     pub async fn send_datagram(&self, datagram: &Datagram) -> Result<usize> {
         self.send_to(datagram.data(), datagram.peer()).await
+    }
+
+    /// Sends a batch of outgoing UDP datagrams using `sendmmsg` (Linux) for minimal syscall overhead.
+    ///
+    /// Each entry is `(payload, target)`. Falls back to per-packet `try_send_to` on non-Linux
+    /// or if `sendmmsg` is unavailable. Stack-allocated buffers eliminate heap allocation.
+    #[cfg(target_os = "linux")]
+    pub fn try_send_batch(&self, packets: &[(&[u8], SocketAddr)]) -> usize {
+        if packets.is_empty() {
+            return 0;
+        }
+        if packets.len() == 1 {
+            return match self.try_send_to(packets[0].0, packets[0].1) {
+                Some(Ok(_)) => 1,
+                _ => 0,
+            };
+        }
+
+        use std::os::fd::AsRawFd;
+        let fd = self.socket.as_raw_fd();
+        let batch_len = packets.len().min(64); // kernel caps at UIO_MAXIOV
+
+        let mut sock_addrs: [std::mem::MaybeUninit<socket2::SockAddr>; 64] =
+            [const { std::mem::MaybeUninit::uninit() }; 64];
+        let mut iovecs = [libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }; 64];
+        let mut msgs = unsafe { std::mem::zeroed::<[libc::mmsghdr; 64]>() };
+
+        for i in 0..batch_len {
+            sock_addrs[i].write(socket2::SockAddr::from(packets[i].1));
+            iovecs[i].iov_base = packets[i].0.as_ptr() as *mut libc::c_void;
+            iovecs[i].iov_len = packets[i].0.len();
+
+            let sa = unsafe { sock_addrs[i].assume_init_ref() };
+            msgs[i].msg_hdr.msg_name = sa.as_ptr() as *mut libc::c_void;
+            msgs[i].msg_hdr.msg_namelen = sa.len();
+            msgs[i].msg_hdr.msg_iov = &mut iovecs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        let ret =
+            unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), batch_len as u32, libc::MSG_DONTWAIT) };
+        if ret > 0 {
+            let sent = ret as usize;
+            let total_bytes: u64 = msgs[..sent].iter().map(|m| m.msg_len as u64).sum();
+            self.bytes_sent.0.fetch_add(total_bytes, Ordering::Relaxed);
+            sent
+        } else {
+            0
+        }
+    }
+
+    /// Fallback for non-Linux platforms sending sequentially.
+    #[cfg(not(target_os = "linux"))]
+    pub fn try_send_batch(&self, packets: &[(&[u8], SocketAddr)]) -> usize {
+        let mut sent = 0;
+        for (buf, target) in packets {
+            if let Some(Ok(_)) = self.try_send_to(buf, *target) {
+                sent += 1;
+            } else {
+                break;
+            }
+        }
+        sent
+    }
+
+    /// Sends a GSO-segmented datagram with proper `UDP_SEGMENT` cmsg (Linux).
+    ///
+    /// When `segment_size` is `Some(size)`, the kernel segments the large buffer into
+    /// individual UDP datagrams of `size` bytes each in a single `sendmsg` syscall.
+    /// If the kernel NIC does not support GSO (returns `EMSGSIZE`), this automatically
+    /// falls back to `sendmmsg` batching to ensure zero packet drops and maximum throughput.
+    #[inline]
+    pub fn try_send_gso_aware(
+        &self,
+        buf: &[u8],
+        segment_size: Option<u16>,
+        target: SocketAddr,
+    ) -> Option<Result<usize>> {
+        match segment_size {
+            Some(seg) if seg > 0 => {
+                if self.config.gso {
+                    match self.try_send_gso_to(buf, seg, target) {
+                        Some(Err(TransportError::Io(ref e)))
+                            if e.raw_os_error() == Some(libc::EMSGSIZE) =>
+                        {
+                            // Kernel NIC does not support GSO. Fall through to batch send chunks!
+                        }
+                        other => return other,
+                    }
+                }
+
+                // Batch send chunks of size `seg` with zero heap allocation
+                let chunk_size = seg as usize;
+                let mut offset = 0;
+                while offset < buf.len() {
+                    let mut batch: [(&[u8], SocketAddr); 64] = [(&[], target); 64];
+                    let mut count = 0;
+                    while count < 64 && offset < buf.len() {
+                        let end = (offset + chunk_size).min(buf.len());
+                        batch[count] = (&buf[offset..end], target);
+                        offset = end;
+                        count += 1;
+                    }
+                    let mut batch_sent = 0;
+                    while batch_sent < count {
+                        let n = self.try_send_batch(&batch[batch_sent..count]);
+                        if n > 0 {
+                            batch_sent += n;
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+                Some(Ok(buf.len()))
+            }
+            _ => self.try_send_to(buf, target),
+        }
+    }
+
+    /// Async version of [`try_send_gso_aware`] with backpressure.
+    pub async fn send_gso_aware(
+        &self,
+        buf: &[u8],
+        segment_size: Option<u16>,
+        target: SocketAddr,
+    ) -> Result<usize> {
+        match segment_size {
+            Some(seg) if seg > 0 => {
+                if self.config.gso {
+                    match self.try_send_gso_to(buf, seg, target) {
+                        Some(Err(TransportError::Io(ref e)))
+                            if e.raw_os_error() == Some(libc::EMSGSIZE) =>
+                        {
+                            // Fall through to batch chunk send
+                        }
+                        Some(Ok(n)) => return Ok(n),
+                        Some(Err(e)) => return Err(e),
+                        None => {
+                            loop {
+                                self.socket.writable().await.map_err(TransportError::Io)?;
+                                match self.try_send_gso_to(buf, seg, target) {
+                                    Some(Err(TransportError::Io(ref e)))
+                                        if e.raw_os_error() == Some(libc::EMSGSIZE) =>
+                                    {
+                                        break; // Fall through to batch send
+                                    }
+                                    Some(res) => return res,
+                                    None => continue,
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Batch send chunks of size `seg` with zero heap allocation & async backpressure
+                let chunk_size = seg as usize;
+                let mut offset = 0;
+                while offset < buf.len() {
+                    let mut batch: [(&[u8], SocketAddr); 64] = [(&[], target); 64];
+                    let mut count = 0;
+                    while count < 64 && offset < buf.len() {
+                        let end = (offset + chunk_size).min(buf.len());
+                        batch[count] = (&buf[offset..end], target);
+                        offset = end;
+                        count += 1;
+                    }
+                    let mut batch_sent = 0;
+                    while batch_sent < count {
+                        let n = self.try_send_batch(&batch[batch_sent..count]);
+                        if n > 0 {
+                            batch_sent += n;
+                        } else {
+                            self.socket.writable().await.map_err(TransportError::Io)?;
+                        }
+                    }
+                }
+                Ok(buf.len())
+            }
+            _ => self.send_to(buf, target).await,
+        }
     }
 
     /// Returns a reference to the underlying Tokio [`TokioUdpSocket`].

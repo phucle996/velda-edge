@@ -220,9 +220,11 @@ impl Http3Config {
         // - Explicit segmentation offload enablement
         transport.initial_rtt(std::time::Duration::from_millis(10));
         transport.send_window(conn_window);
-        transport.congestion_controller_factory(std::sync::Arc::new(
-            quinn_proto::congestion::CubicConfig::default(),
-        ));
+        let mut cubic = quinn_proto::congestion::CubicConfig::default();
+        // Scale initial congestion window for edge delivery (100 packets ~ 147KB)
+        // instead of the conservative RFC 9002 default of 10 packets (~14KB).
+        cubic.initial_window(147_200);
+        transport.congestion_controller_factory(std::sync::Arc::new(cubic));
         transport.enable_segmentation_offload(true);
     }
 

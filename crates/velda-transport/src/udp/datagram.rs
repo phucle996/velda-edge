@@ -8,17 +8,17 @@ use velda_core::{ConnectionId, L4Request, TransportProtocol};
 pub struct Datagram {
     pub peer: SocketAddr,
     pub local_addr: SocketAddr,
-    pub data: Vec<u8>,
+    pub data: bytes::Bytes,
 }
 
 impl Datagram {
     /// Creates a new UDP datagram.
     #[inline]
-    pub fn new(peer: SocketAddr, local_addr: SocketAddr, data: Vec<u8>) -> Self {
+    pub fn new(peer: SocketAddr, local_addr: SocketAddr, data: impl Into<bytes::Bytes>) -> Self {
         Self {
             peer,
             local_addr,
-            data,
+            data: data.into(),
         }
     }
 
@@ -55,6 +55,12 @@ impl Datagram {
     /// Consumes the datagram, returning the underlying payload vector.
     #[inline]
     pub fn into_data(self) -> Vec<u8> {
+        self.data.to_vec()
+    }
+
+    /// Consumes the datagram, returning the underlying [`bytes::Bytes`].
+    #[inline]
+    pub fn into_bytes(self) -> bytes::Bytes {
         self.data
     }
 

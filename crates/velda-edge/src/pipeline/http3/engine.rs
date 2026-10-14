@@ -6,7 +6,6 @@
 //! are NOT disconnected; new incoming requests on existing connections seamlessly
 //! evaluate against the latest swapped runtime snapshot.
 
-use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwapOption;
@@ -19,31 +18,41 @@ use velda_transport::UdpSocket;
 use crate::error::EdgeError;
 use crate::runtime::SharedRuntime;
 
-/// A single sharded QUIC engine state machine with lock-free socket association
-/// and a dedicated millisecond-precision background ticker for loss recovery and ACK timer flushes.
-pub struct H3Shard {
+/// A single per-core HTTP/3 QUIC worker state machine with direct 1:1 socket association
+/// and a high-efficiency event-driven background ticker for loss recovery and ACK timer flushes.
+pub struct Http3Worker {
+    pub worker_id: usize,
     pub engine: Mutex<Http3Engine>,
     socket: ArcSwapOption<UdpSocket>,
     ticker_started: std::sync::atomic::AtomicBool,
 }
 
-impl H3Shard {
-    /// Creates a new shard. The background ticker is lazily spawned on first socket registration.
+impl Http3Worker {
+    /// Creates a new per-core worker. The background ticker is lazily spawned on first socket registration.
     pub fn new(
+        worker_id: usize,
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
         h3_config: velda_http3::Http3Config,
     ) -> Arc<Self> {
         let engine = Http3Engine::new_with_config(quic_cfg, h3_config);
         Arc::new(Self {
+            worker_id,
             engine: Mutex::new(engine),
             socket: ArcSwapOption::empty(),
             ticker_started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
-    /// Registers the active UDP socket handle on the shard and ensures the 1ms ticker is active.
+    /// Registers the active UDP socket handle on the worker and starts the event-driven timeout ticker.
     #[inline]
     pub fn register_socket(self: &Arc<Self>, socket: &Arc<UdpSocket>) {
+        if self
+            .ticker_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+
         if self.socket.load().is_none() {
             self.socket.store(Some(socket.clone()));
         }
@@ -52,37 +61,62 @@ impl H3Shard {
             .ticker_started
             .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            let shard_weak = Arc::downgrade(self);
+            let worker_weak = Arc::downgrade(self);
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    interval.tick().await;
-                    let Some(shard) = shard_weak.upgrade() else {
-                        break;
-                    };
-
-                    let now = std::time::Instant::now();
-                    let outgoing = {
-                        let mut engine = shard.engine.lock();
+                    let (outgoing, has_conns, min_timeout) = {
+                        let Some(worker) = worker_weak.upgrade() else {
+                            break;
+                        };
+                        let mut engine = worker.engine.lock();
                         if engine.connection_count() == 0 {
-                            continue;
+                            (Vec::new(), false, None)
+                        } else {
+                            let now = std::time::Instant::now();
+                            let pkts = engine.handle_timeouts(now);
+                            let next = engine.poll_timeout();
+                            (pkts, true, next)
                         }
-                        engine.handle_timeouts(now)
                     };
 
                     if !outgoing.is_empty()
-                        && let Some(socket) = shard.socket.load_full()
+                        && let Some(worker) = worker_weak.upgrade()
+                        && let Some(socket) = worker.socket.load_full()
                     {
                         for pkt in outgoing {
-                            if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
+                            if let Some(res) =
+                                socket.try_send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
+                            {
                                 if let Err(e) = res {
-                                    tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via try_send_to");
+                                    tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via try_send_gso_aware");
                                 }
-                            } else if let Err(e) = socket.send_to(&pkt.payload, pkt.peer).await {
-                                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via send_to");
+                            } else if let Err(e) = socket
+                                .send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
+                                .await
+                            {
+                                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send timeout packet via send_gso_aware");
                             }
                         }
+                    }
+
+                    if !has_conns {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    } else {
+                        let sleep_dur = match min_timeout {
+                            Some(t) => {
+                                let now = std::time::Instant::now();
+                                if t <= now {
+                                    std::time::Duration::from_millis(1)
+                                } else {
+                                    (t - now).clamp(
+                                        std::time::Duration::from_millis(1),
+                                        std::time::Duration::from_millis(25),
+                                    )
+                                }
+                            }
+                            None => std::time::Duration::from_millis(10),
+                        };
+                        tokio::time::sleep(sleep_dur).await;
                     }
                 }
             });
@@ -90,15 +124,15 @@ impl H3Shard {
     }
 }
 
-/// Sharded container of HTTP/3 engines partitioned by remote peer address to eliminate
-/// lock contention on multi-core hardware topologies.
+/// Multi-worker pool matching 1:1 with CPU cores and SO_REUSEPORT UDP socket instances.
+/// Eliminates cross-core lock contention, cache thrashing, and oversharding overhead.
 #[derive(Clone)]
-pub struct H3EngineShards {
-    shards: Arc<Vec<Arc<H3Shard>>>,
+pub struct Http3WorkerPool {
+    workers: Arc<Vec<Arc<Http3Worker>>>,
 }
 
-impl H3EngineShards {
-    /// Creates a sharded pool scaled dynamically to available hardware parallelism.
+impl Http3WorkerPool {
+    /// Creates a per-core worker pool sized 1:1 with hardware CPU cores.
     pub fn new(
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
         h3_config: velda_http3::Http3Config,
@@ -106,45 +140,30 @@ impl H3EngineShards {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let count = (cores * 8).clamp(32, 128).next_power_of_two();
+        let count = cores.max(1);
 
-        let mut shards = Vec::with_capacity(count);
-        for _ in 0..count {
-            shards.push(H3Shard::new(quic_cfg.clone(), h3_config));
+        let mut workers = Vec::with_capacity(count);
+        for worker_id in 0..count {
+            workers.push(Http3Worker::new(worker_id, quic_cfg.clone(), h3_config));
         }
         Self {
-            shards: Arc::new(shards),
+            workers: Arc::new(workers),
         }
     }
 
-    /// Selects an engine shard deterministically by hashing remote peer IP and port.
+    /// Selects the worker assigned 1:1 to the socket that received the datagram.
+    /// Operates in O(1) without any IP hashing or cross-core lookups!
     #[inline]
-    pub fn get_shard_for_peer(&self, peer: SocketAddr) -> Arc<H3Shard> {
-        let port = peer.port() as usize;
-        let ip_hash = match peer.ip() {
-            std::net::IpAddr::V4(v4) => u32::from_ne_bytes(v4.octets()) as usize,
-            std::net::IpAddr::V6(v6) => {
-                let o = v6.octets();
-                u32::from_ne_bytes([o[12], o[13], o[14], o[15]]) as usize
-            }
-        };
-        // Fast multiply-shift mixing for uniform bucket distribution
-        let hash = (port.wrapping_mul(0x9E3779B9) ^ ip_hash).wrapping_mul(0x85EBCA6B);
-        let idx = hash & (self.shards.len() - 1);
-        self.shards[idx].clone()
-    }
-
-    /// Returns the primary shard (shard 0) for lifecycle checks and API stability.
-    #[inline]
-    pub fn primary_shard(&self) -> Arc<H3Shard> {
-        self.shards[0].clone()
+    pub fn get_worker_for_socket(&self, socket: &UdpSocket) -> Arc<Http3Worker> {
+        let idx = socket.worker_id % self.workers.len();
+        self.workers[idx].clone()
     }
 }
 
-/// Global registry holding long-lived HTTP/3 QUIC sharded engines indexed by listener identifier.
-static H3_ENGINES: OnceLock<RwLock<FxHashMap<String, H3EngineShards>>> = OnceLock::new();
+/// Global registry holding long-lived HTTP/3 QUIC worker pools indexed by listener identifier.
+static H3_ENGINES: OnceLock<RwLock<FxHashMap<String, Http3WorkerPool>>> = OnceLock::new();
 
-fn engines_table() -> &'static RwLock<FxHashMap<String, H3EngineShards>> {
+fn engines_table() -> &'static RwLock<FxHashMap<String, Http3WorkerPool>> {
     H3_ENGINES.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
@@ -160,19 +179,10 @@ pub fn init_h3_engine(listener_id: &str, tls_server: &TlsServerEngine) -> Result
     let table = engines_table();
     let mut write = table.write().unwrap();
     if !write.contains_key(listener_id) {
-        let pool = H3EngineShards::new(Arc::new(quic_cfg), h3_config);
+        let pool = Http3WorkerPool::new(Arc::new(quic_cfg), h3_config);
         write.insert(listener_id.to_string(), pool);
     }
     Ok(())
-}
-
-/// Checks whether an HTTP/3 engine is initialized for the given listener.
-pub fn has_h3_engine(listener_id: &str) -> bool {
-    let table = engines_table();
-    table
-        .read()
-        .map(|l| l.contains_key(listener_id))
-        .unwrap_or(false)
 }
 
 /// Clears all active HTTP/3 engines (useful for test isolation).
@@ -183,8 +193,11 @@ pub fn clear_h3_engines() {
     }
 }
 
-/// Retrieves all sharded engines for the given listener, initializing if needed.
-pub fn get_or_init_h3_shards(listener_id: &str, runtime: &SharedRuntime) -> Option<H3EngineShards> {
+/// Retrieves all workers for the given listener, initializing if needed.
+pub fn get_or_init_h3_workers(
+    listener_id: &str,
+    runtime: &SharedRuntime,
+) -> Option<Http3WorkerPool> {
     let table = engines_table();
     if let Some(pool) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
         return Some(pool);
@@ -196,46 +209,4 @@ pub fn get_or_init_h3_shards(listener_id: &str, runtime: &SharedRuntime) -> Opti
 
     let table = engines_table();
     table.read().ok()?.get(listener_id).cloned()
-}
-
-/// Retrieves an existing engine or lazily initializes one from the active runtime snapshot.
-pub fn get_or_init_h3_engine(listener_id: &str, runtime: &SharedRuntime) -> Option<Arc<H3Shard>> {
-    let table = engines_table();
-    if let Some(pool) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
-        return Some(pool.primary_shard());
-    }
-
-    let rt = runtime.load();
-    let tls_server = rt.tls_server.as_ref()?;
-    let _ = init_h3_engine(listener_id, tls_server);
-
-    let table = engines_table();
-    table
-        .read()
-        .ok()?
-        .get(listener_id)
-        .map(|p| p.primary_shard())
-}
-
-/// Retrieves the specific sharded engine for a given remote peer to eliminate lock contention.
-pub fn get_or_init_h3_engine_for_peer(
-    listener_id: &str,
-    peer: SocketAddr,
-    runtime: &SharedRuntime,
-) -> Option<Arc<H3Shard>> {
-    let table = engines_table();
-    if let Some(pool) = table.read().ok().and_then(|r| r.get(listener_id).cloned()) {
-        return Some(pool.get_shard_for_peer(peer));
-    }
-
-    let rt = runtime.load();
-    let tls_server = rt.tls_server.as_ref()?;
-    let _ = init_h3_engine(listener_id, tls_server);
-
-    let table = engines_table();
-    table
-        .read()
-        .ok()?
-        .get(listener_id)
-        .map(|p| p.get_shard_for_peer(peer))
 }

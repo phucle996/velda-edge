@@ -101,21 +101,57 @@ async fn send_h1_stream(
     )
     .await?;
 
-    loop {
-        match stream.read_buf(&mut read_buf).await {
-            Ok(0) => {
-                if let Ok(Some(resp)) = velda_http1::client::decode_response(&mut read_buf, cfg) {
-                    return Ok(resp.into_l7_response());
-                } else {
-                    return Err(velda_http1::Http1Error::ConnectionClosed);
-                }
+    // 1. Read and decode response head (single-pass parsing)
+    let (head, framing) =
+        velda_http1::client::read_response_head(stream, &mut read_buf, cfg).await?;
+
+    // 2. Read bounded response body with exact pre-allocation
+    let body = match framing {
+        velda_http1::server::request::Http1BodyFraming::Empty => velda_core::Body::Empty,
+        velda_http1::server::request::Http1BodyFraming::ContentLength(body_len) => {
+            if body_len > cfg.max_body_size {
+                return Err(velda_http1::Http1Error::PayloadTooLarge(body_len));
             }
-            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, cfg) {
-                Ok(Some(resp)) => return Ok(resp.into_l7_response()),
-                Ok(None) => continue,
-                Err(e) => return Err(e),
-            },
-            Err(e) => return Err(velda_http1::Http1Error::Io(e)),
+            if body_len > 0 {
+                if read_buf.len() < body_len {
+                    let needed = body_len - read_buf.len();
+                    read_buf.reserve(needed);
+                    while read_buf.len() < body_len {
+                        let n = stream.read_buf(&mut read_buf).await?;
+                        if n == 0 {
+                            return Err(velda_http1::Http1Error::ConnectionClosed);
+                        }
+                    }
+                }
+                velda_core::Body::Bytes(read_buf.split_to(body_len).freeze())
+            } else {
+                velda_core::Body::Empty
+            }
         }
-    }
+        velda_http1::server::request::Http1BodyFraming::Chunked => {
+            let mut chunked_body = BytesMut::new();
+            while let Some(chunk) =
+                velda_http1::client::read_next_chunk(stream, &mut read_buf).await?
+            {
+                if chunked_body.len() + chunk.len() > cfg.max_body_size {
+                    return Err(velda_http1::Http1Error::PayloadTooLarge(
+                        chunked_body.len() + chunk.len(),
+                    ));
+                }
+                chunked_body.extend_from_slice(&chunk);
+            }
+            if chunked_body.is_empty() {
+                velda_core::Body::Empty
+            } else {
+                velda_core::Body::Bytes(chunked_body.freeze())
+            }
+        }
+    };
+
+    Ok(L7Response::new(
+        head.status,
+        head.version,
+        head.headers,
+        body,
+    ))
 }

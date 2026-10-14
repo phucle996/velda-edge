@@ -218,12 +218,12 @@ impl Http3ServerResponse {
 
         let mut outgoing = Vec::new();
         transmit_buf.clear();
-        while let Some(transmit) = conn.poll_transmit(now, 1, transmit_buf) {
+        while let Some(transmit) = conn.poll_transmit(now, 64, transmit_buf) {
             if transmit.size > 0 {
-                let packet = Bytes::copy_from_slice(&transmit_buf[..transmit.size]);
                 outgoing.push(OutgoingDatagram {
                     peer: transmit.destination,
-                    payload: packet,
+                    payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
+                    segment_size: transmit.segment_size.map(|s| s as u16),
                 });
             }
             transmit_buf.clear();
@@ -334,15 +334,15 @@ pub fn send_response(
     // Finish stream cleanly
     let _ = conn.send_stream(stream_id).finish();
 
-    // 4. Drain newly generated packets
+    // 4. Drain newly generated packets with GSO batching
     let mut outgoing = Vec::new();
     transmit_buf.clear();
-    while let Some(transmit) = conn.poll_transmit(now, 1, transmit_buf) {
+    while let Some(transmit) = conn.poll_transmit(now, 64, transmit_buf) {
         if transmit.size > 0 {
-            let packet = Bytes::copy_from_slice(&transmit_buf[..transmit.size]);
             outgoing.push(OutgoingDatagram {
                 peer: transmit.destination,
-                payload: packet,
+                payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
+                segment_size: transmit.segment_size.map(|s| s as u16),
             });
         }
         transmit_buf.clear();

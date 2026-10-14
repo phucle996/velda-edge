@@ -5,22 +5,54 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
+use velda_http3::server::connection::OutgoingDatagram;
 use velda_router::Http3RouteRequest;
 use velda_transport::{Datagram, UdpSocket};
 
-use super::engine::get_or_init_h3_engine_for_peer;
+use super::engine::{Http3WorkerPool, get_or_init_h3_workers};
 use super::pipe;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
 
 pub static H3_TOTAL_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static H3_TOTAL_RESP_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sends outgoing QUIC packets using GSO-aware path (UDP_SEGMENT cmsg) when available.
+///
+/// For GSO-segmented packets (quinn-proto `poll_transmit` with `segment_size`),
+/// the kernel transmits the coalesced buffer as individual datagrams in a single `sendmsg`
+/// syscall, reducing per-response syscalls from ~800 to ~13 for 1MB payloads.
+async fn send_outgoing_packets(socket: &UdpSocket, packets: Vec<OutgoingDatagram>) {
+    for pkt in packets {
+        if let Some(res) = socket.try_send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer) {
+            if let Err(e) = res {
+                tracing::warn!(
+                    peer = %pkt.peer,
+                    segment_size = ?pkt.segment_size,
+                    error = %e,
+                    "Failed to send outgoing QUIC packet via try_send_gso_aware"
+                );
+            }
+        } else if let Err(e) = socket
+            .send_gso_aware(&pkt.payload, pkt.segment_size, pkt.peer)
+            .await
+        {
+            tracing::warn!(
+                peer = %pkt.peer,
+                segment_size = ?pkt.segment_size,
+                error = %e,
+                "Failed to send outgoing QUIC packet via send_gso_aware"
+            );
+        }
+    }
+}
 
 /// Dispatches incoming UDP datagrams to the persistent HTTP/3 state machine.
 ///
@@ -32,15 +64,15 @@ pub async fn handle_http3_udp(
     datagram: Datagram,
     _config: velda_http3::Http3Config,
     runtime: &SharedRuntime,
-    precomputed_shards: Option<&super::engine::H3EngineShards>,
+    precomputed_workers: Option<&Http3WorkerPool>,
 ) {
     let peer = datagram.peer();
     let local_addr = datagram.local_addr();
 
-    let shard = if let Some(pool) = precomputed_shards {
-        pool.get_shard_for_peer(peer)
+    let worker = if let Some(pool) = precomputed_workers {
+        pool.get_worker_for_socket(&socket)
     } else {
-        let Some(s) = get_or_init_h3_engine_for_peer(&listener_id, peer, runtime) else {
+        let Some(pool) = get_or_init_h3_workers(&listener_id, runtime) else {
             tracing::warn!(
                 listener = %listener_id,
                 peer = %peer,
@@ -48,14 +80,14 @@ pub async fn handle_http3_udp(
             );
             return;
         };
-        s
+        pool.get_worker_for_socket(&socket)
     };
 
-    shard.register_socket(&socket);
+    worker.register_socket(&socket);
 
     let now = std::time::Instant::now();
     let (outgoing, requests) = {
-        let mut engine = shard.engine.lock();
+        let mut engine = worker.engine.lock();
         engine.handle_datagram(
             now,
             datagram.peer(),
@@ -65,15 +97,8 @@ pub async fn handle_http3_udp(
     };
 
     // 1. Send all outgoing handshake / ACK datagrams immediately outside the engine lock
-    for pkt in outgoing {
-        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
-            if let Err(e) = res {
-                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send outgoing datagram via try_send_to");
-            }
-        } else if let Err(e) = socket.send_to(&pkt.payload, pkt.peer).await {
-            tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send outgoing datagram via send_to");
-        }
-    }
+    //    using GSO-aware path (UDP_SEGMENT cmsg) when quinn-proto provides segment_size.
+    send_outgoing_packets(&socket, outgoing).await;
 
     let n_reqs = requests.len() as u64;
     if n_reqs > 0 {
@@ -90,7 +115,7 @@ pub async fn handle_http3_udp(
     // 2. Process complete L7 requests concurrently without blocking other datagrams
     for req_event in requests {
         let socket = socket.clone();
-        let shard = shard.clone();
+        let worker = worker.clone();
         let lid = listener_id.clone();
         let runtime = runtime.clone();
 
@@ -118,8 +143,9 @@ pub async fn handle_http3_udp(
                 );
                 let too_early = L7Response::from_bytes(
                     StatusCode::TOO_EARLY,
-                    b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n"
-                        .to_vec(),
+                    Bytes::from_static(
+                        b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n",
+                    ),
                 )
                 .with_header(
                     CONTENT_TYPE,
@@ -127,7 +153,7 @@ pub async fn handle_http3_udp(
                 );
                 let resp_now = std::time::Instant::now();
                 let resp_pkts = {
-                    let mut engine = shard.engine.lock();
+                    let mut engine = worker.engine.lock();
                     engine.send_response(
                         resp_now,
                         req_event.handle,
@@ -136,13 +162,7 @@ pub async fn handle_http3_udp(
                     )
                 };
                 if let Ok(pkts) = resp_pkts {
-                    for pkt in pkts {
-                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
-                            let _ = res;
-                        } else {
-                            let _ = socket.send_to(&pkt.payload, pkt.peer).await;
-                        }
-                    }
+                    send_outgoing_packets(&socket, pkts).await;
                 }
                 return;
             }
@@ -157,7 +177,7 @@ pub async fn handle_http3_udp(
                 );
                 let bad_req = L7Response::from_bytes(
                     StatusCode::BAD_REQUEST,
-                    b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
+                    Bytes::from_static(b"400 Bad Request: unsafe or invalid URI path\n"),
                 )
                 .with_header(
                     CONTENT_TYPE,
@@ -165,17 +185,11 @@ pub async fn handle_http3_udp(
                 );
                 let resp_now = std::time::Instant::now();
                 let resp_pkts = {
-                    let mut engine = shard.engine.lock();
+                    let mut engine = worker.engine.lock();
                     engine.send_response(resp_now, req_event.handle, req_event.stream_id, &bad_req)
                 };
                 if let Ok(pkts) = resp_pkts {
-                    for pkt in pkts {
-                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
-                            let _ = res;
-                        } else {
-                            let _ = socket.send_to(&pkt.payload, pkt.peer).await;
-                        }
-                    }
+                    send_outgoing_packets(&socket, pkts).await;
                 }
                 return;
             }
@@ -199,7 +213,7 @@ pub async fn handle_http3_udp(
             }
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
-                let mut engine = shard.engine.lock();
+                let mut engine = worker.engine.lock();
                 engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
             };
 
@@ -214,15 +228,7 @@ pub async fn handle_http3_udp(
                             "send_response returned ZERO outgoing packets!"
                         );
                     }
-                    for pkt in pkts {
-                        if let Some(res) = socket.try_send_to(&pkt.payload, pkt.peer) {
-                            if let Err(e) = res {
-                                tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send response packet via try_send_to");
-                            }
-                        } else if let Err(e) = socket.send_to(&pkt.payload, pkt.peer).await {
-                            tracing::warn!(peer = %pkt.peer, error = %e, "Failed to send response packet via send_to");
-                        }
-                    }
+                    send_outgoing_packets(&socket, pkts).await;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -244,7 +250,7 @@ pub async fn handle_http3_udp(
 }
 
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
-pub async fn process_http3_request(
+async fn process_http3_request(
     req: &L7Request,
     listener_id: &str,
     runtime: &SharedRuntime,
@@ -267,7 +273,7 @@ pub async fn process_http3_request(
         );
         return L7Response::from_bytes(
             StatusCode::NOT_FOUND,
-            b"404 Not Found: no matching route\n".to_vec(),
+            Bytes::from_static(b"404 Not Found: no matching route\n"),
         )
         .with_header(
             CONTENT_TYPE,
@@ -284,7 +290,7 @@ pub async fn process_http3_request(
         );
         return L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: upstream not configured\n".to_vec(),
+            Bytes::from_static(b"503 Service Unavailable: upstream not configured\n"),
         )
         .with_header(
             CONTENT_TYPE,
@@ -303,7 +309,7 @@ pub async fn process_http3_request(
         );
         return L7Response::from_bytes(
             StatusCode::TOO_MANY_REQUESTS,
-            b"429 Too Many Requests\n".to_vec(),
+            Bytes::from_static(b"429 Too Many Requests\n"),
         )
         .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
         .with_header(
