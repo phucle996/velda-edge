@@ -277,11 +277,11 @@ impl Http3Config {
         }
 
         // 3. Edge-to-Backend Low Latency & High Throughput:
-        // - Initial RTT of 10ms (low latency while preventing false-positive PTO loss under concurrency spikes)
+        // - Initial RTT of 333ms (RFC 9002 Section 6.2.2 standard, preventing false-positive PTO loss under concurrency spikes)
         // - Send window matching connection window to prevent upload pipe starvation
         // - Cubic congestion controller with tier-scaled initial congestion window
         // - Explicit segmentation offload enablement
-        transport.initial_rtt(std::time::Duration::from_millis(10));
+        transport.initial_rtt(std::time::Duration::from_millis(333));
         transport.send_window(self.conn_send_window);
         let mut cubic = quinn_proto::congestion::CubicConfig::default();
         cubic.initial_window(self.initial_congestion_window);

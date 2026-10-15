@@ -1,11 +1,7 @@
 //! Velda Edge binary entrypoint.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::watch;
-use velda_edge::{
-    EdgeConfig, EdgeSupervisor, HardwareTopology, ThreadPinner, resolve_runtime_profile,
-};
+use velda_edge::{EdgeConfig, EdgeSupervisor, HardwareTopology, resolve_runtime_profile};
 
 #[cfg(all(
     feature = "jemalloc",
@@ -149,40 +145,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cores = hardware.available_cores,
         workers = worker_threads,
         cpu_pinning,
-        "Configuring multi-threaded Tokio runtime"
+        "Bootstrapping Thread-Per-Core (Share-Nothing / Core-Affined) Edge Architecture"
     );
 
-    // Build Tokio runtime with CPU core pinning and designated thread names
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(worker_threads);
-    builder.thread_name_fn(|| {
-        static WORKER_ID: AtomicUsize = AtomicUsize::new(0);
-        let id = WORKER_ID.fetch_add(1, Ordering::Relaxed);
-        format!("velda-worker-{id}")
-    });
+    // Build dedicated Supervisor runtime (lightweight single-threaded runtime for IPC and signals)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .thread_name("velda-supervisor")
+        .build()?;
 
-    // Datacenter edge tuning:
-    // - event_interval: 31 (default 61): polls epoll I/O driver twice as frequently to gash P99 tail latency.
-    // - global_queue_interval: 127 (default 61): prioritizes per-core local queue work before acquiring global injection mutex.
-    // - thread_stack_size: 1MB (default 2MB): optimizes CPU cache locality and virtual memory footprint for async state machines.
-    // - max_blocking_threads: 512, thread_keep_alive: 30s.
-    builder.event_interval(31);
-    builder.global_queue_interval(127);
-    builder.thread_stack_size(1024 * 1024);
-    builder.max_blocking_threads(512);
-    builder.thread_keep_alive(std::time::Duration::from_secs(30));
-
-    if cpu_pinning {
-        let pinner = Arc::new(ThreadPinner::new());
-        builder.on_thread_start(move || {
-            pinner.pin_current_worker();
-        });
-    }
-
-    builder.enable_all();
-    let runtime = builder.build()?;
-
-    // Execute edge gateway within custom runtime
+    // Execute edge supervisor; worker threads are spawned 1:1 on dedicated CPU cores
     runtime.block_on(async_main(config))
 }
 

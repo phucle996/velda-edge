@@ -206,6 +206,9 @@ impl RuntimeProfile {
         if let Some(rxq_ovfl) = self.transport.udp.rxq_ovfl {
             cfg = cfg.with_rxq_ovfl(rxq_ovfl);
         }
+        if let Some(prefer_busy_poll) = self.transport.udp.prefer_busy_poll {
+            cfg = cfg.with_prefer_busy_poll(prefer_busy_poll);
+        }
         cfg
     }
 

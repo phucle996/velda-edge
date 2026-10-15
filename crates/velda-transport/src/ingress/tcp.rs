@@ -67,6 +67,22 @@ impl TcpIngress {
         })
     }
 
+    /// Binds a single-shard TCP ingress listener affined to a specific worker.
+    pub fn bind_shard(
+        binding: TcpBinding,
+        worker_id: usize,
+        addr_override: Option<SocketAddr>,
+    ) -> Result<Self> {
+        let addr = addr_override.unwrap_or(binding.addr);
+        let listener = TcpListener::bind_shard(addr, binding.config.clone(), worker_id)?;
+        let listener_id = Arc::from(binding.id.as_str());
+        Ok(Self {
+            listeners: vec![listener],
+            binding,
+            listener_id,
+        })
+    }
+
     /// Returns the bound local socket address.
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {

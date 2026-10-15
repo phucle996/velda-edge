@@ -542,9 +542,9 @@ pub(crate) async fn run_client_driver(
             _ = tokio::time::sleep(timeout_sleep) => {
                 let now = Instant::now();
                 if let Some(timeout) = conn.poll_timeout()
-                    && timeout <= now
+                    && timeout <= now + Duration::from_millis(1)
                 {
-                    conn.handle_timeout(now);
+                    conn.handle_timeout(now.max(timeout));
                 }
             }
         }

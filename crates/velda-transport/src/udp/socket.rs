@@ -158,6 +158,14 @@ impl UdpSocket {
                     &budget as *const _ as *const libc::c_void,
                     std::mem::size_of_val(&budget) as libc::socklen_t,
                 );
+                let busy_poll_us: libc::c_int = 50;
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BUSY_POLL,
+                    &busy_poll_us as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&busy_poll_us) as libc::socklen_t,
+                );
             }
         }
 
@@ -191,14 +199,27 @@ impl UdpSocket {
         })
     }
 
+    /// Binds a single UDP socket shard affined to a specific worker/CPU core.
+    pub fn bind_shard(addr: SocketAddr, config: UdpSocketConfig, worker_id: usize) -> Result<Self> {
+        let mut socket = Self::bind(addr, config.clone())?;
+        socket.worker_id = worker_id;
+        #[cfg(target_os = "linux")]
+        {
+            let available_cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            socket.apply_incoming_cpu(worker_id % available_cpus);
+        }
+        Ok(socket)
+    }
+
     /// Binds multiple UDP socket shards to the specified address with `SO_REUSEPORT`.
     ///
     /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
     /// `config.concurrency_shards` sockets to the same port.
     /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
     pub fn bind_shards(addr: SocketAddr, config: UdpSocketConfig) -> Result<Vec<Self>> {
-        let mut first = Self::bind(addr, config.clone())?;
-        first.worker_id = 0;
+        let first = Self::bind_shard(addr, config.clone(), 0)?;
         let actual_addr = first.local_addr();
         let target_shards = if config.reuseport {
             config.concurrency_shards.max(1)
@@ -214,11 +235,8 @@ impl UdpSocket {
         shards.push(first);
 
         for shard_idx in 1..target_shards {
-            match Self::bind(actual_addr, config.clone()) {
-                Ok(mut shard) => {
-                    shard.worker_id = shard_idx;
-                    shards.push(shard);
-                }
+            match Self::bind_shard(actual_addr, config.clone(), shard_idx) {
+                Ok(shard) => shards.push(shard),
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,
@@ -232,6 +250,40 @@ impl UdpSocket {
         }
 
         Ok(shards)
+    }
+
+    /// Affines the UDP socket queue to a specific CPU core (`SO_INCOMING_CPU`) on Linux.
+    ///
+    /// When combined with `SO_REUSEPORT`, Linux kernel steers incoming UDP datagrams
+    /// processed on that CPU's NAPI/softirq handler directly to this socket shard,
+    /// eliminating cross-core cache invalidation and IPC thrashing.
+    pub fn apply_incoming_cpu(&self, cpu: usize) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.socket.as_raw_fd();
+            let val: libc::c_int = cpu as libc::c_int;
+            unsafe {
+                let ret = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_INCOMING_CPU,
+                    &val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&val) as libc::socklen_t,
+                );
+                if ret != 0 {
+                    tracing::trace!(
+                        cpu,
+                        errno = std::io::Error::last_os_error().raw_os_error(),
+                        "SO_INCOMING_CPU socket option skipped or unsupported on UDP socket"
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = cpu;
+        }
     }
 
     /// Wraps an existing Tokio [`TokioUdpSocket`] with the given configuration.
@@ -544,18 +596,27 @@ impl UdpSocket {
             msgs[i].msg_hdr.msg_iovlen = 1;
         }
 
-        let ret = unsafe {
-            libc::recvmmsg(
-                fd,
-                msgs.as_mut_ptr(),
-                max_batch as u32,
-                libc::MSG_DONTWAIT,
-                std::ptr::null_mut(),
-            )
-        };
+        let ret = self.socket.try_io(tokio::io::Interest::READABLE, || {
+            let res = unsafe {
+                libc::recvmmsg(
+                    fd,
+                    msgs.as_mut_ptr(),
+                    max_batch as u32,
+                    libc::MSG_DONTWAIT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if res >= 0 {
+                Ok(res)
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
 
-        if ret > 0 {
-            let count = ret as usize;
+        if let Ok(res_count) = ret
+            && res_count > 0
+        {
+            let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
                 let n = msgs[i].msg_len as usize;
@@ -663,18 +724,27 @@ impl UdpSocket {
             msgs[i].msg_hdr.msg_iovlen = 1;
         }
 
-        let ret = unsafe {
-            libc::recvmmsg(
-                fd,
-                msgs.as_mut_ptr(),
-                max_batch as u32,
-                libc::MSG_DONTWAIT,
-                std::ptr::null_mut(),
-            )
-        };
+        let ret = self.socket.try_io(tokio::io::Interest::READABLE, || {
+            let res = unsafe {
+                libc::recvmmsg(
+                    fd,
+                    msgs.as_mut_ptr(),
+                    max_batch as u32,
+                    libc::MSG_DONTWAIT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if res >= 0 {
+                Ok(res)
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
 
-        if ret > 0 {
-            let count = ret as usize;
+        if let Ok(res_count) = ret
+            && res_count > 0
+        {
+            let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
                 let n = msgs[i].msg_len as usize;

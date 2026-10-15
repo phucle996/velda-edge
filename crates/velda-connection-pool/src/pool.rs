@@ -242,6 +242,38 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
             }
         }
 
+        // Step 3: Work-stealing across all remaining sibling shards before declaring a miss.
+        // Prevents expensive TCP/TLS reconnections under high concurrency (200-300 clients)
+        // by reusing idle keep-alive connections held in any shard.
+        for shard in self.shards.all_shards() {
+            if std::ptr::eq(shard, local_shard) || std::ptr::eq(shard, base_shard) {
+                continue;
+            }
+            loop {
+                let candidate = {
+                    let mut table = shard.lock();
+                    if let Some(subpool) = table.get_mut(key) {
+                        subpool.pop_candidate(idle_timeout, max_lifetime, now)
+                    } else {
+                        None
+                    }
+                };
+
+                match candidate {
+                    Some(mut resource) => {
+                        if resource.is_healthy() {
+                            resource.touch_at(now);
+                            shard.record_hit();
+                            return Some(resource);
+                        } else {
+                            resource.close();
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+
         local_shard.record_miss();
         None
     }

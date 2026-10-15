@@ -79,7 +79,7 @@ async fn send_h1_buffered(
     cfg: &velda_http1::config::Http1Config,
 ) -> Result<L7Response, velda_http1::Http1Error> {
     let mut write_buf = BytesMut::with_capacity(1024);
-    let read_cap = cfg.client_body_buffer_size.clamp(16_384, 65_536);
+    let read_cap = cfg.client_body_buffer_size.clamp(4_096, 65_536);
     let mut read_buf = BytesMut::with_capacity(read_cap);
 
     velda_http1::client::send_request_parts(
@@ -120,7 +120,7 @@ async fn send_h1_buffered(
             }
         }
         velda_http1::server::request::Http1BodyFraming::Chunked => {
-            let mut chunked_body = BytesMut::new();
+            let mut chunked_body = BytesMut::with_capacity(4096);
             while let Some(chunk) =
                 velda_http1::client::read_next_chunk(stream, &mut read_buf).await?
             {

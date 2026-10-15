@@ -151,15 +151,7 @@ impl UdpSocketConfig {
         if ladder.udp_egress >= velda_core::UdpEgressTier::GenericSegmentationOffload {
             cfg.gso = true;
         }
-        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            )
-        {
+        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll {
             cfg.prefer_busy_poll = true;
         }
         cfg

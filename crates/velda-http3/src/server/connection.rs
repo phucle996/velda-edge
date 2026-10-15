@@ -533,9 +533,9 @@ impl Http3Engine {
         for (&handle, conn) in self.connections.iter_mut() {
             let mut handle_timeout = false;
             if let Some(timeout) = conn.poll_timeout()
-                && timeout <= now
+                && timeout <= now + std::time::Duration::from_millis(1)
             {
-                conn.handle_timeout(now);
+                conn.handle_timeout(now.max(timeout));
                 handle_timeout = true;
             }
 

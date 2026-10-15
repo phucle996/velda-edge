@@ -162,27 +162,35 @@ impl TcpListener {
         }
     }
 
+    /// Binds a single TCP listener shard affined to a specific worker/CPU core.
+    pub fn bind_shard(
+        addr: SocketAddr,
+        config: TcpListenerConfig,
+        worker_id: usize,
+    ) -> Result<Self> {
+        let listener = Self::bind(addr, config.clone())?;
+        if config.incoming_cpu {
+            let available_cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            listener.apply_incoming_cpu(worker_id % available_cpus);
+        }
+        Ok(listener)
+    }
+
     /// Binds multiple TCP listener shards to the specified address with `SO_REUSEPORT`.
     ///
     /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
     /// `config.concurrency_shards` sockets to the same port.
     /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
     pub fn bind_shards(addr: SocketAddr, config: TcpListenerConfig) -> Result<Vec<Self>> {
-        let first = Self::bind(addr, config.clone())?;
+        let first = Self::bind_shard(addr, config.clone(), 0)?;
         let actual_addr = first.local_addr();
         let target_shards = if config.reuseport {
             config.concurrency_shards.max(1)
         } else {
             1
         };
-
-        let available_cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-
-        if config.incoming_cpu {
-            first.apply_incoming_cpu(0);
-        }
 
         if target_shards <= 1 {
             return Ok(vec![first]);
@@ -192,13 +200,8 @@ impl TcpListener {
         shards.push(first);
 
         for shard_idx in 1..target_shards {
-            match Self::bind(actual_addr, config.clone()) {
-                Ok(shard) => {
-                    if config.incoming_cpu {
-                        shard.apply_incoming_cpu(shard_idx % available_cpus);
-                    }
-                    shards.push(shard);
-                }
+            match Self::bind_shard(actual_addr, config.clone(), shard_idx) {
+                Ok(shard) => shards.push(shard),
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,

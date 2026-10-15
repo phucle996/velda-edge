@@ -111,6 +111,8 @@ pub struct UdpRuntimeConfig {
     pub gso: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rxq_ovfl: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer_busy_poll: Option<bool>,
 }
 
 impl UdpRuntimeConfig {

@@ -148,6 +148,7 @@ pub async fn handle_http3_udp(
             datagram.data(),
         )
     };
+    worker.notify.notify_one();
 
     // 1. Send all outgoing handshake / ACK datagrams immediately outside the engine lock
     //    using GSO-aware path (UDP_SEGMENT cmsg) when quinn-proto provides segment_size.
@@ -198,16 +199,7 @@ pub async fn handle_http3_udp(
                     path = %req_event.request.path(),
                     "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
                 );
-                let too_early = L7Response::from_bytes(
-                    StatusCode::TOO_EARLY,
-                    Bytes::from_static(
-                        b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n",
-                    ),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                );
+                let too_early = make_too_early_response();
                 let msg = super::engine::Http3ResponseMsg {
                     handle: req_event.handle,
                     stream_id: req_event.stream_id,
@@ -225,14 +217,7 @@ pub async fn handle_http3_udp(
                     path = %req.path(),
                     "Rejecting HTTP/3 request with unsafe URI path"
                 );
-                let bad_req = L7Response::from_bytes(
-                    StatusCode::BAD_REQUEST,
-                    Bytes::from_static(b"400 Bad Request: unsafe or invalid URI path\n"),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                );
+                let bad_req = make_bad_request_response();
                 let msg = super::engine::Http3ResponseMsg {
                     handle: req_event.handle,
                     stream_id: req_event.stream_id,
@@ -249,16 +234,7 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
-            let t_req = std::time::Instant::now();
             let response = process_http3_request(&req, &lid, &runtime).await;
-            let req_dur = t_req.elapsed();
-            if req_dur > std::time::Duration::from_millis(100) {
-                tracing::warn!(
-                    stream = %req_event.stream_id,
-                    dur_ms = req_dur.as_millis(),
-                    "process_http3_request took >100ms!"
-                );
-            }
 
             let msg = super::engine::Http3ResponseMsg {
                 handle: req_event.handle,
@@ -298,14 +274,7 @@ async fn process_http3_request(
             method = %req.method,
             "No HTTP/3 route matched"
         );
-        return L7Response::from_bytes(
-            StatusCode::NOT_FOUND,
-            Bytes::from_static(b"404 Not Found: no matching route\n"),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
+        return make_not_found_response();
     };
 
     let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
@@ -315,14 +284,7 @@ async fn process_http3_request(
             upstream = %route.upstream_name,
             "No HTTP upstream configured"
         );
-        return L7Response::from_bytes(
-            StatusCode::SERVICE_UNAVAILABLE,
-            Bytes::from_static(b"503 Service Unavailable: upstream not configured\n"),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
+        return make_service_unavailable_response();
     };
 
     // Resource Saturation Circuit Breaker (Overload Protection)
@@ -334,15 +296,7 @@ async fn process_http3_request(
             overload = ?overload_lvl,
             "Shedding HTTP/3 request due to memory saturation"
         );
-        return L7Response::from_bytes(
-            StatusCode::TOO_MANY_REQUESTS,
-            Bytes::from_static(b"429 Too Many Requests\n"),
-        )
-        .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
+        return make_overload_response();
     }
 
     // ========================================================================
@@ -380,6 +334,72 @@ async fn process_http3_request(
             Http1PipeStrategy::Duplex => pipe::duplex_h3_h1::serve(req, upstream).await,
         },
     }
+}
+
+#[cold]
+#[inline(never)]
+fn make_too_early_response() -> L7Response {
+    L7Response::from_bytes(
+        StatusCode::TOO_EARLY,
+        Bytes::from_static(b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n"),
+    )
+    .with_header(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn make_bad_request_response() -> L7Response {
+    L7Response::from_bytes(
+        StatusCode::BAD_REQUEST,
+        Bytes::from_static(b"400 Bad Request: unsafe or invalid URI path\n"),
+    )
+    .with_header(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn make_not_found_response() -> L7Response {
+    L7Response::from_bytes(
+        StatusCode::NOT_FOUND,
+        Bytes::from_static(b"404 Not Found: no matching route\n"),
+    )
+    .with_header(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn make_service_unavailable_response() -> L7Response {
+    L7Response::from_bytes(
+        StatusCode::SERVICE_UNAVAILABLE,
+        Bytes::from_static(b"503 Service Unavailable: upstream not configured\n"),
+    )
+    .with_header(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn make_overload_response() -> L7Response {
+    L7Response::from_bytes(
+        StatusCode::TOO_MANY_REQUESTS,
+        Bytes::from_static(b"429 Too Many Requests\n"),
+    )
+    .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
+    .with_header(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    )
 }
 
 #[cfg(test)]

@@ -88,7 +88,7 @@ async fn send_h1_duplex(
     cfg: &velda_http1::config::Http1Config,
 ) -> Result<L7Response, velda_http1::Http1Error> {
     let mut write_buf = BytesMut::with_capacity(1024);
-    let read_cap = cfg.client_body_buffer_size.clamp(16_384, 65_536);
+    let read_cap = cfg.client_body_buffer_size.clamp(4_096, 65_536);
     let mut read_buf = BytesMut::with_capacity(read_cap);
 
     velda_http1::client::send_request_parts(

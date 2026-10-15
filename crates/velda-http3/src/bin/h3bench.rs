@@ -166,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut status_5xx: usize = 0;
             let mut errors: usize = 0;
 
-            let client = &clients[worker_id % clients.len()];
+            let mut client_idx = worker_id % clients.len();
 
             loop {
                 let req_idx = counter.fetch_add(1, Ordering::Relaxed);
@@ -191,32 +191,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     req.headers.insert("host", hv);
                 }
 
-                let t0 = Instant::now();
-                match client.send_request(req).await {
-                    Ok(resp) => {
-                        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                        latencies.push(elapsed_ms);
+                let mut retries = 0;
+                while retries < 3 {
+                    let client = &clients[client_idx];
+                    let t0 = Instant::now();
+                    let send_fut = client.send_request(req.clone());
+                    match tokio::time::timeout(std::time::Duration::from_secs(3), send_fut).await {
+                        Ok(Ok(resp)) => {
+                            let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                            latencies.push(elapsed_ms);
 
-                        if resp.status.is_success() {
-                            status_2xx += 1;
-                        } else if resp.status.is_client_error() {
-                            status_4xx += 1;
-                        } else if resp.status.is_server_error() {
-                            status_5xx += 1;
-                        }
+                            if resp.status.is_success() {
+                                status_2xx += 1;
+                            } else if resp.status.is_client_error() {
+                                status_4xx += 1;
+                            } else if resp.status.is_server_error() {
+                                status_5xx += 1;
+                            }
 
-                        if let Body::Bytes(b) = resp.body {
-                            bytes_transferred += b.len();
+                            if let Body::Bytes(b) = resp.body {
+                                bytes_transferred += b.len();
+                            }
+                            break;
                         }
-                    }
-                    Err(e) => {
-                        if errors < 10 {
-                            eprintln!(
-                                "Worker {worker_id} (conn {}) failed on req #{req_idx} after {status_2xx} successes: {e:?}",
-                                worker_id % clients.len()
-                            );
+                        Ok(Err(e)) => {
+                            if errors < 10 {
+                                eprintln!(
+                                    "Worker {worker_id} (conn {client_idx}) failed on req #{req_idx} after {status_2xx} successes: {e:?}",
+                                );
+                            }
+                            if client.is_closed() {
+                                client_idx = (client_idx + 1) % clients.len();
+                            }
+                            retries += 1;
+                            if retries == 3 {
+                                errors += 1;
+                            }
                         }
-                        errors += 1;
+                        Err(_) => {
+                            if errors < 10 {
+                                eprintln!(
+                                    "Worker {worker_id} (conn {client_idx}) request timed out after 3s on req #{req_idx}",
+                                );
+                            }
+                            client_idx = (client_idx + 1) % clients.len();
+                            retries += 1;
+                            if retries == 3 {
+                                errors += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -250,6 +273,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_5xx += s5;
         total_errors += errs;
     }
+
+    // Gracefully close all QUIC connections (RFC 9114 Section 8.1)
+    for client in clients.iter() {
+        let _ = client.close().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let elapsed = bench_start.elapsed();
     let succeeded = all_latencies.len();

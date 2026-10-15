@@ -18,7 +18,7 @@ use crate::upstream::Http3Upstream;
 /// Forward a buffered request over an active HTTP/3 client connection.
 async fn forward_buffered(
     client: &Http3Client,
-    req: L7Request,
+    req: &L7Request,
     config: &Http3Config,
 ) -> Result<L7Response, Http3Error> {
     if let Body::Bytes(ref b) = req.body
@@ -28,7 +28,7 @@ async fn forward_buffered(
     }
 
     let is_head = req.method == http::Method::HEAD;
-    let resp = client.send_request(req).await?;
+    let resp = client.send_request_ref(req).await?;
 
     if let Some(content_type) = resp.headers.get(http::header::CONTENT_TYPE)
         && content_type
@@ -84,7 +84,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
         }
     };
 
-    let mut pipe_res = forward_buffered(&client, req.clone(), &upstream.config).await;
+    let mut pipe_res = forward_buffered(&client, req, &upstream.config).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -98,7 +98,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
-            pipe_res = forward_buffered(&fresh_client, req.clone(), &upstream.config).await;
+            pipe_res = forward_buffered(&fresh_client, req, &upstream.config).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {

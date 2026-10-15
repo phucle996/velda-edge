@@ -104,7 +104,13 @@ async fn send_h2_buffered(
     let response = response_future.await?;
     let (parts, mut body_stream) = response.into_parts();
 
-    let mut resp_body = BytesMut::new();
+    let content_len = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4096);
+    let mut resp_body = BytesMut::with_capacity(content_len.min(65536));
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk?;
         body_stream.flow_control().release_capacity(chunk.len())?;

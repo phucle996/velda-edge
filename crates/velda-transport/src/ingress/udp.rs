@@ -66,6 +66,22 @@ impl UdpIngress {
         })
     }
 
+    /// Binds a single-shard UDP ingress listener affined to a specific worker.
+    pub fn bind_shard(
+        binding: UdpBinding,
+        worker_id: usize,
+        addr_override: Option<SocketAddr>,
+    ) -> Result<Self> {
+        let addr = addr_override.unwrap_or(binding.addr);
+        let socket = UdpSocket::bind_shard(addr, binding.config.clone(), worker_id)?;
+        let listener_id = Arc::from(binding.id.as_str());
+        Ok(Self {
+            sockets: vec![Arc::new(socket)],
+            binding,
+            listener_id,
+        })
+    }
+
     /// Returns the bound local socket address.
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -138,15 +154,14 @@ impl UdpIngress {
             "UDP ingress socket shard bound and receiving"
         );
 
-        // Pre-allocate a 64KB contiguous slab (32 slots * 2048 bytes per slot).
-        // By slicing datagrams out of this frozen slab via Bytes::slice, we achieve zero-allocation
-        // and zero-copy packet ingress under heavy line-rate traffic.
+        // Pre-allocate a 64KB contiguous slab (32 slots * 2048 bytes per slot) once for the shard lifetime.
+        // Reusing this contiguous vector eliminates repeated 64KB heap allocations/deallocations per batch,
+        // keeping the receive buffer permanently warm in CPU L1/L2 cache.
         const BATCH_SIZE: usize = 32;
         const SLOT_SIZE: usize = 2048;
         const SLAB_SIZE: usize = BATCH_SIZE * SLOT_SIZE;
 
-        let mut slab = bytes::BytesMut::with_capacity(SLAB_SIZE);
-        slab.resize(SLAB_SIZE, 0);
+        let mut slab = vec![0u8; SLAB_SIZE];
         let mut batch_out = [(0usize, local_addr); BATCH_SIZE];
 
         loop {
@@ -185,22 +200,12 @@ impl UdpIngress {
                     loop {
                         let count = socket.try_recv_batch_slab(&mut slab, SLOT_SIZE, &mut batch_out);
                         if count == 0 {
-                            // Kernel receive queue is drained: notify Tokio to reset edge-triggered readiness
-                            // via non-blocking zero-byte/dummy receive attempt returning WouldBlock.
-                            let mut dummy = [0u8; 1];
-                            let _ = socket.try_recv_from(&mut dummy);
                             break;
                         }
 
-                        // Freeze the slab buffer into an immutable, refcounted Bytes container.
-                        // Each datagram slices a sub-range (offset..offset + len) without allocating memory
-                        // or copying bytes from the socket buffer.
-                        let chunk = slab.split().freeze();
-                        slab.resize(SLAB_SIZE, 0);
-
                         for (i, &(n, peer)) in batch_out[..count].iter().enumerate() {
                             let offset = i * SLOT_SIZE;
-                            let dgram_bytes = chunk.slice(offset..offset + n);
+                            let dgram_bytes = bytes::Bytes::copy_from_slice(&slab[offset..offset + n]);
                             let dgram = Datagram::new(peer, local_addr, dgram_bytes);
 
                             // Handlers run inline, not in a task per datagram: this keeps packets
@@ -208,13 +213,6 @@ impl UdpIngress {
                             // avoids a task spawn per packet. Handlers must stay short; long work
                             // (e.g. HTTP/3 request processing, L4 session pumps) is spawned by them.
                             handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
-                        }
-
-                        if count < BATCH_SIZE {
-                            // Drained all immediately queued packets in kernel
-                            let mut dummy = [0u8; 1];
-                            let _ = socket.try_recv_from(&mut dummy);
-                            break;
                         }
                     }
                 }

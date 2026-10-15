@@ -35,7 +35,15 @@ impl EdgeSupervisor {
     /// Runs the edge gateway until `shutdown` is signaled.
     #[inline]
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), EdgeError> {
-        crate::lifecycle::run_gateway(self.engine, self.shared_runtime, self.config, shutdown).await
+        crate::lifecycle::run_gateway(
+            self.engine,
+            self.shared_runtime,
+            self.config,
+            self.hardware,
+            self.runtime_profile,
+            shutdown,
+        )
+        .await
     }
 
     /// Returns the hardware topology probed during cold-start bootstrap.

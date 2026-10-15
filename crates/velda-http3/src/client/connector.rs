@@ -209,17 +209,18 @@ impl Http3Client {
 
 /// Configures tuned kernel buffers and opportunistic acceleration flags on an egress UDP socket.
 ///
-/// Implements continuous safe memory budgeting (clamped between 512KB and 16MB) based on
-/// host/cgroup RAM, avoiding rigid tier classification and adapting seamlessly to any VPS or bare-metal host.
+/// Implements safe memory budgeting (clamped between 256KB and 2MB) for upstream client connections,
+/// avoiding socket buffer bloat and kernel `udp_mem` exhaustion when managing many concurrent client sockets.
 ///
-/// Opportunistically enables Linux kernel UDP acceleration (`UDP_GRO`, `SO_RCVBUFFORCE`).
+/// Opportunistically enables Linux kernel UDP acceleration (`SO_RCVBUFFORCE`).
 /// In all cases, failure (e.g. unprivileged container, older kernel) gracefully falls back
 /// to standard unaccelerated socket options without interrupting connection establishment.
 fn tune_udp_socket(sock: &socket2::Socket) {
     let topology = velda_core::global_hardware_topology();
     let total_ram = topology.memory.total_bytes;
-    // 1/64 of available host/cgroup RAM, clamped between 512KB and 16MB.
-    let desired_buf = ((total_ram / 64) as usize).clamp(512 * 1024, 16 * 1024 * 1024);
+    // Upstream client socket: conservative buffer allocation (256KB to 2MB)
+    // to prevent socket memory exhaustion when multiplexing multiple client connections.
+    let desired_buf = ((total_ram / 1024) as usize).clamp(256 * 1024, 2 * 1024 * 1024);
 
     #[cfg(target_os = "linux")]
     {

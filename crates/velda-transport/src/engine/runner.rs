@@ -13,24 +13,41 @@ use crate::udp::datagram::Datagram;
 use crate::udp::socket::UdpSocket;
 
 /// Controller handle allowing supervisors to submit declarative listener reconciliations
-/// to the running [`TrafficEngine`]. Keeps the internal channel type out of the public API.
+/// to the running [`TrafficEngine`] or its partitioned worker engines. Keeps the internal channel type out of the public API.
 #[derive(Clone, Debug)]
 pub struct EngineHandle {
-    reconcile_tx: mpsc::Sender<Vec<IngressBinding>>,
+    reconcile_senders: Vec<mpsc::Sender<Vec<IngressBinding>>>,
 }
 
 impl EngineHandle {
-    /// Submits a declarative list of desired ingress bindings to the running traffic engine.
+    /// Creates a handle bound to a single reconciliation sender.
+    pub fn new(reconcile_tx: mpsc::Sender<Vec<IngressBinding>>) -> Self {
+        Self {
+            reconcile_senders: vec![reconcile_tx],
+        }
+    }
+
+    /// Creates a handle broadcasting reconciliations across multiple worker senders.
+    pub fn with_senders(senders: Vec<mpsc::Sender<Vec<IngressBinding>>>) -> Self {
+        Self {
+            reconcile_senders: senders,
+        }
+    }
+
+    /// Submits a declarative list of desired ingress bindings to the running traffic engine(s).
     ///
     /// The engine automatically compares desired bindings against live sockets, binding new
     /// ports, gracefully closing removed ports, and leaving identical listeners untouched.
     pub async fn reconcile(&self, desired: Vec<IngressBinding>) -> Result<()> {
-        self.reconcile_tx.send(desired).await.map_err(|_| {
-            TransportError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "TrafficEngine has terminated",
-            ))
-        })
+        for tx in &self.reconcile_senders {
+            tx.send(desired.clone()).await.map_err(|_| {
+                TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TrafficEngine has terminated",
+                ))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -79,9 +96,39 @@ impl TrafficEngine {
 
     /// Returns a lightweight controller handle to dynamically submit declarative listener reconciliations.
     pub fn handle(&self) -> EngineHandle {
-        EngineHandle {
-            reconcile_tx: self.reconcile_tx.clone(),
+        EngineHandle::new(self.reconcile_tx.clone())
+    }
+
+    /// Partitions the engine into `worker_count` independent worker engines,
+    /// returning the workers, the combined initial bindings, and an `EngineHandle` to reconcile all workers.
+    pub fn into_workers(
+        self,
+        worker_count: usize,
+    ) -> (
+        Vec<super::worker::WorkerEngine>,
+        Vec<IngressBinding>,
+        EngineHandle,
+    ) {
+        let count = worker_count.max(1);
+        let mut workers = Vec::with_capacity(count);
+        let mut senders = Vec::with_capacity(count);
+
+        for worker_id in 0..count {
+            let (tx, rx) = mpsc::channel(32);
+            workers.push(super::worker::WorkerEngine::new(worker_id, count, rx));
+            senders.push(tx);
         }
+
+        let mut bindings = self.initial_bindings;
+        for tcp in self.initial_tcp {
+            bindings.push(IngressBinding::Tcp(tcp.binding().clone()));
+        }
+        for udp in self.initial_udp {
+            bindings.push(IngressBinding::Udp(udp.binding().clone()));
+        }
+
+        let handle = EngineHandle::with_senders(senders);
+        (workers, bindings, handle)
     }
 
     /// Registers a pre-bound TCP ingress listener directly.

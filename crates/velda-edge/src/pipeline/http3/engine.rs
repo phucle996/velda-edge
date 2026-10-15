@@ -37,6 +37,7 @@ pub struct Http3Worker {
     response_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Http3ResponseMsg>>>,
     socket: ArcSwapOption<UdpSocket>,
     ticker_started: std::sync::atomic::AtomicBool,
+    pub notify: tokio::sync::Notify,
 }
 
 impl Http3Worker {
@@ -55,6 +56,7 @@ impl Http3Worker {
             response_rx: Mutex::new(Some(rx)),
             socket: ArcSwapOption::empty(),
             ticker_started: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -83,37 +85,27 @@ impl Http3Worker {
             let worker_weak = Arc::downgrade(self);
             tokio::spawn(async move {
                 let mut batch = Vec::with_capacity(64);
-                let (mut next_timeout, mut has_conns) = {
+                let mut next_timeout = {
                     let Some(worker) = worker_weak.upgrade() else {
                         return;
                     };
                     let mut engine = worker.engine.lock();
-                    (engine.poll_timeout(), engine.connection_count() > 0)
+                    engine.poll_timeout()
                 };
 
                 loop {
-                    let sleep_dur = match next_timeout {
-                        Some(t) => {
-                            let now = Instant::now();
-                            if t <= now {
-                                Duration::from_micros(50)
-                            } else {
-                                (t - now)
-                                    .clamp(Duration::from_micros(100), Duration::from_millis(25))
-                            }
+                    // Quinn invariant: If poll_timeout is None, NO timer is active.
+                    // Sleeping or polling when None causes futile wakeups and futex lock contention.
+                    let sleep_opt = next_timeout.map(|t| {
+                        let now = Instant::now();
+                        if t <= now {
+                            Duration::from_micros(50)
+                        } else {
+                            (t - now).clamp(Duration::from_micros(50), Duration::from_millis(50))
                         }
-                        None => {
-                            if has_conns {
-                                Duration::from_millis(10)
-                            } else {
-                                Duration::from_millis(50)
-                            }
-                        }
-                    };
+                    });
 
                     tokio::select! {
-                        biased;
-
                         msg = rx.recv() => {
                             match msg {
                                 Some(first_msg) => {
@@ -135,9 +127,10 @@ impl Http3Worker {
 
                                     let mut all_outgoing = Vec::with_capacity(batch.len() * 2);
                                     let now = Instant::now();
-                                    {
+                                    while !batch.is_empty() {
+                                        let chunk_len = batch.len().min(4);
                                         let mut engine = worker.engine.lock();
-                                        for item in batch.drain(..) {
+                                        for item in batch.drain(..chunk_len) {
                                             match engine.send_response(
                                                 now,
                                                 item.handle,
@@ -160,7 +153,15 @@ impl Http3Worker {
                                             }
                                         }
                                         next_timeout = engine.poll_timeout();
-                                        has_conns = engine.connection_count() > 0;
+                                    }
+
+                                    // If Quinn's loss detection or PTO timer has expired, handle it immediately in the same pass
+                                    if let Some(t) = next_timeout && t <= now {
+                                        let mut engine = worker.engine.lock();
+                                        if engine.connection_count() > 0 {
+                                            all_outgoing.extend(engine.handle_timeouts(now));
+                                        }
+                                        next_timeout = engine.poll_timeout();
                                     }
 
                                     if !all_outgoing.is_empty() {
@@ -171,7 +172,41 @@ impl Http3Worker {
                             }
                         }
 
-                        _ = tokio::time::sleep(sleep_dur) => {
+                        _ = async {
+                            let Some(worker) = worker_weak.upgrade() else {
+                                std::future::pending::<()>().await;
+                                return;
+                            };
+                            worker.notify.notified().await;
+                        } => {
+                            let Some(worker) = worker_weak.upgrade() else {
+                                break;
+                            };
+                            let now = Instant::now();
+                            let outgoing = {
+                                let mut engine = worker.engine.lock();
+                                let pkts = if let Some(t) = engine.poll_timeout() && t <= now && engine.connection_count() > 0 {
+                                    engine.handle_timeouts(now)
+                                } else {
+                                    Vec::new()
+                                };
+                                next_timeout = engine.poll_timeout();
+                                pkts
+                            };
+                            if !outgoing.is_empty()
+                                && let Some(socket) = worker.socket.load_full()
+                            {
+                                super::downstream::send_outgoing_packets(&socket, outgoing).await;
+                            }
+                        }
+
+                        _ = async {
+                            if let Some(dur) = sleep_opt {
+                                tokio::time::sleep(dur).await;
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        } => {
                             let Some(worker) = worker_weak.upgrade() else {
                                 break;
                             };
@@ -188,7 +223,6 @@ impl Http3Worker {
                                     engine.handle_timeouts(now)
                                 };
                                 next_timeout = engine.poll_timeout();
-                                has_conns = engine.connection_count() > 0;
                                 pkts
                             };
 
@@ -211,6 +245,22 @@ pub struct Http3WorkerPool {
 }
 
 impl Http3WorkerPool {
+    /// Creates a per-core worker pool sized to an explicit worker count.
+    pub fn with_worker_count(
+        quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
+        h3_config: velda_http3::Http3Config,
+        count: usize,
+    ) -> Self {
+        let count = count.max(1);
+        let mut workers = Vec::with_capacity(count);
+        for worker_id in 0..count {
+            workers.push(Http3Worker::new(worker_id, quic_cfg.clone(), h3_config));
+        }
+        Self {
+            workers: Arc::new(workers),
+        }
+    }
+
     /// Creates a per-core worker pool sized 1:1 with hardware CPU cores.
     pub fn new(
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
@@ -219,15 +269,7 @@ impl Http3WorkerPool {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let count = cores.max(1);
-
-        let mut workers = Vec::with_capacity(count);
-        for worker_id in 0..count {
-            workers.push(Http3Worker::new(worker_id, quic_cfg.clone(), h3_config));
-        }
-        Self {
-            workers: Arc::new(workers),
-        }
+        Self::with_worker_count(quic_cfg, h3_config, cores)
     }
 
     /// Selects the worker assigned 1:1 to the socket that received the datagram.
