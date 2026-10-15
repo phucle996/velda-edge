@@ -83,22 +83,23 @@ impl Http3Worker {
             let worker_weak = Arc::downgrade(self);
             tokio::spawn(async move {
                 let mut batch = Vec::with_capacity(64);
-                loop {
-                    let (min_timeout, has_conns) = {
-                        let Some(worker) = worker_weak.upgrade() else {
-                            break;
-                        };
-                        let mut engine = worker.engine.lock();
-                        (engine.poll_timeout(), engine.connection_count() > 0)
+                let (mut next_timeout, mut has_conns) = {
+                    let Some(worker) = worker_weak.upgrade() else {
+                        return;
                     };
+                    let mut engine = worker.engine.lock();
+                    (engine.poll_timeout(), engine.connection_count() > 0)
+                };
 
-                    let sleep_dur = match min_timeout {
+                loop {
+                    let sleep_dur = match next_timeout {
                         Some(t) => {
                             let now = Instant::now();
                             if t <= now {
-                                Duration::from_millis(1)
+                                Duration::from_micros(50)
                             } else {
-                                (t - now).clamp(Duration::from_millis(1), Duration::from_millis(25))
+                                (t - now)
+                                    .clamp(Duration::from_micros(100), Duration::from_millis(25))
                             }
                         }
                         None => {
@@ -132,7 +133,7 @@ impl Http3Worker {
                                         continue;
                                     };
 
-                                    let mut all_outgoing = Vec::new();
+                                    let mut all_outgoing = Vec::with_capacity(batch.len() * 2);
                                     let now = Instant::now();
                                     {
                                         let mut engine = worker.engine.lock();
@@ -158,6 +159,8 @@ impl Http3Worker {
                                                 }
                                             }
                                         }
+                                        next_timeout = engine.poll_timeout();
+                                        has_conns = engine.connection_count() > 0;
                                     }
 
                                     if !all_outgoing.is_empty() {
@@ -178,12 +181,15 @@ impl Http3Worker {
 
                             let outgoing = {
                                 let mut engine = worker.engine.lock();
-                                if engine.connection_count() == 0 {
+                                let pkts = if engine.connection_count() == 0 {
                                     Vec::new()
                                 } else {
                                     let now = Instant::now();
                                     engine.handle_timeouts(now)
-                                }
+                                };
+                                next_timeout = engine.poll_timeout();
+                                has_conns = engine.connection_count() > 0;
+                                pkts
                             };
 
                             if !outgoing.is_empty() {

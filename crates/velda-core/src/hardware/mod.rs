@@ -58,6 +58,40 @@ pub struct HardwareTopology {
     pub worker_threads: usize,
     /// Total/available memory in bytes (respects container cgroups limits).
     pub memory_bytes: usize,
+    /// Pre-computed optimal idle connection capacity per upstream target (scaled from CPU concurrency).
+    pub optimal_max_idle_per_key: usize,
+    /// Pre-computed optimal shard count for concurrency distribution (power-of-two, bounded [8, 1024]).
+    pub concurrency_shards: usize,
+}
+
+#[inline]
+const fn compute_optimal_pool_concurrency(worker_threads: usize) -> (usize, usize) {
+    let workers = if worker_threads == 0 {
+        1
+    } else {
+        worker_threads
+    };
+    let max_idle = {
+        let val = workers * 64;
+        if val < 16 {
+            16
+        } else if val > 4096 {
+            4096
+        } else {
+            val
+        }
+    };
+    let shards = {
+        let val = (workers * 2).next_power_of_two();
+        if val < 8 {
+            8
+        } else if val > 1024 {
+            1024
+        } else {
+            val
+        }
+    };
+    (max_idle, shards)
 }
 
 impl HardwareTopology {
@@ -68,6 +102,8 @@ impl HardwareTopology {
         let cpu = probe_cpu();
         let memory = probe_memory();
         let kernel = probe_kernel();
+        let (optimal_max_idle_per_key, concurrency_shards) =
+            compute_optimal_pool_concurrency(cpu.available_cores);
 
         Self {
             cpu,
@@ -76,6 +112,8 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
+            optimal_max_idle_per_key,
+            concurrency_shards,
         }
     }
 
@@ -83,6 +121,8 @@ impl HardwareTopology {
     #[inline]
     pub fn new(cpu: CpuProfile, memory: MemoryProfile) -> Self {
         let kernel = probe_kernel();
+        let (optimal_max_idle_per_key, concurrency_shards) =
+            compute_optimal_pool_concurrency(cpu.available_cores);
         Self {
             cpu,
             memory,
@@ -90,6 +130,8 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
+            optimal_max_idle_per_key,
+            concurrency_shards,
         }
     }
 
@@ -158,6 +200,18 @@ impl HardwareTopology {
         self.kernel.acceleration.is_accelerated()
     }
 
+    /// Returns the pre-computed optimal idle connection capacity per upstream target.
+    #[inline]
+    pub fn optimal_max_idle_per_key(&self) -> usize {
+        self.optimal_max_idle_per_key
+    }
+
+    /// Returns the pre-computed optimal concurrency shard count.
+    #[inline]
+    pub fn concurrency_shards(&self) -> usize {
+        self.concurrency_shards
+    }
+
     /// Resolves the evolutionary acceleration ladder selecting the highest supported kernel path per goal.
     #[inline]
     pub fn acceleration_ladder(&self) -> KernelAccelerationLadder {
@@ -173,6 +227,18 @@ static TOPOLOGY: OnceLock<HardwareTopology> = OnceLock::new();
 /// Subsequent invocations are 100% in-memory with zero syscalls and zero file reads.
 pub fn global_hardware_topology() -> &'static HardwareTopology {
     TOPOLOGY.get_or_init(HardwareTopology::probe)
+}
+
+/// Reads the globally cached optimal maximum idle connections per upstream key.
+#[inline]
+pub fn optimal_max_idle_per_key() -> usize {
+    global_hardware_topology().optimal_max_idle_per_key()
+}
+
+/// Reads the globally cached concurrency shard count.
+#[inline]
+pub fn concurrency_shards() -> usize {
+    global_hardware_topology().concurrency_shards()
 }
 
 /// Explicitly sets the global hardware topology in RAM during cold-start bootstrap.

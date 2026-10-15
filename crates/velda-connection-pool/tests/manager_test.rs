@@ -36,15 +36,15 @@ impl PoolableResource for MockConn {
 fn test_pool_config_defaults() {
     let cfg = PoolConfig::default();
     assert_eq!(cfg.max_idle_per_key, probed_max_idle_per_key());
-    assert!((8..=128).contains(&cfg.max_idle_per_key));
+    assert!((16..=4096).contains(&cfg.max_idle_per_key));
     assert_eq!(cfg.idle_timeout, Duration::from_secs(30));
     assert_eq!(cfg.max_lifetime, Some(Duration::from_secs(3600)));
 
     // with_workers sets capacity scaled to workers
     let p2 = PoolManager::<String, MockConn>::with_workers(2);
-    assert_eq!(p2.config().max_idle_per_key, 8);
+    assert_eq!(p2.config().max_idle_per_key, 128);
     let p64 = PoolManager::<String, MockConn>::with_workers(64);
-    assert_eq!(p64.config().max_idle_per_key, 128);
+    assert_eq!(p64.config().max_idle_per_key, 4096);
 }
 
 #[test]

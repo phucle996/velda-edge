@@ -1,11 +1,6 @@
 use std::time::Duration;
 
-use velda_core::hardware::{CpuTier, MemoryTier};
-
-use crate::container::{
-    concurrency_shards_for_cpu_tier, max_concurrent_streams_for_mem_tier,
-    max_idle_per_key_for_mem_tier, probed_max_idle_per_key,
-};
+use crate::container::{max_concurrent_streams_for_mem_tier, probed_max_idle_per_key};
 
 /// Default idle timeout before an idle connection is considered expired (30 seconds).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -16,7 +11,7 @@ pub const DEFAULT_MAX_LIFETIME: Duration = Duration::from_secs(3600);
 /// Configuration defining capacity, idle timeouts, and maximum connection lifetimes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolConfig {
-    /// Maximum number of idle connections retained per key container (default: dynamically probed from MemoryTier).
+    /// Maximum number of idle connections retained per key container (default: dynamically computed from worker concurrency).
     /// Excess connections returned to the pool are closed immediately to prevent FD exhaustion (`EMFILE`).
     pub max_idle_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection (default: dynamically probed from MemoryTier).
@@ -41,23 +36,15 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
-    /// Returns pool configuration and concurrency shard count explicitly tuned for given CPU and Memory tiers.
-    pub fn for_tiers(cpu: CpuTier, mem: MemoryTier) -> (Self, usize) {
-        let shards = concurrency_shards_for_cpu_tier(cpu);
+    /// Returns pool configuration and concurrency shards directly using pre-computed values from [`HardwareTopology`].
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
         let config = Self {
-            max_idle_per_key: max_idle_per_key_for_mem_tier(mem),
-            max_concurrent_streams: max_concurrent_streams_for_mem_tier(mem),
+            max_idle_per_key: topo.optimal_max_idle_per_key,
+            max_concurrent_streams: max_concurrent_streams_for_mem_tier(topo.memory_tier()),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
         };
-        (config, shards)
-    }
-
-    /// Pre-compiles pool configuration and scales shard count directly to available CPU cores.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
-        let (config, _) = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
-        let shards = topo.available_cores().max(1).next_power_of_two();
-        (config, shards)
+        (config, topo.concurrency_shards)
     }
 }
 
@@ -92,29 +79,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pool_config_tiers() {
-        // Constrained CPU + Constrained Memory
-        let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
-        assert_eq!(shards, 2);
-        assert_eq!(cfg.max_idle_per_key, 16);
-        assert_eq!(cfg.max_concurrent_streams, 256);
+    fn test_pool_config_for_topology() {
+        // Small 2-core edge
+        let topo_2 = velda_core::HardwareTopology::with_workers_and_memory(2, 512 * 1024 * 1024);
+        let (cfg, shards) = PoolConfig::for_topology(&topo_2);
+        assert_eq!(shards, 8);
+        assert_eq!(cfg.max_idle_per_key, 128);
+        assert_eq!(cfg.max_concurrent_streams, 1024);
 
-        // Ultra CPU + Constrained Memory (Compute-heavy, low RAM)
-        let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Constrained);
+        // 16-core regional edge (4GB RAM -> MemoryTier::Medium)
+        let topo_16 =
+            velda_core::HardwareTopology::with_workers_and_memory(16, 4 * 1024 * 1024 * 1024);
+        let (cfg, shards) = PoolConfig::for_topology(&topo_16);
+        assert_eq!(shards, 32);
+        assert_eq!(cfg.max_idle_per_key, 1024);
+        assert_eq!(cfg.max_concurrent_streams, 4096);
+
+        // 64-core hyperscale node (64GB RAM -> MemoryTier::XLarge)
+        let topo_64 =
+            velda_core::HardwareTopology::with_workers_and_memory(64, 64 * 1024 * 1024 * 1024);
+        let (cfg, shards) = PoolConfig::for_topology(&topo_64);
         assert_eq!(shards, 128);
-        assert_eq!(cfg.max_idle_per_key, 16);
-        assert_eq!(cfg.max_concurrent_streams, 256);
-
-        // Constrained CPU + Ultra Memory (Low core, massive RAM)
-        let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Constrained, MemoryTier::Ultra);
-        assert_eq!(shards, 2);
-        assert_eq!(cfg.max_idle_per_key, 512);
-        assert_eq!(cfg.max_concurrent_streams, 65536);
-
-        // Ultra CPU + Ultra Memory (Hyperscale server)
-        let (cfg, shards) = PoolConfig::for_tiers(CpuTier::Ultra, MemoryTier::Ultra);
-        assert_eq!(shards, 128);
-        assert_eq!(cfg.max_idle_per_key, 512);
-        assert_eq!(cfg.max_concurrent_streams, 65536);
+        assert_eq!(cfg.max_idle_per_key, 4096);
+        assert_eq!(cfg.max_concurrent_streams, 16384);
     }
 }

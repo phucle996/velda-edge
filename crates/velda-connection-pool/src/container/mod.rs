@@ -15,13 +15,13 @@ pub use multiplexed::{MultiplexedConnection, MultiplexedPool, MuxShard};
 pub use shard::{PoolShard, ShardMetrics, ShardTable, current_thread_lane};
 pub use subpool::SubPool;
 
-use velda_core::hardware::{CpuTier, MemoryTier};
+use velda_core::hardware::MemoryTier;
 
 /// Minimum number of idle connections retained per key container.
-pub const MIN_IDLE_PER_KEY: usize = 8;
+pub const MIN_IDLE_PER_KEY: usize = 16;
 
 /// Maximum number of idle connections retained per key container to protect from OS `EMFILE`.
-pub const MAX_IDLE_PER_KEY: usize = 128;
+pub const MAX_IDLE_PER_KEY: usize = 4096;
 
 /// Minimum shard count for concurrency distribution.
 pub const MIN_SHARDS: usize = 8;
@@ -32,38 +32,6 @@ pub const MIN_SHARDS: usize = 8;
 /// Capped at 1024 to prevent excessive memory overhead and thread synchronization storms
 /// on high-end NUMA machines (e.g., dual-socket 256-core/512-thread servers).
 pub const MAX_SHARDS: usize = 1024;
-
-/// Returns the recommended concurrency shard count for a given [`CpuTier`].
-///
-/// Scales strictly with CPU parallelism as a power of two to guarantee minimal lock contention.
-#[inline]
-pub fn concurrency_shards_for_cpu_tier(tier: CpuTier) -> usize {
-    match tier {
-        CpuTier::Constrained => 2,
-        CpuTier::Small => 4,
-        CpuTier::Medium => 8,
-        CpuTier::Large => 16,
-        CpuTier::XLarge => 32,
-        CpuTier::TwoXLarge => 64,
-        CpuTier::Ultra => 128,
-    }
-}
-
-/// Returns the recommended maximum idle connections per key container for a given [`MemoryTier`].
-///
-/// Protects against File Descriptor exhaustion (`EMFILE`) and memory bloat on constrained hardware.
-#[inline]
-pub fn max_idle_per_key_for_mem_tier(tier: MemoryTier) -> usize {
-    match tier {
-        MemoryTier::Constrained => 16,
-        MemoryTier::Small => 32,
-        MemoryTier::Medium => 32,
-        MemoryTier::Large => 64,
-        MemoryTier::XLarge => 128,
-        MemoryTier::TwoXLarge => 256,
-        MemoryTier::Ultra => 512,
-    }
-}
 
 /// Returns the recommended maximum concurrent streams per multiplexed connection for a given [`MemoryTier`].
 #[inline]
@@ -81,17 +49,17 @@ pub fn max_concurrent_streams_for_mem_tier(tier: MemoryTier) -> u32 {
 
 /// Computes the optimal maximum idle connections per key container based on worker concurrency.
 ///
-/// Scales with worker count (2 connections per worker to absorb microbursts without closing),
+/// Scales with worker count (64 connections per worker to absorb high-concurrency bursts without closing),
 /// clamped within `[MIN_IDLE_PER_KEY, MAX_IDLE_PER_KEY]` to prevent File Descriptor exhaustion (`EMFILE`).
 #[inline]
 pub fn optimal_max_idle_per_key(workers: usize) -> usize {
-    (workers.max(1) * 2).clamp(MIN_IDLE_PER_KEY, MAX_IDLE_PER_KEY)
+    (workers.max(1) * 64).clamp(MIN_IDLE_PER_KEY, MAX_IDLE_PER_KEY)
 }
 
-/// Reads the optimal maximum idle connections per key from global hardware topology cached in RAM.
+/// Reads the optimal maximum idle connections per key pre-computed during cold-start bootstrap.
 #[inline]
 pub fn probed_max_idle_per_key() -> usize {
-    optimal_max_idle_per_key(velda_core::global_hardware_topology().worker_threads())
+    velda_core::optimal_max_idle_per_key()
 }
 
 /// Computes the optimal shard count dynamically scaled to the number of worker threads.
@@ -105,10 +73,10 @@ pub fn optimal_shard_count(workers: usize) -> usize {
         .clamp(MIN_SHARDS, MAX_SHARDS)
 }
 
-/// Reads the optimal shard count from global hardware topology cached in RAM.
+/// Reads the optimal shard count pre-computed during cold-start bootstrap.
 #[inline]
 pub fn probed_shard_count() -> usize {
-    optimal_shard_count(velda_core::global_hardware_topology().worker_threads())
+    velda_core::concurrency_shards()
 }
 
 #[cfg(test)]
@@ -277,18 +245,18 @@ mod tests {
 
     #[test]
     fn test_optimal_max_idle() {
-        assert_eq!(optimal_max_idle_per_key(0), 8);
-        assert_eq!(optimal_max_idle_per_key(1), 8);
-        assert_eq!(optimal_max_idle_per_key(2), 8);
-        assert_eq!(optimal_max_idle_per_key(4), 8);
-        assert_eq!(optimal_max_idle_per_key(8), 16);
-        assert_eq!(optimal_max_idle_per_key(16), 32);
-        assert_eq!(optimal_max_idle_per_key(32), 64);
-        assert_eq!(optimal_max_idle_per_key(64), 128);
-        assert_eq!(optimal_max_idle_per_key(128), 128);
-        assert_eq!(optimal_max_idle_per_key(256), 128);
+        assert_eq!(optimal_max_idle_per_key(0), 64);
+        assert_eq!(optimal_max_idle_per_key(1), 64);
+        assert_eq!(optimal_max_idle_per_key(2), 128);
+        assert_eq!(optimal_max_idle_per_key(4), 256);
+        assert_eq!(optimal_max_idle_per_key(8), 512);
+        assert_eq!(optimal_max_idle_per_key(16), 1024);
+        assert_eq!(optimal_max_idle_per_key(32), 2048);
+        assert_eq!(optimal_max_idle_per_key(64), 4096);
+        assert_eq!(optimal_max_idle_per_key(128), 4096);
+        assert_eq!(optimal_max_idle_per_key(256), 4096);
 
         let probed = probed_max_idle_per_key();
-        assert!((8..=128).contains(&probed));
+        assert!((16..=4096).contains(&probed));
     }
 }

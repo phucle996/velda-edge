@@ -1,13 +1,5 @@
 {
   "version": 1,
-  "hardware": {
-    "detected_ram_bytes": 8589934592,
-    "detected_cores": 8,
-    "worker_threads": 4,
-    "cpu_tier": "medium",
-    "memory_tier": "medium",
-    "tier": "medium"
-  },
   "discovery": {
     "max_dns_cache_capacity": 50000,
     "max_lkg_capacity": 10000,
@@ -17,7 +9,6 @@
     "positive_ttl_secs": 300
   },
   "transport": {
-    "io_workers": 4,
     "max_active_connections": 200000,
     "reconcile_channel_capacity": 128,
     "tcp": {

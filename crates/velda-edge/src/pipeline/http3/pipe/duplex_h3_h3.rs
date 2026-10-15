@@ -36,7 +36,7 @@ async fn forward_duplex(client: &Http3Client, req: &L7Request) -> Result<L7Respo
 
 /// Serves a full-duplex HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response {
-    let (client, _lease) = match upstream.acquire(&upstream.config).await {
+    let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -56,13 +56,24 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
     };
 
     let mut pipe_res = forward_duplex(&client, req).await;
-    if let Err(Http3Error::ConnectionClosed) = pipe_res {
+    let mut _fresh_lease_guard = None;
+    if pipe_res
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.is_connection_closed())
+    {
+        lease.mark_goaway();
+        drop(lease);
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
-        if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
             pipe_res = forward_duplex(&fresh_client, req).await;
+            if pipe_res.is_err() {
+                fresh_lease.mark_goaway();
+            }
+            _fresh_lease_guard = Some(fresh_lease);
         }
     }
 

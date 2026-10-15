@@ -142,6 +142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    #[cfg(unix)]
+    auto_elevate_nofile_limit();
+
     tracing::info!(
         cores = hardware.available_cores,
         workers = worker_threads,
@@ -222,4 +225,48 @@ async fn async_main(config: EdgeConfig) -> Result<(), Box<dyn std::error::Error>
     supervisor.run(shutdown_rx).await?;
     tracing::info!("Velda Edge Data Plane stopped cleanly.");
     Ok(())
+}
+
+/// Automatically elevates the process file descriptor limit (`RLIMIT_NOFILE`).
+///
+/// Ensures high-throughput HTTP/3 and reverse proxy workloads are never choked
+/// by default OS soft limits (e.g., 1024 on Linux).
+#[cfg(unix)]
+fn auto_elevate_nofile_limit() {
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            const DESIRED_LIMIT: libc::rlim_t = 1_048_576;
+            let initial_cur = rlim.rlim_cur;
+            let initial_max = rlim.rlim_max;
+
+            // 1. Try to elevate both max and cur to DESIRED_LIMIT (succeeds if running as root or with CAP_SYS_RESOURCE)
+            rlim.rlim_cur = DESIRED_LIMIT;
+            rlim.rlim_max = DESIRED_LIMIT.max(initial_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+                tracing::info!(
+                    from_cur = initial_cur,
+                    to_cur = rlim.rlim_cur,
+                    from_max = initial_max,
+                    to_max = rlim.rlim_max,
+                    "Elevated file descriptor limit (RLIMIT_NOFILE) to datacenter scale"
+                );
+            } else {
+                // 2. Unprivileged fallback: raise soft limit to match existing hard limit
+                rlim.rlim_cur = initial_max;
+                rlim.rlim_max = initial_max;
+                if rlim.rlim_cur > initial_cur && libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+                    tracing::info!(
+                        from_cur = initial_cur,
+                        to_cur = rlim.rlim_cur,
+                        max = initial_max,
+                        "Elevated soft file descriptor limit to hard limit (RLIMIT_NOFILE)"
+                    );
+                }
+            }
+        }
+    }
 }

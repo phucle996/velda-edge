@@ -6,6 +6,7 @@ use std::path::Path;
 use velda_core::hardware::HardwareTopology;
 
 use super::runtime::RuntimeProfile;
+use super::schema::HardwareProfile;
 
 /// Recursively merges sparse operator overrides on top of hardware baseline values.
 fn merge_json_values(base: &mut serde_json::Value, overrides: serde_json::Value) {
@@ -28,6 +29,7 @@ fn merge_json_values(base: &mut serde_json::Value, overrides: serde_json::Value)
 /// 4. Best-effort writes back the complete merged `<runtime_dir>/runtime.json`.
 pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) -> RuntimeProfile {
     let profile_path = runtime_dir.join("runtime.json");
+    let exact_cores = hardware.available_cores().max(1);
     let mut profile = RuntimeProfile::from_hardware(hardware);
     let mut loaded_from_file = false;
 
@@ -36,41 +38,41 @@ pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) 
     {
         match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(mut override_val) if override_val.is_object() => {
-                let mut target_cpu_tier = hardware.cpu_tier();
-                let mut target_mem_tier = hardware.memory_tier();
-
-                if let Some(hw) = override_val
-                    .get_mut("hardware")
-                    .and_then(|h| h.as_object_mut())
-                {
-                    if let Some(t) = hw.get("tier").cloned()
-                        && !hw.contains_key("memory_tier")
+                // Strip legacy/stale "hardware" or "io_workers" from operator JSON
+                if let Some(obj) = override_val.as_object_mut() {
+                    obj.remove("hardware");
+                    if let Some(transport) =
+                        obj.get_mut("transport").and_then(|t| t.as_object_mut())
                     {
-                        hw.insert("memory_tier".to_string(), t);
-                    } else if let Some(mt) = hw.get("memory_tier").cloned()
-                        && !hw.contains_key("tier")
-                    {
-                        hw.insert("tier".to_string(), mt);
-                    }
-
-                    if let Some(c) = hw.get("cpu_tier").and_then(|v| v.as_str())
-                        && let Ok(tier) = c.parse::<velda_core::CpuTier>()
-                    {
-                        target_cpu_tier = tier;
-                    }
-                    if let Some(m) = hw.get("memory_tier").and_then(|v| v.as_str())
-                        && let Ok(tier) = m.parse::<velda_core::MemoryTier>()
-                    {
-                        target_mem_tier = tier;
+                        transport.remove("io_workers");
                     }
                 }
 
-                let base_profile =
-                    RuntimeProfile::for_tiers(hardware, target_cpu_tier, target_mem_tier);
+                let has_explicit_tcp_shards = override_val
+                    .get("transport")
+                    .and_then(|t| t.get("tcp"))
+                    .and_then(|tcp| tcp.get("concurrency_shards"))
+                    .is_some();
+
+                let base_profile = RuntimeProfile::from_hardware(hardware);
                 if let Ok(mut base_val) = serde_json::to_value(&base_profile) {
                     merge_json_values(&mut base_val, override_val);
                     match serde_json::from_value::<RuntimeProfile>(base_val) {
-                        Ok(merged_profile) => {
+                        Ok(mut merged_profile) => {
+                            // Re-bind physical hardware topology and worker thread count directly from hardware
+                            merged_profile.hardware = HardwareProfile {
+                                detected_ram_bytes: hardware.memory_bytes(),
+                                detected_cores: hardware.available_cores(),
+                                worker_threads: exact_cores,
+                                cpu_tier: hardware.cpu_tier().as_str().to_string(),
+                                memory_tier: hardware.memory_tier().as_str().to_string(),
+                                tier: hardware.memory_tier().as_str().to_string(),
+                            };
+                            merged_profile.transport.io_workers = exact_cores;
+                            if !has_explicit_tcp_shards {
+                                merged_profile.transport.tcp.concurrency_shards = exact_cores;
+                            }
+
                             profile = merged_profile;
                             loaded_from_file = true;
                             tracing::info!(

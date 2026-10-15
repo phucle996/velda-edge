@@ -107,13 +107,13 @@ impl UdpSocketConfig {
         const KB: usize = 1024;
         const MB: usize = 1024 * KB;
         let (recv, send) = match tier {
-            velda_core::MemoryTier::Constrained => (512 * KB, 512 * KB),
-            velda_core::MemoryTier::Small => (MB, MB),
-            velda_core::MemoryTier::Medium => (2 * MB, 2 * MB),
-            velda_core::MemoryTier::Large => (4 * MB, 4 * MB),
-            velda_core::MemoryTier::XLarge => (8 * MB, 8 * MB),
-            velda_core::MemoryTier::TwoXLarge => (8 * MB, 8 * MB),
-            velda_core::MemoryTier::Ultra => (8 * MB, 8 * MB),
+            velda_core::MemoryTier::Constrained => (MB, MB),
+            velda_core::MemoryTier::Small => (2 * MB, 2 * MB),
+            velda_core::MemoryTier::Medium => (4 * MB, 4 * MB),
+            velda_core::MemoryTier::Large => (8 * MB, 8 * MB),
+            velda_core::MemoryTier::XLarge => (16 * MB, 16 * MB),
+            velda_core::MemoryTier::TwoXLarge => (16 * MB, 16 * MB),
+            velda_core::MemoryTier::Ultra => (32 * MB, 32 * MB),
         };
         Self {
             recv_buffer_size: Some(recv),
@@ -189,25 +189,25 @@ mod tests {
     #[test]
     fn test_udp_config_for_tier() {
         let constrained = UdpSocketConfig::for_tier(velda_core::MemoryTier::Constrained);
-        assert_eq!(constrained.recv_buffer_size, Some(512 * 1024));
+        assert_eq!(constrained.recv_buffer_size, Some(1024 * 1024));
 
         let small = UdpSocketConfig::for_tier(velda_core::MemoryTier::Small);
-        assert_eq!(small.recv_buffer_size, Some(1024 * 1024));
+        assert_eq!(small.recv_buffer_size, Some(2 * 1024 * 1024));
 
         let medium = UdpSocketConfig::for_tier(velda_core::MemoryTier::Medium);
-        assert_eq!(medium.recv_buffer_size, Some(2 * 1024 * 1024));
+        assert_eq!(medium.recv_buffer_size, Some(4 * 1024 * 1024));
 
         let large = UdpSocketConfig::for_tier(velda_core::MemoryTier::Large);
-        assert_eq!(large.recv_buffer_size, Some(4 * 1024 * 1024));
+        assert_eq!(large.recv_buffer_size, Some(8 * 1024 * 1024));
 
         let xlarge = UdpSocketConfig::for_tier(velda_core::MemoryTier::XLarge);
-        assert_eq!(xlarge.recv_buffer_size, Some(8 * 1024 * 1024));
+        assert_eq!(xlarge.recv_buffer_size, Some(16 * 1024 * 1024));
 
         let two_xlarge = UdpSocketConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
-        assert_eq!(two_xlarge.recv_buffer_size, Some(8 * 1024 * 1024));
+        assert_eq!(two_xlarge.recv_buffer_size, Some(16 * 1024 * 1024));
 
         let ultra = UdpSocketConfig::for_tier(velda_core::MemoryTier::Ultra);
-        assert_eq!(ultra.recv_buffer_size, Some(8 * 1024 * 1024));
+        assert_eq!(ultra.recv_buffer_size, Some(32 * 1024 * 1024));
     }
 
     #[test]

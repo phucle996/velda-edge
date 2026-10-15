@@ -11,6 +11,8 @@ use super::schema::*;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeProfile {
     pub version: u32,
+    /// Dynamically probed physical hardware topology. Never serialized to or deserialized from JSON.
+    #[serde(skip)]
     pub hardware: HardwareProfile,
     pub discovery: DiscoveryRuntimeConfig,
     pub transport: TransportRuntimeConfig,

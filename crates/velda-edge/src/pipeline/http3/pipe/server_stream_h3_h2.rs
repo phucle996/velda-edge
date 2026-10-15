@@ -22,7 +22,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
         velda_core::Body::Empty => bytes::Bytes::new(),
     };
 
-    let (mut client, _lease) = match upstream.acquire(&upstream.config).await {
+    let (mut client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -42,16 +42,23 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
     };
 
     let mut pipe_res = send_h2_stream(&mut client, req, &headers, &body_bytes).await;
+    let mut _fresh_lease_guard = None;
     if let Err(ref e) = pipe_res
         && is_h2_refused_or_goaway(e)
     {
+        lease.mark_goaway();
+        drop(lease);
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
+        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
         {
             pipe_res = send_h2_stream(&mut fresh_client, req, &headers, &body_bytes).await;
+            if pipe_res.is_err() {
+                fresh_lease.mark_goaway();
+            }
+            _fresh_lease_guard = Some(fresh_lease);
         }
     }
 

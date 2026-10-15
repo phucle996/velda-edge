@@ -93,12 +93,6 @@ fn test_operator_override() {
     // Custom operator override with explicitly tuned values
     let custom_json = r#"{
         "version": 1,
-        "hardware": {
-            "detected_ram_bytes": 1073741824,
-            "detected_cores": 8,
-            "worker_threads": 8,
-            "tier": "custom"
-        },
         "discovery": {
             "max_dns_cache_capacity": 42000,
             "max_lkg_capacity": 7777,
@@ -106,23 +100,19 @@ fn test_operator_override() {
             "query_timeout_ms": 1500,
             "negative_ttl_secs": 25,
             "positive_ttl_secs": 45
-        },
-        "transport": {
-            "io_workers": 8
         }
     }"#;
 
     fs::write(&runtime_json_path, custom_json).unwrap();
 
     let hardware = HardwareTopology::with_workers_and_memory(2, 256 * 1024 * 1024);
-    // Even though hardware is constrained (256MB), operator's runtime.json MUST win!
     let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
-    assert_eq!(resolved.hardware.tier, "custom");
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 42_000);
     assert_eq!(resolved.discovery.max_lkg_capacity, 7_777);
     assert_eq!(resolved.discovery.max_negative_ttl_secs, 120);
-    assert_eq!(resolved.transport.io_workers, 8);
+    assert_eq!(resolved.transport.io_workers, 2);
+    assert_eq!(resolved.hardware.tier, "constrained");
 }
 
 #[test]
@@ -139,12 +129,21 @@ fn test_fallback_writeback() {
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
     assert_eq!(resolved.discovery.max_lkg_capacity, 500_000);
     assert_eq!(resolved.transport.max_active_connections, 10_000_000);
+    assert_eq!(resolved.transport.io_workers, 2);
 
-    // Verify write-back occurred
+    // Verify write-back occurred and omits hardware and io_workers
     assert!(runtime_json_path.exists());
     let content = fs::read_to_string(&runtime_json_path).unwrap();
+    assert!(
+        !content.contains("\"hardware\""),
+        "runtime.json must never contain hardware"
+    );
+    assert!(
+        !content.contains("\"io_workers\""),
+        "runtime.json must never contain io_workers"
+    );
     let parsed: RuntimeProfile = serde_json::from_str(&content).unwrap();
-    assert_eq!(parsed, resolved);
+    assert_eq!(parsed.discovery.max_dns_cache_capacity, 2_500_000);
 }
 
 #[test]
@@ -188,6 +187,7 @@ fn test_grouped_transport_override() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime_json_path = temp_dir.path().join("runtime.json");
 
+    // Even if legacy or rogue JSON specifies io_workers: 12, hardware (4 cores) MUST win!
     let json = r#"{
         "version": 1,
         "transport": {
@@ -207,7 +207,7 @@ fn test_grouped_transport_override() {
     let hardware = HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
     let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
-    assert_eq!(resolved.transport.io_workers, 12);
+    assert_eq!(resolved.transport.io_workers, 4); // Ignored from JSON, bound to 4 cores!
     assert_eq!(resolved.transport.max_active_connections, 750_000);
     assert_eq!(resolved.transport.tcp.backlog, 9999);
     assert_eq!(resolved.transport.tcp.copy_buffer_size, 49_152);
@@ -255,42 +255,52 @@ fn test_parse_example_runtime_json() {
     assert!(example_path.exists(), "example/runtime.json must exist");
 
     let content = fs::read_to_string(&example_path).unwrap();
+    assert!(
+        !content.contains("\"hardware\""),
+        "example runtime.json must not contain hardware"
+    );
+    assert!(
+        !content.contains("\"io_workers\""),
+        "example runtime.json must not contain io_workers"
+    );
     let profile: RuntimeProfile = serde_json::from_str(&content)
         .expect("example/runtime.json must be valid according to RuntimeProfile schema");
 
     assert_eq!(profile.version, 1);
-    assert_eq!(profile.hardware.tier, "medium");
-    assert_eq!(profile.transport.io_workers, 4);
     assert_eq!(profile.tls.session_cache_capacity, 8192);
     assert_eq!(profile.tls.send_tls13_tickets, 4);
-    assert_eq!(profile.memory_tier(), velda_core::MemoryTier::Medium);
-    assert_eq!(profile.cpu_tier(), velda_core::CpuTier::Medium);
 }
 
 #[test]
-fn test_effective_tier_override() {
+fn test_hardware_probe_isolation_from_stale_json() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime_json_path = temp_dir.path().join("runtime.json");
 
-    // Machine hardware is small (1GB RAM, 2 cores), but operator sets tier to ultra
-    let json = r#"{
+    // Hostile or stale JSON attempts to inject fake hardware, tiers, and worker count
+    let stale_json = r#"{
         "version": 1,
         "hardware": {
             "tier": "ultra",
             "memory_tier": "ultra",
-            "cpu_tier": "ultra"
+            "cpu_tier": "ultra",
+            "detected_cores": 64,
+            "worker_threads": 64
+        },
+        "transport": {
+            "io_workers": 64,
+            "max_active_connections": 10000000
         }
     }"#;
 
-    fs::write(&runtime_json_path, json).unwrap();
+    fs::write(&runtime_json_path, stale_json).unwrap();
     let hardware = HardwareTopology::with_workers_and_memory(2, 1024 * 1024 * 1024);
     let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
-    assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Ultra);
-    assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Ultra);
-    assert_eq!(resolved.transport.max_active_connections, 10_000_000);
-    assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
-    assert_eq!(resolved.tls.session_cache_capacity, 131_072);
+    // Stale hardware & io_workers MUST be stripped; actual physical hardware wins!
+    assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Small); // 1GB = Small
+    assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Constrained); // 2 cores = Constrained
+    assert_eq!(resolved.transport.io_workers, 2);
+    assert_eq!(resolved.transport.max_active_connections, 10_000_000); // legitimate operator override honored
 }
 
 #[test]

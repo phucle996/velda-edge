@@ -2,8 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Hardware information snapshot recorded in `runtime.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Hardware information snapshot probed dynamically at runtime.
+///
+/// NOTE: Maintained in memory for observability and sizing, but intentionally
+/// never serialized to or deserialized from `runtime.json` to prevent stale hardware
+/// persistence across machine or container resizes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HardwareProfile {
     pub detected_ram_bytes: usize,
     pub detected_cores: usize,
@@ -128,6 +132,10 @@ impl UdpRuntimeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransportRuntimeConfig {
     /// Number of network I/O event loop workers.
+    ///
+    /// Dynamically derived from physical hardware topology (`available_cores`).
+    /// Never serialized or deserialized from `runtime.json` to prevent over-subscription.
+    #[serde(skip)]
     pub io_workers: usize,
     /// Maximum concurrent active connections allowed before L4 rate-limiting/drop to protect RAM.
     pub max_active_connections: usize,

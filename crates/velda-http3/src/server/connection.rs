@@ -89,6 +89,7 @@ pub struct Http3Engine {
     total_pending_bytes: usize,
     config: Http3Config,
     transmit_buf: Vec<u8>,
+    resp_buf: Vec<u8>,
 }
 
 impl std::fmt::Debug for Http3Engine {
@@ -122,6 +123,7 @@ impl Http3Engine {
             total_pending_bytes: 0,
             config,
             transmit_buf: Vec::with_capacity(65535),
+            resp_buf: Vec::with_capacity(2048),
         }
     }
 
@@ -137,18 +139,18 @@ impl Http3Engine {
         let mut outgoing = Vec::new();
         let mut ready_requests = Vec::new();
 
-        let mut resp_buf = Vec::new();
+        self.resp_buf.clear();
         let bytes_mut = BytesMut::from(data);
 
-        // 1. Ingest datagram into endpoint
-        let event = self
-            .endpoint
-            .handle(now, remote, local_ip, None, bytes_mut, &mut resp_buf);
+        // 1. Ingest datagram into endpoint (reusing pre-allocated resp_buf across packet calls)
+        let event =
+            self.endpoint
+                .handle(now, remote, local_ip, None, bytes_mut, &mut self.resp_buf);
 
-        if !resp_buf.is_empty() {
+        if !self.resp_buf.is_empty() {
             outgoing.push(OutgoingDatagram {
                 peer: remote,
-                payload: Bytes::from(resp_buf),
+                payload: Bytes::copy_from_slice(&self.resp_buf),
                 segment_size: None,
             });
         }

@@ -80,8 +80,8 @@ pub use hardware::{
     HardwareTopology, KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile,
     MemoryTier, MultipathResilienceTier, MultiplexPacingTier, OutboundPortScalingTier,
     OverloadConfig, OverloadLevel, OverloadTracker, ParseTierError, UdpEgressTier, UdpOffloadTier,
-    global_hardware_topology, init_hardware_topology, probe_cpu, probe_kernel, probe_memory,
-    probe_memory_usage,
+    concurrency_shards, global_hardware_topology, init_hardware_topology, optimal_max_idle_per_key,
+    probe_cpu, probe_kernel, probe_memory, probe_memory_usage,
 };
 pub use provenance::Provenance;
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
