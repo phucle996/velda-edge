@@ -15,6 +15,7 @@
 //!    $\mathcal{O}(1)$ register integer arithmetic (`(downstream * 12) + (upstream * 4) + pipe`).
 
 pub mod global;
+pub mod pool;
 pub mod slot;
 pub mod snapshot;
 pub mod store;
@@ -23,8 +24,9 @@ pub mod types;
 
 // Re-exports for convenient, canonical usage across the monorepo
 pub use global::GlobalMetrics;
+pub use pool::{EvictionReason, PoolMetrics};
 pub use slot::PipelineSlot;
-pub use snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
+pub use snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot, PoolSnapshot};
 pub use store::{MetricsStore, TOTAL_PIPELINE_SLOTS};
 pub use telemetry::{LiveTelemetry, NoopTelemetry, Telemetry};
 pub use types::{

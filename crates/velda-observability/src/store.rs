@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::global::GlobalMetrics;
+use crate::pool::PoolMetrics;
 use crate::slot::PipelineSlot;
 use crate::snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
 use crate::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
@@ -16,10 +17,11 @@ use crate::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProt
 pub const TOTAL_PIPELINE_SLOTS: usize =
     DownstreamProto::COUNT * UpstreamProto::COUNT * PipeStrategy::COUNT;
 
-/// Contiguous, lock-free metrics store housing all pipeline and global metrics.
+/// Contiguous, lock-free metrics store housing all pipeline, global, and pool metrics.
 pub struct MetricsStore {
     slots: [PipelineSlot; TOTAL_PIPELINE_SLOTS],
     global: GlobalMetrics,
+    pool: PoolMetrics,
 }
 
 impl Default for MetricsStore {
@@ -34,6 +36,7 @@ impl MetricsStore {
         Self {
             slots: std::array::from_fn(|_| PipelineSlot::new()),
             global: GlobalMetrics::new(),
+            pool: PoolMetrics::new(),
         }
     }
 
@@ -95,6 +98,12 @@ impl MetricsStore {
     #[inline(always)]
     pub fn global(&self) -> &GlobalMetrics {
         &self.global
+    }
+
+    /// Returns a reference to the upstream connection pool metrics.
+    #[inline(always)]
+    pub fn pool(&self) -> &PoolMetrics {
+        &self.pool
     }
 
     /// Records stream start across the designated pipeline slot.
@@ -173,6 +182,7 @@ impl MetricsStore {
             captured_at: Instant::now(),
             pipelines,
             global,
+            pool: self.pool.snapshot(),
         }
     }
 }
