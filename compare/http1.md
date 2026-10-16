@@ -133,6 +133,25 @@ Mọi kịch bản thử nghiệm đều chia tỷ lệ 4/3/3 giữa 3 nhánh up
 | | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | **10.68%** | 10.62% | 9.73% | Miss cache L1 dữ liệu |
 | | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | **0.08%** | Bảo vệ bộ nhớ LLC |
 
+#### 3.1.1 Thử Nghiệm Ép Tải Liên Tục 5 Phút (Sustained High-Load Test @ 200 Conns x 300 Giây)
+
+Nhằm kiểm chứng độ bền bỉ dài hạn, khả năng chống rò rỉ bộ nhớ (memory leak) và tính ổn định thông lượng khi chịu tải cao kéo dài liên tục, Velda Edge được kích hoạt bài đo **5 phút (300 giây)** với **200 kết nối đồng thời** (`wrk -t2 -c200 -d300s --latency http://172.16.0.4:80/plain/ping`):
+
+| Tiêu Chí Đo Lường Chi Tiết | **Kết Quả Đo Kiểm Thực Tế (Velda Edge v0.1.0)** | Đánh Giá Kỹ Thuật & Kiến Trúc |
+| :--- | :---: | :--- |
+| **Tổng số Requests phục vụ** | **15,125,594 requests** (15.12 triệu reqs) | Hoàn tất trọn vẹn trong đúng 300.00s |
+| **Thông lượng duy trì (Sustained Throughput)** | **50,403.39 req/s** | Thông lượng đi ngang phẳng lì, duy trì >50k RPS xuyên suốt 5 phút |
+| **Băng thông truyền tải (Goodput)** | **5.05 MB/s** (1.48 GB dữ liệu) | Băng thông L7 HTTP/1.1 wire text |
+| **Độ trễ trung bình (Mean Latency)** | **3.65 ms** | Phản hồi siêu tốc trong môi trường mạng Azure VNet |
+| **Độ lệch chuẩn độ trễ (Latency Stdev)** | **1.36 ms** | **Phương sai cực thấp (1.36ms)** — triệt tiêu hiện tượng jitter |
+| **Độ trễ phân vị P50** | **3.49 ms** | 50% requests hoàn tất dưới 3.5ms |
+| **Độ trễ phân vị P75** | **4.33 ms** | 75% requests hoàn tất dưới 4.4ms |
+| **Độ trễ phân vị P90** | **5.24 ms** | 90% requests hoàn tất dưới 5.3ms |
+| **Độ trễ phân vị P99 (Tail Latency)** | **7.87 ms** | **Dưới 8ms** cho 99% trong tổng số 15.1 triệu requests |
+| **Độ trễ tối đa (Max Latency Spike)** | **45.53 ms** | Không có bất kỳ request nào vượt quá 46ms trong suốt 5 phút |
+| **Tỷ lệ thành công (Success Rate)** | **100.0% (0 lỗi, 0 timeout, 0 socket drops)** | 15,125,594 / 15,125,594 thành công tuyệt đối |
+| **Bộ nhớ thường trú đỉnh (Peak RSS)** | **189.5 MB** | Ổn định vững chắc, hoàn toàn không có hiện tượng memory leak |
+
 ---
 
 ### KB 02: buffered_h1_h1 — Medium Payload (REST JSON 12KB)
