@@ -6,3 +6,23 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false
+
+[[bench]]
+name = "chaos_bench"
+harness = false
