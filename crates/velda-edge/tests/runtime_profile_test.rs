@@ -260,7 +260,7 @@ fn test_hardware_probe_isolation_from_stale_json() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime_json_path = temp_dir.path().join("runtime.json");
 
-    // Hostile or stale JSON attempts to inject fake hardware, tiers, and worker count
+    // Hostile or stale legacy JSON attempts to inject fake hardware, legacy tiers, and worker count
     let stale_json = r#"{
         "version": 1,
         "hardware": {

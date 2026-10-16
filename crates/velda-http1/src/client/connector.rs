@@ -125,7 +125,7 @@ pub struct Http1AccelerationPath {
     /// middlebox / NAT table entries warm and detect silent peer reboots.
     pub keepalive: Option<std::time::Duration>,
     /// Low-latency socket polling in kernel space (`SO_BUSY_POLL`) to bypass epoll sleep/wake
-    /// context-switch latency spikes on high-core server tiers.
+    /// context-switch latency spikes on high-core server hosts.
     pub busy_poll_us: Option<u32>,
     /// Commands the kernel to rehash IPv6 flow label / 4-tuple on loss/RTO (`SO_TXREHASH`, Linux >= 5.18).
     pub tx_rehash: bool,
@@ -187,7 +187,7 @@ impl Http1AccelerationPath {
         let keepalive = Some(idle_timeout / 2);
 
         // Enable SO_BUSY_POLL only on multi-core hardware (>= 8 cores) where dedicated core polling
-        // yields sub-millisecond tail latency wins without starving small-tier CPU budgets.
+        // yields sub-millisecond tail latency wins without starving constrained CPU budgets.
         let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             Some(50)
         } else {

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use tokio::sync::watch;
-use velda_core::hardware::HardwareTopology;
+use velda_core::hardware::{CorePartition, HardwareTopology};
 use velda_transport::TrafficEngine;
 
 use crate::affinity::{get_allowed_cores, pin_current_thread_to_core};
@@ -15,18 +15,21 @@ use crate::profile::RuntimeProfile;
 use crate::runtime::SharedRuntime;
 
 /// Coordinates the end-to-end Thread-Per-Core gateway execution:
-/// 1. Spawns background UDS IPC listener for live config updates.
-/// 2. Spawns background Resource Overload Monitor for OOM protection.
-/// 3. Spawns N dedicated worker OS threads, each pinned 1:1 to a CPU core.
-/// 4. Each worker thread runs its own single-threaded Tokio current_thread runtime,
+/// 1. Partitions CPU topology into Data Plane traffic cores and Auxiliary cores.
+/// 2. Spawns background UDS IPC listener for live config updates.
+/// 3. Spawns background Resource Overload Monitor for OOM protection.
+/// 4. Spawns background Auxiliary Prometheus Exporter if declared in plugins.
+/// 5. Spawns N dedicated worker OS threads, each pinned 1:1 to a CPU traffic core.
+/// 6. Each worker thread runs its own single-threaded Tokio current_thread runtime,
 ///    owning its dedicated shard of all TCP and UDP listener sockets with SO_REUSEPORT + SO_INCOMING_CPU.
-/// 5. Awaits graceful termination when shutdown is signaled.
+/// 7. Awaits graceful termination when shutdown is signaled.
 pub async fn run_gateway(
     engine: TrafficEngine,
     shared_runtime: SharedRuntime,
     config: EdgeConfig,
     _hardware: HardwareTopology,
     runtime_profile: RuntimeProfile,
+    metrics: Arc<velda_observability::MetricsStore>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), EdgeError> {
     let socket_path = config.socket_path.clone();
@@ -35,7 +38,16 @@ pub async fn run_gateway(
     let cpu_pinning = runtime_profile.transport.cpu_pinning;
     let allowed_cores = get_allowed_cores();
 
-    // 1. Partition TrafficEngine into N dedicated WorkerEngines
+    // 1. Establish hardware partition between Traffic Cores and Auxiliary Cores
+    let partition = CorePartition::plan(&allowed_cores);
+    tracing::info!(
+        mode = ?partition.mode,
+        traffic_cores = ?partition.traffic_cores,
+        auxiliary_cores = ?partition.auxiliary_cores,
+        "Established hardware core partition"
+    );
+
+    // 2. Partition TrafficEngine into N dedicated WorkerEngines
     let (workers, initial_bindings, engine_handle) = engine.into_workers(worker_count);
 
     // 2. Spawn background UDS IPC server task
@@ -64,15 +76,66 @@ pub async fn run_gateway(
         shutdown.clone(),
     );
 
-    // 4. Coordinate ephemeral port resolution across worker threads (for port 0 listeners)
+    // 4. Spawn background Auxiliary Prometheus Exporter if configured in plugins
+    let exporter_task = {
+        let active_exporter = {
+            let rt = shared_runtime.load();
+            rt.config
+                .plugins
+                .iter()
+                .find(|p| p.plugin_type == "prometheus_exporter")
+                .cloned()
+        };
+
+        if let Some(plugin) = active_exporter {
+            match velda_sync::validate_prometheus_exporter_config(&plugin.id, &plugin.config) {
+                Ok(exporter_cfg) => {
+                    match velda_plugin::PrometheusExporter::new(exporter_cfg, Arc::clone(&metrics))
+                    {
+                        Ok(exporter) => {
+                            let exp_shutdown = shutdown.clone();
+                            let dedicated_aux_core = partition.dedicated_auxiliary_core();
+
+                            let handle = tokio::spawn(async move {
+                                if let Some(core_id) = dedicated_aux_core
+                                    && pin_current_thread_to_core(core_id)
+                                {
+                                    tracing::info!(
+                                        core = core_id,
+                                        "Prometheus exporter task pinned to dedicated auxiliary core"
+                                    );
+                                }
+                                if let Err(e) = exporter.run(exp_shutdown).await {
+                                    tracing::error!(error = %e, "Prometheus exporter exited with error");
+                                }
+                            });
+                            Some(handle)
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to instantiate Prometheus exporter");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Invalid Prometheus exporter configuration");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // 5. Coordinate ephemeral port resolution across worker threads (for port 0 listeners)
     let (resolved_tx, resolved_rx) = watch::channel(None);
     let resolved_publisher = Arc::new(resolved_tx);
 
-    // 5. Spawn N dedicated Worker OS threads, each running a core-pinned single-threaded Tokio runtime
+    // 6. Spawn N dedicated Worker OS threads, each running a core-pinned single-threaded Tokio runtime
     let mut worker_threads = Vec::with_capacity(worker_count);
     for worker in workers {
         let worker_id = worker.worker_id();
-        let core_id = allowed_cores[worker_id % allowed_cores.len()];
+        let core_id = partition.traffic_cores[worker_id % partition.traffic_cores.len()];
         let worker_shutdown = shutdown.clone();
         let bindings = initial_bindings.clone();
         let rt_shared = shared_runtime.clone();
@@ -163,6 +226,9 @@ pub async fn run_gateway(
     // 7. Await background supervisor tasks termination
     let _ = ipc_task.await;
     let _ = overload_task.await;
+    if let Some(exp_task) = exporter_task {
+        let _ = exp_task.await;
+    }
 
     if let Ok(Some(err)) = join_res {
         return Err(err);

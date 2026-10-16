@@ -3,22 +3,22 @@
 //! Provides the canonical representation of available CPU cores and worker threads
 //! probed once and cached in RAM (`OnceLock`).
 //!
-//! # Orthogonal Tier Architecture:
-//! - [`CpuTier`]: Driven by CPU core count and cgroups CPU bandwidth.
+//! # Continuous Hardware Sizing Architecture:
+//! - CPU Topology: Driven by available logical cores and cgroup CPU limits.
 //!   Controls worker thread count, channel capacity, and concurrency sharding.
-//! - [`MemoryTier`]: Driven by RAM capacity and cgroups memory limits.
-//!   Controls socket kernel buffers, backlog depth, and in-memory cache capacity.
+//! - Memory Topology: Driven by total RAM capacity and cgroup memory limits.
+//!   Derives continuous socket buffers, backlog depths, and in-memory cache capacities
+//!   via [`HardwareSizing`].
 //!
 //! Strict Invariant:
-//! - This module ONLY owns host hardware inspection and concurrency profiling.
-//! - Subsystem-specific sizing (such as shard counts, socket buffers, or connection pool capacities)
-//!   MUST be calculated by the respective subsystem crates (`velda-transport`, `velda-discovery`),
-//!   NOT hardcoded here.
+//! - This module ONLY owns host hardware inspection and continuous capacity profiling.
+//! - Sizing is derived continuously without rigid discrete tier boundaries.
 
 pub mod cpu;
 pub mod kernel;
 pub mod memory;
 pub mod overload;
+pub mod partition;
 pub mod sizing;
 
 use std::sync::OnceLock;
@@ -31,6 +31,7 @@ pub use kernel::{
 };
 pub use memory::{MemoryProfile, probe_memory};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
+pub use partition::{CorePartition, CorePartitionMode};
 pub use sizing::HardwareSizing;
 
 /// Hardware topology profile probed once and cached in RAM.

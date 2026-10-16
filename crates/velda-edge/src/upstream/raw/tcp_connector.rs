@@ -28,7 +28,7 @@ pub struct TcpAccelerationPath {
     /// middlebox / NAT table entries warm and detect silent peer reboots.
     pub keepalive: Option<Duration>,
     /// Low-latency socket polling in kernel space (`SO_BUSY_POLL`) to bypass epoll sleep/wake
-    /// context-switch latency spikes on high-core server tiers.
+    /// context-switch latency spikes on high-core server environments.
     pub busy_poll_us: Option<u32>,
     /// Bounds SYN retransmission attempts (`TCP_SYNCNT`) to fail fast and trigger upstream
     /// failover within 3-7s rather than stalling worker tasks for 60-127s on partitioned backends.

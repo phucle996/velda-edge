@@ -102,26 +102,21 @@ ResolvConf (/etc/resolv.conf)      StaticServerProvider                      Udp
 | [`DnsServerTarget`](src/dns/server.rs) | Nameserver target resolution | Resolves IP literals and Host:Port targets via bootstrap hosts without deadlock |
 | [`UdpDnsTransport`](src/dns/transport.rs) | RFC 1035 UDP wire transport | Pure zero-dependency wire serialization; dual A/AAAA query; atomic TX ID |
 | [`SystemDnsTransport`](src/dns/transport.rs) | OS fallback resolver | Delegates domain resolution to `tokio::net::lookup_host` |
-| [`DnsResolverProvider`](src/dns/resolver.rs) | Phase 3 resolver coordinator | Singleflight deduplication; sequential nameserver failover; bounded LKG resilience; `for_tier` adaptive sizing |
+| [`DnsResolverProvider`](src/dns/resolver.rs) | Phase 3 resolver coordinator | Singleflight deduplication; sequential nameserver failover; bounded LKG resilience; `for_topology` adaptive sizing |
 | [`Endpoint`](src/endpoint.rs) | Canonical physical destination | Re-exported from `velda-core`; strictly represents `address: SocketAddr` + `weight` |
 | [`EndpointSet`](src/endpoint.rs) | Immutable generational snapshot | Generation-tracked topology; lock-free iteration via `.ips()` and `.addresses()` |
 | [`Discovery`](src/service.rs) | Top-level lifecycle orchestrator | Background refresh task; lock-free `ArcSwap` snapshot publication |
 
 ---
 
-## Adaptive Resource Tiers (`DnsResolverConfig::for_tier`)
+## Continuous Hardware Sizing (`DnsResolverConfig::for_topology`)
 
-To adapt seamlessly from constrained edge routers (256 MB RAM) to high-throughput bare-metal edge servers (128 GB RAM):
+Rather than relying on arbitrary discrete tiers, `velda-discovery` uses zero-quantization [`HardwareSizing`](../velda-core/src/hardware/sizing.rs) to continuously derive DNS cache and LKG capacities directly from host RAM:
 
-| Profile | Target Environment | DNS Cache Capacity | Bounded LKG Capacity | Query Timeout |
-| :--- | :--- | :--- | :--- | :--- |
-| **Constrained** | RAM < 512 MB (IoT gateways, OpenWrt, CPE) | **1,000 entries** | **500 entries** | 3.0s |
-| **Small** | RAM 512 MB – 2 GB (Micro VMs, Raspberry Pi 4/5) | **10,000 entries** | **2,000 entries** | 2.0s |
-| **Medium** | RAM 2 GB – 8 GB (Standard edge compute nodes) | **50,000 entries** | **10,000 entries** | 2.0s |
-| **Large** | RAM 8 GB – 32 GB (Regional edge nodes, Telco MEC) | **150,000 entries** | **30,000 entries** | 1.5s |
-| **XLarge** | RAM 32 GB – 64 GB (Heavy edge compute instances) | **400,000 entries** | **80,000 entries** | 1.0s |
-| **2XLarge** | RAM 64 GB – 128 GB (High-density edge clusters) | **1,000,000 entries** | **200,000 entries** | 1.0s |
-| **Ultra** | RAM > 128 GB (Massive bare-metal datacenters) | **2,500,000 entries** | **500,000 entries** | 1.0s |
+- **DNS Cache Capacity**: `(ram_bytes / (1024 * 1024)).clamp(256, 16384)`
+- **LKG Resilience Capacity**: `(cache_capacity / 5).max(100)`
+- **Query Timeout**: 1.5s on multi-core servers ($\ge 8$ cores), 2.0s on low-core instances
+- **Negative TTL**: 5s when RAM $\ge 1$ GB, 15s on constrained nodes (< 1 GB RAM)
 
 ---
 

@@ -30,7 +30,7 @@ pub struct UdpAccelerationPath {
     /// offloading datagram fragmentation of up to 64KB buffers to kernel or NIC.
     pub gso_segment: Option<u16>,
     /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL`
-    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) on high-core latency-critical tiers.
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) in high-core latency-critical environments.
     pub prefer_busy_poll: bool,
 }
 

@@ -1,3 +1,14 @@
+//! Plugin Domain Compiler & Lifecycle Engine (`velda-sync::post_sync::plugin`).
+//!
+//! Converts raw plugin configurations (`plugins.json`) into optimized, checksummed
+//! binary runtime artifacts (`plugins.bin`) for consumption by the Data Plane and Auxiliary Subsystem.
+//!
+//! # Modular Plugin Schema Architecture
+//! Individual plugin configuration schemas and validation rules are organized under
+//! dedicated sub-modules by plugin type:
+//! - [`prometheus_exporter`]: Schema and strict semantic validation for Prometheus Exporter.
+//! - Future plugins (`jwt_auth`, `rate_limit`, `ip_restriction`) are isolated similarly.
+
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
@@ -7,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::SyncError;
+
+pub mod prometheus_exporter;
+pub use prometheus_exporter::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
@@ -49,7 +63,7 @@ pub struct PluginConfig {
     pub id: String,
     #[serde(rename = "type")]
     pub plugin_type: String,
-    pub phase: String, // "pre_route", "pre_upstream", "post_response"
+    pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
     #[serde(with = "json_value_bincode")]
     pub config: serde_json::Value,
 }
@@ -108,7 +122,7 @@ pub fn parse_plugins(payload: &[u8]) -> Result<Vec<PluginConfig>, SyncError> {
 }
 
 // ============================================================================
-// Phase 3: Integrity Check & Semantic Validation
+// Phase 3: Integrity Check & Semantic Validation (Dispatcher)
 // ============================================================================
 
 /// Validates plugin rules locally.
@@ -160,17 +174,40 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
 
         let is_valid_phase = matches!(
             plugin.phase.as_str(),
-            "pre_route" | "pre_upstream" | "post_response"
+            "pre_route" | "pre_upstream" | "post_response" | "background"
         );
 
         if !is_valid_phase {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
                 reason: format!(
-                    "Plugin '{}' has invalid phase '{}' (must be pre_route, pre_upstream, or post_response)",
+                    "Plugin '{}' has invalid phase '{}' (must be pre_route, pre_upstream, post_response, or background)",
                     plugin.id, plugin.phase
                 ),
             });
+        }
+
+        // Modular semantic validation dispatched per plugin type
+        match plugin.plugin_type.as_str() {
+            "prometheus_exporter" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' of type 'prometheus_exporter' must specify phase 'background'",
+                            plugin.id
+                        ),
+                    });
+                }
+
+                prometheus_exporter::validate_prometheus_exporter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            }
+            _ => {
+                // Future plugins will dispatch to their respective validation modules
+            }
         }
     }
 
@@ -374,5 +411,74 @@ mod tests {
         persist_plugins(tmp.path(), json_bytes, &binary).expect("Should persist plugins");
         assert!(tmp.path().join("config/plugins.json").exists());
         assert!(tmp.path().join("runtime/plugins.bin").exists());
+    }
+
+    #[test]
+    fn test_valid_prometheus_exporter_plugin() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [
+                {
+                    "id": "metrics-exp",
+                    "type": "prometheus_exporter",
+                    "phase": "background",
+                    "config": {
+                        "listen": "0.0.0.0:9090",
+                        "path": "/metrics",
+                        "protocol": "http",
+                        "scrape": {
+                            "timeout_ms": 5000,
+                            "max_concurrency": 16,
+                            "max_buffer_size_kb": 256
+                        },
+                        "tls": {
+                            "mode": "none"
+                        },
+                        "cors": {
+                            "enabled": false,
+                            "allow_origins": [],
+                            "allow_methods": [],
+                            "allow_headers": []
+                        },
+                        "auth": {
+                            "mode": "none"
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let mut plugins = parse_plugins(json.as_bytes()).expect("parse should succeed");
+        validate_plugins(&mut plugins).expect("validation should succeed");
+    }
+
+    #[test]
+    fn test_prometheus_exporter_must_be_background() {
+        let mut plugins = vec![PluginConfig {
+            id: "prom-1".into(),
+            plugin_type: "prometheus_exporter".into(),
+            phase: "pre_route".into(),
+            config: serde_json::json!({
+                "listen": "0.0.0.0:9090",
+                "path": "/metrics",
+                "protocol": "http",
+                "scrape": {
+                    "timeout_ms": 5000,
+                    "max_concurrency": 16,
+                    "max_buffer_size_kb": 256
+                },
+                "tls": { "mode": "none" },
+                "cors": { "enabled": false },
+                "auth": { "mode": "none" }
+            }),
+        }];
+
+        let res = validate_plugins(&mut plugins);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must specify phase 'background'")
+        );
     }
 }

@@ -161,7 +161,7 @@ fn bench_runtime_profile_resolution() {
     let ops_mem = (iters_mem as f64 / elapsed_mem.as_secs_f64()) as u64;
 
     println!(
-        "| **from_hardware (In-Memory)** | 16 GB Large Tier probe | **{:.2} ns** | **{:.2}** | {} ops/s |",
+        "| **from_hardware (In-Memory)** | 16 GB Continuous Sizing probe | **{:.2} ns** | **{:.2}** | {} ops/s |",
         ns_mem,
         allocs_mem as f64 / iters_mem as f64,
         ops_mem
@@ -205,7 +205,7 @@ fn bench_runtime_profile_resolution() {
     let ops_disk = (iters_disk as f64 / elapsed_disk.as_secs_f64()) as u64;
 
     println!(
-        "| **resolve_runtime_profile (Disk)** | JSON parse, tier merge, write | **{:.2} µs** | **{:.2}** | {} ops/s |",
+        "| **resolve_runtime_profile (Disk)** | JSON parse, profile merge, write | **{:.2} µs** | **{:.2}** | {} ops/s |",
         ns_disk / 1_000.0,
         allocs_disk as f64 / iters_disk as f64,
         ops_disk

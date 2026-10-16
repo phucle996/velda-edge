@@ -1,6 +1,6 @@
-//! HTTP/1.1 protocol engine configuration and limits, scaled by hardware topology.
+//! HTTP/1.1 protocol engine configuration and limits, scaled continuously by hardware topology.
 //!
-//! Follows the `for_tier(MemoryTier)` pattern. Each subsystem owns its own tier-driven
+//! Follows continuous [`velda_core::HardwareSizing`] derivation. Each subsystem owns its own
 //! sizing and safety limits — `velda-core::hardware` only probes the host, it does not
 //! dictate subsystem parameters.
 

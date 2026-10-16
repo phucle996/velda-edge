@@ -4,7 +4,7 @@
 //! 1. **Operator Override (File Priority)**: Checks `<runtime_dir>/runtime.json`.
 //!    If present and valid, operator-specified values are strictly preserved.
 //! 2. **Hardware Probe Fallback**: If the file does not exist or has missing fields,
-//!    probes host CPU and RAM (cgroup limit or physical) to calculate [`velda_core::CpuTier`] and [`velda_core::MemoryTier`].
+//!    probes host CPU and RAM (cgroup limit or physical) to derive continuous [`velda_core::hardware::HardwareSizing`].
 //! 3. **Self-Persisting Write-Back**: Serializes the resulting profile back to
 //!    `<runtime_dir>/runtime.json` (best-effort, ignoring read-only filesystem errors).
 //!

@@ -76,11 +76,11 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
-    AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, DeadPeerTeardownTier,
-    HardwareSizing, HardwareTopology, KernelAccelerationLadder, KernelProfile, KernelVersion,
-    MemoryProfile, MultipathResilienceTier, MultiplexPacingTier, OutboundPortScalingTier,
-    OverloadConfig, OverloadLevel, OverloadTracker, UdpEgressTier, UdpOffloadTier,
-    compute_optimal_pool_concurrency, concurrency_shards, global_hardware_topology,
+    AccelerationTier, BusyPollTier, CorePartition, CorePartitionMode, CoreSteeringTier, CpuProfile,
+    DeadPeerTeardownTier, HardwareSizing, HardwareTopology, KernelAccelerationLadder,
+    KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier, MultiplexPacingTier,
+    OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker, UdpEgressTier,
+    UdpOffloadTier, compute_optimal_pool_concurrency, concurrency_shards, global_hardware_topology,
     init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
     probe_memory_usage,
 };

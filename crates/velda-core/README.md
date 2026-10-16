@@ -127,14 +127,14 @@ Detects physical and container hardware allocations once at cold start from the 
 
 - `src/hardware/cpu.rs`:
   - `probe_cpu()`: Inspects cgroups v2 (`/sys/fs/cgroup/cpu.max`), cgroups v1 (`cpu.cfs_quota_us`), or falls back to system `available_parallelism`.
-  - **`CpuTier`**: `Constrained` (1-2 cores), `Small` (3-4 cores), `Medium` (5-8 cores), `Large` (9-16 cores), `XLarge` (17-32 cores), `TwoXLarge` (33-64 cores), `Ultra` (> 64 cores).
+  - Determines available logical cores and hardware vector SIMD capabilities (AVX-512, AVX2, NEON).
   - Used to dynamically scale concurrency partitions and channel buffer capacities.
 - `src/hardware/memory.rs`:
   - `probe_memory()`: Inspects cgroups v2 (`memory.max`), cgroups v1 (`memory.limit_in_bytes`), or `/proc/meminfo` `MemTotal`.
-  - **`MemoryTier`**: `Constrained` (< 512 MB), `Small` (512 MB – 2 GB), `Medium` (2 GB – 8 GB), `Large` (8 GB – 32 GB), `XLarge` (32 GB – 64 GB), `TwoXLarge` (64 GB – 128 GB), `Ultra` (> 128 GB).
-  - Used to scale TCP/UDP socket buffers, listen backlogs, and DNS/LKG cache capacities.
+  - Determines precise memory bytes allocated to the process container.
+  - Used by [`HardwareSizing`] to continuously scale TCP/UDP socket buffers, listen backlogs, and DNS/LKG cache capacities without rigid discrete tier boundaries.
 - `src/hardware/mod.rs`:
-  - `HardwareTopology`: Aggregates `CpuProfile` and `MemoryProfile`, exposing `cpu_tier()` and `memory_tier()`.
+  - `HardwareTopology`: Aggregates `CpuProfile`, `MemoryProfile`, `KernelProfile`, and continuous `HardwareSizing`.
 
 ---
 
@@ -145,14 +145,10 @@ Proactively defends the Data Plane against Linux Kernel OOMKill (`SIGKILL 9`) du
   - `Normal (0)`: Safe memory zone. Serves 100% of requests and streaming pipes without restriction.
   - `Shedding (1)`: Memory enters warning threshold. The engine rejects new streaming/duplex pipes (returning generic `429 Too Many Requests`), but allows active inflight streams to drain and complete cleanly.
   - `Critical (2)`: Memory nears physical limits. Proactively rejects new incoming requests, transmits HTTP/2 `GOAWAY` frames to gracefully shed downstream clients, and sheds load immediately.
-- **Hardware-Calibrated Watermarks (`OverloadConfig::for_tier`)**:
-  - *Architectural Rationale*: An 80% RAM threshold on a 60MB-512MB VPS leaves merely ~12MB of headroom (a small concurrent burst can easily trigger an OOMKill before buffers drain). Conversely, 80% RAM on a 64GB-256GB bare-metal host leaves dozens of gigabytes of unused buffer. Therefore, watermark thresholds adapt dynamically based on `MemoryTier`:
-    - `Constrained` (< 512 MB): Shedding 70%, Critical 80% (20% safety headroom).
-    - `Small` (512 MB – 2 GB): Shedding 75%, Critical 85% (15% safety headroom).
-    - `Medium` (2 GB – 8 GB): Shedding 80%, Critical 88% (12% safety headroom).
-    - `Large` (8 GB – 32 GB): Shedding 85%, Critical 92% (8% safety headroom).
-    - `XLarge` (32 GB – 64 GB): Shedding 88%, Critical 94% (6% safety headroom).
-    - `TwoXLarge` / `Ultra` (> 64 GB): Shedding 90%, Critical 95% (5% safety headroom).
+- **Hardware-Calibrated Watermarks (`OverloadConfig::from_memory_bytes`)**:
+  - *Architectural Rationale*: An 80% RAM threshold on a 60MB-512MB VPS leaves merely ~12MB of headroom (a small concurrent burst can easily trigger an OOMKill before buffers drain). Conversely, 80% RAM on a 64GB-256GB bare-metal host leaves dozens of gigabytes of unused buffer. Therefore, watermark thresholds adapt continuously based on host RAM:
+    - Small instances allocate larger safety headroom (20%–30%) to prevent instant OOMKill.
+    - Large bare-metal hosts permit higher utilization (up to 90%–95%) with several gigabytes of safety margin.
   - Operators can override these defaults dynamically via the `overload` section in `runtime.json`.
 - **Hysteresis (Schmitt Trigger)**:
   - Separate entry thresholds (`high_watermark`) and recovery thresholds (`low_watermark`) prevent state flapping under oscillating memory pressure.

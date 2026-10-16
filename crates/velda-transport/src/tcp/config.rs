@@ -33,7 +33,7 @@ pub struct TcpListenerConfig {
     /// can send initial data in the SYN packet, cutting 1 RTT of downstream connection latency.
     pub fastopen_backlog: Option<u32>,
     /// Polls NIC ring buffers directly in kernel space (`SO_BUSY_POLL`) for up to N microseconds,
-    /// bypassing thread sleep/wake epoll context switches on latency-critical tiers.
+    /// bypassing thread sleep/wake epoll context switches in latency-critical environments.
     pub busy_poll_us: Option<u32>,
     /// Affines listener socket queues to specific CPU cores (`SO_INCOMING_CPU`) to steer
     /// packet processing directly to the worker thread's local CPU, maximizing L1/L2 cache locality.

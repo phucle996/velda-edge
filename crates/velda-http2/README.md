@@ -71,7 +71,7 @@ The codebase strictly enforces the monorepo's **Ingress Two-Way Perspective**:
 | **Upstream Ingress Gateway** | Gateway $\leftrightarrow$ Backend | `client/` | `Http2UpstreamConnector`, `Http2Response`, `Http2ResponseHead` |
 | **Wire Pipes** | End-to-End Forwarding | `pipe/` | `Http2PipeStrategy`, `pipe_buffered`, `pipe_server_stream`, `pipe_client_stream`, `pipe_duplex` |
 | **Header Sanitization** | RFC 9113 Normalization | `headers` | `sanitize_h2_headers` (in-place), `filter_h2_headers` (immutable copy) |
-| **Capacity & Limits** | Host-Scaled Config | `config` | `Http2Config` (explicit 7 [`MemoryTier`] constants) |
+| **Capacity & Limits** | Host-Scaled Config | `config` | `Http2Config` (continuous [`HardwareSizing`]) |
 
 ---
 

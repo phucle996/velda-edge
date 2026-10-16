@@ -19,7 +19,7 @@ pub struct UdpSocketConfig {
     /// Enables socket queue overflow monitoring (`SO_RXQ_OVFL`) to trace dropped datagrams.
     pub rxq_ovfl: bool,
     /// Instructs kernel NAPI to suppress IRQs and prioritize polling (`SO_PREFER_BUSY_POLL`
-    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) on high-core latency-critical tiers.
+    /// + `SO_BUSY_POLL_BUDGET`, Linux >= 5.11) in high-core latency-critical environments.
     pub prefer_busy_poll: bool,
     /// Enables Generic Segmentation Offload (`UDP_SEGMENT`, Linux >= 4.18),
     /// offloading datagram segmentation up to 64KB to kernel or NIC hardware.

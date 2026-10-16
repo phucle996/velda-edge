@@ -33,7 +33,7 @@ In high-performance edge gateways, **TLS is computationally the most expensive a
                                   │  1. In-Memory SniResolver (Exact & RFC 6125 *.wild) │ ~65 ns (O(1))
                                   │  2. Strict Rejection on Unknown / Missing SNI       │ 0 Cert Leakage
                                   │  3. Downstream Handshake & mTLS Peer Verification   │ +1.1% cost
-                                  │  4. RAM Session Resumption Cache & 0-RTT Tickets    │ Auto-Tiered
+                                  │  4. RAM Session Resumption Cache & 0-RTT Tickets    │ Auto-Sized
                                   └──────────────────────────┬──────────────────────────┘
                                                              ▼
                                                     Decrypted TlsStream
@@ -79,17 +79,13 @@ Many gateways fall back to a "default certificate" if the client sends an unknow
 - If `ClientHello` contains no SNI $\to$ Handshake immediately rejected.
 - If SNI does not match any configured exact domain or single-label wildcard $\to$ Handshake immediately rejected.
 
-### 3.4 Dynamic Hardware Tiering (Preventing OOM)
+### 3.4 Dynamic Hardware Sizing (Preventing OOM)
 Session resumption caches must be bounded according to the host machine's capacity. Hardcoding cache sizes causes OOM on small containers (e.g. 512MB RAM) or underutilizes large edge servers (e.g. 128GB RAM).
-`velda-tls` dynamically probes hardware via `velda-core`:
-
-| Memory Tier | Host RAM | Session Cache Capacity | 0-RTT Max Early Data | Handshake Timeout |
-| :--- | :--- | :--- | :--- | :--- |
-| **Constrained** | $< 2\text{ GB}$ | $1,024\text{ sessions}$ | $0\text{ B (Disabled)}$ | $10\text{ s}$ |
-| **Small** | $2 - 4\text{ GB}$ | $2,048\text{ sessions}$ | $4\text{ KB}$ | $8\text{ s}$ |
-| **Medium** | $4 - 16\text{ GB}$ | $8,192\text{ sessions}$ | $8\text{ KB}$ | $5\text{ s}$ |
-| **Large** | $16 - 64\text{ GB}$ | $16,384\text{ sessions}$ | $8\text{ KB}$ | $5\text{ s}$ |
-| **Ultra** | $> 256\text{ GB}$ | $131,072\text{ sessions}$ | $32\text{ KB}$ | $2\text{ s}$ |
+`velda-tls` dynamically derives session capacity continuously via [`velda_core::HardwareSizing`]:
+- `session_cache_capacity`: Scaled continuously from host RAM (`sizing.tls_session_cache_capacity`).
+- `session_shards`: Lock striping aligned to CPU parallelism (`sizing.concurrency_shards`).
+- `max_early_data_size`: Bounded 0-RTT memory footprint (`sizing.tls_max_early_data_size`).
+- `handshake_timeout`: Scaled by host core availability (5s for $\ge 8$ cores, 10s for smaller nodes).
 
 ### 3.5 QUIC / HTTP/3 Native Bridge
 Rather than maintaining separate crypto configurations for TCP and UDP, `velda-tls` provides `build_quic_server_config()`, directly transforming `Arc<rustls::ServerConfig>` into `quinn_proto::ServerConfig`. Both protocols share the same certificates, ALPN lists, and resumption logic.

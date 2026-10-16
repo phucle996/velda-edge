@@ -82,7 +82,7 @@ impl Http2Config {
 
     /// Derives an [`Http2Config`] scaled continuously from host CPU cores and RAM bytes.
     ///
-    /// Eliminates rigid discrete tier boundaries, smoothly scaling flow-control windows and concurrency
+    /// Eliminates rigid discrete quantization boundaries, smoothly scaling flow-control windows and concurrency
     /// using proportional formulas with strict `[min, max]` safety clamps.
     pub const fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
         const KB: usize = 1024;

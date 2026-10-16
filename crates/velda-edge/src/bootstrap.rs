@@ -6,6 +6,7 @@
 //! 3. Binds declarative ingress ports onto [`TrafficEngine`].
 //! 4. Prepares [`EdgeSupervisor`] for execution.
 
+use std::sync::Arc;
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
 use velda_transport::TrafficEngine;
@@ -23,6 +24,7 @@ pub struct EdgeSupervisor {
     pub runtime_profile: RuntimeProfile,
     pub shared_runtime: SharedRuntime,
     pub engine: TrafficEngine,
+    pub metrics: Arc<velda_observability::MetricsStore>,
 }
 
 impl EdgeSupervisor {
@@ -41,6 +43,7 @@ impl EdgeSupervisor {
             self.config,
             self.hardware,
             self.runtime_profile,
+            self.metrics,
             shutdown,
         )
         .await
@@ -62,6 +65,12 @@ impl EdgeSupervisor {
     #[inline]
     pub fn shared_runtime(&self) -> &SharedRuntime {
         &self.shared_runtime
+    }
+
+    /// Returns a reference to the telemetry metrics store.
+    #[inline]
+    pub fn metrics(&self) -> &Arc<velda_observability::MetricsStore> {
+        &self.metrics
     }
 }
 
@@ -110,11 +119,14 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
         "Velda Edge supervisor bootstrapped successfully"
     );
 
+    let metrics = Arc::new(velda_observability::MetricsStore::new());
+
     Ok(EdgeSupervisor {
         config,
         hardware,
         runtime_profile,
         shared_runtime,
         engine,
+        metrics,
     })
 }

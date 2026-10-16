@@ -2055,6 +2055,8 @@ dependencies = [
  "velda-http2",
  "velda-http3",
  "velda-lb",
+ "velda-observability",
+ "velda-plugin",
  "velda-router",
  "velda-sync",
  "velda-tls",
@@ -2152,7 +2154,23 @@ dependencies = [
 name = "velda-plugin"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "http",
+ "httparse",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
  "velda-core",
+ "velda-observability",
+ "velda-sync",
+ "velda-tls",
 ]
 
 [[package]]

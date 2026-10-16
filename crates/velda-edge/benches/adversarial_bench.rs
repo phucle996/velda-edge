@@ -278,13 +278,13 @@ fn bench_corrupted_profile_recovery_stress() {
         };
 
         println!(
-            "| **{}** | `{}` | Fallback to Hardware Tier | **YES** | **{:.2} µs** |",
+            "| **{}** | `{}` | Fallback to Hardware Defaults | **YES** | **{:.2} µs** |",
             desc, snippet, us_op
         );
     }
 
     println!(
-        "\n> **Invariant Verified**: Hostile or corrupted runtime.json files never crash Edge; system safely falls back to hardware tier.\n"
+        "\n> **Invariant Verified**: Hostile or corrupted runtime.json files never crash Edge; system safely falls back to continuous hardware defaults.\n"
     );
 }
 

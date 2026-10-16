@@ -8,7 +8,7 @@
 //! - `client/`: Upstream Ingress (Gateway <-> Backend). Owns `Http1ClientRequest` & `Http1ClientResponse`,
 //!   outbound request serialization, response decoding, and upstream connection mechanics.
 //! - `pipe/`: Bidirectional stream pump connecting downstream and upstream according to streaming policy.
-//! - `config/`: Buffer sizing scaled by [`velda_core::hardware::MemoryTier`].
+//! - `config/`: Buffer sizing scaled continuously by [`velda_core::HardwareSizing`].
 //! - `error/`: HTTP/1.1 protocol error definitions.
 
 pub mod client;

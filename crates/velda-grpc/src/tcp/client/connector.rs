@@ -36,7 +36,7 @@ pub struct GrpcAccelerationPath {
     /// middlebox / NAT table entries warm and detect silent peer reboots.
     pub keepalive: Option<std::time::Duration>,
     /// Low-latency socket polling in kernel space (`SO_BUSY_POLL`) to bypass epoll sleep/wake
-    /// context-switch latency spikes on high-core server tiers.
+    /// context-switch latency spikes on high-core server environments.
     pub busy_poll_us: Option<u32>,
     /// Commands the kernel to rehash IPv6 flow label / 4-tuple on loss/RTO (`SO_TXREHASH`, Linux >= 5.18).
     pub tx_rehash: bool,

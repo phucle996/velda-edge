@@ -56,7 +56,7 @@ Measures per-connection protocol pipeline lookup directly from the runtime dispa
 
 ## 4. Hardware Adaptation & Runtime Profile Resolution
 
-Measures hardware tier probing, JSON deep-merge resolution, and conversion to downstream subsystem configs:
+Measures continuous hardware probing, JSON deep-merge resolution, and conversion to downstream subsystem configs:
 
 | Scenario | Execution Phase | Latency / op | Allocs / op | Throughput |
 | :--- | :--- | :--- | :--- | :--- |

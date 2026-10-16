@@ -60,7 +60,7 @@ impl Http3Config {
     /// Derives an [`Http3Config`] scaled smoothly from actual host CPU cores and RAM bytes.
     ///
     /// Calculated once during bootstrap and compiled into the runtime snapshot.
-    /// Eliminates rigid discrete tier boundaries, smoothly scaling flow-control windows and concurrency
+    /// Eliminates rigid discrete quantization boundaries, smoothly scaling flow-control windows and concurrency
     /// using continuous mathematical formulas with strict `[min, max]` safety clamps.
     pub fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
         const KB: usize = 1024;
@@ -223,7 +223,7 @@ impl Http3Config {
     }
 
     /// Fallback default per-stream receive window (1 MB).
-    /// Used when hardware topology cannot determine the host memory tier.
+    /// Used when hardware topology cannot determine host memory capacity.
     pub const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024; // 1 MB
 
     /// Fallback default connection-level receive window (16 MB).
@@ -232,7 +232,7 @@ impl Http3Config {
 
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
     ///
-    /// Flow control windows and congestion windows are deterministically scaled by host memory tier,
+    /// Flow control windows and congestion windows are deterministically scaled continuously by host memory capacity,
     /// protecting constrained VPS instances from buffer exhaustion while achieving maximum BDP
     /// and wire-speed throughput on hyperscale datacenter nodes.
     pub fn apply_to_transport(&self, transport: &mut quinn_proto::TransportConfig) {
@@ -248,11 +248,11 @@ impl Http3Config {
             self.max_concurrent_uni_streams,
         ));
 
-        // 1. Stream-level flow control: Scaled per tier (128 KB for Constrained up to 4 MB for Ultra).
+        // 1. Stream-level flow control: Scaled continuously from host RAM.
         // As data is read and consumed, Quinn automatically issues MAX_STREAM_DATA frames to replenish credit.
         transport.stream_receive_window(quinn_proto::VarInt::from_u32(self.stream_receive_window));
 
-        // 2. Connection-level flow control: Scaled per tier (2 MB for Constrained up to 64 MB for Ultra).
+        // 2. Connection-level flow control: Scaled continuously from host RAM.
         if let Ok(conn_win_varint) = quinn_proto::VarInt::try_from(self.conn_receive_window) {
             transport.receive_window(conn_win_varint);
         }
@@ -260,7 +260,7 @@ impl Http3Config {
         // 3. Edge-to-Backend Low Latency & High Throughput:
         // - Initial RTT of 333ms (RFC 9002 Section 6.2.2 standard, preventing false-positive PTO loss under concurrency spikes)
         // - Send window matching connection window to prevent upload pipe starvation
-        // - Cubic congestion controller with tier-scaled initial congestion window
+        // - Cubic congestion controller with scaled initial congestion window
         // - Explicit segmentation offload enablement
         transport.initial_rtt(std::time::Duration::from_millis(333));
         transport.send_window(self.conn_send_window);

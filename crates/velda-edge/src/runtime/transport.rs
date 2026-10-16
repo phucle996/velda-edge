@@ -11,7 +11,7 @@ use velda_transport::{IngressBinding, TcpBinding, TcpListenerConfig, UdpBinding,
 use crate::error::EdgeError;
 
 /// Converts a list of listener configurations into transport-ready [`IngressBinding`]s
-/// applying host/tier-tuned TCP and UDP socket configurations.
+/// applying continuous hardware-tuned TCP and UDP socket configurations.
 pub(super) fn active_bindings_with_configs(
     listeners: &[ListenerConfig],
     tcp_config: Option<&TcpListenerConfig>,

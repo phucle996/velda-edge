@@ -26,7 +26,7 @@ async fn test_tls_session_resumption_and_tickets() {
         client_ca_pem: None,
     };
 
-    // Use explicit parameters to prevent fragility across heterogeneous CI/CD hardware tiers
+    // Use explicit parameters to prevent fragility across heterogeneous CI/CD hardware environments
     let params = TlsServerParams::from_hardware()
         .with_session_cache_capacity(4096)
         .with_max_early_data_size(8192)

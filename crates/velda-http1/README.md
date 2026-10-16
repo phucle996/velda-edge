@@ -121,7 +121,7 @@ On each request cycle, if read/write buffers have expanded beyond the configured
 ```
 src/
 ├── lib.rs                  Crate root, canonical public re-exports (flat entities)
-├── config.rs               Http1Config scaled by hardware memory tier
+├── config.rs               Http1Config scaled by continuous hardware sizing
 ├── error.rs                Http1Error enum
 ├── wire.rs                 RFC 9112 wire framing & chunked codec utilities
 │

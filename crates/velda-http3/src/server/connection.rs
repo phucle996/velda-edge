@@ -128,7 +128,7 @@ impl Http3Engine {
     }
 
     /// Returns the maximum aggregate pending outbound response bytes allowed in this worker,
-    /// dynamically derived from hardware memory tier and configuration (`self.config.max_pending_bytes`).
+    /// dynamically derived from hardware memory capacity and configuration (`self.config.max_pending_bytes`).
     #[inline]
     pub fn max_pending_bytes(&self) -> usize {
         self.config.max_pending_bytes

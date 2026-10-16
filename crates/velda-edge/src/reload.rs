@@ -42,7 +42,9 @@ pub fn load_initial_runtime(
 ) -> Result<Runtime, EdgeError> {
     let has_lkg = runtime_dir.join("listeners.bin").exists()
         || runtime_dir.join("routes.bin").exists()
-        || runtime_dir.join("upstreams.bin").exists();
+        || runtime_dir.join("upstreams.bin").exists()
+        || runtime_dir.join("plugins.bin").exists()
+        || runtime_dir.join("tls.bin").exists();
 
     if !has_lkg {
         tracing::info!(

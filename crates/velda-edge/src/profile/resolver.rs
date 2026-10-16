@@ -24,8 +24,8 @@ fn merge_json_values(base: &mut serde_json::Value, overrides: serde_json::Value)
 
 /// Resolves the runtime profile for the edge process:
 /// 1. Reads `<runtime_dir>/runtime.json` if available.
-/// 2. If fields are omitted, merges them on top of probed hardware tier defaults.
-/// 3. If file does not exist, uses 100% hardware tier defaults.
+/// 2. If fields are omitted, merges them on top of probed continuous hardware defaults.
+/// 3. If file does not exist, uses 100% probed continuous hardware defaults.
 /// 4. Best-effort writes back the complete merged `<runtime_dir>/runtime.json`.
 pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) -> RuntimeProfile {
     let profile_path = runtime_dir.join("runtime.json");
