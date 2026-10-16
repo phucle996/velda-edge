@@ -94,10 +94,7 @@ pub async fn serve(
     let (mut read_half, mut write_half) = tokio::io::split(&mut *lease);
 
     // Upload task: pipes downstream H2 DATA frames into upstream H1 chunked encoding
-    let coalesce_limit = upstream
-        .config
-        .client_body_buffer_size
-        .clamp(32_768, 131_072);
+    let coalesce_limit = upstream.config.client_body_buffer_size;
     let upload_fut = async {
         loop {
             match receiver.recv_coalesced_chunk(coalesce_limit).await {
@@ -129,10 +126,7 @@ pub async fn serve(
 
     // Download task: reads upstream H1 response and streams H2 DATA frames downstream
     let download_fut = async {
-        let read_cap = upstream
-            .config
-            .client_body_buffer_size
-            .clamp(16_384, 65_536);
+        let read_cap = upstream.config.client_body_buffer_size;
         let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
         let (resp_head, framing) = velda_http1::client::read_response_head(
             &mut read_half,
@@ -167,10 +161,7 @@ pub async fn serve(
             },
             Http1BodyFraming::ContentLength(total_len) => {
                 let mut remaining = total_len;
-                let chunk_limit = upstream
-                    .config
-                    .client_body_buffer_size
-                    .clamp(32_768, 131_072);
+                let chunk_limit = upstream.config.client_body_buffer_size;
                 while remaining > 0 {
                     let to_read = remaining.min(chunk_limit);
                     match velda_http1::client::read_chunk_sized(

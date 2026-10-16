@@ -48,152 +48,115 @@ pub struct Http2Config {
     pub alt_svc_port: Option<u16>,
 }
 
+#[inline]
+const fn clamp_usize(val: usize, min: usize, max: usize) -> usize {
+    if val < min {
+        min
+    } else if val > max {
+        max
+    } else {
+        val
+    }
+}
+
+#[inline]
+const fn clamp_u32(val: u32, min: u32, max: u32) -> u32 {
+    if val < min {
+        min
+    } else if val > max {
+        max
+    } else {
+        val
+    }
+}
+
+#[inline]
+const fn max_usize(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
 impl Http2Config {
-    /// Probes host hardware topology and derives the configuration for the active [`MemoryTier`].
+    /// Probes host hardware topology and derives the configuration smoothly from CPU cores and RAM bytes.
     pub fn auto() -> Self {
         let hw = velda_core::global_hardware_topology();
-        Self::for_tier(hw.memory_tier())
+        Self::from_hardware(hw.available_cores, hw.memory.total_bytes)
+    }
+
+    /// Derives an [`Http2Config`] scaled continuously from host CPU cores and RAM bytes.
+    ///
+    /// Eliminates rigid discrete tier boundaries, smoothly scaling flow-control windows and concurrency
+    /// using proportional formulas with strict `[min, max]` safety clamps.
+    pub const fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
+        const KB: usize = 1024;
+        const MB: usize = 1024 * KB;
+
+        let cores = max_usize(cores, 1);
+
+        // 1. Max concurrent streams: (cores * 64).clamp(128, 512)
+        let max_concurrent_streams = clamp_u32((cores * 64) as u32, 128, 512);
+
+        // 2. Initial stream window (receive): (ram_bytes / 16384).clamp(256 KB, 1 MB)
+        let initial_stream_window_size =
+            clamp_u32((ram_bytes / 16384) as u32, 256 * 1024, 1024 * 1024);
+
+        // 3. Initial connection window: (ram_bytes / 4096).clamp(1 MB, 8 MB)
+        let initial_connection_window_size =
+            clamp_u32((ram_bytes / 4096) as u32, 1024 * 1024, 8 * 1024 * 1024);
+
+        // 4. Max send buffer size: (ram_bytes / 16384).clamp(256 KB, 1 MB)
+        let max_send_buffer_size = clamp_usize(ram_bytes / 16384, 256 * KB, MB);
+
+        // 5. Max body size for buffered requests: (ram_bytes / 256).clamp(8 MB, 64 MB)
+        let max_body_size = clamp_usize(ram_bytes / 256, 8 * MB, 64 * MB);
+
+        // 6. Max header size: (ram_bytes / 131072).clamp(16 KB, 64 KB)
+        let max_header_size = clamp_usize(ram_bytes / 131_072, 16 * KB, 64 * KB);
+
+        // 7. Max headers count: clamped to [32, 96]
+        let max_headers = clamp_usize(cores * 16, 32, 96);
+
+        // 8. Idle timeout and safety limits
+        let idle_timeout_ms = 30_000;
+        let max_frame_size = 64 * 1024;
+        let max_header_list_size = max_header_size as u32;
+
+        let max_consecutive_resets = clamp_u32((cores * 200) as u32, 200, 2000);
+        let max_pending_control_frames = clamp_u32((cores * 100) as u32, 100, 1000);
+        let max_continuation_frames = clamp_u32((cores * 4) as u32, 8, 32);
+
+        Self {
+            max_body_size,
+            max_header_size,
+            max_headers,
+            idle_timeout_ms,
+            max_concurrent_streams,
+            initial_connection_window_size,
+            initial_stream_window_size,
+            max_frame_size,
+            max_header_list_size,
+            enable_push: false,
+            max_send_buffer_size,
+            max_consecutive_resets,
+            max_pending_control_frames,
+            max_continuation_frames,
+            max_requests_per_connection: 10_000_000,
+            max_connection_duration_secs: 7200,
+            alt_svc_port: None,
+        }
     }
 
     /// Derives an [`Http2Config`] scaled deterministically for the given [`MemoryTier`].
-    ///
-    /// Matches all 7 tiers explicitly to ensure unambiguous capacity planning without magic numbers.
     pub const fn for_tier(tier: MemoryTier) -> Self {
-        match tier {
-            MemoryTier::Constrained => Self {
-                max_body_size: 8 * 1024 * 1024,
-                max_header_size: 16 * 1024,
-                max_headers: 32,
-                idle_timeout_ms: 15_000,
-                max_concurrent_streams: 128,
-                initial_connection_window_size: 1024 * 1024,
-                initial_stream_window_size: 256 * 1024,
-                max_frame_size: 16 * 1024,
-                max_header_list_size: 16 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 256 * 1024,
-                max_consecutive_resets: 100,
-                max_pending_control_frames: 100,
-                max_continuation_frames: 8,
-                max_requests_per_connection: 10_000,
-                max_connection_duration_secs: 1800,
-                alt_svc_port: None,
-            },
-            MemoryTier::Small => Self {
-                max_body_size: 16 * 1024 * 1024,
-                max_header_size: 32 * 1024,
-                max_headers: 48,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 512,
-                initial_connection_window_size: 8 * 1024 * 1024,
-                initial_stream_window_size: 2 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 32 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 2 * 1024 * 1024,
-                max_consecutive_resets: 200,
-                max_pending_control_frames: 200,
-                max_continuation_frames: 8,
-                max_requests_per_connection: 1_000_000,
-                max_connection_duration_secs: 3600,
-                alt_svc_port: None,
-            },
-            MemoryTier::Medium => Self {
-                max_body_size: 64 * 1024 * 1024,
-                max_header_size: 64 * 1024,
-                max_headers: 64,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 2048,
-                initial_connection_window_size: 64 * 1024 * 1024,
-                initial_stream_window_size: 16 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 64 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 8 * 1024 * 1024,
-                max_consecutive_resets: 500,
-                max_pending_control_frames: 200,
-                max_continuation_frames: 16,
-                max_requests_per_connection: 10_000_000,
-                max_connection_duration_secs: 3600,
-                alt_svc_port: None,
-            },
-            MemoryTier::Large => Self {
-                max_body_size: 128 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 96,
-                idle_timeout_ms: 45_000,
-                max_concurrent_streams: 4096,
-                initial_connection_window_size: 64 * 1024 * 1024,
-                initial_stream_window_size: 16 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 128 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 16 * 1024 * 1024,
-                max_consecutive_resets: 1_000,
-                max_pending_control_frames: 500,
-                max_continuation_frames: 16,
-                max_requests_per_connection: 10_000_000,
-                max_connection_duration_secs: 7200,
-                alt_svc_port: None,
-            },
-            MemoryTier::XLarge => Self {
-                max_body_size: 256 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 8192,
-                initial_connection_window_size: 128 * 1024 * 1024,
-                initial_stream_window_size: 32 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 128 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 32 * 1024 * 1024,
-                max_consecutive_resets: 2_000,
-                max_pending_control_frames: 500,
-                max_continuation_frames: 32,
-                max_requests_per_connection: 10_000_000,
-                max_connection_duration_secs: 7200,
-                alt_svc_port: None,
-            },
-            MemoryTier::TwoXLarge => Self {
-                max_body_size: 512 * 1024 * 1024,
-                max_header_size: 256 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 16384,
-                initial_connection_window_size: 256 * 1024 * 1024,
-                initial_stream_window_size: 64 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 256 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 64 * 1024 * 1024,
-                max_consecutive_resets: 5_000,
-                max_pending_control_frames: 1_000,
-                max_continuation_frames: 32,
-                max_requests_per_connection: 10_000_000,
-                max_connection_duration_secs: 14400,
-                alt_svc_port: None,
-            },
-            MemoryTier::Ultra => Self {
-                max_body_size: 1024 * 1024 * 1024,
-                max_header_size: 256 * 1024,
-                max_headers: 256,
-                idle_timeout_ms: 120_000,
-                max_concurrent_streams: 32768,
-                initial_connection_window_size: 512 * 1024 * 1024,
-                initial_stream_window_size: 128 * 1024 * 1024,
-                max_frame_size: 64 * 1024,
-                max_header_list_size: 256 * 1024,
-                enable_push: false,
-                max_send_buffer_size: 128 * 1024 * 1024,
-                max_consecutive_resets: 10_000,
-                max_pending_control_frames: 1_000,
-                max_continuation_frames: 32,
-                max_requests_per_connection: 10_000_000,
-                max_connection_duration_secs: 14400,
-                alt_svc_port: None,
-            },
-        }
+        let (cores, ram) = match tier {
+            MemoryTier::Constrained => (1, 512 * 1024 * 1024),
+            MemoryTier::Small => (2, 2 * 1024 * 1024 * 1024),
+            MemoryTier::Medium => (4, 8 * 1024 * 1024 * 1024),
+            MemoryTier::Large => (8, 16 * 1024 * 1024 * 1024),
+            MemoryTier::XLarge => (16, 64 * 1024 * 1024 * 1024),
+            MemoryTier::TwoXLarge => (32, 128 * 1024 * 1024 * 1024),
+            MemoryTier::Ultra => (64, 512 * 1024 * 1024 * 1024),
+        };
+        Self::from_hardware(cores, ram)
     }
 
     /// Sets the maximum body size in bytes for buffered requests.
@@ -344,6 +307,27 @@ mod tests {
     }
 
     #[test]
+    fn test_from_hardware_continuous_scaling() {
+        let edge_2c_4g = Http2Config::from_hardware(2, 4 * 1024 * 1024 * 1024);
+        assert_eq!(edge_2c_4g.max_concurrent_streams, 128);
+        assert_eq!(edge_2c_4g.initial_connection_window_size, 1024 * 1024);
+        assert_eq!(edge_2c_4g.initial_stream_window_size, 256 * 1024);
+
+        let vm_4c_16g = Http2Config::from_hardware(4, 16 * 1024 * 1024 * 1024);
+        assert_eq!(vm_4c_16g.max_concurrent_streams, 256);
+        assert_eq!(vm_4c_16g.initial_connection_window_size, 4 * 1024 * 1024);
+        assert_eq!(vm_4c_16g.initial_stream_window_size, 1024 * 1024);
+
+        let server_64c_128g = Http2Config::from_hardware(64, 128 * 1024 * 1024 * 1024);
+        assert_eq!(server_64c_128g.max_concurrent_streams, 512);
+        assert_eq!(
+            server_64c_128g.initial_connection_window_size,
+            8 * 1024 * 1024
+        );
+        assert_eq!(server_64c_128g.initial_stream_window_size, 1024 * 1024);
+    }
+
+    #[test]
     fn test_for_tier_explicit_all_tiers() {
         let constrained = Http2Config::for_tier(MemoryTier::Constrained);
         assert_eq!(constrained.max_concurrent_streams, 128);
@@ -352,17 +336,17 @@ mod tests {
         assert_eq!(constrained.max_body_size, 8 * 1024 * 1024);
 
         let medium = Http2Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 2048);
-        assert_eq!(medium.initial_connection_window_size, 64 * 1024 * 1024);
-        assert_eq!(medium.initial_stream_window_size, 16 * 1024 * 1024);
-        assert_eq!(medium.max_body_size, 64 * 1024 * 1024);
+        assert_eq!(medium.max_concurrent_streams, 256);
+        assert_eq!(medium.initial_connection_window_size, 2 * 1024 * 1024);
+        assert_eq!(medium.initial_stream_window_size, 512 * 1024);
+        assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
         assert_eq!(medium.max_frame_size, 64 * 1024);
 
         let ultra = Http2Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 32768);
-        assert_eq!(ultra.initial_connection_window_size, 512 * 1024 * 1024);
-        assert_eq!(ultra.initial_stream_window_size, 128 * 1024 * 1024);
-        assert_eq!(ultra.max_body_size, 1024 * 1024 * 1024);
+        assert_eq!(ultra.max_concurrent_streams, 512);
+        assert_eq!(ultra.initial_connection_window_size, 8 * 1024 * 1024);
+        assert_eq!(ultra.initial_stream_window_size, 1024 * 1024);
+        assert_eq!(ultra.max_body_size, 64 * 1024 * 1024);
         assert_eq!(ultra.max_frame_size, 64 * 1024);
     }
 

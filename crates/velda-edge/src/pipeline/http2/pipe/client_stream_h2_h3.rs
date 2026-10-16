@@ -58,8 +58,9 @@ pub async fn serve(
         }
     };
 
-    // 4. Fast-path: Ingest initial payload with opportunistic coalescing up to 64KB
-    let (first_chunk, mut is_fin) = match receiver.recv_coalesced_chunk(65_536).await {
+    // 4. Fast-path: Ingest initial payload with opportunistic coalescing
+    let (first_chunk, mut is_fin) =
+        match receiver.recv_coalesced_chunk(upstream.config.stream_receive_window as usize).await {
         Ok(Some(c)) => {
             let fin = receiver.is_end_stream();
             (Some(c), fin)
@@ -96,13 +97,61 @@ pub async fn serve(
         }
     };
 
+    let mut response_rx = std::pin::pin!(response_rx);
+    let mut early_resp = None;
+
     // 5. Progressively stream any remaining client DATA frames directly to HTTP/3
     if !is_fin {
-        let coalesce_limit = (upstream.config.max_body_size / 64).clamp(16_384, 65_536);
-        while let Ok(Some(chunk)) = receiver.recv_coalesced_chunk(coalesce_limit).await {
-            let chunk_fin = receiver.is_end_stream();
-            if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {
-                tracing::warn!("Failed to stream DATA chunk to HTTP/3 upstream");
+        let coalesce_limit = (upstream.config.max_body_size / 32).clamp(65_536, 262_144);
+        'upload: while !receiver.is_end_stream() {
+            tokio::select! {
+                early = &mut response_rx => {
+                    early_resp = Some(early);
+                    break 'upload;
+                }
+                res = receiver.recv_coalesced_chunk(coalesce_limit) => {
+                    match res {
+                        Ok(Some(chunk)) => {
+                            let chunk_fin = receiver.is_end_stream();
+                            if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {
+                                tracing::warn!("Failed to stream DATA chunk to HTTP/3 upstream");
+                                let err_resp = L7Response::from_bytes(
+                                    StatusCode::BAD_GATEWAY,
+                                    b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
+                                );
+                                let _ = responder.send_response(&err_resp);
+                                return;
+                            }
+                            if chunk_fin {
+                                is_fin = true;
+                                break 'upload;
+                            }
+                        }
+                        Ok(None) => break 'upload,
+                        Err(_) => return,
+                    }
+                }
+            }
+        }
+        if !is_fin && early_resp.is_none() {
+            let _ = sender.finish().await;
+        }
+    }
+
+    // 6. Await response headers from upstream HTTP/3
+    let mut resp_stream = match early_resp {
+        Some(res) => match res {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "Upstream HTTP/3 stream returned error");
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                );
+                let _ = responder.send_response(&err_resp);
+                return;
+            }
+            Err(_) => {
                 let err_resp = L7Response::from_bytes(
                     StatusCode::BAD_GATEWAY,
                     b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
@@ -110,36 +159,27 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return;
             }
-            if chunk_fin {
-                is_fin = true;
-                break;
+        },
+        None => match response_rx.await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "Upstream HTTP/3 stream returned error");
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                );
+                let _ = responder.send_response(&err_resp);
+                return;
             }
-        }
-        if !is_fin {
-            let _ = sender.finish().await;
-        }
-    }
-
-    // 5. Await response headers from upstream HTTP/3
-    let mut resp_stream = match response_rx.await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "Upstream HTTP/3 stream returned error");
-            let err_resp = L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            );
-            let _ = responder.send_response(&err_resp);
-            return;
-        }
-        Err(_) => {
-            let err_resp = L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
-            );
-            let _ = responder.send_response(&err_resp);
-            return;
-        }
+            Err(_) => {
+                let err_resp = L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
+                );
+                let _ = responder.send_response(&err_resp);
+                return;
+            }
+        },
     };
 
     // 6. Consume finite response body and send downstream
@@ -184,4 +224,9 @@ pub async fn serve(
         body,
     );
     let _ = responder.send_response(&resp);
+    if !receiver.is_end_stream() {
+        tokio::spawn(async move {
+            while let Ok(Some(_)) = receiver.recv_chunk().await {}
+        });
+    }
 }

@@ -37,14 +37,30 @@ pub const MAX_SHARDS: usize = 1024;
 #[inline]
 pub fn max_concurrent_streams_for_mem_tier(tier: MemoryTier) -> u32 {
     match tier {
-        MemoryTier::Constrained => 256,
-        MemoryTier::Small => 1024,
-        MemoryTier::Medium => 4096,
-        MemoryTier::Large => 8192,
-        MemoryTier::XLarge => 16384,
-        MemoryTier::TwoXLarge => 32768,
-        MemoryTier::Ultra => 65536,
+        MemoryTier::Constrained => 128,
+        MemoryTier::Small => 128,
+        MemoryTier::Medium => 256,
+        MemoryTier::Large => 256,
+        MemoryTier::XLarge => 512,
+        MemoryTier::TwoXLarge => 512,
+        MemoryTier::Ultra => 1024,
     }
+}
+
+/// Computes the recommended maximum concurrent streams per multiplexed connection scaled continuously
+/// from available CPU cores and physical RAM bytes.
+///
+/// Formula: scales with cores ((cores * 32).clamp(64, 256)), ensuring high throughput without socket buffer bloat.
+#[inline]
+pub fn optimal_max_concurrent_streams(cores: usize, _ram_bytes: usize) -> u32 {
+    ((cores.max(1) * 32) as u32).clamp(64, 256)
+}
+
+/// Reads the optimal maximum concurrent streams pre-computed during cold-start bootstrap.
+#[inline]
+pub fn probed_max_concurrent_streams() -> u32 {
+    let hw = velda_core::global_hardware_topology();
+    optimal_max_concurrent_streams(hw.available_cores, hw.memory.total_bytes)
 }
 
 /// Computes the optimal maximum idle connections per key container based on worker concurrency.
@@ -258,5 +274,19 @@ mod tests {
 
         let probed = probed_max_idle_per_key();
         assert!((16..=4096).contains(&probed));
+    }
+
+    #[test]
+    fn test_optimal_max_concurrent_streams() {
+        assert_eq!(optimal_max_concurrent_streams(0, 0), 64);
+        assert_eq!(optimal_max_concurrent_streams(1, 0), 64);
+        assert_eq!(optimal_max_concurrent_streams(2, 0), 64);
+        assert_eq!(optimal_max_concurrent_streams(4, 0), 128);
+        assert_eq!(optimal_max_concurrent_streams(8, 0), 256);
+        assert_eq!(optimal_max_concurrent_streams(16, 0), 256);
+        assert_eq!(optimal_max_concurrent_streams(64, 0), 256);
+
+        let probed = probed_max_concurrent_streams();
+        assert!((64..=256).contains(&probed));
     }
 }

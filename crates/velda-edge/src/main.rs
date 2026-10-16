@@ -11,17 +11,17 @@ use velda_edge::{EdgeConfig, EdgeSupervisor, HardwareTopology, resolve_runtime_p
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// Adaptive Container & Datacenter Jemalloc profile:
+// High-performance Datacenter Jemalloc profile (Pingora-aligned):
 // - background_thread:true: Purges dirty pages in dedicated background thread, eliminating latency spikes on worker threads.
-// - dirty_decay_ms / muzzy_decay_ms: 1000ms: Smoothly purges idle dirty pages within 1s, preventing cgroup OOMKilled evictions
-//   in constrained container environments (e.g. K8s pods, Docker limits, embedded edge) while preserving burst reuse.
+// - dirty_decay_ms / muzzy_decay_ms: 30000ms: Retains active page arenas across request bursts without issuing frequent kernel madvise syscalls.
 #[cfg(all(
     feature = "jemalloc",
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[unsafe(export_name = "malloc_conf")]
-pub static MALLOC_CONF: &[u8] = b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\0";
+pub static MALLOC_CONF: &[u8] =
+    b"background_thread:true,dirty_decay_ms:30000,muzzy_decay_ms:30000\0";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check CLI arguments first before runtime bootstrap

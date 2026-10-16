@@ -71,16 +71,27 @@ pub async fn serve(
         let http_req = head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-        let upload_reserve =
-            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
-        let coalesce_limit = (upload_reserve / 2).clamp(16_384, 131_072);
-        let low_watermark = (upload_reserve / 4).clamp(8_192, 65_536);
+        let upload_reserve = config.initial_stream_window_size as usize;
+        let coalesce_limit = (upload_reserve / 2).max(16_384);
+        let low_watermark = (upload_reserve / 4).max(8_192);
         send_stream.reserve_capacity(upload_reserve);
 
         let mut response_fut = std::pin::pin!(response_fut);
         let mut early_response = None;
 
-        'upload: while let Some(mut chunk) = receiver.recv_coalesced_chunk(coalesce_limit).await? {
+        'upload: while !receiver.is_end_stream() {
+            let chunk_opt = tokio::select! {
+                resp = &mut response_fut => {
+                    early_response = Some(resp?);
+                    break 'upload;
+                }
+                res = receiver.recv_coalesced_chunk(coalesce_limit) => res?,
+            };
+
+            let Some(mut chunk) = chunk_opt else {
+                break 'upload;
+            };
+
             while !chunk.is_empty() {
                 let available = send_stream.capacity();
                 if available == 0 {
@@ -105,8 +116,13 @@ pub async fn serve(
                 }
 
                 let to_send = chunk.len().min(available);
+                let is_last = receiver.is_end_stream() && to_send == chunk.len();
                 let slice = chunk.split_to(to_send);
-                send_stream.send_data(slice, false)?;
+                send_stream.send_data(slice, is_last)?;
+
+                if is_last {
+                    break 'upload;
+                }
 
                 if send_stream.capacity() < low_watermark {
                     send_stream.reserve_capacity(upload_reserve);
@@ -117,7 +133,9 @@ pub async fn serve(
         let response = match early_response {
             Some(resp) => resp,
             None => {
-                let _ = send_stream.send_data(Bytes::new(), true);
+                if !receiver.is_end_stream() {
+                    let _ = send_stream.send_data(Bytes::new(), true);
+                }
                 response_fut.await?
             }
         };
@@ -228,6 +246,11 @@ pub async fn serve(
 
         let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
         responder.send_response(&resp)?;
+        if !receiver.is_end_stream() {
+            tokio::spawn(async move {
+                while let Ok(Some(_)) = receiver.recv_chunk().await {}
+            });
+        }
         Ok::<(), Http2Error>(())
     }
     .await;

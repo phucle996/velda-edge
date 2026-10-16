@@ -198,10 +198,10 @@ pub struct PipelineTable {
 }
 
 impl PipelineTable {
-    /// Compiles a pipeline table from listener configurations using default hardware topology memory tier.
+    /// Compiles a pipeline table from listener configurations using default hardware topology.
     pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
-        let tier = velda_core::global_hardware_topology().memory_tier();
-        Self::build_with_tier(listeners, tier)
+        let hw = velda_core::global_hardware_topology();
+        Self::build_with_hardware(listeners, hw.available_cores, hw.memory.total_bytes)
     }
 
     /// Compiles a pipeline table from listener configurations using the explicit memory tier.
@@ -212,6 +212,25 @@ impl PipelineTable {
         listeners: &[ListenerConfig],
         tier: MemoryTier,
     ) -> Result<Self, EdgeError> {
+        let (cores, ram_bytes) = match tier {
+            MemoryTier::Constrained => (1, 512 * 1024 * 1024),
+            MemoryTier::Small => (2, 2 * 1024 * 1024 * 1024),
+            MemoryTier::Medium => (4, 8 * 1024 * 1024 * 1024),
+            MemoryTier::Large => (8, 16 * 1024 * 1024 * 1024),
+            MemoryTier::XLarge => (16, 64 * 1024 * 1024 * 1024),
+            MemoryTier::TwoXLarge => (32, 128 * 1024 * 1024 * 1024),
+            MemoryTier::Ultra => (64, 512 * 1024 * 1024 * 1024),
+        };
+        Self::build_with_hardware(listeners, cores, ram_bytes)
+    }
+
+    /// Compiles a pipeline table from listener configurations using explicit hardware core and RAM parameters.
+    pub fn build_with_hardware(
+        listeners: &[ListenerConfig],
+        cores: usize,
+        ram_bytes: usize,
+    ) -> Result<Self, EdgeError> {
+        let tier = MemoryTier::from_bytes(ram_bytes);
         let mut tcp = FxHashMap::default();
         let mut udp = FxHashMap::default();
 
@@ -230,7 +249,7 @@ impl PipelineTable {
             if transport == "udp" {
                 match app.as_str() {
                     "http" | "http3" => {
-                        let config = resolve_http3_config(listener, tier);
+                        let config = resolve_http3_config(listener, cores, ram_bytes);
                         udp.insert(
                             listener.id.clone(),
                             UdpPipeline::Http3 {
@@ -264,7 +283,7 @@ impl PipelineTable {
                 match app.as_str() {
                     "http" => {
                         let http1_config = resolve_http1_config(listener, tier);
-                        let http2_config = resolve_http2_config(listener, tier);
+                        let http2_config = resolve_http2_config(listener, cores, ram_bytes);
                         if is_tls {
                             tcp.insert(
                                 listener.id.clone(),
@@ -298,7 +317,7 @@ impl PipelineTable {
                         );
                     }
                     "http2" => {
-                        let config = resolve_http2_config(listener, tier);
+                        let config = resolve_http2_config(listener, cores, ram_bytes);
                         tcp.insert(
                             listener.id.clone(),
                             TcpPipeline::Http2 {
@@ -384,8 +403,8 @@ fn resolve_http1_config(listener: &ListenerConfig, tier: MemoryTier) -> Http1Con
     config
 }
 
-fn resolve_http2_config(listener: &ListenerConfig, tier: MemoryTier) -> Http2Config {
-    let mut config = Http2Config::for_tier(tier);
+fn resolve_http2_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize) -> Http2Config {
+    let mut config = Http2Config::from_hardware(cores, ram_bytes);
     if let Some(ref h2) = listener.http2 {
         if let Some(v) = h2.max_body_size {
             // Note: max_body_size is enforced strictly for Buffered strategy.
@@ -473,8 +492,8 @@ fn resolve_grpc_config(listener: &ListenerConfig, tier: MemoryTier) -> GrpcConfi
     config
 }
 
-fn resolve_http3_config(listener: &ListenerConfig, tier: MemoryTier) -> Http3Config {
-    let mut config = Http3Config::for_tier(tier);
+fn resolve_http3_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize) -> Http3Config {
+    let mut config = Http3Config::from_hardware(cores, ram_bytes);
     if let Some(ref h3) = listener.http3 {
         if let Some(v) = h3.max_body_size {
             // Note: max_body_size is enforced strictly for Buffered strategy.

@@ -378,10 +378,6 @@ where
                 }
             }
 
-            if total < self.max_connections_per_key && min_load > 4 {
-                return None;
-            }
-
             best
         };
 
@@ -437,24 +433,14 @@ where
 
     /// Returns the number of physical connections currently stored for a given key.
     pub fn connection_count(&self, key: &K) -> usize {
-        let lane = crate::container::shard::current_thread_lane();
-        let local_shard = self.shard_for_lane(key, lane);
-        let base_shard = self.shard_for(key);
-
-        let local_count = {
-            let guard = local_shard.table.lock().unwrap_or_else(|e| e.into_inner());
-            guard.get(key).map(|v| v.len()).unwrap_or(0)
-        };
-
-        if std::ptr::eq(local_shard, base_shard) {
-            local_count
-        } else {
-            let base_count = {
-                let guard = base_shard.table.lock().unwrap_or_else(|e| e.into_inner());
-                guard.get(key).map(|v| v.len()).unwrap_or(0)
-            };
-            local_count + base_count
+        let mut total = 0;
+        for shard in self.shards.iter() {
+            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(conns) = guard.get(key) {
+                total += conns.len();
+            }
         }
+        total
     }
 
     /// Acquires a stream slot from an existing available multiplexed connection,
@@ -478,6 +464,16 @@ where
             && let Some(lease) = self.acquire_stream_from_shard(base_shard, key, idle_timeout, now)
         {
             return Some(lease);
+        }
+
+        // Step 3: Fallback to scan any other shard before failing to avoid spawning redundant connections
+        for shard in self.shards.iter() {
+            if !std::ptr::eq(shard, local_shard)
+                && !std::ptr::eq(shard, base_shard)
+                && let Some(lease) = self.acquire_stream_from_shard(shard, key, idle_timeout, now)
+            {
+                return Some(lease);
+            }
         }
 
         None

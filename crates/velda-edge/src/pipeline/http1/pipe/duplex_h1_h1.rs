@@ -35,12 +35,12 @@ pub async fn serve<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. Enrich proxy forwarding headers
-    velda_http1::server::header::enrich_headers(
+    // 1. Enrich proxy forwarding headers using pre-computed connection metadata
+    velda_http1::server::header::enrich_headers_cached(
         &mut head.headers,
         &head.uri,
-        meta.peer,
-        meta.local_addr,
+        &meta.client_ip_header,
+        &meta.client_port_header,
         meta.is_tls,
     );
 

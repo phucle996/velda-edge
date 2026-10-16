@@ -66,7 +66,7 @@ where
             self.write_buf = BytesMut::with_capacity(self.config.initial_buffer_capacity);
         }
         if self.upstream_read_buf.is_empty()
-            && (self.upstream_read_buf.capacity() < 65_536
+            && (self.upstream_read_buf.capacity() < 8192
                 || self.upstream_read_buf.capacity() > 262_144)
         {
             self.upstream_read_buf = BytesMut::with_capacity(65_536);
@@ -115,21 +115,20 @@ where
                 std::time::Duration::from_millis(self.config.header_read_timeout_ms)
             };
 
-            let bytes_read = match tokio::time::timeout(
-                timeout_duration,
-                self.stream.read_buf(&mut self.read_buf),
-            )
-            .await
-            {
-                Ok(res) => res?,
-                Err(_) => {
-                    if self.read_buf.is_empty() {
-                        return Ok(None);
-                    } else {
-                        return Err(Http1Error::Timeout);
+            let bytes_read =
+                match read_with_timeout(&mut self.stream, &mut self.read_buf, timeout_duration)
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(Http1Error::Timeout) => {
+                        if self.read_buf.is_empty() {
+                            return Ok(None);
+                        } else {
+                            return Err(Http1Error::Timeout);
+                        }
                     }
-                }
-            };
+                    Err(e) => return Err(e),
+                };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);
@@ -171,11 +170,10 @@ where
             }
 
             let bytes_read =
-                match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
-                    .await
-                {
-                    Ok(res) => res?,
-                    Err(_) => return Err(Http1Error::Timeout),
+                match read_with_timeout(&mut self.stream, &mut self.read_buf, idle_timeout).await {
+                    Ok(res) => res,
+                    Err(Http1Error::Timeout) => return Err(Http1Error::Timeout),
+                    Err(e) => return Err(e),
                 };
             if bytes_read == 0 {
                 return Err(Http1Error::Parse(
@@ -228,21 +226,20 @@ where
                 std::time::Duration::from_millis(self.config.header_read_timeout_ms)
             };
 
-            let bytes_read = match tokio::time::timeout(
-                timeout_duration,
-                self.stream.read_buf(&mut self.read_buf),
-            )
-            .await
-            {
-                Ok(res) => res?,
-                Err(_) => {
-                    if self.read_buf.is_empty() {
-                        return Ok(None);
-                    } else {
-                        return Err(Http1Error::Timeout);
+            let bytes_read =
+                match read_with_timeout(&mut self.stream, &mut self.read_buf, timeout_duration)
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(Http1Error::Timeout) => {
+                        if self.read_buf.is_empty() {
+                            return Ok(None);
+                        } else {
+                            return Err(Http1Error::Timeout);
+                        }
                     }
-                }
-            };
+                    Err(e) => return Err(e),
+                };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);
@@ -433,5 +430,48 @@ where
             }
         })
         .await;
+    }
+}
+
+/// Fast-path socket reader: polls stream immediately without registering a timer in Tokio's
+/// timer wheel if incoming data has already arrived in the kernel socket receive buffer.
+/// Falls back to `tokio::time::timeout` only when the socket genuinely would block.
+#[inline]
+pub(crate) async fn read_with_timeout<IO>(
+    stream: &mut IO,
+    buf: &mut BytesMut,
+    timeout_duration: std::time::Duration,
+) -> Result<usize, Http1Error>
+where
+    IO: AsyncRead + Unpin,
+{
+    if buf.capacity().saturating_sub(buf.len()) < 1024 {
+        buf.reserve(4096);
+    }
+
+    let poll_res = std::future::poll_fn(|cx| {
+        let mut read_buf = tokio::io::ReadBuf::uninit(buf.spare_capacity_mut());
+        match std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
+            std::task::Poll::Ready(Ok(())) => {
+                let filled = read_buf.filled().len();
+                unsafe {
+                    let new_len = buf.len() + filled;
+                    buf.set_len(new_len);
+                }
+                std::task::Poll::Ready(Some(Ok(filled)))
+            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Some(Err(Http1Error::Io(e)))),
+            std::task::Poll::Pending => std::task::Poll::Ready(None),
+        }
+    })
+    .await;
+
+    if let Some(res) = poll_res {
+        return res;
+    }
+
+    match tokio::time::timeout(timeout_duration, stream.read_buf(buf)).await {
+        Ok(res) => Ok(res?),
+        Err(_) => Err(Http1Error::Timeout),
     }
 }

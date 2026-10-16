@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut urls: Vec<String> = Vec::new();
     let mut total_requests: usize = 50_000;
     let mut concurrency: usize = 100;
+    let mut timeout_secs: u64 = 10;
     let mut json_output = false;
     let mut host_override: Option<String> = None;
 
@@ -93,6 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "-c" | "--concurrency" => {
                 if i + 1 < args.len() {
                     concurrency = args[i + 1].parse()?;
+                    i += 1;
+                }
+            }
+            "-t" | "--timeout" => {
+                if i + 1 < args.len() {
+                    timeout_secs = args[i + 1].parse()?;
                     i += 1;
                 }
             }
@@ -196,7 +203,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let client = &clients[client_idx];
                     let t0 = Instant::now();
                     let send_fut = client.send_request(req.clone());
-                    match tokio::time::timeout(std::time::Duration::from_secs(3), send_fut).await {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout_secs),
+                        send_fut,
+                    )
+                    .await
+                    {
                         Ok(Ok(resp)) => {
                             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
                             latencies.push(elapsed_ms);
@@ -231,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(_) => {
                             if errors < 10 {
                                 eprintln!(
-                                    "Worker {worker_id} (conn {client_idx}) request timed out after 3s on req #{req_idx}",
+                                    "Worker {worker_id} (conn {client_idx}) request timed out after {timeout_secs}s on req #{req_idx}",
                                 );
                             }
                             client_idx = (client_idx + 1) % clients.len();

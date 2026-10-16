@@ -1,26 +1,29 @@
-//! Layer 7 HTTP/3 to HTTP/2 Server Streaming Bridge Pipeline.
+//! Layer 7 HTTP/3 to HTTP/2 Server-Stream Pipeline.
 //!
-//! Handles streaming responses where downstream HTTP/3 requests are forwarded
-//! to upstream HTTP/2 backends.
+//! Streams upstream HTTP/2 response frames progressively to downstream HTTP/3 clients
+//! with reactive channel-driven flow-control backpressure.
 
 use std::sync::Arc;
 
-use bytes::BytesMut;
-use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use velda_core::{L7Request, L7Response};
+use http::{StatusCode, Version};
+use velda_core::{Body, L7Request, L7Response};
 
+use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http2Upstream;
 
-/// Serves a server-streaming HTTP/3 downstream request bridged to an HTTP/2 backend.
-pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response {
+/// Minimum batching threshold for HTTP/2 WINDOW_UPDATE frame emission (32 KB).
+/// Prevents micro-frame thrashing on small response chunk reads.
+const MIN_H2_WINDOW_UPDATE_BATCH: usize = 32 * 1024;
+
+/// Maximum batching threshold for HTTP/2 WINDOW_UPDATE frame emission (256 KB).
+/// Ensures upstream HTTP/2 connection credit is returned in time to prevent pipe stall.
+const MAX_H2_WINDOW_UPDATE_BATCH: usize = 256 * 1024;
+
+/// Serves a server-streaming HTTP/3 downstream request forwarded to an HTTP/2 upstream backend.
+pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Http2Upstream>) {
     let mut headers = req.headers.clone();
     velda_http2::client::sanitize_h2_headers(&mut headers);
-
-    let body_bytes = match &req.body {
-        velda_core::Body::Bytes(b) => b.clone(),
-        velda_core::Body::Empty => bytes::Bytes::new(),
-    };
 
     let (mut client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,
@@ -30,7 +33,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
                 upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/2 connection for H3->H2 server stream bridge"
             );
-            return L7Response::from_bytes(
+            let err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -38,94 +41,143 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            let _ = responder.send_response(err_resp).await;
+            return;
         }
     };
 
-    let mut pipe_res = send_h2_stream(&mut client, req, &headers, &body_bytes).await;
-    let mut _fresh_lease_guard = None;
-    if let Err(ref e) = pipe_res
-        && is_h2_refused_or_goaway(e)
-    {
-        lease.mark_goaway();
-        drop(lease);
-        tracing::debug!(
-            upstream = %upstream.id(),
-            "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
-        );
-        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
-        {
-            pipe_res = send_h2_stream(&mut fresh_client, req, &headers, &body_bytes).await;
-            if pipe_res.is_err() {
-                fresh_lease.mark_goaway();
-            }
-            _fresh_lease_guard = Some(fresh_lease);
+    let mut h2_req = http::Request::builder()
+        .method(req.method.clone())
+        .uri(req.uri.clone())
+        .version(Version::HTTP_2);
+    *h2_req.headers_mut().unwrap() = headers;
+    let h2_req = h2_req.body(()).unwrap();
+
+    let has_body = match &req.body {
+        Body::Bytes(b) => !b.is_empty(),
+        Body::Empty => false,
+    };
+
+    let (response_fut, mut send_stream) = match client.send_request(h2_req, !has_body) {
+        Ok(res) => res,
+        Err(e) => {
+            lease.mark_goaway();
+            tracing::warn!(
+                error = %e,
+                upstream = %upstream.id(),
+                "Failed to dispatch HTTP/2 request to upstream"
+            );
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = responder.send_response(err_resp).await;
+            return;
         }
+    };
+
+    if let Body::Bytes(ref b) = req.body
+        && !b.is_empty()
+    {
+        let _ = send_stream.send_data(b.clone(), true);
     }
 
-    match pipe_res {
-        Ok(resp) => resp,
+    let response = match response_fut.await {
+        Ok(r) => r,
+        Err(e) => {
+            lease.mark_goaway();
+            tracing::warn!(
+                error = %e,
+                upstream = %upstream.id(),
+                "Failed to await HTTP/2 response headers from upstream"
+            );
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            let _ = responder.send_response(err_resp).await;
+            return;
+        }
+    };
+
+    let (parts, mut body_stream) = response.into_parts();
+
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body = parts.status.is_informational()
+        || parts.status == StatusCode::NO_CONTENT
+        || parts.status == StatusCode::NOT_MODIFIED;
+
+    if is_head || is_no_body {
+        let resp = L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
+        let _ = responder.send_response(resp).await;
+        return;
+    }
+
+    let mut stream_sender = match responder
+        .send_stream_response(parts.status, &parts.headers)
+        .await
+    {
+        Ok(s) => s,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
-                "HTTP/2 upstream server-stream pipe failed"
+                "Failed to initiate downstream HTTP/3 streaming response"
             );
-            L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
+            return;
+        }
+    };
+
+    // RFC 9113 §5.2.2: Batch WINDOW_UPDATE frames at 1/4th of initial stream window size.
+    // Clamping to [32KB, 256KB] prevents micro-frame flooding while guaranteeing steady upstream credit.
+    let batch_threshold = (upstream.config.initial_stream_window_size as usize / 4)
+        .clamp(MIN_H2_WINDOW_UPDATE_BATCH, MAX_H2_WINDOW_UPDATE_BATCH);
+    let mut unreleased_bytes = 0;
+
+    while let Some(chunk) = body_stream.data().await {
+        let data = match chunk {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "HTTP/2 upstream body stream error");
+                let _ = body_stream
+                    .flow_control()
+                    .release_capacity(unreleased_bytes);
+                return;
+            }
+        };
+
+        let len = data.len();
+        unreleased_bytes += len;
+
+        if stream_sender.send_chunk(data).await.is_err() {
+            tracing::debug!("Downstream client disconnected during H3 streaming");
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
+            return;
+        }
+
+        if unreleased_bytes >= batch_threshold {
+            let _ = body_stream
+                .flow_control()
+                .release_capacity(unreleased_bytes);
+            unreleased_bytes = 0;
         }
     }
-}
 
-async fn send_h2_stream(
-    client: &mut h2::client::SendRequest<bytes::Bytes>,
-    req: &L7Request,
-    headers: &http::HeaderMap,
-    body: &bytes::Bytes,
-) -> Result<L7Response, h2::Error> {
-    let mut h2_req = http::Request::builder()
-        .method(req.method.clone())
-        .uri(req.uri.clone())
-        .version(http::Version::HTTP_2);
-    *h2_req.headers_mut().unwrap() = headers.clone();
-    let h2_req = h2_req.body(()).unwrap();
-
-    let has_body = !body.is_empty();
-    let (response_future, mut send_stream) = client.send_request(h2_req, !has_body)?;
-    if has_body {
-        send_stream.send_data(body.clone(), true)?;
+    if unreleased_bytes > 0 {
+        let _ = body_stream
+            .flow_control()
+            .release_capacity(unreleased_bytes);
     }
 
-    let response = response_future.await?;
-    let (parts, mut body_stream) = response.into_parts();
-
-    let content_len = parts
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(4096);
-    let mut resp_body = BytesMut::with_capacity(content_len.min(65536));
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk?;
-        body_stream.flow_control().release_capacity(chunk.len())?;
-        resp_body.extend_from_slice(&chunk);
-    }
-
-    Ok(L7Response::new(
-        parts.status,
-        http::Version::HTTP_3,
-        parts.headers,
-        velda_core::Body::Bytes(resp_body.freeze()),
-    ))
-}
-
-#[inline]
-fn is_h2_refused_or_goaway(err: &h2::Error) -> bool {
-    (err.is_reset() && err.reason() == Some(h2::Reason::REFUSED_STREAM)) || err.is_go_away()
+    let _ = stream_sender.finish().await;
 }

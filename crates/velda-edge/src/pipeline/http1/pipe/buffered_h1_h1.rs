@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -34,12 +35,12 @@ pub async fn serve<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. Enrich proxy forwarding headers
-    velda_http1::server::header::enrich_headers(
+    // 1. Enrich proxy forwarding headers using pre-computed connection metadata
+    velda_http1::server::header::enrich_headers_cached(
         &mut head.headers,
         &head.uri,
-        meta.peer,
-        meta.local_addr,
+        &meta.client_ip_header,
+        &meta.client_port_header,
         meta.is_tls,
     );
 
@@ -219,7 +220,16 @@ where
                         }
                     }
                 }
-                Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
+                if len <= 4096 {
+                    let body_bytes = bytes::Bytes::copy_from_slice(&conn.upstream_read_buf[..len]);
+                    conn.upstream_read_buf.advance(len);
+                    if conn.upstream_read_buf.is_empty() {
+                        conn.upstream_read_buf.clear();
+                    }
+                    Body::Bytes(body_bytes)
+                } else {
+                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
+                }
             }
             Http1BodyFraming::Chunked => unreachable!(),
         }

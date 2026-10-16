@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
+use http::StatusCode;
 use quinn_proto::{
     Connection, ConnectionHandle, Dir, Endpoint, EndpointConfig, Event, ServerConfig, StreamEvent,
     StreamId,
@@ -69,15 +70,14 @@ struct StreamSlot {
 
 struct PendingStreamWrite {
     remaining: Bytes,
-    created_at: Instant,
+    finish: bool,
+    permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    last_activity: Instant,
 }
 
-/// Maximum aggregate pending outbound response bytes across all streams in an engine worker (64 MB).
-/// Prevents memory exhaustion if malicious or stalled downstream clients stop acknowledging data.
-const MAX_ENGINE_PENDING_BYTES: usize = 64 * 1024 * 1024;
-
-/// Timeout after which a stalled pending response stream is forcibly reset (10 seconds).
-const PENDING_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Fallback stall timeout for unacknowledged pending stream writes when idle_timeout is unspecified.
+/// Bound defensively between 5s and 30s to mitigate slowloris attacks without terminating high-latency pipes.
+pub const DEFAULT_PENDING_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// High-performance, packet-driven HTTP/3 server engine.
 pub struct Http3Engine {
@@ -125,6 +125,23 @@ impl Http3Engine {
             transmit_buf: Vec::with_capacity(65535),
             resp_buf: Vec::with_capacity(2048),
         }
+    }
+
+    /// Returns the maximum aggregate pending outbound response bytes allowed in this worker,
+    /// dynamically derived from hardware memory tier and configuration (`self.config.max_pending_bytes`).
+    #[inline]
+    pub fn max_pending_bytes(&self) -> usize {
+        self.config.max_pending_bytes
+    }
+
+    /// Derives the stall timeout for unacknowledged pending stream writes.
+    /// Scaled proportionally to connection `idle_timeout_ms` (half of idle timeout, clamped to 5s-30s).
+    #[inline]
+    pub fn pending_stream_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.config.idle_timeout_ms / 2).clamp(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+        )
     }
 
     /// Ingests an incoming UDP datagram payload, advances the QUIC state machine,
@@ -269,12 +286,16 @@ impl Http3Engine {
                                             self.total_pending_bytes =
                                                 self.total_pending_bytes.saturating_sub(n);
                                             pending.remaining = pending.remaining.slice(n..);
+                                            pending.last_activity = now;
                                         }
                                         _ => break,
                                     }
                                 }
                                 if pending.remaining.is_empty() {
-                                    let _ = conn.send_stream(id).finish();
+                                    if pending.finish {
+                                        let _ = conn.send_stream(id).finish();
+                                    }
+                                    pending.permits.clear();
                                     self.pending_writes.remove(&(handle, id));
                                 }
                             }
@@ -309,12 +330,16 @@ impl Http3Engine {
                                         self.total_pending_bytes =
                                             self.total_pending_bytes.saturating_sub(n);
                                         pending.remaining = pending.remaining.slice(n..);
+                                        pending.last_activity = now;
                                     }
                                     _ => break,
                                 }
                             }
                             if pending.remaining.is_empty() {
-                                let _ = conn.send_stream(sid).finish();
+                                if pending.finish {
+                                    let _ = conn.send_stream(sid).finish();
+                                }
+                                pending.permits.clear();
                                 finished_streams.push(sid);
                             }
                         }
@@ -496,10 +521,11 @@ impl Http3Engine {
         let mut outgoing = Vec::new();
         let mut closed_handles = Vec::new();
 
-        // 1. Evict timed-out pending writes (>10s) and attempt flushing active pending writes
+        // 1. Evict stalled pending writes and attempt flushing active pending writes
+        let stall_timeout = self.pending_stream_timeout();
         let mut evicted_streams = Vec::new();
         for (&(handle, stream_id), write) in self.pending_writes.iter_mut() {
-            if now.saturating_duration_since(write.created_at) > PENDING_STREAM_TIMEOUT {
+            if now.saturating_duration_since(write.last_activity) > stall_timeout {
                 evicted_streams.push((handle, stream_id, write.remaining.len()));
                 if let Some(conn) = self.connections.get_mut(&handle) {
                     let _ = conn
@@ -514,12 +540,16 @@ impl Http3Engine {
                         Ok(n) if n > 0 => {
                             self.total_pending_bytes = self.total_pending_bytes.saturating_sub(n);
                             write.remaining = write.remaining.slice(n..);
+                            write.last_activity = now;
                         }
                         _ => break,
                     }
                 }
                 if write.remaining.is_empty() {
-                    let _ = conn.send_stream(stream_id).finish();
+                    if write.finish {
+                        let _ = conn.send_stream(stream_id).finish();
+                    }
+                    write.permits.clear();
                     evicted_streams.push((handle, stream_id, 0));
                 }
             }
@@ -604,7 +634,7 @@ impl Http3Engine {
         )?;
 
         if let Some(rem) = remaining {
-            if self.total_pending_bytes + rem.len() > MAX_ENGINE_PENDING_BYTES {
+            if self.total_pending_bytes + rem.len() > self.config.max_pending_bytes {
                 let _ = conn
                     .send_stream(stream_id)
                     .reset(quinn_proto::VarInt::from_u32(
@@ -620,9 +650,130 @@ impl Http3Engine {
                 (handle, stream_id),
                 PendingStreamWrite {
                     remaining: rem,
-                    created_at: now,
+                    finish: true,
+                    permits: Vec::new(),
+                    last_activity: now,
                 },
             );
+        }
+
+        Ok(outgoing)
+    }
+
+    /// Sends only the response HEADERS frame to initiate a progressive streaming response.
+    pub fn send_response_head(
+        &mut self,
+        now: Instant,
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        status: StatusCode,
+        headers: &http::HeaderMap,
+    ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+        let conn = self
+            .connections
+            .get_mut(&handle)
+            .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
+
+        crate::server::response::send_response_head(
+            conn,
+            stream_id,
+            status,
+            headers,
+            &mut self.transmit_buf,
+            now,
+        )
+    }
+
+    /// Sends a progressive response DATA frame chunk to the specified stream.
+    pub fn send_data_chunk(
+        &mut self,
+        now: Instant,
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        chunk: &Bytes,
+        finish: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+        let conn = self
+            .connections
+            .get_mut(&handle)
+            .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
+
+        // 1. Invariant: If this stream ALREADY has pending bytes that were not yet accepted by Quinn,
+        // we cannot write new bytes directly to Quinn because that would write data out of order!
+        // Instead, we must append the encoded new chunk to the pending buffer.
+        if let Some(pending) = self.pending_writes.get_mut(&(handle, stream_id)) {
+            if !chunk.is_empty() {
+                let encoded_chunk = crate::server::response::encode_data_frame(chunk);
+                if self.total_pending_bytes + encoded_chunk.len() > self.config.max_pending_bytes {
+                    let _ = conn
+                        .send_stream(stream_id)
+                        .reset(quinn_proto::VarInt::from_u32(
+                            crate::frame::error_code::H3_REQUEST_CANCELLED as u32,
+                        ));
+                    return Err(Http3Error::H3(
+                        "HTTP/3 response pending buffer overflow: client throttled or slow reader"
+                            .into(),
+                    ));
+                }
+                self.total_pending_bytes += encoded_chunk.len();
+                let mut combined =
+                    BytesMut::with_capacity(pending.remaining.len() + encoded_chunk.len());
+                combined.extend_from_slice(&pending.remaining);
+                combined.extend_from_slice(&encoded_chunk);
+                pending.remaining = combined.freeze();
+            }
+            if finish {
+                pending.finish = true;
+            }
+            if let Some(p) = permit {
+                pending.permits.push(p);
+            }
+            pending.last_activity = now;
+            return Ok(Vec::new());
+        }
+
+        // 2. Stream has no pending writes: write directly to Quinn send stream
+        let (outgoing, remaining) = crate::server::response::send_data_chunk(
+            conn,
+            stream_id,
+            chunk,
+            finish,
+            &mut self.transmit_buf,
+            now,
+        )?;
+
+        if let Some(rem) = remaining {
+            if self.total_pending_bytes + rem.len() > self.config.max_pending_bytes {
+                let _ = conn
+                    .send_stream(stream_id)
+                    .reset(quinn_proto::VarInt::from_u32(
+                        crate::frame::error_code::H3_REQUEST_CANCELLED as u32,
+                    ));
+                return Err(Http3Error::H3(
+                    "HTTP/3 response pending buffer overflow: client throttled or slow reader"
+                        .into(),
+                ));
+            }
+            self.total_pending_bytes += rem.len();
+            let mut permits = Vec::with_capacity(1);
+            if let Some(p) = permit {
+                permits.push(p);
+            }
+            if let Some(old) = self.pending_writes.insert(
+                (handle, stream_id),
+                PendingStreamWrite {
+                    remaining: rem,
+                    finish,
+                    permits,
+                    last_activity: now,
+                },
+            ) {
+                self.total_pending_bytes =
+                    self.total_pending_bytes.saturating_sub(old.remaining.len());
+            }
+        } else {
+            drop(permit);
         }
 
         Ok(outgoing)

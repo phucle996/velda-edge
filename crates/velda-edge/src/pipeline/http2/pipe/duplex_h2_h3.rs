@@ -98,7 +98,7 @@ pub async fn serve(
     // Task 1: Upload Pump (Downstream H2 -> Upstream H3 QUIC)
     let upload_task = async {
         if !is_fin {
-            let coalesce_limit = (upstream.config.max_body_size / 64).clamp(16_384, 65_536);
+            let coalesce_limit = (upstream.config.max_body_size / 32).clamp(65_536, 262_144);
             while let Ok(Some(chunk)) = receiver.recv_coalesced_chunk(coalesce_limit).await {
                 let chunk_fin = receiver.is_end_stream();
                 if !chunk.is_empty() && sender.send_chunk_fin(chunk, chunk_fin).await.is_err() {

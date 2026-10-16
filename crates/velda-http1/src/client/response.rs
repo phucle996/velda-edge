@@ -453,10 +453,10 @@ where
         }
 
         if read_buf.is_empty() {
-            if read_buf.capacity() < 65536 || read_buf.capacity() > 131072 {
+            if read_buf.capacity() < 8192 || read_buf.capacity() > 262144 {
                 *read_buf = bytes::BytesMut::with_capacity(65536);
             }
-        } else if read_buf.capacity() - read_buf.len() < 65536 {
+        } else if read_buf.capacity() - read_buf.len() < 8192 {
             read_buf.reserve(65536);
         }
         let n = stream.read_buf(read_buf).await?;

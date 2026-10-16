@@ -1,9 +1,7 @@
 //! Configuration parameters for HTTP/3 server and client pipelines (RFC 9114).
 //!
-//! Scaled deterministically by host [`MemoryTier`] with all 7 tiers explicitly matched.
-//! Zero-IO, zero JSON parsing on hot paths.
-
-use velda_core::hardware::MemoryTier;
+//! Scaled dynamically from actual host/container RAM bytes once at bootstrap.
+//! Zero-IO, zero JSON parsing, zero allocation on hot paths.
 
 /// Tunable settings for HTTP/3 framing, QPACK metadata limits, and stream concurrency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,126 +33,100 @@ pub struct Http3Config {
     pub conn_send_window: u64,
     /// Initial congestion window in bytes (for Cubic congestion controller).
     pub initial_congestion_window: u64,
+    /// Maximum aggregate pending outbound response bytes across all active streams in an engine worker.
+    ///
+    /// Sized dynamically from host RAM. When slow readers or unacknowledged stream writes
+    /// exceed this ceiling, the engine resets stalled streams with `H3_REQUEST_CANCELLED` to prevent
+    /// memory exhaustion (defensive protection against Slowloris attacks).
+    pub max_pending_bytes: usize,
 }
 
 impl Http3Config {
-    /// Probes host hardware topology and derives the configuration for the active [`MemoryTier`].
+    /// Minimum connection send window (256 KB) ensuring high-throughput WAN streaming on low-RAM nodes.
+    pub const MIN_CONN_SEND_WINDOW: u64 = 256 * 1024;
+
+    /// Maximum connection send window (4 MB) preventing memory exhaustion under high concurrency.
+    pub const MAX_CONN_SEND_WINDOW: u64 = 4 * 1024 * 1024;
+
+    /// RAM divisor for connection send window (1/8192 of physical RAM).
+    pub const SEND_WINDOW_RAM_DIVISOR: usize = 8192;
+
+    /// Probes host hardware topology and derives the configuration smoothly from CPU cores and RAM bytes.
     pub fn auto() -> Self {
         let hw = velda_core::global_hardware_topology();
-        Self::for_tier(hw.memory_tier())
+        Self::from_hardware(hw.available_cores, hw.memory.total_bytes)
     }
 
-    /// Derives an [`Http3Config`] scaled deterministically for the given [`MemoryTier`].
+    /// Derives an [`Http3Config`] scaled smoothly from actual host CPU cores and RAM bytes.
     ///
-    /// Across the 7 tiers (Constrained, Small, Medium, Large, XLarge, TwoXLarge, Ultra),
-    /// flow-control windows scale steadily to protect low-RAM VPS nodes from buffer bloat
-    /// while unlocking line-rate multi-gigabit throughput in datacenter environments.
-    pub const fn for_tier(tier: MemoryTier) -> Self {
-        const KB: u32 = 1024;
-        const MB: u32 = 1024 * KB;
-        const MB64: u64 = 1024 * 1024;
+    /// Calculated once during bootstrap and compiled into the runtime snapshot.
+    /// Eliminates rigid discrete tier boundaries, smoothly scaling flow-control windows and concurrency
+    /// using continuous mathematical formulas with strict `[min, max]` safety clamps.
+    pub fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
+        const KB: usize = 1024;
+        const MB: usize = 1024 * KB;
         const PACKET: u64 = 1472;
 
-        match tier {
-            MemoryTier::Constrained => Self {
-                max_body_size: 2 * 1024 * 1024,
-                max_header_size: 16 * 1024,
-                max_headers: 32,
-                idle_timeout_ms: 15_000,
-                max_concurrent_streams: 128,
-                max_concurrent_uni_streams: 16,
-                max_qpack_table_capacity: 4096,
-                max_pending_handshakes: 512,
-                stream_receive_window: 128 * KB,
-                conn_receive_window: 2 * MB64,
-                conn_send_window: 2 * MB64,
-                initial_congestion_window: 20 * PACKET, // 29,440 B
-            },
-            MemoryTier::Small => Self {
-                max_body_size: 4 * 1024 * 1024,
-                max_header_size: 32 * 1024,
-                max_headers: 48,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 256,
-                max_concurrent_uni_streams: 32,
-                max_qpack_table_capacity: 4096,
-                max_pending_handshakes: 1_024,
-                stream_receive_window: 256 * KB,
-                conn_receive_window: 4 * MB64,
-                conn_send_window: 4 * MB64,
-                initial_congestion_window: 32 * PACKET, // 47,104 B
-            },
-            MemoryTier::Medium => Self {
-                max_body_size: 32 * 1024 * 1024,
-                max_header_size: 64 * 1024,
-                max_headers: 64,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 512,
-                max_concurrent_uni_streams: 64,
-                max_qpack_table_capacity: 8192,
-                max_pending_handshakes: 2_048,
-                stream_receive_window: 512 * KB,
-                conn_receive_window: 8 * MB64,
-                conn_send_window: 8 * MB64,
-                initial_congestion_window: 50 * PACKET, // 73,600 B
-            },
-            MemoryTier::Large => Self {
-                max_body_size: 16 * 1024 * 1024,
-                max_header_size: 64 * 1024,
-                max_headers: 96,
-                idle_timeout_ms: 45_000,
-                max_concurrent_streams: 1_024,
-                max_concurrent_uni_streams: 128,
-                max_qpack_table_capacity: 16384,
-                max_pending_handshakes: 4_096,
-                stream_receive_window: MB,
-                conn_receive_window: 16 * MB64,
-                conn_send_window: 16 * MB64,
-                initial_congestion_window: 80 * PACKET, // 117,760 B
-            },
-            MemoryTier::XLarge => Self {
-                max_body_size: 32 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 2_048,
-                max_concurrent_uni_streams: 256,
-                max_qpack_table_capacity: 32768,
-                max_pending_handshakes: 8_192,
-                stream_receive_window: 1536 * KB, // 1.5 MB
-                conn_receive_window: 32 * MB64,
-                conn_send_window: 32 * MB64,
-                initial_congestion_window: 100 * PACKET, // 147,200 B
-            },
-            MemoryTier::TwoXLarge => Self {
-                max_body_size: 64 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 4_096,
-                max_concurrent_uni_streams: 256,
-                max_qpack_table_capacity: 65536,
-                max_pending_handshakes: 16_384,
-                stream_receive_window: 2 * MB,
-                conn_receive_window: 48 * MB64,
-                conn_send_window: 48 * MB64,
-                initial_congestion_window: 150 * PACKET, // 220,800 B
-            },
-            MemoryTier::Ultra => Self {
-                max_body_size: 128 * 1024 * 1024,
-                max_header_size: 256 * 1024,
-                max_headers: 256,
-                idle_timeout_ms: 120_000,
-                max_concurrent_streams: 8_192,
-                max_concurrent_uni_streams: 512,
-                max_qpack_table_capacity: 65536,
-                max_pending_handshakes: 32_768,
-                stream_receive_window: 4 * MB,
-                conn_receive_window: 64 * MB64,
-                conn_send_window: 64 * MB64,
-                initial_congestion_window: 200 * PACKET, // 294,400 B
-            },
+        let cores = cores.max(1);
+
+        // 1. Connection send window: 1/8192 of RAM, clamped strictly to [256 KB, 4 MB]
+        let conn_send_window = ((ram_bytes / Self::SEND_WINDOW_RAM_DIVISOR) as u64)
+            .clamp(Self::MIN_CONN_SEND_WINDOW, Self::MAX_CONN_SEND_WINDOW);
+
+        // 2. Stream receive window (incoming client upload data): 1/16384 of RAM, clamped to [128 KB, 1 MB]
+        let stream_receive_window = ((ram_bytes / 16384) as u32).clamp(128 * 1024, 1024 * 1024);
+
+        // 3. Connection receive window (incoming client upload data): 1/4096 of RAM, clamped to [1 MB, 8 MB]
+        let conn_receive_window = ((ram_bytes / 4096) as u64).clamp(1024 * 1024, 8 * 1024 * 1024);
+
+        // 4. Maximum pending bytes across active streams in an engine worker: 1/64 of RAM, clamped to [16 MB, 128 MB]
+        let max_pending_bytes = (ram_bytes / 64).clamp(16 * MB, 128 * MB);
+
+        // 5. Max concurrent bidirectional streams: (cores * 64).clamp(128, 512)
+        let max_concurrent_streams = ((cores * 64) as u32).clamp(128, 512);
+        let max_concurrent_uni_streams = (max_concurrent_streams / 8).clamp(16, 128);
+
+        // 6. Max body size for buffered requests: 1/256 of RAM, clamped to [2 MB, 32 MB]
+        let max_body_size = (ram_bytes / 256).clamp(2 * MB, 32 * MB);
+
+        // 7. Max header size: clamped to [16 KB, 64 KB]
+        let max_header_size = (ram_bytes / 131_072).clamp(16 * KB, 64 * KB);
+
+        // 8. Max headers count: clamped to [32, 96]
+        let max_headers = (cores * 16).clamp(32, 96);
+
+        // 9. QPACK dynamic table capacity: clamped to [4096, 32768]
+        let max_qpack_table_capacity = (ram_bytes / MB).clamp(4096, 32768);
+
+        // 10. Max pending handshakes before activating Retry tokens: clamped to [512, 16384]
+        let max_pending_handshakes = ((cores * 512) as u32).clamp(512, 16384);
+
+        // 11. Initial congestion window: clamped to [20 * 1472, 100 * 1472]
+        let initial_congestion_window =
+            (((ram_bytes / (160 * MB)) as u64) * PACKET).clamp(20 * PACKET, 100 * PACKET);
+
+        Self {
+            max_body_size,
+            max_header_size,
+            max_headers,
+            idle_timeout_ms: 30_000,
+            max_concurrent_streams,
+            max_concurrent_uni_streams,
+            max_qpack_table_capacity,
+            max_pending_handshakes,
+            stream_receive_window,
+            conn_receive_window,
+            conn_send_window,
+            initial_congestion_window,
+            max_pending_bytes,
         }
+    }
+
+    /// Derives an [`Http3Config`] scaled smoothly from actual host/container RAM bytes.
+    #[inline]
+    pub fn from_ram_bytes(ram_bytes: usize) -> Self {
+        let cores = velda_core::global_hardware_topology().available_cores;
+        Self::from_hardware(cores, ram_bytes)
     }
 
     /// Sets the maximum body size in bytes for buffered requests.
@@ -243,10 +215,19 @@ impl Http3Config {
         self
     }
 
+    /// Sets the maximum aggregate pending outbound response bytes across all streams in an engine worker.
+    #[inline]
+    pub const fn with_max_pending_bytes(mut self, bytes: usize) -> Self {
+        self.max_pending_bytes = bytes;
+        self
+    }
+
     /// Fallback default per-stream receive window (1 MB).
+    /// Used when hardware topology cannot determine the host memory tier.
     pub const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024; // 1 MB
 
     /// Fallback default connection-level receive window (16 MB).
+    /// Sized to saturate high-latency BDP links without exhausting buffer pools.
     pub const DEFAULT_CONN_WINDOW: u32 = 16 * 1024 * 1024; // 16 MB
 
     /// Applies these HTTP/3 tuning parameters to Quinn [`quinn_proto::TransportConfig`].
@@ -307,94 +288,75 @@ mod tests {
         assert!(config.max_body_size >= 2 * 1024 * 1024);
         assert!(config.max_header_size >= 16 * 1024);
         assert!(config.stream_receive_window >= 128 * 1024);
-        assert!(config.conn_receive_window >= 2 * 1024 * 1024);
+        assert!(config.conn_receive_window >= 1024 * 1024);
+        assert!(config.conn_send_window >= Http3Config::MIN_CONN_SEND_WINDOW);
+        assert!(config.conn_send_window <= Http3Config::MAX_CONN_SEND_WINDOW);
     }
 
     #[test]
-    fn test_for_tier_explicit_all_tiers() {
-        let constrained = Http3Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 128);
-        assert_eq!(constrained.max_body_size, 2 * 1024 * 1024);
-        assert_eq!(constrained.max_pending_handshakes, 512);
-        assert_eq!(constrained.stream_receive_window, 128 * 1024);
-        assert_eq!(constrained.conn_receive_window, 2 * 1024 * 1024);
-        assert_eq!(constrained.conn_send_window, 2 * 1024 * 1024);
+    fn test_from_hardware_scaling() {
+        const MB: usize = 1024 * 1024;
+        const GB: usize = 1024 * MB;
 
-        let medium = Http3Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 512);
-        assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
-        assert_eq!(medium.max_pending_handshakes, 2_048);
-        assert_eq!(medium.stream_receive_window, 512 * 1024);
-        assert_eq!(medium.conn_receive_window, 8 * 1024 * 1024);
+        // 1 core, 256 MB (IoT / constrained)
+        let c256 = Http3Config::from_hardware(1, 256 * MB);
+        assert_eq!(c256.conn_send_window, 256 * 1024); // clamped min
+        assert_eq!(c256.max_pending_bytes, 16 * MB); // clamped min
+        assert_eq!(c256.max_concurrent_streams, 128); // clamped min
 
-        let ultra = Http3Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 8_192);
-        assert_eq!(ultra.max_body_size, 128 * 1024 * 1024);
-        assert_eq!(ultra.max_pending_handshakes, 32_768);
-        assert_eq!(ultra.stream_receive_window, 4 * 1024 * 1024);
-        assert_eq!(ultra.conn_receive_window, 64 * 1024 * 1024);
-    }
+        // 4 cores, 8 GB (standard test VM)
+        let c8g = Http3Config::from_hardware(4, 8 * GB);
+        assert_eq!(c8g.conn_send_window, 1024 * 1024); // 8 GB / 8192 = 1 MB exactly
+        assert_eq!(c8g.max_pending_bytes, 128 * MB); // 8 GB / 64 = 128 MB
+        assert_eq!(c8g.stream_receive_window, 512 * 1024); // 8 GB / 16384 = 512 KB
+        assert_eq!(c8g.conn_receive_window, 2 * MB as u64); // 8 GB / 4096 = 2 MB
+        assert_eq!(c8g.max_concurrent_streams, 256); // 4 * 64 = 256
 
-    #[test]
-    fn test_tiered_flow_control_windows_strictly_increasing() {
-        let tiers = [
-            MemoryTier::Constrained,
-            MemoryTier::Small,
-            MemoryTier::Medium,
-            MemoryTier::Large,
-            MemoryTier::XLarge,
-            MemoryTier::TwoXLarge,
-            MemoryTier::Ultra,
+        // 64 cores, 128 GB (hyperscale datacenter server)
+        let c128g = Http3Config::from_hardware(64, 128 * GB);
+        assert_eq!(c128g.conn_send_window, 4 * 1024 * 1024); // clamped max (4 MB)
+        assert_eq!(c128g.max_pending_bytes, 128 * MB); // clamped max (128 MB)
+        assert_eq!(c128g.stream_receive_window, 1024 * 1024); // clamped max (1 MB)
+        assert_eq!(c128g.conn_receive_window, 8 * MB as u64); // clamped max (8 MB)
+        assert_eq!(c128g.max_concurrent_streams, 512); // clamped max (512)
+
+        // Verify monotonic non-decreasing across range of memory sizes
+        let ram_sizes = [
+            128 * MB,
+            256 * MB,
+            512 * MB,
+            GB,
+            2 * GB,
+            4 * GB,
+            6 * GB,
+            8 * GB,
+            12 * GB,
+            16 * GB,
+            32 * GB,
+            64 * GB,
+            128 * GB,
+            256 * GB,
         ];
 
-        let configs: Vec<Http3Config> = tiers.iter().map(|&t| Http3Config::for_tier(t)).collect();
+        let configs: Vec<Http3Config> = ram_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| Http3Config::from_hardware(i + 1, r))
+            .collect();
 
-        // All 7 tiers must strictly increase:
-        // Stream: 128KB -> 256KB -> 512KB -> 1MB -> 1.5MB -> 2MB -> 4MB
-        // Conn:   2MB   -> 4MB   -> 8MB   -> 16MB-> 32MB  -> 48MB -> 64MB
-        for window in configs.windows(2) {
-            assert!(
-                window[0].stream_receive_window < window[1].stream_receive_window,
-                "stream_receive_window must strictly increase across tiers"
-            );
-            assert!(
-                window[0].conn_receive_window < window[1].conn_receive_window,
-                "conn_receive_window must strictly increase across tiers"
-            );
-            assert!(
-                window[0].conn_send_window < window[1].conn_send_window,
-                "conn_send_window must strictly increase across tiers"
-            );
-            assert!(
-                window[0].initial_congestion_window < window[1].initial_congestion_window,
-                "initial_congestion_window must strictly increase across tiers"
-            );
-            assert!(
-                window[0].max_concurrent_streams < window[1].max_concurrent_streams,
-                "max_concurrent_streams must strictly increase across tiers"
-            );
+        for w in configs.windows(2) {
+            assert!(w[0].conn_send_window <= w[1].conn_send_window);
+            assert!(w[0].stream_receive_window <= w[1].stream_receive_window);
+            assert!(w[0].conn_receive_window <= w[1].conn_receive_window);
+            assert!(w[0].max_pending_bytes <= w[1].max_pending_bytes);
+            assert!(w[0].max_concurrent_streams <= w[1].max_concurrent_streams);
+            assert!(w[0].max_body_size <= w[1].max_body_size);
         }
-
-        assert_eq!(configs[0].stream_receive_window, 128 * 1024); // 128 KB
-        assert_eq!(configs[1].stream_receive_window, 256 * 1024); // 256 KB
-        assert_eq!(configs[2].stream_receive_window, 512 * 1024); // 512 KB
-        assert_eq!(configs[3].stream_receive_window, 1024 * 1024); // 1 MB
-        assert_eq!(configs[4].stream_receive_window, 1536 * 1024); // 1.5 MB
-        assert_eq!(configs[5].stream_receive_window, 2 * 1024 * 1024); // 2 MB
-        assert_eq!(configs[6].stream_receive_window, 4 * 1024 * 1024); // 4 MB
-
-        assert_eq!(configs[0].conn_receive_window, 2 * 1024 * 1024); // 2 MB
-        assert_eq!(configs[1].conn_receive_window, 4 * 1024 * 1024); // 4 MB
-        assert_eq!(configs[2].conn_receive_window, 8 * 1024 * 1024); // 8 MB
-        assert_eq!(configs[3].conn_receive_window, 16 * 1024 * 1024); // 16 MB
-        assert_eq!(configs[4].conn_receive_window, 32 * 1024 * 1024); // 32 MB
-        assert_eq!(configs[5].conn_receive_window, 48 * 1024 * 1024); // 48 MB
-        assert_eq!(configs[6].conn_receive_window, 64 * 1024 * 1024); // 64 MB
     }
 
     #[test]
     fn test_transport_config_builder() {
-        let config = Http3Config::for_tier(MemoryTier::Medium);
+        let config = Http3Config::from_ram_bytes(8 * 1024 * 1024 * 1024);
         let transport = config.build_transport_config();
         // Verifies no panics during building and applying to Quinn TransportConfig
         let _ = transport;

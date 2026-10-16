@@ -233,6 +233,12 @@ where
             stream.write_all(write_buf).await?;
         }
         Body::Bytes(bytes) => {
+            if bytes.len() <= 65536 {
+                write_buf.extend_from_slice(bytes);
+                stream.write_all(write_buf).await?;
+                return Ok(());
+            }
+
             let mut h_slice = &write_buf[..];
             let mut b_slice = bytes.as_ref();
             while !h_slice.is_empty() || !b_slice.is_empty() {

@@ -17,6 +17,7 @@ members = [
     "crates/velda-connection-pool",
     "crates/velda-observability",
     "crates/velda-edge",
+    "crates/velda-bench-backend",
 ]
 
 [workspace.package]

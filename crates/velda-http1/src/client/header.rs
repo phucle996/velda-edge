@@ -24,46 +24,62 @@ pub const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-const HOP_BY_HOP_NAMES: [HeaderName; 10] = [
-    http::header::CONNECTION,
-    HeaderName::from_static("keep-alive"),
-    http::header::PROXY_AUTHENTICATE,
-    http::header::PROXY_AUTHORIZATION,
-    HeaderName::from_static("proxy-connection"),
-    http::header::TE,
-    http::header::TRAILER,
-    HeaderName::from_static("trailers"),
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-];
+#[inline(always)]
+fn is_hop_by_hop(name: &HeaderName) -> bool {
+    name == http::header::CONNECTION
+        || name == http::header::TRANSFER_ENCODING
+        || name == http::header::UPGRADE
+        || name == http::header::TE
+        || name == http::header::TRAILER
+        || name == http::header::PROXY_AUTHENTICATE
+        || name == http::header::PROXY_AUTHORIZATION
+        || name.as_str().eq_ignore_ascii_case("keep-alive")
+        || name.as_str().eq_ignore_ascii_case("proxy-connection")
+        || name.as_str().eq_ignore_ascii_case("trailers")
+}
 
 /// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
 pub fn sanitize_headers(headers: &mut HeaderMap) {
+    if headers.is_empty() {
+        return;
+    }
+
     let mut custom_stack: [Option<HeaderName>; 16] = [const { None }; 16];
     let mut custom_count = 0;
     let mut custom_heap: Option<Vec<HeaderName>> = None;
 
     // Iterate across all Connection header entries (RFC 9110 Section 7.6.1)
-    for conn in headers.get_all(http::header::CONNECTION) {
-        if let Ok(conn_str) = conn.to_str() {
-            for part in conn_str.split(',') {
-                let trimmed = part.trim();
-                if !trimmed.is_empty()
-                    && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
-                {
-                    if custom_count < custom_stack.len() {
-                        custom_stack[custom_count] = Some(name);
-                        custom_count += 1;
-                    } else {
-                        custom_heap.get_or_insert_with(Vec::new).push(name);
+    if headers.contains_key(http::header::CONNECTION) {
+        for conn in headers.get_all(http::header::CONNECTION) {
+            if let Ok(conn_str) = conn.to_str() {
+                for part in conn_str.split(',') {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty()
+                        && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
+                    {
+                        if custom_count < custom_stack.len() {
+                            custom_stack[custom_count] = Some(name);
+                            custom_count += 1;
+                        } else {
+                            custom_heap.get_or_insert_with(Vec::new).push(name);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Remove fixed hop-by-hop headers
-    for name in &HOP_BY_HOP_NAMES {
+    // Fast-path: Only inspect headers that are actually present in the map
+    // instead of blindly invoking 10 hash table lookup probes!
+    let mut to_remove_stack: [Option<HeaderName>; 8] = [const { None }; 8];
+    let mut to_remove_count = 0;
+    for (name, _) in headers.iter() {
+        if is_hop_by_hop(name) && to_remove_count < to_remove_stack.len() {
+            to_remove_stack[to_remove_count] = Some(name.clone());
+            to_remove_count += 1;
+        }
+    }
+    for name in to_remove_stack[..to_remove_count].iter().flatten() {
         headers.remove(name);
     }
 

@@ -40,12 +40,41 @@ pub async fn serve(
         meta.is_tls,
     );
 
-    // 3. Mark request as Chunked transfer encoding towards HTTP/1.1
-    head.headers
-        .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-    head.headers.remove(CONTENT_LENGTH);
+    // 3. Opportunistically ingest first chunk (up to 262KB)
+    let coalesce_limit = upstream.config.client_body_buffer_size;
+    let (first_chunk, is_fin) = match receiver.recv_coalesced_chunk(coalesce_limit).await {
+        Ok(Some(c)) => {
+            let fin = receiver.is_end_stream();
+            (Some(c), fin)
+        }
+        Ok(None) => (None, true),
+        Err(e) => {
+            let err_resp = L7Response::from_bytes(
+                StatusCode::BAD_REQUEST,
+                format!("400 Bad Request: {e}\n").into_bytes(),
+            );
+            let _ = responder.send_response(&err_resp);
+            return;
+        }
+    };
 
-    // 4. Acquire pooled HTTP/1.1 upstream connection
+    // 4. Decide framing mode towards HTTP/1.1: Content-Length vs Chunked
+    let is_chunked = if head.headers.contains_key(CONTENT_LENGTH) {
+        head.headers.remove(TRANSFER_ENCODING);
+        false
+    } else if is_fin {
+        let len = first_chunk.as_ref().map_or(0, |c| c.len());
+        head.headers.insert(CONTENT_LENGTH, HeaderValue::from(len));
+        head.headers.remove(TRANSFER_ENCODING);
+        false
+    } else {
+        head.headers
+            .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        head.headers.remove(CONTENT_LENGTH);
+        true
+    };
+
+    // 5. Acquire pooled HTTP/1.1 upstream connection
     let mut lease = match upstream.acquire().await {
         Ok(l) => l,
         Err(e) => {
@@ -67,26 +96,9 @@ pub async fn serve(
         }
     };
 
-    // 5. Ingest first chunk (coalesced) and send HTTP/1.1 request head in a fused buffer
-    let (first_chunk, is_fin) = match receiver.recv_coalesced_chunk(65_536).await {
-        Ok(Some(c)) => {
-            let fin = receiver.is_end_stream();
-            (Some(c), fin)
-        }
-        Ok(None) => (None, true),
-        Err(e) => {
-            let err_resp = L7Response::from_bytes(
-                StatusCode::BAD_REQUEST,
-                format!("400 Bad Request: {e}\n").into_bytes(),
-            );
-            let _ = responder.send_response(&err_resp);
-            return;
-        }
-    };
-
-    let mut write_buf = bytes::BytesMut::with_capacity(1024);
-
-    // Encode HTTP/1.1 request head
+    // 6. Encode HTTP/1.1 request head
+    let initial_cap = 1024 + if !is_chunked { first_chunk.as_ref().map_or(0, |c| c.len()) } else { 0 };
+    let mut write_buf = bytes::BytesMut::with_capacity(initial_cap);
     velda_http1::client::encode_request_head(
         &head.method,
         &head.uri,
@@ -95,143 +107,140 @@ pub async fn serve(
         &mut write_buf,
     );
 
-    if let Err(e) = lease.write_all(&write_buf).await {
-        lease.mark_closed();
-        tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send chunked request head");
-        let err_resp = L7Response::from_bytes(
-            StatusCode::BAD_GATEWAY,
-            format!("502 Bad Gateway: {e}\n").into_bytes(),
-        );
-        let _ = responder.send_response(&err_resp);
-        return;
-    }
+    // 7. Split HTTP/1.1 stream into read and write halves for concurrent execution
+    let (resp_res, should_close) = {
+        let (mut read_half, mut write_half) = tokio::io::split(&mut *lease);
 
-    if let Some(chunk) = first_chunk
-        && !chunk.is_empty()
-        && velda_http1::client::send_chunk_vectored(&mut *lease, &chunk)
-            .await
-            .is_err()
-    {
-        lease.mark_closed();
-        tracing::warn!(upstream = %upstream.id(), "Failed to send initial chunked payload");
-        let err_resp = L7Response::from_bytes(
-            StatusCode::BAD_GATEWAY,
-            b"502 Bad Gateway: failed to send initial payload\n".to_vec(),
-        );
-        let _ = responder.send_response(&err_resp);
-        return;
-    }
-
-    if is_fin {
-        let _ = lease.write_all(b"0\r\n\r\n").await;
-    }
-
-    // 6. Progressively stream any remaining client DATA frames to HTTP/1.1 chunked stream
-    if !is_fin {
-        let coalesce_limit = upstream
-            .config
-            .client_body_buffer_size
-            .clamp(32_768, 131_072);
-        loop {
-            match receiver.recv_coalesced_chunk(coalesce_limit).await {
-                Ok(Some(chunk)) => {
-                    if !chunk.is_empty()
-                        && velda_http1::client::send_chunk_vectored(&mut *lease, &chunk)
-                            .await
-                            .is_err()
+        let upload_fut = async {
+            if !is_chunked {
+                if let Some(chunk) = first_chunk {
+                    write_buf.extend_from_slice(&chunk);
+                }
+                write_half.write_all(&write_buf).await?;
+                if !is_fin {
+                    while let Some(chunk) = receiver
+                        .recv_coalesced_chunk(coalesce_limit)
+                        .await
+                        .map_err(std::io::Error::other)?
                     {
-                        lease.mark_closed();
-                        tracing::warn!("Failed writing chunk to HTTP/1.1 backend");
-                        let err_resp = L7Response::from_bytes(
-                            StatusCode::BAD_GATEWAY,
-                            b"502 Bad Gateway: upstream stream broken\n".to_vec(),
-                        );
-                        let _ = responder.send_response(&err_resp);
-                        return;
-                    }
-                    if receiver.is_end_stream() {
-                        break;
+                        if !chunk.is_empty() {
+                            write_half.write_all(&chunk).await?;
+                        }
+                        if receiver.is_end_stream() {
+                            break;
+                        }
                     }
                 }
-                Ok(None) => break,
-                Err(e) => {
-                    lease.mark_closed();
-                    tracing::warn!(error = %e, "Client disconnected during H2 upload");
-                    return;
+            } else {
+                write_half.write_all(&write_buf).await?;
+                if let Some(chunk) = first_chunk
+                    && !chunk.is_empty()
+                {
+                    velda_http1::client::send_chunk_vectored(&mut write_half, &chunk)
+                        .await
+                        .map_err(std::io::Error::other)?;
+                }
+                if is_fin {
+                    write_half.write_all(b"0\r\n\r\n").await?;
+                } else {
+                    while let Some(chunk) = receiver
+                        .recv_coalesced_chunk(coalesce_limit)
+                        .await
+                        .map_err(std::io::Error::other)?
+                    {
+                        if !chunk.is_empty() {
+                            velda_http1::client::send_chunk_vectored(&mut write_half, &chunk)
+                                .await
+                                .map_err(std::io::Error::other)?;
+                        }
+                        if receiver.is_end_stream() {
+                            break;
+                        }
+                    }
+                    write_half.write_all(b"0\r\n\r\n").await?;
                 }
             }
-        }
+            write_half.flush().await?;
+            Ok::<(), std::io::Error>(())
+        };
 
-        // Conclude chunked stream with terminal chunk 0\r\n\r\n
-        if lease.write_all(b"0\r\n\r\n").await.is_err() {
-            lease.mark_closed();
-            tracing::warn!("Failed concluding HTTP/1.1 chunked stream");
+        let download_fut = async {
+            let read_cap = upstream.config.client_body_buffer_size;
+            let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
+            loop {
+                match read_half.read_buf(&mut read_buf).await {
+                    Ok(0) => {
+                        if let Ok(Some(resp)) =
+                            velda_http1::client::decode_response(&mut read_buf, &upstream.config)
+                        {
+                            return Ok(resp);
+                        } else {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "upstream closed connection prematurely",
+                            ));
+                        }
+                    }
+                    Ok(_) => {
+                        if let Ok(Some(resp)) =
+                            velda_http1::client::decode_response(&mut read_buf, &upstream.config)
+                        {
+                            return Ok(resp);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+
+        let mut upload_pinned = std::pin::pin!(upload_fut);
+        let mut download_pinned = std::pin::pin!(download_fut);
+
+        let mut upload_done = false;
+        let res = tokio::select! {
+            resp = &mut download_pinned => resp,
+            upload_res = &mut upload_pinned => {
+                upload_done = upload_res.is_ok();
+                if let Err(e) = upload_res {
+                    tracing::warn!(error = %e, "Upload to HTTP/1.1 backend failed");
+                }
+                download_pinned.await
+            }
+        };
+
+        match res {
+            Ok(resp) => {
+                let close = !upload_done || check_connection_close(&resp.headers);
+                (Ok(resp.into_l7_response()), close)
+            }
+            Err(e) => (Err(e), true),
+        }
+    };
+
+    if should_close {
+        lease.mark_closed();
+    }
+
+    match resp_res {
+        Ok(l7_resp) => {
+            let _ = responder.send_response(&l7_resp);
+            if !receiver.is_end_stream() {
+                tokio::spawn(async move {
+                    while let Ok(Some(_)) = receiver.recv_chunk().await {}
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read upstream HTTP/1.1 response");
             let err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
-                b"502 Bad Gateway: failed to complete chunked upload\n".to_vec(),
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
             let _ = responder.send_response(&err_resp);
-            return;
-        }
-    }
-
-    // 7. Read HTTP/1.1 response
-    let read_cap = upstream
-        .config
-        .client_body_buffer_size
-        .clamp(16_384, 65_536);
-    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
-    loop {
-        match lease.read_buf(&mut read_buf).await {
-            Ok(0) => {
-                if let Ok(Some(resp)) =
-                    velda_http1::client::decode_response(&mut read_buf, &upstream.config)
-                {
-                    if check_connection_close(&resp.headers) {
-                        lease.mark_closed();
-                    }
-                    let l7_resp = resp.into_l7_response();
-                    let _ = responder.send_response(&l7_resp);
-                } else {
-                    lease.mark_closed();
-                    let err_resp = L7Response::from_bytes(
-                        StatusCode::BAD_GATEWAY,
-                        b"502 Bad Gateway: upstream closed connection prematurely\n".to_vec(),
-                    );
-                    let _ = responder.send_response(&err_resp);
-                }
-                break;
-            }
-            Ok(_) => match velda_http1::client::decode_response(&mut read_buf, &upstream.config) {
-                Ok(Some(resp)) => {
-                    if check_connection_close(&resp.headers) {
-                        lease.mark_closed();
-                    }
-                    let l7_resp = resp.into_l7_response();
-                    let _ = responder.send_response(&l7_resp);
-                    break;
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    lease.mark_closed();
-                    tracing::warn!(error = %e, "Failed to decode upstream HTTP/1.1 response");
-                    let err_resp = L7Response::from_bytes(
-                        StatusCode::BAD_GATEWAY,
-                        format!("502 Bad Gateway: {e}\n").into_bytes(),
-                    );
-                    let _ = responder.send_response(&err_resp);
-                    break;
-                }
-            },
-            Err(e) => {
-                lease.mark_closed();
-                tracing::warn!(error = %e, "Error reading upstream HTTP/1.1 response");
-                let err_resp = L7Response::from_bytes(
-                    StatusCode::BAD_GATEWAY,
-                    format!("502 Bad Gateway: {e}\n").into_bytes(),
-                );
-                let _ = responder.send_response(&err_resp);
-                break;
+            if !receiver.is_end_stream() {
+                tokio::spawn(async move {
+                    while let Ok(Some(_)) = receiver.recv_chunk().await {}
+                });
             }
         }
     }

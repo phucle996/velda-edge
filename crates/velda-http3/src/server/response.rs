@@ -16,6 +16,17 @@ use crate::frame::{Http3Frame, encode_frame, encode_varint, frame_id};
 use crate::qpack::encode_qpack_response;
 use crate::server::connection::OutgoingDatagram;
 
+/// Initial buffer capacity for serializing HTTP/3 response HEADERS frames (512 bytes).
+/// Accommodates status code, server, date, and common content headers without resizing.
+pub const INITIAL_RESPONSE_HEADER_CAPACITY: usize = 512;
+
+/// Maximum number of datagrams drained per `poll_transmit` invocation (64 datagrams).
+/// Aligns with the Linux kernel GSO (`UDP_SEGMENT`) batching limit.
+pub const GSO_TRANSMIT_BATCH_SIZE: usize = 64;
+
+/// Maximum bytes required to encode an RFC 9000 VarInt frame type and payload length header (8 bytes).
+pub const MAX_VARINT_FRAME_HEADER_SIZE: usize = 8;
+
 /// Downstream HTTP/3 server response head metadata.
 #[derive(Debug, Clone)]
 pub struct Http3ServerResponseHead {
@@ -352,4 +363,115 @@ pub fn send_response(
     }
 
     Ok((outgoing, remaining_body))
+}
+
+/// Sends only the response HEADERS frame (QPACK-encoded) to start a progressive streaming response.
+pub fn send_response_head(
+    conn: &mut Connection,
+    stream_id: StreamId,
+    status: StatusCode,
+    headers: &HeaderMap,
+    transmit_buf: &mut Vec<u8>,
+    now: Instant,
+) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+    let mut header_payload = BytesMut::new();
+    encode_qpack_response(status, headers, &mut header_payload);
+    let header_frame = Http3Frame::Headers(header_payload.freeze());
+
+    let mut write_buf = BytesMut::with_capacity(INITIAL_RESPONSE_HEADER_CAPACITY);
+    encode_frame(&header_frame, &mut write_buf);
+
+    let mut written = 0;
+    while written < write_buf.len() {
+        match conn.send_stream(stream_id).write(&write_buf[written..]) {
+            Ok(n) if n > 0 => written += n,
+            Ok(_) => break,
+            Err(e) => return Err(Http3Error::H3(e.to_string())),
+        }
+    }
+    if written < write_buf.len() {
+        return Err(Http3Error::H3(format!(
+            "Failed to write complete response headers: stream flow control window exhausted ({written}/{} bytes written)",
+            write_buf.len()
+        )));
+    }
+
+    let mut outgoing = Vec::new();
+    transmit_buf.clear();
+    while let Some(transmit) = conn.poll_transmit(now, GSO_TRANSMIT_BATCH_SIZE, transmit_buf) {
+        if transmit.size > 0 {
+            outgoing.push(OutgoingDatagram {
+                peer: transmit.destination,
+                payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
+                segment_size: transmit.segment_size.map(|s| s as u16),
+            });
+        }
+        transmit_buf.clear();
+    }
+
+    Ok(outgoing)
+}
+
+/// Encodes an RFC 9114 DATA frame header with varint length prefix for the given chunk.
+#[inline]
+pub fn encode_data_frame(chunk: &Bytes) -> Bytes {
+    if chunk.is_empty() {
+        return Bytes::new();
+    }
+    let mut frame_buf = BytesMut::with_capacity(MAX_VARINT_FRAME_HEADER_SIZE + chunk.len());
+    encode_varint(frame_id::DATA, &mut frame_buf);
+    encode_varint(chunk.len() as u64, &mut frame_buf);
+    frame_buf.extend_from_slice(chunk);
+    frame_buf.freeze()
+}
+
+/// Sends a progressive response DATA frame chunk to the designated QUIC send stream.
+///
+/// Encodes an RFC 9114 DATA frame header with the chunk length and writes the payload.
+/// If `finish` is true and all bytes are written, closes the stream with `.finish()`.
+pub fn send_data_chunk(
+    conn: &mut Connection,
+    stream_id: StreamId,
+    chunk: &Bytes,
+    finish: bool,
+    transmit_buf: &mut Vec<u8>,
+    now: Instant,
+) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Error> {
+    let mut remaining_frame: Option<Bytes> = None;
+
+    if !chunk.is_empty() {
+        let full_frame = encode_data_frame(chunk);
+
+        let mut written = 0;
+        while written < full_frame.len() {
+            match conn.send_stream(stream_id).write(&full_frame[written..]) {
+                Ok(n) if n > 0 => written += n,
+                Ok(_) => break,
+                Err(quinn_proto::WriteError::Blocked) => break,
+                Err(e) => return Err(Http3Error::H3(e.to_string())),
+            }
+        }
+        if written < full_frame.len() {
+            remaining_frame = Some(full_frame.slice(written..));
+        }
+    }
+
+    if finish && remaining_frame.is_none() {
+        let _ = conn.send_stream(stream_id).finish();
+    }
+
+    let mut outgoing = Vec::new();
+    transmit_buf.clear();
+    while let Some(transmit) = conn.poll_transmit(now, GSO_TRANSMIT_BATCH_SIZE, transmit_buf) {
+        if transmit.size > 0 {
+            outgoing.push(OutgoingDatagram {
+                peer: transmit.destination,
+                payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
+                segment_size: transmit.segment_size.map(|s| s as u16),
+            });
+        }
+        transmit_buf.clear();
+    }
+
+    Ok((outgoing, remaining_frame))
 }

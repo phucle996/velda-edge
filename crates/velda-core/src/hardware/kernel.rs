@@ -13,23 +13,18 @@ pub enum AccelerationTier {
     /// Uses standard user-space buffers and cross-platform Tokio reactor.
     Degraded,
 
-    /// Standard Linux Production Path (Linux < 5.19 or io_uring restricted by Seccomp).
+    /// Standard Linux Production Path (Linux < 5.10).
     ///
     /// Employs `SO_REUSEPORT` multi-listener sharding, CPU core affinity,
     /// and zero-copy `splice(2)` for L4 TCP proxying.
     Standard,
 
-    /// ACCELERATION FAST-PATH: Linux Kernel >= 5.19 with unlocked `io_uring` ring buffers.
+    /// ACCELERATION FAST-PATH: Linux Kernel >= 5.10 with high-performance networking features.
     ///
-    /// # Performance Advantage:
-    /// Replaces readiness-based `epoll` syscall loops with lockless Submission/Completion
-    /// ring buffers in kernel-shared memory, eliminating user/kernel context switches.
-    ///
-    /// # Conditions Required:
-    /// 1. Target OS is Linux.
-    /// 2. Kernel release version is >= 5.19 (enables `IORING_ACCEPT_MULTISHOT` & stable multi-worker networking rings).
-    /// 3. `io_uring_setup` syscall dry-run succeeds without `EPERM`/`ENOSYS` (unrestricted by K8s Seccomp / sysctl).
-    IoUringFastPath,
+    /// Employs Thread-Per-Core pinned execution, `SO_REUSEPORT` socket sharding,
+    /// TCP pacing (`TCP_NOTSENT_LOWAT`), sub-millisecond RTO/delack, BBR congestion control,
+    /// and busy polling optimization.
+    LinuxFastPath,
 }
 
 impl AccelerationTier {
@@ -39,14 +34,14 @@ impl AccelerationTier {
         match self {
             Self::Degraded => "degraded",
             Self::Standard => "standard",
-            Self::IoUringFastPath => "io_uring_fast_path",
+            Self::LinuxFastPath => "linux_fast_path",
         }
     }
 
     /// Returns `true` if this tier is an accelerated fast-path.
     #[inline]
     pub const fn is_accelerated(&self) -> bool {
-        matches!(self, Self::IoUringFastPath)
+        matches!(self, Self::LinuxFastPath)
     }
 }
 
@@ -310,13 +305,6 @@ impl KernelProfile {
         self.version.is_at_least(5, 18)
     }
 
-    /// Evaluates if the kernel version satisfies the minimum requirement for `io_uring`
-    /// multishot networking and stable ring buffers (Linux >= 5.19).
-    #[inline]
-    pub const fn supports_io_uring(&self) -> bool {
-        self.version.is_at_least(5, 19)
-    }
-
     // --- Linux 6.x ---
 
     /// Evaluates if the kernel supports microsecond-level RTO and delayed ACK tuning
@@ -553,46 +541,6 @@ fn parse_ascii_digits(slice: &[u8]) -> u32 {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IoUringProbeResult {
-    Available,
-    BlockedBySeccomp,
-    Disabled,
-    Unsupported,
-}
-
-#[cfg(target_os = "linux")]
-fn probe_io_uring_capability() -> IoUringProbeResult {
-    // Syscall 425: __NR_io_uring_setup on Linux x86_64, aarch64, arm, riscv64.
-    const SYS_IO_URING_SETUP: libc::c_long = 425;
-
-    // Zeroed buffer of 128 bytes representing struct io_uring_params (120 bytes in kernel).
-    let mut params = [0u8; 128];
-    let ret = unsafe {
-        libc::syscall(
-            SYS_IO_URING_SETUP,
-            1 as libc::c_uint, // entries = 1 (minimal ring entry)
-            params.as_mut_ptr(),
-        )
-    };
-
-    if ret >= 0 {
-        // Success: Dry-run succeeded. Immediately close temporary ring fd to prevent leak.
-        unsafe {
-            libc::close(ret as libc::c_int);
-        }
-        IoUringProbeResult::Available
-    } else {
-        let err = std::io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::EPERM) => IoUringProbeResult::BlockedBySeccomp,
-            Some(libc::EACCES) => IoUringProbeResult::Disabled,
-            Some(libc::ENOSYS) => IoUringProbeResult::Unsupported,
-            _ => IoUringProbeResult::Unsupported,
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 #[inline]
 fn read_sysctl_u64(path: &str) -> Option<u64> {
@@ -604,10 +552,6 @@ fn read_sysctl_u64(path: &str) -> Option<u64> {
 }
 
 /// Probes host OS kernel version and hardware I/O acceleration capabilities.
-///
-/// Executes a 2-stage capability handshake:
-/// 1. Version Gatekeeper: Checks if Linux kernel release is >= 5.19.
-/// 2. Capability Dry-Run: Tests `io_uring_setup` syscall to verify Seccomp/cgroup unblocking.
 #[cfg(target_os = "linux")]
 pub fn probe_kernel() -> KernelProfile {
     let rmem_max = read_sysctl_u64("/proc/sys/net/core/rmem_max");
@@ -635,41 +579,20 @@ pub fn probe_kernel() -> KernelProfile {
 
     let version = parse_version_bytes(&buf[..len]);
 
-    // Stage 1: Version Gatekeeper
-    // ACCELERATION PATH requires Linux >= 5.19 for multi-shot accept and stable network rings.
-    let profile = if !version.is_at_least(5, 19) {
+    // ACCELERATION FAST-PATH: Linux Kernel >= 5.10 enables high-performance networking features:
+    // SO_REUSEPORT, TCP_NOTSENT_LOWAT pacing, sub-ms TCP timers, BBR, and busy polling.
+    let profile = if version.is_at_least(5, 10) {
+        KernelProfile::new(
+            version,
+            AccelerationTier::LinuxFastPath,
+            "kernel_5_10_plus_linux_fast_path",
+        )
+    } else {
         KernelProfile::new(
             version,
             AccelerationTier::Standard,
-            "kernel_below_5_19_standard_epoll",
+            "kernel_below_5_10_standard_epoll",
         )
-    } else {
-        // Stage 2: Capability Dry-Run (Probe io_uring_setup to verify Seccomp & permissions)
-        // Avoids branch loops by matching directly on the probe result enum.
-        match probe_io_uring_capability() {
-            // ACCELERATION FAST-PATH: Linux Kernel >= 5.19 with unlocked io_uring ring buffers.
-            // Condition: Kernel >= 5.19 AND io_uring_setup dry-run returned success (unrestricted).
-            IoUringProbeResult::Available => KernelProfile::new(
-                version,
-                AccelerationTier::IoUringFastPath,
-                "kernel_5_19_plus_io_uring_unlocked",
-            ),
-            IoUringProbeResult::BlockedBySeccomp => KernelProfile::new(
-                version,
-                AccelerationTier::Standard,
-                "io_uring_blocked_by_seccomp_fallback_epoll",
-            ),
-            IoUringProbeResult::Disabled => KernelProfile::new(
-                version,
-                AccelerationTier::Standard,
-                "io_uring_disabled_by_sysctl_fallback_epoll",
-            ),
-            IoUringProbeResult::Unsupported => KernelProfile::new(
-                version,
-                AccelerationTier::Standard,
-                "io_uring_unsupported_fallback_epoll",
-            ),
-        }
     };
 
     profile.with_socket_buffers(rmem_max, wmem_max)
@@ -728,7 +651,7 @@ mod tests {
             assert!(profile.version.major >= 2);
             assert!(
                 profile.acceleration == AccelerationTier::Standard
-                    || profile.acceleration == AccelerationTier::IoUringFastPath
+                    || profile.acceleration == AccelerationTier::LinuxFastPath
             );
         }
         #[cfg(not(target_os = "linux"))]

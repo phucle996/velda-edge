@@ -1,0 +1,23 @@
+[package]
+name = "velda-bench-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+hyper = { version = "1.11", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1.10"
+http = "1.2"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls-pemfile = "2.2"
+tokio-rustls = "0.26"
+rustls-pki-types = "1"
+rcgen = "0.14"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+velda-core = { path = "../velda-core" }
+velda-http3 = { path = "../velda-http3" }

@@ -522,7 +522,7 @@ mod tests {
 
         let kernel_6_9 = KernelProfile::new(
             KernelVersion::new(6, 9, 0),
-            AccelerationTier::IoUringFastPath,
+            AccelerationTier::LinuxFastPath,
             "test_6_9",
         );
         let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)

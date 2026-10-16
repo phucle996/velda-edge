@@ -199,15 +199,20 @@ pub async fn handle_http3_udp(
                     path = %req_event.request.path(),
                     "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
                 );
-                let too_early = make_too_early_response();
-                let msg = super::engine::Http3ResponseMsg {
-                    handle: req_event.handle,
-                    stream_id: req_event.stream_id,
-                    response: too_early,
-                };
-                let _ = worker.response_tx.send(msg).await;
+                let responder = super::engine::Http3Responder::new(
+                    req_event.handle,
+                    req_event.stream_id,
+                    worker.response_tx.clone(),
+                );
+                let _ = responder.send_response(make_too_early_response()).await;
                 return;
             }
+
+            let responder = super::engine::Http3Responder::new(
+                req_event.handle,
+                req_event.stream_id,
+                worker.response_tx.clone(),
+            );
 
             let mut req = req_event.request;
             if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {
@@ -217,13 +222,7 @@ pub async fn handle_http3_udp(
                     path = %req.path(),
                     "Rejecting HTTP/3 request with unsafe URI path"
                 );
-                let bad_req = make_bad_request_response();
-                let msg = super::engine::Http3ResponseMsg {
-                    handle: req_event.handle,
-                    stream_id: req_event.stream_id,
-                    response: bad_req,
-                };
-                let _ = worker.response_tx.send(msg).await;
+                let _ = responder.send_response(make_bad_request_response()).await;
                 return;
             }
 
@@ -234,20 +233,7 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
-            let response = process_http3_request(&req, &lid, &runtime).await;
-
-            let msg = super::engine::Http3ResponseMsg {
-                handle: req_event.handle,
-                stream_id: req_event.stream_id,
-                response,
-            };
-            if let Err(e) = worker.response_tx.send(msg).await {
-                tracing::warn!(
-                    stream = %req_event.stream_id,
-                    error = %e,
-                    "Failed to queue HTTP/3 response to worker"
-                );
-            }
+            process_http3_request(&req, &lid, &runtime, responder).await;
         });
     }
 }
@@ -257,7 +243,8 @@ async fn process_http3_request(
     req: &L7Request,
     listener_id: &str,
     runtime: &SharedRuntime,
-) -> L7Response {
+    responder: super::engine::Http3Responder,
+) {
     let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
     let mut http_req = Http3RouteRequest::new(req.path());
     if let Some(h) = host {
@@ -274,7 +261,8 @@ async fn process_http3_request(
             method = %req.method,
             "No HTTP/3 route matched"
         );
-        return make_not_found_response();
+        let _ = responder.send_response(make_not_found_response()).await;
+        return;
     };
 
     let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
@@ -284,7 +272,10 @@ async fn process_http3_request(
             upstream = %route.upstream_name,
             "No HTTP upstream configured"
         );
-        return make_service_unavailable_response();
+        let _ = responder
+            .send_response(make_service_unavailable_response())
+            .await;
+        return;
     };
 
     // Resource Saturation Circuit Breaker (Overload Protection)
@@ -296,7 +287,8 @@ async fn process_http3_request(
             overload = ?overload_lvl,
             "Shedding HTTP/3 request due to memory saturation"
         );
-        return make_overload_response();
+        let _ = responder.send_response(make_overload_response()).await;
+        return;
     }
 
     // ========================================================================
@@ -304,34 +296,52 @@ async fn process_http3_request(
     // ========================================================================
     match upstream_target.as_ref() {
         HttpUpstream::Http3(upstream) => match upstream.strategy {
-            Http3PipeStrategy::Buffered => pipe::buffered_h3_h3::serve(req, upstream).await,
+            Http3PipeStrategy::Buffered => {
+                let resp = pipe::buffered_h3_h3::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
+            }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h3::serve(req, upstream).await
+                pipe::server_stream_h3_h3::serve(req, responder, upstream).await;
             }
             Http3PipeStrategy::ClientStream => {
-                pipe::client_stream_h3_h3::serve(req, upstream).await
+                let resp = pipe::client_stream_h3_h3::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
             }
-            Http3PipeStrategy::Duplex => pipe::duplex_h3_h3::serve(req, upstream).await,
+            Http3PipeStrategy::Duplex => {
+                pipe::duplex_h3_h3::serve(req, responder, upstream).await;
+            }
         },
         HttpUpstream::Http2(upstream) => match upstream.strategy {
-            Http2PipeStrategy::Buffered => pipe::buffered_h3_h2::serve(req, upstream).await,
+            Http2PipeStrategy::Buffered => {
+                let resp = pipe::buffered_h3_h2::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
+            }
             Http2PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h2::serve(req, upstream).await
+                pipe::server_stream_h3_h2::serve(req, responder, upstream).await;
             }
             Http2PipeStrategy::ClientStream => {
-                pipe::client_stream_h3_h2::serve(req, upstream).await
+                let resp = pipe::client_stream_h3_h2::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
             }
-            Http2PipeStrategy::Duplex => pipe::duplex_h3_h2::serve(req, upstream).await,
+            Http2PipeStrategy::Duplex => {
+                pipe::duplex_h3_h2::serve(req, responder, upstream).await;
+            }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy {
-            Http1PipeStrategy::Buffered => pipe::buffered_h3_h1::serve(req, upstream).await,
+            Http1PipeStrategy::Buffered => {
+                let resp = pipe::buffered_h3_h1::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
+            }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h1::serve(req, upstream).await
+                pipe::server_stream_h3_h1::serve(req, responder, upstream).await;
             }
             Http1PipeStrategy::ClientStream => {
-                pipe::client_stream_h3_h1::serve(req, upstream).await
+                let resp = pipe::client_stream_h3_h1::serve(req, upstream).await;
+                let _ = responder.send_response(resp).await;
             }
-            Http1PipeStrategy::Duplex => pipe::duplex_h3_h1::serve(req, upstream).await,
+            Http1PipeStrategy::Duplex => {
+                pipe::duplex_h3_h1::serve(req, responder, upstream).await;
+            }
         },
     }
 }

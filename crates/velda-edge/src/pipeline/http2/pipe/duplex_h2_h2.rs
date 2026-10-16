@@ -72,10 +72,9 @@ pub async fn serve(
         let http_req = head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
-        let upload_reserve =
-            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
-        let upload_coalesce = (upload_reserve / 2).clamp(16_384, 131_072);
-        let upload_low_wm = (upload_reserve / 4).clamp(8_192, 65_536);
+        let upload_reserve = config.initial_stream_window_size as usize;
+        let upload_coalesce = (upload_reserve / 2).max(16_384);
+        let upload_low_wm = (upload_reserve / 4).max(8_192);
 
         let upload_task = async move {
             send_stream.reserve_capacity(upload_reserve);

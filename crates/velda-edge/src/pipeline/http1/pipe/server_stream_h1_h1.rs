@@ -36,12 +36,12 @@ pub async fn serve<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. Enrich proxy forwarding headers
-    velda_http1::server::header::enrich_headers(
+    // 1. Enrich proxy forwarding headers using pre-computed connection metadata
+    velda_http1::server::header::enrich_headers_cached(
         &mut head.headers,
         &head.uri,
-        meta.peer,
-        meta.local_addr,
+        &meta.client_ip_header,
+        &meta.client_port_header,
         meta.is_tls,
     );
 
@@ -114,7 +114,12 @@ where
 
     // 5. Send request and read response head with self-healing retry on stale pooled connection
     let (mut resp_head, resp_framing) = {
-        if conn.upstream_read_buf.capacity() < 65536 {
+        if conn
+            .upstream_read_buf
+            .capacity()
+            .saturating_sub(conn.upstream_read_buf.len())
+            < 4096
+        {
             conn.upstream_read_buf.reserve(65536);
         }
 

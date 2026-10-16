@@ -13,6 +13,44 @@ use http::{HeaderMap, Uri};
 
 use crate::error::Http1Error;
 
+/// Enriches HTTP/1.1 request headers using pre-computed connection header values (zero formatting overhead).
+#[inline]
+pub fn enrich_headers_cached(
+    headers: &mut HeaderMap,
+    uri: &Uri,
+    client_ip: &HeaderValue,
+    client_port: &HeaderValue,
+    is_tls: bool,
+) {
+    let proto = if is_tls { "https" } else { "http" };
+
+    headers.insert(
+        HeaderName::from_static("x-forwarded-for"),
+        client_ip.clone(),
+    );
+    headers.insert(HeaderName::from_static("x-real-ip"), client_ip.clone());
+    headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(proto),
+    );
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        client_port.clone(),
+    );
+
+    let host_hdr = headers.get(http::header::HOST).cloned();
+    let host_str = host_hdr
+        .as_ref()
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.host());
+
+    if let Some(h) = host_str
+        && let Ok(val) = HeaderValue::from_str(h)
+    {
+        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
+    }
+}
+
 /// Enriches HTTP/1.1 request headers with authoritative proxy forwarding metadata.
 ///
 /// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.

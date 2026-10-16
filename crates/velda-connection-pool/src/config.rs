@@ -85,7 +85,7 @@ mod tests {
         let (cfg, shards) = PoolConfig::for_topology(&topo_2);
         assert_eq!(shards, 8);
         assert_eq!(cfg.max_idle_per_key, 128);
-        assert_eq!(cfg.max_concurrent_streams, 1024);
+        assert_eq!(cfg.max_concurrent_streams, 128);
 
         // 16-core regional edge (4GB RAM -> MemoryTier::Medium)
         let topo_16 =
@@ -93,7 +93,7 @@ mod tests {
         let (cfg, shards) = PoolConfig::for_topology(&topo_16);
         assert_eq!(shards, 32);
         assert_eq!(cfg.max_idle_per_key, 1024);
-        assert_eq!(cfg.max_concurrent_streams, 4096);
+        assert_eq!(cfg.max_concurrent_streams, 256);
 
         // 64-core hyperscale node (64GB RAM -> MemoryTier::XLarge)
         let topo_64 =
@@ -101,6 +101,6 @@ mod tests {
         let (cfg, shards) = PoolConfig::for_topology(&topo_64);
         assert_eq!(shards, 128);
         assert_eq!(cfg.max_idle_per_key, 4096);
-        assert_eq!(cfg.max_concurrent_streams, 16384);
+        assert_eq!(cfg.max_concurrent_streams, 512);
     }
 }

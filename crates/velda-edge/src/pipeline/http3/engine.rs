@@ -21,11 +21,169 @@ use velda_transport::UdpSocket;
 use crate::error::EdgeError;
 use crate::runtime::SharedRuntime;
 
-/// A response message queued from upstream processing to be written to the HTTP/3 QUIC connection.
-pub struct Http3ResponseMsg {
+/// Streaming pipeline depth (number of chunks permitted in flight per stream).
+///
+/// Depth 1 enforces strict O(1) flow-control backpressure: the upstream reader only fetches
+/// chunk N+1 after chunk N has been accepted by Quinn or transmitted over the wire.
+/// Because Quinn internally manages pacing, congestion windows, and packet flight buffers,
+/// an application-layer depth of 1 prevents memory ballooning and avoids out-of-order chunk races.
+pub const STREAM_PIPELINE_DEPTH: usize = 1;
+
+/// Channel capacity for worker response messages across active streams on a single CPU core.
+/// Sized to 512 messages (~32 MB peak payload capacity) to accommodate concurrency bursts without
+/// excessive RAM ballooning under heavy multi-stream load.
+pub const WORKER_RESPONSE_QUEUE_CAPACITY: usize = 512;
+
+/// Batch size for draining response messages from the channel per worker tick.
+/// Matches Linux GSO (`sendmmsg` / `UDP_SEGMENT`) batching limit (up to 64 datagrams).
+pub const RESPONSE_BATCH_SIZE: usize = 64;
+
+/// Minimum sleep duration when Quinn timers expire immediately or have microsecond pacing requirements.
+pub const TIMER_MIN_SLEEP: Duration = Duration::from_micros(50);
+
+/// Maximum sleep clamp to avoid sleeping past newly scheduled loss-detection deadlines.
+pub const TIMER_MAX_SLEEP: Duration = Duration::from_millis(50);
+
+/// Fallback sleep duration when no Quinn transport timers are actively registered.
+pub const TIMER_IDLE_FALLBACK: Duration = Duration::from_millis(10);
+
+/// A response or progressive streaming message queued from upstream processing
+/// to be written to the HTTP/3 QUIC connection.
+pub enum Http3ResponseMsg {
+    /// Full 1-shot HTTP/3 response (QPACK HEADERS + optional single-flight DATA frame).
+    Full {
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        response: L7Response,
+    },
+    /// Response HEADERS only (initiates a progressive streaming response).
+    Head {
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        status: http::StatusCode,
+        headers: http::HeaderMap,
+    },
+    /// Progressive response DATA chunk.
+    Chunk {
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        chunk: bytes::Bytes,
+        finish: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    },
+}
+
+/// Downstream HTTP/3 response responder, providing uniform 1-shot and progressive streaming methods.
+#[derive(Clone)]
+pub struct Http3Responder {
     pub handle: ConnectionHandle,
     pub stream_id: StreamId,
-    pub response: L7Response,
+    pub response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
+}
+
+impl Http3Responder {
+    /// Creates a new [`Http3Responder`].
+    #[inline]
+    pub fn new(
+        handle: ConnectionHandle,
+        stream_id: StreamId,
+        response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
+    ) -> Self {
+        Self {
+            handle,
+            stream_id,
+            response_tx,
+        }
+    }
+
+    /// Sends a 1-shot full response (buffered).
+    #[inline]
+    pub async fn send_response(self, response: L7Response) -> Result<(), EdgeError> {
+        self.response_tx
+            .send(Http3ResponseMsg::Full {
+                handle: self.handle,
+                stream_id: self.stream_id,
+                response,
+            })
+            .await
+            .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))
+    }
+
+    /// Sends the response HEADERS frame and returns an [`Http3StreamSender`] for streaming response chunks.
+    #[inline]
+    pub async fn send_stream_response(
+        self,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+    ) -> Result<Http3StreamSender, EdgeError> {
+        self.response_tx
+            .send(Http3ResponseMsg::Head {
+                handle: self.handle,
+                stream_id: self.stream_id,
+                status,
+                headers: headers.clone(),
+            })
+            .await
+            .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))?;
+
+        // Double-buffering: 2 permits allow 2 chunks in flight, maximizing pipelined throughput
+        // while bounding peak memory to O(1) per stream.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(STREAM_PIPELINE_DEPTH));
+
+        Ok(Http3StreamSender {
+            handle: self.handle,
+            stream_id: self.stream_id,
+            response_tx: self.response_tx,
+            semaphore,
+        })
+    }
+}
+
+/// Progressive stream sender for transmitting HTTP/3 response DATA chunks downstream.
+pub struct Http3StreamSender {
+    handle: ConnectionHandle,
+    stream_id: StreamId,
+    response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl Http3StreamSender {
+    /// Sends a DATA frame chunk downstream with channel-driven async backpressure.
+    #[inline]
+    pub async fn send_chunk(&mut self, chunk: bytes::Bytes) -> Result<(), EdgeError> {
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EdgeError::Internal("HTTP/3 stream closed".into()))?;
+
+        self.response_tx
+            .send(Http3ResponseMsg::Chunk {
+                handle: self.handle,
+                stream_id: self.stream_id,
+                chunk,
+                finish: false,
+                permit: Some(permit),
+            })
+            .await
+            .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))
+    }
+
+    /// Explicitly closes the HTTP/3 stream by emitting the QUIC FIN bit.
+    #[inline]
+    pub async fn finish(self) -> Result<(), EdgeError> {
+        self.response_tx
+            .send(Http3ResponseMsg::Chunk {
+                handle: self.handle,
+                stream_id: self.stream_id,
+                chunk: bytes::Bytes::new(),
+                finish: true,
+                permit: None,
+            })
+            .await
+            .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))
+    }
 }
 
 /// A single per-core HTTP/3 QUIC worker state machine with direct 1:1 socket association
@@ -48,7 +206,7 @@ impl Http3Worker {
         h3_config: velda_http3::Http3Config,
     ) -> Arc<Self> {
         let engine = Http3Engine::new_with_config(quic_cfg, h3_config);
-        let (response_tx, rx) = tokio::sync::mpsc::channel(8192);
+        let (response_tx, rx) = tokio::sync::mpsc::channel(WORKER_RESPONSE_QUEUE_CAPACITY);
         Arc::new(Self {
             worker_id,
             engine: Mutex::new(engine),
@@ -84,7 +242,7 @@ impl Http3Worker {
             };
             let worker_weak = Arc::downgrade(self);
             tokio::spawn(async move {
-                let mut batch = Vec::with_capacity(64);
+                let mut batch = Vec::with_capacity(RESPONSE_BATCH_SIZE);
                 let mut next_timeout = {
                     let Some(worker) = worker_weak.upgrade() else {
                         return;
@@ -99,9 +257,9 @@ impl Http3Worker {
                     let sleep_opt = next_timeout.map(|t| {
                         let now = Instant::now();
                         if t <= now {
-                            Duration::from_micros(50)
+                            TIMER_MIN_SLEEP
                         } else {
-                            (t - now).clamp(Duration::from_micros(50), Duration::from_millis(50))
+                            (t - now).clamp(TIMER_MIN_SLEEP, TIMER_MAX_SLEEP)
                         }
                     });
 
@@ -110,7 +268,7 @@ impl Http3Worker {
                             match msg {
                                 Some(first_msg) => {
                                     batch.push(first_msg);
-                                    while batch.len() < 64 {
+                                    while batch.len() < RESPONSE_BATCH_SIZE {
                                         match rx.try_recv() {
                                             Ok(m) => batch.push(m),
                                             Err(_) => break,
@@ -127,16 +285,30 @@ impl Http3Worker {
 
                                     let mut all_outgoing = Vec::with_capacity(batch.len() * 2);
                                     let now = Instant::now();
-                                    while !batch.is_empty() {
-                                        let chunk_len = batch.len().min(4);
+                                    {
                                         let mut engine = worker.engine.lock();
-                                        for item in batch.drain(..chunk_len) {
-                                            match engine.send_response(
-                                                now,
-                                                item.handle,
-                                                item.stream_id,
-                                                &item.response,
-                                            ) {
+                                        for item in batch.drain(..) {
+                                            let res = match item {
+                                                Http3ResponseMsg::Full {
+                                                    handle,
+                                                    stream_id,
+                                                    response,
+                                                } => engine.send_response(now, handle, stream_id, &response),
+                                                Http3ResponseMsg::Head {
+                                                    handle,
+                                                    stream_id,
+                                                    status,
+                                                    headers,
+                                                } => engine.send_response_head(now, handle, stream_id, status, &headers),
+                                                Http3ResponseMsg::Chunk {
+                                                    handle,
+                                                    stream_id,
+                                                    chunk,
+                                                    finish,
+                                                    permit,
+                                                } => engine.send_data_chunk(now, handle, stream_id, &chunk, finish, permit),
+                                            };
+                                            match res {
                                                 Ok(pkts) => {
                                                     super::downstream::H3_TOTAL_RESP_SENT
                                                         .0
@@ -145,20 +317,15 @@ impl Http3Worker {
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!(
-                                                        stream = %item.stream_id,
                                                         error = %e,
-                                                        "Failed to send HTTP/3 response"
+                                                        "Failed to send HTTP/3 response or chunk"
                                                     );
                                                 }
                                             }
                                         }
-                                        next_timeout = engine.poll_timeout();
-                                    }
 
-                                    // If Quinn's loss detection or PTO timer has expired, handle it immediately in the same pass
-                                    if let Some(t) = next_timeout && t <= now {
-                                        let mut engine = worker.engine.lock();
-                                        if engine.connection_count() > 0 {
+                                        // If Quinn's loss detection or PTO timer has expired, handle it immediately in the same pass
+                                        if let Some(t) = engine.poll_timeout() && t <= now && engine.connection_count() > 0 {
                                             all_outgoing.extend(engine.handle_timeouts(now));
                                         }
                                         next_timeout = engine.poll_timeout();
@@ -204,7 +371,7 @@ impl Http3Worker {
                             if let Some(dur) = sleep_opt {
                                 tokio::time::sleep(dur).await;
                             } else {
-                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                tokio::time::sleep(TIMER_IDLE_FALLBACK).await;
                             }
                         } => {
                             let Some(worker) = worker_weak.upgrade() else {

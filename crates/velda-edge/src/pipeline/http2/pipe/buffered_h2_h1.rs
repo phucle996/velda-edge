@@ -112,10 +112,7 @@ pub async fn serve(
     }
 
     // 6. Read and decode HTTP/1.1 response
-    let read_cap = upstream
-        .config
-        .client_body_buffer_size
-        .clamp(16_384, 65_536);
+    let read_cap = upstream.config.client_body_buffer_size;
     let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
     let (head, framing) =
         match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)

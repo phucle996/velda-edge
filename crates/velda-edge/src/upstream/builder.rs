@@ -173,8 +173,10 @@ pub fn build_upstreams(
 
         let default_shards = topology.concurrency_shards;
         let default_max_idle = topology.optimal_max_idle_per_key;
-        let default_max_streams =
-            velda_connection_pool::max_concurrent_streams_for_mem_tier(topology.memory_tier());
+        let default_max_streams = velda_connection_pool::optimal_max_concurrent_streams(
+            cores,
+            topology.memory.total_bytes,
+        );
 
         let pool_opt = config.pool.as_ref();
         let shard_count = pool_opt
@@ -187,9 +189,11 @@ pub fn build_upstreams(
         let max_streams = pool_opt
             .and_then(|p| p.max_concurrent_streams)
             .unwrap_or(default_max_streams);
-        // For multiplexed protocols (H2, H3, gRPC), align parallel connections 1:1 with CPU cores
-        // to maintain thread-affinity and eliminate cross-core lock/cache thrashing.
-        let mux_conns = cores.max(1);
+        // For multiplexed protocols (H2, H3, gRPC), scale parallel connections proportional to cores
+        // (default 8 per core, clamped between 16 and 128) to absorb high stream concurrency without socket starvation.
+        let mux_conns = pool_opt
+            .and_then(|p| p.max_idle_per_key)
+            .unwrap_or_else(|| (cores * 8).clamp(16, 128));
         let idle_timeout = pool_opt
             .and_then(|p| p.idle_timeout_ms.map(std::time::Duration::from_millis))
             .unwrap_or(timeouts.idle);

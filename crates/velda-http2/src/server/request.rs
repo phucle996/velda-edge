@@ -245,18 +245,12 @@ pub struct Http2StreamReceiver {
     body_stream: h2::RecvStream,
     max_body_size: usize,
     bytes_received: usize,
-    unreleased_bytes: usize,
     flood_tracker: Option<Arc<Http2FloodTracker>>,
 }
 
 impl Drop for Http2StreamReceiver {
     fn drop(&mut self) {
-        if self.unreleased_bytes > 0 {
-            let _ = self
-                .body_stream
-                .flow_control()
-                .release_capacity(self.unreleased_bytes);
-        }
+        // Any unconsumed bytes are automatically handled by h2 when RecvStream is dropped.
     }
 }
 
@@ -268,7 +262,6 @@ impl Http2StreamReceiver {
             body_stream,
             max_body_size,
             bytes_received: 0,
-            unreleased_bytes: 0,
             flood_tracker: None,
         }
     }
@@ -283,42 +276,27 @@ impl Http2StreamReceiver {
     /// Asynchronously receives the next DATA chunk from the incoming stream.
     pub async fn recv_chunk(&mut self) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
         let Some(chunk_res) = self.body_stream.data().await else {
-            if self.unreleased_bytes > 0 {
-                let _ = self
-                    .body_stream
-                    .flow_control()
-                    .release_capacity(self.unreleased_bytes);
-                self.unreleased_bytes = 0;
-            }
             return Ok(None);
         };
 
         let chunk = chunk_res?;
         let len = chunk.len();
         self.bytes_received += len;
-        self.unreleased_bytes += len;
         if let Some(tracker) = &self.flood_tracker {
             tracker.on_payload_read(len);
         }
 
         if self.bytes_received > self.max_body_size {
-            let _ = self
-                .body_stream
-                .flow_control()
-                .release_capacity(self.unreleased_bytes);
+            let _ = self.body_stream.flow_control().release_capacity(len);
             return Err(crate::error::Http2Error::PayloadTooLarge(
                 self.bytes_received,
             ));
         }
 
-        const INGRESS_BATCH_THRESHOLD: usize = 32_768; // 32 KB
-        if self.unreleased_bytes >= INGRESS_BATCH_THRESHOLD {
-            let _ = self
-                .body_stream
-                .flow_control()
-                .release_capacity(self.unreleased_bytes);
-            self.unreleased_bytes = 0;
-        }
+        // Proactively release capacity immediately to h2's internal flow-control state machine.
+        // h2 automatically generates WINDOW_UPDATE frames whenever consumed capacity crosses its threshold,
+        // avoiding artificial stalls on client uploads.
+        let _ = self.body_stream.flow_control().release_capacity(len);
 
         Ok(Some(chunk))
     }
@@ -333,39 +311,19 @@ impl Http2StreamReceiver {
             std::task::Poll::Ready(Some(Ok(chunk))) => {
                 let len = chunk.len();
                 self.bytes_received += len;
-                self.unreleased_bytes += len;
                 if let Some(tracker) = &self.flood_tracker {
                     tracker.on_payload_read(len);
                 }
                 if self.bytes_received > self.max_body_size {
-                    let _ = self
-                        .body_stream
-                        .flow_control()
-                        .release_capacity(self.unreleased_bytes);
+                    let _ = self.body_stream.flow_control().release_capacity(len);
                     return Err(crate::error::Http2Error::PayloadTooLarge(
                         self.bytes_received,
                     ));
                 }
-                const INGRESS_BATCH_THRESHOLD: usize = 32_768; // 32 KB
-                if self.unreleased_bytes >= INGRESS_BATCH_THRESHOLD {
-                    let _ = self
-                        .body_stream
-                        .flow_control()
-                        .release_capacity(self.unreleased_bytes);
-                    self.unreleased_bytes = 0;
-                }
+                let _ = self.body_stream.flow_control().release_capacity(len);
                 Ok(Some(Some(chunk)))
             }
-            std::task::Poll::Ready(None) => {
-                if self.unreleased_bytes > 0 {
-                    let _ = self
-                        .body_stream
-                        .flow_control()
-                        .release_capacity(self.unreleased_bytes);
-                    self.unreleased_bytes = 0;
-                }
-                Ok(Some(None))
-            }
+            std::task::Poll::Ready(None) => Ok(Some(None)),
             std::task::Poll::Ready(Some(Err(e))) => Err(crate::error::Http2Error::from(e)),
             std::task::Poll::Pending => Ok(None),
         }
@@ -420,13 +378,6 @@ impl Http2StreamReceiver {
         };
 
         if self.is_end_stream() {
-            if self.unreleased_bytes > 0 {
-                let _ = self
-                    .body_stream
-                    .flow_control()
-                    .release_capacity(self.unreleased_bytes);
-                self.unreleased_bytes = 0;
-            }
             return Ok(Body::Bytes(first_chunk));
         }
 
@@ -435,14 +386,6 @@ impl Http2StreamReceiver {
 
         while let Some(chunk) = self.recv_chunk().await? {
             body_buf.extend_from_slice(&chunk);
-        }
-
-        if self.unreleased_bytes > 0 {
-            let _ = self
-                .body_stream
-                .flow_control()
-                .release_capacity(self.unreleased_bytes);
-            self.unreleased_bytes = 0;
         }
 
         Ok(Body::Bytes(body_buf.freeze()))
