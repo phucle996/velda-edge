@@ -396,34 +396,11 @@ async fn test_resolve_ips_and_resolve() {
 }
 
 #[test]
-fn test_dns_resolver_config_for_tier() {
-    let constrained = DnsResolverConfig::for_tier(velda_core::MemoryTier::Constrained);
-    assert_eq!(constrained.cache_capacity, 1_000);
-    assert_eq!(constrained.lkg_capacity, 500);
-
-    let small = DnsResolverConfig::for_tier(velda_core::MemoryTier::Small);
-    assert_eq!(small.cache_capacity, 10_000);
-    assert_eq!(small.lkg_capacity, 2_000);
-
-    let medium = DnsResolverConfig::for_tier(velda_core::MemoryTier::Medium);
-    assert_eq!(medium.cache_capacity, 50_000);
-    assert_eq!(medium.lkg_capacity, 10_000);
-
-    let large = DnsResolverConfig::for_tier(velda_core::MemoryTier::Large);
-    assert_eq!(large.cache_capacity, 150_000);
-    assert_eq!(large.lkg_capacity, 30_000);
-
-    let xlarge = DnsResolverConfig::for_tier(velda_core::MemoryTier::XLarge);
-    assert_eq!(xlarge.cache_capacity, 400_000);
-    assert_eq!(xlarge.lkg_capacity, 80_000);
-
-    let two_xlarge = DnsResolverConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
-    assert_eq!(two_xlarge.cache_capacity, 1_000_000);
-    assert_eq!(two_xlarge.lkg_capacity, 200_000);
-
-    let ultra = DnsResolverConfig::for_tier(velda_core::MemoryTier::Ultra);
-    assert_eq!(ultra.cache_capacity, 2_500_000);
-    assert_eq!(ultra.lkg_capacity, 500_000);
+fn test_dns_resolver_config_for_topology() {
+    let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+    let cfg = DnsResolverConfig::for_topology(&topo);
+    assert_eq!(cfg.cache_capacity, topo.sizing.dns_cache_capacity);
+    assert!(cfg.lkg_capacity <= cfg.cache_capacity);
 }
 
 #[tokio::test]

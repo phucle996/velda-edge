@@ -12,7 +12,6 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::CountingAllocator;
-use velda_core::MemoryTier;
 use velda_http1::{Http1Config, decode_request};
 
 #[global_allocator]
@@ -81,7 +80,7 @@ fn bench_smuggling_and_framing() {
         ),
     ];
 
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     for (name, payload, should_succeed) in attack_vectors {
         let start = Instant::now();
 
@@ -158,7 +157,7 @@ fn bench_pathological_header_floods() {
         ),
     ];
 
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     for (name, payload, outcome) in scenarios {
         let start = Instant::now();
 
@@ -201,7 +200,7 @@ fn bench_hostile_method_injections() {
     ];
 
     ALLOCATOR.reset();
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     let start = Instant::now();
 
     for i in 0..iters {
@@ -251,7 +250,7 @@ fn bench_pipeline_boundary_fuzzing() {
     // Case 2: Pipelined stream (2 requests concatenated in one buffer)
     let pipelined_stream = b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     let start = Instant::now();
 
     for _ in 0..iters {

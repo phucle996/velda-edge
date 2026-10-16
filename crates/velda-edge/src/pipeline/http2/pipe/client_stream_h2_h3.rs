@@ -59,8 +59,10 @@ pub async fn serve(
     };
 
     // 4. Fast-path: Ingest initial payload with opportunistic coalescing
-    let (first_chunk, mut is_fin) =
-        match receiver.recv_coalesced_chunk(upstream.config.stream_receive_window as usize).await {
+    let (first_chunk, mut is_fin) = match receiver
+        .recv_coalesced_chunk(upstream.config.stream_receive_window as usize)
+        .await
+    {
         Ok(Some(c)) => {
             let fin = receiver.is_end_stream();
             (Some(c), fin)
@@ -225,8 +227,6 @@ pub async fn serve(
     );
     let _ = responder.send_response(&resp);
     if !receiver.is_end_stream() {
-        tokio::spawn(async move {
-            while let Ok(Some(_)) = receiver.recv_chunk().await {}
-        });
+        tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
     }
 }

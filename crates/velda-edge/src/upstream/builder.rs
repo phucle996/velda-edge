@@ -148,7 +148,7 @@ pub fn build_upstreams(
         };
 
         let timeouts = UpstreamTimeouts {
-            connect: std::time::Duration::from_millis(config.timeouts.connect_ms),
+            connect: std::time::Duration::from_millis(config.timeouts.connect_ms.max(2000)),
             idle: std::time::Duration::from_millis(config.timeouts.idle_ms),
             request: config
                 .timeouts
@@ -181,10 +181,11 @@ pub fn build_upstreams(
         let pool_opt = config.pool.as_ref();
         let shard_count = pool_opt
             .and_then(|p| p.concurrency_shards)
-            .map(|s| s.max(1).next_power_of_two())
+            .map(|s| s.max(default_shards).next_power_of_two())
             .unwrap_or(default_shards);
         let max_idle = pool_opt
             .and_then(|p| p.max_idle_per_key)
+            .map(|m| m.max(default_max_idle))
             .unwrap_or(default_max_idle);
         let max_streams = pool_opt
             .and_then(|p| p.max_concurrent_streams)
@@ -406,8 +407,8 @@ pub fn build_upstreams_default(
     configs: &[UpstreamConfig],
     tls_client: Option<&TlsClientEngine>,
 ) -> UpstreamTable {
-    let tier = velda_core::global_hardware_topology().memory_tier();
-    let dns_config = DnsResolverConfig::for_tier(tier);
+    let topo = velda_core::global_hardware_topology();
+    let dns_config = DnsResolverConfig::for_topology(topo);
     build_upstreams(configs, tls_client, &dns_config)
 }
 

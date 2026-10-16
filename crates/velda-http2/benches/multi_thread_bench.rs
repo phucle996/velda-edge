@@ -8,11 +8,11 @@ use common::format_throughput;
 use http::StatusCode;
 use tokio::io::duplex;
 use tokio::task::JoinSet;
-use velda_core::{L7Response, MemoryTier};
+use velda_core::L7Response;
 use velda_http2::config::Http2Config;
 use velda_http2::server::Http2ServerConnection;
 
-const TEST_CONFIG: Http2Config = Http2Config::for_tier(MemoryTier::Medium);
+const TEST_CONFIG: Http2Config = Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
 #[tokio::main]
 async fn main() {

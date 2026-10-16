@@ -64,9 +64,6 @@ pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) 
                                 detected_ram_bytes: hardware.memory_bytes(),
                                 detected_cores: hardware.available_cores(),
                                 worker_threads: exact_cores,
-                                cpu_tier: hardware.cpu_tier().as_str().to_string(),
-                                memory_tier: hardware.memory_tier().as_str().to_string(),
-                                tier: hardware.memory_tier().as_str().to_string(),
                             };
                             merged_profile.transport.io_workers = exact_cores;
                             if !has_explicit_tcp_shards {
@@ -77,8 +74,6 @@ pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) 
                             loaded_from_file = true;
                             tracing::info!(
                                 path = %profile_path.display(),
-                                cpu_tier = %profile.hardware.cpu_tier,
-                                memory_tier = %profile.hardware.memory_tier,
                                 io_workers = profile.transport.io_workers,
                                 max_conns = profile.transport.max_active_connections,
                                 "Loaded runtime profile from runtime.json with operator overrides"
@@ -137,8 +132,8 @@ pub fn resolve_runtime_profile(runtime_dir: &Path, hardware: &HardwareTopology) 
             } else if !loaded_from_file {
                 tracing::info!(
                     path = %profile_path.display(),
-                    cpu_tier = %profile.hardware.cpu_tier,
-                    memory_tier = %profile.hardware.memory_tier,
+                    detected_cores = profile.hardware.detected_cores,
+                    detected_ram_bytes = profile.hardware.detected_ram_bytes,
                     io_workers = profile.transport.io_workers,
                     max_conns = profile.transport.max_active_connections,
                     "Generated baseline runtime.json from hardware probe"

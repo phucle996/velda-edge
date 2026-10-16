@@ -3,7 +3,6 @@ use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::net::TcpListener;
 use velda_core::Body;
-use velda_core::hardware::MemoryTier;
 use velda_http1::error::Http1Error;
 use velda_http1::{
     Http1BodyFraming, Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse,
@@ -11,7 +10,7 @@ use velda_http1::{
     decode_response_head, encode_response, forward_request,
 };
 
-const TEST_CONFIG: Http1Config = Http1Config::for_tier(MemoryTier::Medium);
+const TEST_CONFIG: Http1Config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
 
 #[tokio::test]
 async fn test_http1_server_connection() {
@@ -153,11 +152,12 @@ fn test_header_too_large_rejection() {
 
 #[test]
 fn test_payload_too_large_rejection() {
-    // Content-Length claims 15 MB (exceeds default max_body_size = 10 MB)
+    let limits = TEST_CONFIG.with_max_body_size(10 * 1024 * 1024);
+    // Content-Length claims 15 MB (exceeds max_body_size = 10 MB)
     let raw = b"POST /data HTTP/1.1\r\nHost: edge.velda.io\r\nContent-Length: 15728640\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
 
-    let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
+    let err = decode_request(&mut buf, &limits).unwrap_err();
     assert!(
         matches!(err, Http1Error::PayloadTooLarge(_)),
         "Payload > 10MB must be rejected with PayloadTooLarge"

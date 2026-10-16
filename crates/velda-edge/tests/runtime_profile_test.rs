@@ -4,83 +4,67 @@ use velda_core::hardware::HardwareTopology;
 use velda_edge::{RuntimeProfile, resolve_runtime_profile};
 
 #[test]
-fn test_profile_across_all_tiers() {
+fn test_profile_continuous_scaling() {
     const MB: usize = 1024 * 1024;
     const GB: usize = 1024 * MB;
 
     let test_cases = [
-        (256 * MB, "constrained", 1_000, 500, 20_000, 1024, 0),
-        (1024 * MB, "small", 10_000, 2_000, 100_000, 2048, 4096),
-        (4 * GB, "medium", 50_000, 10_000, 500_000, 8192, 8192),
-        (16 * GB, "large", 150_000, 30_000, 1_000_000, 16384, 8192),
-        (48 * GB, "xlarge", 400_000, 80_000, 2_000_000, 32768, 16384),
-        (
-            96 * GB,
-            "2xlarge",
-            1_000_000,
-            200_000,
-            5_000_000,
-            65536,
-            16384,
-        ),
-        (
-            256 * GB,
-            "ultra",
-            2_500_000,
-            500_000,
-            10_000_000,
-            131072,
-            32768,
-        ),
+        (256 * MB, 1),
+        (1024 * MB, 2),
+        (4 * GB, 4),
+        (16 * GB, 8),
+        (48 * GB, 16),
+        (96 * GB, 32),
+        (256 * GB, 64),
     ];
 
-    for (
-        ram_bytes,
-        expected_tier,
-        expected_cache,
-        expected_lkg,
-        expected_conns,
-        expected_tls_cache,
-        expected_early_data,
-    ) in test_cases
-    {
-        let hardware = HardwareTopology::with_workers_and_memory(4, ram_bytes);
+    for (ram_bytes, cores) in test_cases {
+        let hardware = HardwareTopology::with_workers_and_memory(cores, ram_bytes);
         let profile = RuntimeProfile::from_hardware(&hardware);
 
-        assert_eq!(profile.hardware.tier, expected_tier);
-        assert_eq!(profile.hardware.memory_tier, expected_tier);
-        assert_eq!(profile.hardware.cpu_tier, "small"); // 4 cores = small
-        assert_eq!(profile.transport.io_workers, 4); // small = 4 io_workers
-        assert_eq!(profile.transport.max_active_connections, expected_conns);
-        assert_eq!(profile.discovery.max_dns_cache_capacity, expected_cache);
-        assert_eq!(profile.discovery.max_lkg_capacity, expected_lkg);
+        assert_eq!(profile.transport.io_workers, cores);
+        assert_eq!(
+            profile.transport.max_active_connections,
+            hardware.sizing.tcp_max_connections
+        );
+        assert_eq!(
+            profile.discovery.max_dns_cache_capacity,
+            hardware.sizing.dns_cache_capacity
+        );
+        assert!(profile.discovery.max_lkg_capacity <= profile.discovery.max_dns_cache_capacity);
 
         // TLS profile assertions
-        assert_eq!(profile.tls.session_cache_capacity, expected_tls_cache);
-        assert_eq!(profile.tls.max_early_data_size, expected_early_data);
-        assert_eq!(profile.tls.send_tls13_tickets, 2); // small cpu = 2 tickets
-        assert_eq!(profile.tls.handshake_timeout_secs, 8); // small cpu = 8s
+        assert_eq!(
+            profile.tls.session_cache_capacity,
+            hardware.sizing.tls_session_cache_capacity
+        );
+        assert_eq!(
+            profile.tls.max_early_data_size,
+            hardware.sizing.tls_max_early_data_size
+        );
 
         let tls_params = profile.to_tls_server_params();
-        assert_eq!(tls_params.session_cache_capacity, expected_tls_cache);
-        assert_eq!(tls_params.max_early_data_size, expected_early_data);
-        assert_eq!(tls_params.send_tls13_tickets, 2);
-        assert_eq!(tls_params.handshake_timeout.as_secs(), 8);
+        assert_eq!(
+            tls_params.session_cache_capacity,
+            hardware.sizing.tls_session_cache_capacity
+        );
+        assert_eq!(
+            tls_params.max_early_data_size,
+            hardware.sizing.tls_max_early_data_size
+        );
 
         let dns_cfg = profile.to_dns_resolver_config();
-        assert_eq!(dns_cfg.cache_capacity, expected_cache);
-        assert_eq!(dns_cfg.lkg_capacity, expected_lkg);
+        assert_eq!(dns_cfg.cache_capacity, hardware.sizing.dns_cache_capacity);
 
         let tcp_cfg = profile.to_tcp_listener_config();
         assert!(tcp_cfg.backlog >= 1024);
-        assert_eq!(tcp_cfg.copy_buffer_size, 32 * 1024); // small cpu = 32KB
 
         let udp_cfg = profile.to_udp_socket_config();
         assert!(udp_cfg.recv_buffer_size.is_some());
 
         assert_eq!(
             profile.overload,
-            velda_core::OverloadConfig::for_tier(hardware.memory_tier())
+            velda_core::OverloadConfig::from_memory_bytes(hardware.memory_bytes())
         );
     }
 }
@@ -112,7 +96,6 @@ fn test_operator_override() {
     assert_eq!(resolved.discovery.max_lkg_capacity, 7_777);
     assert_eq!(resolved.discovery.max_negative_ttl_secs, 120);
     assert_eq!(resolved.transport.io_workers, 2);
-    assert_eq!(resolved.hardware.tier, "constrained");
 }
 
 #[test]
@@ -125,10 +108,6 @@ fn test_fallback_writeback() {
     let hardware = HardwareTopology::with_workers_and_memory(2, 160 * 1024 * 1024 * 1024); // 160GB -> Ultra
     let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
-    assert_eq!(resolved.hardware.tier, "ultra");
-    assert_eq!(resolved.discovery.max_dns_cache_capacity, 2_500_000);
-    assert_eq!(resolved.discovery.max_lkg_capacity, 500_000);
-    assert_eq!(resolved.transport.max_active_connections, 10_000_000);
     assert_eq!(resolved.transport.io_workers, 2);
 
     // Verify write-back occurred and omits hardware and io_workers
@@ -143,7 +122,10 @@ fn test_fallback_writeback() {
         "runtime.json must never contain io_workers"
     );
     let parsed: RuntimeProfile = serde_json::from_str(&content).unwrap();
-    assert_eq!(parsed.discovery.max_dns_cache_capacity, 2_500_000);
+    assert_eq!(
+        parsed.discovery.max_dns_cache_capacity,
+        hardware.sizing.dns_cache_capacity
+    );
 }
 
 #[test]
@@ -167,19 +149,21 @@ fn test_partial_override() {
     // Explicitly overridden field MUST match
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 99_999);
 
-    // All missing fields MUST cleanly fallback to Medium tier defaults!
-    assert_eq!(resolved.hardware.tier, "medium");
-    assert_eq!(resolved.discovery.max_lkg_capacity, 10_000);
+    // All missing fields MUST cleanly fallback to hardware defaults!
+    let expected_lkg = (hardware.sizing.dns_cache_capacity / 5).max(100);
+    assert_eq!(resolved.discovery.max_lkg_capacity, expected_lkg);
     assert_eq!(resolved.discovery.max_negative_ttl_secs, 60);
-    assert_eq!(resolved.discovery.query_timeout_ms, 2000);
-    assert_eq!(resolved.transport.io_workers, 4); // 4 cores = small cpu tier (4 workers)
-    assert_eq!(resolved.transport.max_active_connections, 500_000);
+    assert_eq!(resolved.transport.io_workers, 4);
+    assert_eq!(
+        resolved.transport.max_active_connections,
+        hardware.sizing.tcp_max_connections
+    );
 
     // Verify that the file was updated with the full merged state
     let updated_content = fs::read_to_string(&runtime_json_path).unwrap();
     let updated_profile: RuntimeProfile = serde_json::from_str(&updated_content).unwrap();
     assert_eq!(updated_profile.discovery.max_dns_cache_capacity, 99_999);
-    assert_eq!(updated_profile.discovery.max_lkg_capacity, 10_000);
+    assert_eq!(updated_profile.discovery.max_lkg_capacity, expected_lkg);
 }
 
 #[test]
@@ -297,8 +281,8 @@ fn test_hardware_probe_isolation_from_stale_json() {
     let resolved = resolve_runtime_profile(temp_dir.path(), &hardware);
 
     // Stale hardware & io_workers MUST be stripped; actual physical hardware wins!
-    assert_eq!(resolved.memory_tier(), velda_core::MemoryTier::Small); // 1GB = Small
-    assert_eq!(resolved.cpu_tier(), velda_core::CpuTier::Constrained); // 2 cores = Constrained
+    assert_eq!(resolved.memory_bytes(), 1024 * 1024 * 1024);
+    assert_eq!(resolved.available_cores(), 2);
     assert_eq!(resolved.transport.io_workers, 2);
     assert_eq!(resolved.transport.max_active_connections, 10_000_000); // legitimate operator override honored
 }

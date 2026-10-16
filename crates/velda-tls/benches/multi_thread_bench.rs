@@ -12,14 +12,13 @@ use std::time::Instant;
 use common::{make_test_client, make_test_server};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::hardware::{CpuTier, MemoryTier};
 
 async fn run_concurrent_handshakes(
     threads: usize,
     iters_per_thread: usize,
     resumed: bool,
 ) -> (f64, u64) {
-    let (server_engine, cert_pem) = make_test_server(CpuTier::Ultra, MemoryTier::Ultra);
+    let (server_engine, cert_pem) = make_test_server(64, 128 * 1024 * 1024 * 1024);
     let srv_arc = Arc::new(server_engine);
     let client = Arc::new(make_test_client(&cert_pem, resumed));
 

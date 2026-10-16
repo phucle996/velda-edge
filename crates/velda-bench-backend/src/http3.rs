@@ -2,11 +2,11 @@
 //!
 //! Serves all 8 canonical routes over HTTP/3 QUIC streams using pure packet-driven state machine.
 
+use bytes::Bytes;
+use http::{HeaderMap, StatusCode, Version};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use bytes::Bytes;
-use http::{HeaderMap, StatusCode, Version};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, interval};
 use velda_core::{Body, L7Response};

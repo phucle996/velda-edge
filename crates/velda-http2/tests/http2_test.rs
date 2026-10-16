@@ -2,13 +2,13 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use tokio::io::duplex;
 use tokio::net::TcpListener;
-use velda_core::{Body, MemoryTier};
+use velda_core::Body;
 use velda_http2::client::{self, Http2ClientResponse};
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
 use velda_http2::server::Http2ServerConnection;
 
-const TEST_CONFIG: Http2Config = Http2Config::for_tier(MemoryTier::Medium);
+const TEST_CONFIG: Http2Config = Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
 #[tokio::test]
 async fn test_http2_server_and_client_roundtrip() {
@@ -137,7 +137,7 @@ async fn test_http2_payload_limit_enforcement() {
     });
 
     // Limit maximum body size to 50 bytes
-    let tight_config = Http2Config::for_tier(MemoryTier::Medium).with_max_body_size(50);
+    let tight_config = TEST_CONFIG.with_max_body_size(50);
     let mut server_conn = Http2ServerConnection::handshake(server_io, tight_config)
         .await
         .unwrap();

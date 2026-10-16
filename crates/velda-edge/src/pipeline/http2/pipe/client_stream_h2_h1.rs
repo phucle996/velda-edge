@@ -97,7 +97,12 @@ pub async fn serve(
     };
 
     // 6. Encode HTTP/1.1 request head
-    let initial_cap = 1024 + if !is_chunked { first_chunk.as_ref().map_or(0, |c| c.len()) } else { 0 };
+    let initial_cap = 1024
+        + if !is_chunked {
+            first_chunk.as_ref().map_or(0, |c| c.len())
+        } else {
+            0
+        };
     let mut write_buf = bytes::BytesMut::with_capacity(initial_cap);
     velda_http1::client::encode_request_head(
         &head.method,
@@ -225,9 +230,7 @@ pub async fn serve(
         Ok(l7_resp) => {
             let _ = responder.send_response(&l7_resp);
             if !receiver.is_end_stream() {
-                tokio::spawn(async move {
-                    while let Ok(Some(_)) = receiver.recv_chunk().await {}
-                });
+                tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
         }
         Err(e) => {
@@ -238,9 +241,7 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             if !receiver.is_end_stream() {
-                tokio::spawn(async move {
-                    while let Ok(Some(_)) = receiver.recv_chunk().await {}
-                });
+                tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
         }
     }

@@ -19,29 +19,19 @@ pub mod cpu;
 pub mod kernel;
 pub mod memory;
 pub mod overload;
+pub mod sizing;
 
 use std::sync::OnceLock;
 
-pub use cpu::{CpuProfile, CpuTier, CpuVectorCapabilities, copy_bulk_payload, probe_cpu};
+pub use cpu::{CpuProfile, CpuVectorCapabilities, copy_bulk_payload, probe_cpu};
 pub use kernel::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
     KernelAccelerationLadder, KernelProfile, KernelVersion, MultipathResilienceTier,
     MultiplexPacingTier, OutboundPortScalingTier, UdpEgressTier, UdpOffloadTier, probe_kernel,
 };
-pub use memory::{MemoryProfile, MemoryTier, probe_memory};
+pub use memory::{MemoryProfile, probe_memory};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
-
-/// Error returned when a hardware tier string fails to parse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseTierError(pub String);
-
-impl std::fmt::Display for ParseTierError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ParseTierError {}
+pub use sizing::HardwareSizing;
 
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,28 +48,31 @@ pub struct HardwareTopology {
     pub worker_threads: usize,
     /// Total/available memory in bytes (respects container cgroups limits).
     pub memory_bytes: usize,
+    /// Pre-computed hardware-driven resource capacities across all networking subsystems.
+    pub sizing: HardwareSizing,
     /// Pre-computed optimal idle connection capacity per upstream target (scaled from CPU concurrency).
     pub optimal_max_idle_per_key: usize,
     /// Pre-computed optimal shard count for concurrency distribution (power-of-two, bounded [8, 1024]).
     pub concurrency_shards: usize,
 }
 
+/// Continuously computes the optimal pool concurrency and idle capacity per key
+/// scaled from hardware CPU parallelism and available physical RAM bytes.
+///
+/// # Mathematical Formulation
+/// - `shards`: `(worker_threads * 2).next_power_of_two().clamp(8, 1024)`: Prevents Mutex false sharing across cores.
+/// - `target_total`: `(worker_threads * 256).clamp(1024, 65536)`: Absorbs high multiplexed stream bursts.
+/// - `ram_safe_cap`: `(memory_bytes / 262144).max(128)`: Caps max sockets at ~1/64 of RAM capacity (4KB socket buffer).
+/// - `max_idle`: `((min(target_total, ram_safe_cap) / shards) * 2).clamp(128, 4096)`.
 #[inline]
-const fn compute_optimal_pool_concurrency(worker_threads: usize) -> (usize, usize) {
+pub const fn compute_optimal_pool_concurrency(
+    worker_threads: usize,
+    memory_bytes: usize,
+) -> (usize, usize) {
     let workers = if worker_threads == 0 {
         1
     } else {
         worker_threads
-    };
-    let max_idle = {
-        let val = workers * 64;
-        if val < 16 {
-            16
-        } else if val > 4096 {
-            4096
-        } else {
-            val
-        }
     };
     let shards = {
         let val = (workers * 2).next_power_of_two();
@@ -91,6 +84,40 @@ const fn compute_optimal_pool_concurrency(worker_threads: usize) -> (usize, usiz
             val
         }
     };
+
+    let target_total = {
+        let val = workers * 256;
+        if val < 1024 {
+            1024
+        } else if val > 65536 {
+            65536
+        } else {
+            val
+        }
+    };
+
+    let ram_safe_cap = if memory_bytes == 0 {
+        1024
+    } else {
+        let cap = memory_bytes / 262_144;
+        if cap < 128 { 128 } else { cap }
+    };
+
+    let total_pool = if target_total < ram_safe_cap {
+        target_total
+    } else {
+        ram_safe_cap
+    };
+
+    let per_shard_unclamped = (total_pool / shards) * 2;
+    let max_idle = if per_shard_unclamped < 128 {
+        128
+    } else if per_shard_unclamped > 4096 {
+        4096
+    } else {
+        per_shard_unclamped
+    };
+
     (max_idle, shards)
 }
 
@@ -102,8 +129,7 @@ impl HardwareTopology {
         let cpu = probe_cpu();
         let memory = probe_memory();
         let kernel = probe_kernel();
-        let (optimal_max_idle_per_key, concurrency_shards) =
-            compute_optimal_pool_concurrency(cpu.available_cores);
+        let sizing = HardwareSizing::from_hardware(cpu.available_cores, memory.total_bytes);
 
         Self {
             cpu,
@@ -112,8 +138,9 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
-            optimal_max_idle_per_key,
-            concurrency_shards,
+            sizing,
+            optimal_max_idle_per_key: sizing.optimal_max_idle_per_key,
+            concurrency_shards: sizing.concurrency_shards,
         }
     }
 
@@ -121,8 +148,7 @@ impl HardwareTopology {
     #[inline]
     pub fn new(cpu: CpuProfile, memory: MemoryProfile) -> Self {
         let kernel = probe_kernel();
-        let (optimal_max_idle_per_key, concurrency_shards) =
-            compute_optimal_pool_concurrency(cpu.available_cores);
+        let sizing = HardwareSizing::from_hardware(cpu.available_cores, memory.total_bytes);
         Self {
             cpu,
             memory,
@@ -130,8 +156,9 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
-            optimal_max_idle_per_key,
-            concurrency_shards,
+            sizing,
+            optimal_max_idle_per_key: sizing.optimal_max_idle_per_key,
+            concurrency_shards: sizing.concurrency_shards,
         }
     }
 
@@ -174,18 +201,6 @@ impl HardwareTopology {
     #[inline]
     pub fn memory_bytes(&self) -> usize {
         self.memory_bytes
-    }
-
-    /// Returns the classified CPU resource tier.
-    #[inline]
-    pub fn cpu_tier(&self) -> CpuTier {
-        self.cpu.tier
-    }
-
-    /// Returns the classified memory resource tier.
-    #[inline]
-    pub fn memory_tier(&self) -> MemoryTier {
-        self.memory.tier
     }
 
     /// Returns the classified hardware I/O acceleration tier.
@@ -259,8 +274,8 @@ mod tests {
         assert!(topo.available_cores() >= 1);
         assert!(topo.worker_threads() >= 1);
         assert!(topo.memory_bytes() >= 1024 * 1024);
-        assert_eq!(topo.cpu_tier(), topo.cpu.tier);
-        assert_eq!(topo.memory_tier(), topo.memory.tier);
+        assert!(topo.concurrency_shards() >= 8);
+        assert!(topo.optimal_max_idle_per_key() >= 128);
     }
 
     #[test]
@@ -268,7 +283,7 @@ mod tests {
         let topo = HardwareTopology::with_workers(8);
         assert_eq!(topo.worker_threads(), 8);
         assert_eq!(topo.available_cores(), 8);
-        assert_eq!(topo.cpu_tier(), CpuTier::Medium);
+        assert_eq!(topo.concurrency_shards(), 16);
     }
 
     #[test]
@@ -277,20 +292,21 @@ mod tests {
         assert_eq!(topo.available_cores(), 4);
         assert_eq!(topo.worker_threads(), 4);
         assert_eq!(topo.memory_bytes(), 512 * 1024 * 1024);
-        assert_eq!(topo.cpu_tier(), CpuTier::Small);
-        assert_eq!(topo.memory_tier(), MemoryTier::Small);
+        assert_eq!(topo.concurrency_shards(), 8);
     }
 
     #[test]
-    fn test_orthogonal_cpu_and_memory_tiers() {
+    fn test_orthogonal_cpu_and_memory_hardware() {
         // High CPU (16 cores), Constrained RAM (256 MB) - Compute-optimized
         let topo_compute = HardwareTopology::with_workers_and_memory(16, 256 * 1024 * 1024);
-        assert_eq!(topo_compute.cpu_tier(), CpuTier::Large);
-        assert_eq!(topo_compute.memory_tier(), MemoryTier::Constrained);
+        assert_eq!(topo_compute.available_cores(), 16);
+        assert_eq!(topo_compute.memory_bytes(), 256 * 1024 * 1024);
+        assert_eq!(topo_compute.concurrency_shards(), 32);
 
-        // Low CPU (2 cores), Ultra RAM (256 GB) - Memory-optimized caching proxy
+        // Low CPU (2 cores), High RAM (256 GB) - Memory-optimized caching proxy
         let topo_memory = HardwareTopology::with_workers_and_memory(2, 256 * 1024 * 1024 * 1024);
-        assert_eq!(topo_memory.cpu_tier(), CpuTier::Constrained);
-        assert_eq!(topo_memory.memory_tier(), MemoryTier::Ultra);
+        assert_eq!(topo_memory.available_cores(), 2);
+        assert_eq!(topo_memory.memory_bytes(), 256 * 1024 * 1024 * 1024);
+        assert_eq!(topo_memory.concurrency_shards(), 8);
     }
 }

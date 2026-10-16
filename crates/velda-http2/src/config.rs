@@ -1,10 +1,8 @@
 //! Configuration parameters for HTTP/2 server and client connections (RFC 9113).
 //!
 //! Owns protocol-specific settings, safety limits, and framing parameters.
-//! Scaled by host [`MemoryTier`] with all 7 tiers explicitly defined,
+//! Continuously scaled by host hardware topology,
 //! keeping the hot path zero-IO and free from JSON parsing.
-
-use velda_core::hardware::MemoryTier;
 
 /// Tunable settings for HTTP/2 connection parameters, framing, flow control, and safety limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,18 +143,9 @@ impl Http2Config {
         }
     }
 
-    /// Derives an [`Http2Config`] scaled deterministically for the given [`MemoryTier`].
-    pub const fn for_tier(tier: MemoryTier) -> Self {
-        let (cores, ram) = match tier {
-            MemoryTier::Constrained => (1, 512 * 1024 * 1024),
-            MemoryTier::Small => (2, 2 * 1024 * 1024 * 1024),
-            MemoryTier::Medium => (4, 8 * 1024 * 1024 * 1024),
-            MemoryTier::Large => (8, 16 * 1024 * 1024 * 1024),
-            MemoryTier::XLarge => (16, 64 * 1024 * 1024 * 1024),
-            MemoryTier::TwoXLarge => (32, 128 * 1024 * 1024 * 1024),
-            MemoryTier::Ultra => (64, 512 * 1024 * 1024 * 1024),
-        };
-        Self::from_hardware(cores, ram)
+    /// Derives an [`Http2Config`] scaled deterministically from host hardware topology.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
     /// Sets the maximum body size in bytes for buffered requests.
@@ -328,26 +317,14 @@ mod tests {
     }
 
     #[test]
-    fn test_for_tier_explicit_all_tiers() {
-        let constrained = Http2Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 128);
-        assert_eq!(constrained.initial_connection_window_size, 1024 * 1024);
-        assert_eq!(constrained.initial_stream_window_size, 256 * 1024);
-        assert_eq!(constrained.max_body_size, 8 * 1024 * 1024);
-
-        let medium = Http2Config::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 256);
-        assert_eq!(medium.initial_connection_window_size, 2 * 1024 * 1024);
-        assert_eq!(medium.initial_stream_window_size, 512 * 1024);
-        assert_eq!(medium.max_body_size, 32 * 1024 * 1024);
-        assert_eq!(medium.max_frame_size, 64 * 1024);
-
-        let ultra = Http2Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 512);
-        assert_eq!(ultra.initial_connection_window_size, 8 * 1024 * 1024);
-        assert_eq!(ultra.initial_stream_window_size, 1024 * 1024);
-        assert_eq!(ultra.max_body_size, 64 * 1024 * 1024);
-        assert_eq!(ultra.max_frame_size, 64 * 1024);
+    fn test_for_topology() {
+        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let config = Http2Config::for_topology(&topo);
+        assert_eq!(config.max_concurrent_streams, 256);
+        assert_eq!(config.initial_connection_window_size, 2 * 1024 * 1024);
+        assert_eq!(config.initial_stream_window_size, 512 * 1024);
+        assert_eq!(config.max_body_size, 32 * 1024 * 1024);
+        assert_eq!(config.max_frame_size, 64 * 1024);
     }
 
     #[test]

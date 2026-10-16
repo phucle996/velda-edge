@@ -91,9 +91,11 @@ pub fn load_initial_runtime(
         tls,
     };
 
-    let pipelines = crate::runtime::pipeline::PipelineTable::build_with_tier(
+    let topo = velda_core::global_hardware_topology();
+    let pipelines = crate::runtime::pipeline::PipelineTable::build_with_hardware(
         &runtime_config.listeners,
-        profile.memory_tier(),
+        topo.available_cores,
+        topo.memory_bytes,
     )?;
 
     Ok(Runtime {
@@ -179,9 +181,11 @@ pub async fn apply_reload(
 
     // Recompile PipelineTable if listeners changed
     let pipelines = if listeners_changed {
-        crate::runtime::pipeline::PipelineTable::build_with_tier(
+        let topo = velda_core::global_hardware_topology();
+        crate::runtime::pipeline::PipelineTable::build_with_hardware(
             &config.listeners,
-            profile.memory_tier(),
+            topo.available_cores,
+            topo.memory_bytes,
         )?
     } else {
         current.pipelines.clone()

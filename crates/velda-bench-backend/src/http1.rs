@@ -2,10 +2,10 @@
 //!
 //! Serves all 8 canonical routes over HTTP/1.1 text streaming with keep-alive reuse.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;

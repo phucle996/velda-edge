@@ -9,7 +9,6 @@ use common::format_throughput;
 use http::StatusCode;
 use http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, TE, UPGRADE};
 use tokio::io::duplex;
-use velda_core::MemoryTier;
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
 use velda_http2::headers::filter_h2_headers;
@@ -33,7 +32,7 @@ async fn bench_oversized_payload_rejection() {
 
     const ITERS: u64 = 1_000;
     const MAX_SIZE: usize = 64;
-    let config = Http2Config::for_tier(MemoryTier::Constrained).with_max_body_size(MAX_SIZE);
+    let config = Http2Config::from_hardware(1, 512 * 1024 * 1024).with_max_body_size(MAX_SIZE);
 
     let (client_io, server_io) = duplex(256 * 1024);
     let oversized_chunk = Bytes::from(vec![b'A'; 256]);
@@ -89,7 +88,7 @@ async fn bench_rapid_reset_resilience() {
     println!("### 2. Rapid Reset Attack Resilience (CVE-2023-44487)\n");
 
     const RESETS: u64 = 5_000;
-    let config = Http2Config::for_tier(MemoryTier::Medium);
+    let config = Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
     let (client_io, server_io) = duplex(256 * 1024);
 

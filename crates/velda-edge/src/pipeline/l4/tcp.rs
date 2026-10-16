@@ -70,11 +70,9 @@ pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime
         })
         .or_else(|| Some(upstream.timeouts().idle));
 
-    let default_buffer_size = match velda_core::global_hardware_topology().memory_tier() {
-        velda_core::hardware::MemoryTier::Constrained => 16_384,
-        velda_core::hardware::MemoryTier::Small => 32_768,
-        _ => 65_536,
-    };
+    let default_buffer_size = velda_core::global_hardware_topology()
+        .sizing
+        .tcp_copy_buffer_size;
 
     let buffer_size = listener
         .and_then(|l| l.raw.and_then(|r| r.copy_buffer_size))

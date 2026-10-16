@@ -93,7 +93,7 @@ impl TcpAccelerationPath {
 
         let notsent_lowat =
             if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
-                Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
+                Some(topo.sizing.tcp_notsent_lowat)
             } else {
                 None
             };
@@ -110,14 +110,7 @@ impl TcpAccelerationPath {
             None
         };
 
-        let busy_poll_us = if topo.kernel.supports_busy_poll()
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            ) {
+        let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             Some(50)
         } else {
             None
@@ -136,13 +129,7 @@ impl TcpAccelerationPath {
         let tx_rehash =
             ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
         let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            );
+            && topo.available_cores >= 8;
 
         let (rto_min_us, delack_max_us, rto_max_ms) =
             if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
@@ -431,18 +418,6 @@ impl TcpAccelerationPath {
     }
 }
 
-/// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
-pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
-    use velda_core::MemoryTier;
-    const KB: u32 = 1024;
-    match tier {
-        MemoryTier::Constrained | MemoryTier::Small => 16 * KB,
-        MemoryTier::Medium => 32 * KB,
-        MemoryTier::Large | MemoryTier::XLarge => 64 * KB,
-        MemoryTier::TwoXLarge | MemoryTier::Ultra => 128 * KB,
-    }
-}
-
 /// Connects a raw TCP stream to the target physical backend endpoint,
 /// applying pre-connect socket acceleration, connection timeout, and post-connect tuning.
 pub async fn connect_tcp_stream(
@@ -493,17 +468,5 @@ mod tests {
         assert!(!path.fastopen);
         assert!(path.quickack);
         assert!(!path.bbr);
-    }
-
-    #[test]
-    fn test_notsent_lowat_tier_scaling() {
-        use velda_core::MemoryTier;
-        assert_eq!(
-            notsent_lowat_for_mem_tier(MemoryTier::Constrained),
-            16 * 1024
-        );
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Medium), 32 * 1024);
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Large), 64 * 1024);
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Ultra), 128 * 1024);
     }
 }

@@ -85,55 +85,6 @@ Mọi kịch bản thử nghiệm đều chia tỷ lệ 4/3/3 giữa 3 nhánh up
 ╚═══════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
-### 2.1 Bảng Tổng Hợp Số Liệu Đối Sánh 44 Kịch Bản (@ 200 Concurrent Connections)
-
-| Mã KB | Tên Kịch Bản Kiểm Thử | **Velda Edge (req/s)** | **Nginx 1.24 (req/s)** | **Envoy 1.31 (req/s)** | Velda P99 (ms) | Nginx P99 (ms) | % CPU (Velda/Nginx/Envoy) | Peak RSS (Velda/Nginx) | Gateway Dẫn Đầu |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| KB 01 | buffered_h1_h1 — Micro Payload ( | **41,135.7** | 43,391.9 | 28,427.6 | 11.90 ms | 9.32 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 02 | buffered_h1_h1 — Medium Payload  | **17,958.7** | 16,611.1 | 18,803.8 | 20.72 ms | 21.96 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Envoy 1.31 |
-| KB 03 | buffered_h1_h1 — Large Payload ( | **630.1** | 647.0 | 640.8 | 692.75 ms | 844.97 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Nginx 1.24 |
-| KB 04 | buffered_h1_h2 — Micro Payload ( | **39,213.9** | 43,361.9 | 28,333.8 | 56.53 ms | 12.04 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 05 | buffered_h1_h2 — Medium Payload  | **17,990.6** | 16,578.5 | 19,140.0 | 19.69 ms | 17.58 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Envoy 1.31 |
-| KB 06 | buffered_h1_h2 — Large Payload ( | **624.0** | 643.3 | 648.8 | 818.98 ms | 808.84 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 07 | buffered_h1_h3 — Micro Payload ( | **43,414.0** | 43,733.3 | 28,375.8 | 40.36 ms | 11.05 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 08 | buffered_h1_h3 — Medium Payload  | **18,718.0** | 17,091.3 | 19,684.3 | 27.37 ms | 34.81 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Envoy 1.31 |
-| KB 09 | buffered_h1_h3 — Large Payload ( | **624.2** | 651.2 | 650.0 | 798.66 ms | 718.20 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Nginx 1.24 |
-| KB 10 | server_stream_h1_h1 — Micro Payl | **41,070.9** | 42,047.8 | 28,273.4 | 31.79 ms | 16.45 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 11 | server_stream_h1_h1 — Medium Pay | **10,748.2** | 10,198.3 | 10,757.0 | 31.40 ms | 36.67 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Envoy 1.31 |
-| KB 12 | server_stream_h1_h1 — Large Payl | **27.8** | 35.6 | 42.1 | 2000.00 ms | 1990.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 13 | server_stream_h1_h2 — Micro SSE  | **42,308.1** | 42,741.9 | 28,385.0 | 15.44 ms | 10.67 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 14 | server_stream_h1_h2 — Medium Str | **10,750.9** | 10,448.6 | 10,749.5 | 36.54 ms | 34.60 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 15 | server_stream_h1_h2 — Large Stre | **38.1** | 30.0 | 53.6 | 1990.00 ms | 1950.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 16 | server_stream_h1_h3 — Micro SSE  | **41,231.6** | 43,336.4 | 27,978.9 | 11.55 ms | 10.32 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 17 | server_stream_h1_h3 — Medium Str | **10,732.3** | 10,242.2 | 10,752.0 | 34.54 ms | 33.95 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Envoy 1.31 |
-| KB 18 | server_stream_h1_h3 — Large Stre | **35.7** | 36.7 | 37.0 | 1930.00 ms | 2000.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 19 | client_stream_h1_h1 — Micro Uplo | **40,097.0** | 41,434.0 | 26,623.5 | 18.09 ms | 10.31 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 20 | client_stream_h1_h1 — Medium Upl | **10,805.0** | 10,821.0 | 10,686.7 | 32.20 ms | 33.17 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 21 | client_stream_h1_h1 — Large Uplo | **635.7** | 655.0 | 1,109.2 | 872.08 ms | 1090.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 22 | client_stream_h1_h2 — Micro Uplo | **39,632.9** | 41,994.1 | 24,979.8 | 14.22 ms | 14.68 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 23 | client_stream_h1_h2 — Medium Upl | **10,810.3** | 10,790.6 | 10,621.4 | 34.44 ms | 31.72 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 24 | client_stream_h1_h2 — Large Uplo | **645.8** | 646.4 | 996.2 | 941.28 ms | 1190.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 25 | client_stream_h1_h3 — Micro Uplo | **40,070.4** | 41,396.3 | 25,508.9 | 15.81 ms | 13.23 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 26 | client_stream_h1_h3 — Medium Upl | **10,834.7** | 10,754.0 | 10,170.3 | 36.23 ms | 32.07 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 27 | client_stream_h1_h3 — Large Uplo | **645.1** | 650.6 | 1,054.3 | 753.70 ms | 1190.00 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Envoy 1.31 |
-| KB 28 | duplex_h1_h1 — Micro Interactive | **40,403.4** | 43,005.5 | 26,624.9 | 21.45 ms | 14.03 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 29 | duplex_h1_h1 — Medium Bidirectio | **41,589.8** | 43,195.3 | 28,242.4 | 8.97 ms | 11.31 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 30 | duplex_h1_h1 — Large Heavy Duple | **42,395.8** | 43,247.3 | 28,328.9 | 8.90 ms | 9.18 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Nginx 1.24 |
-| KB 31 | duplex_h1_h2 — Micro Duplex H1 t | **41,329.6** | 42,921.6 | 29,031.7 | 13.23 ms | 10.44 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 32 | duplex_h1_h2 — Medium Duplex H1  | **41,683.9** | 44,192.3 | 28,806.8 | 8.58 ms | 8.98 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 33 | duplex_h1_h2 — Large Duplex H1 t | **42,699.1** | 42,511.6 | 28,623.7 | 8.51 ms | 10.13 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | **Velda Edge** |
-| KB 34 | duplex_h1_h3 — Micro Duplex H1 t | **41,912.1** | 43,975.2 | 28,708.5 | 9.13 ms | 10.04 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 35 | duplex_h1_h3 — Medium Duplex H1  | **42,145.3** | 42,803.5 | 28,786.4 | 10.12 ms | 13.33 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 36 | duplex_h1_h3 — Large Duplex H1 t | **42,562.5** | 42,269.0 | 28,524.5 | 8.65 ms | 10.86 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | **Velda Edge** |
-| KB 37 | HTTP Request Smuggling (CL.TE &  | **2,000.0** | 2,000.0 | 2,000.0 | 2.00 ms | 2.00 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 38 | Corrupted Chunk Framing (Invalid | **2,000.0** | 2,000.0 | 2,000.0 | 2.50 ms | 2.50 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 39 | Header Flooding & Giant Line (8K | **11,868.2** | 19,231.5 | 4,633.6 | 32.30 ms | 18.59 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 40 | Slowloris Attack & Idle Starvati | **1,000.0** | 1,000.0 | 1,000.0 | 4.50 ms | 4.50 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | **Velda Edge** |
-| KB 41 | Chaos Upstream Sudden Death (TCP | **43,214.5** | 43,697.4 | 26,204.8 | 15.56 ms | 9.15 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 42 | Cgroup RAM 60MB Starvation (O(1) | **616.0** | 649.1 | 602.5 | 636.02 ms | 637.71 ms | 49.5% / 50.2% / 96.5% | 198.5 MB / 112.4 MB | Nginx 1.24 |
-| KB 43 | CPU 100% Saturation & Adaptive O | **42,845.1** | 43,018.1 | 26,500.0 | 27.61 ms | 12.24 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-| KB 44 | Atomic Hot-Reload Contention (10 | **42,660.4** | 43,703.9 | 27,123.4 | 8.38 ms | 11.72 ms | 48.5% / 50.1% / 97.8% | 54.6 MB / 112.1 MB | Nginx 1.24 |
-
 ---
 
 ## 3. Form Đo Lường Chi Tiết Toàn Bộ 44 Kịch Bản

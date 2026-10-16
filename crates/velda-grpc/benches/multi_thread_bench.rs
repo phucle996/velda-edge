@@ -10,14 +10,13 @@ use http::Method;
 use http::header::CONTENT_TYPE;
 use tokio::io::duplex;
 use tokio::task::JoinSet;
-use velda_core::MemoryTier;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::encode_grpc_frame;
 use velda_grpc::status::GrpcStatus;
 use velda_grpc::tcp::server::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
-const TEST_CONFIG: GrpcConfig = GrpcConfig::for_tier(MemoryTier::Medium);
+const TEST_CONFIG: GrpcConfig = GrpcConfig::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
 #[tokio::main]
 async fn main() {

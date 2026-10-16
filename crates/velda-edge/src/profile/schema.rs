@@ -12,9 +12,6 @@ pub struct HardwareProfile {
     pub detected_ram_bytes: usize,
     pub detected_cores: usize,
     pub worker_threads: usize,
-    pub cpu_tier: String,
-    pub memory_tier: String,
-    pub tier: String,
 }
 
 /// Discovery subsystem tuning parameters.

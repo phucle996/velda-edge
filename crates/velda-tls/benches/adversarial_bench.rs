@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use common::{make_test_client, make_test_server};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncWriteExt, duplex};
-use velda_core::hardware::{CpuTier, MemoryTier};
 
 // ============================================================================
 // Stage 1: Unknown SNI Flood
@@ -25,7 +24,7 @@ async fn bench_unknown_sni_flood() {
     );
     println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, cert_pem) = make_test_server(CpuTier::Large, MemoryTier::Large);
+    let (server_engine, cert_pem) = make_test_server(8, 16 * 1024 * 1024 * 1024);
     let client = make_test_client(&cert_pem, false);
     let iters = 5_000;
 
@@ -68,7 +67,7 @@ async fn bench_garbage_record_flood() {
     );
     println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, _) = make_test_server(CpuTier::Large, MemoryTier::Large);
+    let (server_engine, _) = make_test_server(8, 16 * 1024 * 1024 * 1024);
     let iters = 10_000;
 
     let start = Instant::now();
@@ -111,7 +110,7 @@ async fn bench_slowloris_timeout_defense() {
     );
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, _) = make_test_server(CpuTier::Large, MemoryTier::Large);
+    let (server_engine, _) = make_test_server(8, 16 * 1024 * 1024 * 1024);
     let iters = 200;
     let timeout_duration = Duration::from_millis(10);
 

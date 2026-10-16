@@ -8,16 +8,16 @@
 //! Each Protocol Router serves all 8 canonical routes across 4 streaming pipeline strategies
 //! (buffered, server_stream, client_stream, duplex) in Plain and TLS modes.
 
-mod routes;
 mod http1;
 mod http2;
 mod http3;
+mod routes;
 
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use velda_http3::quinn_proto;
 
@@ -25,26 +25,32 @@ fn load_or_generate_tls() -> (Arc<ServerConfig>, Arc<quinn_proto::ServerConfig>)
     let crt_path = "/etc/ssl/velda/backend.crt";
     let key_path = "/etc/ssl/velda/backend.key";
 
-    let (cert_chain, private_key) = if let (Ok(crt_file), Ok(key_file)) = (File::open(crt_path), File::open(key_path)) {
-        let mut crt_reader = BufReader::new(crt_file);
-        let certs = rustls_pemfile::certs(&mut crt_reader)
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
-        let mut key_reader = BufReader::new(key_file);
-        let key = rustls_pemfile::private_key(&mut key_reader)
-            .ok()
-            .flatten()
-            .expect("Failed to parse private key");
-        (certs, key)
-    } else {
-        tracing::warn!("Backend certificate files not found, generating self-signed TLS certificate");
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "172.16.0.5".into()]).unwrap();
-        let cert_der = cert.cert.der().to_vec();
-        let key_der = cert.signing_key.serialize_der();
-        let cert_chain = vec![CertificateDer::from(cert_der)];
-        let private_key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
-        (cert_chain, private_key)
-    };
+    let (cert_chain, private_key) =
+        if let (Ok(crt_file), Ok(key_file)) = (File::open(crt_path), File::open(key_path)) {
+            let mut crt_reader = BufReader::new(crt_file);
+            let certs = rustls_pemfile::certs(&mut crt_reader)
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            let mut key_reader = BufReader::new(key_file);
+            let key = rustls_pemfile::private_key(&mut key_reader)
+                .ok()
+                .flatten()
+                .expect("Failed to parse private key");
+            (certs, key)
+        } else {
+            tracing::warn!(
+                "Backend certificate files not found, generating self-signed TLS certificate"
+            );
+            let cert =
+                rcgen::generate_simple_self_signed(vec!["localhost".into(), "172.16.0.5".into()])
+                    .unwrap();
+            let cert_der = cert.cert.der().to_vec();
+            let key_der = cert.signing_key.serialize_der();
+            let cert_chain = vec![CertificateDer::from(cert_der)];
+            let private_key =
+                PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
+            (cert_chain, private_key)
+        };
 
     // TCP TLS Server Config (ALPN: h2, http/1.1)
     let mut tcp_tls_cfg = ServerConfig::builder_with_provider(Arc::new(
@@ -111,7 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    tracing::info!("✅ All 3 Protocol Routers initialized successfully (8 routes each for 4 streaming pipes)");
+    tracing::info!(
+        "✅ All 3 Protocol Routers initialized successfully (8 routes each for 4 streaming pipes)"
+    );
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down backend...");
     Ok(())

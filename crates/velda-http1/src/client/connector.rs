@@ -171,7 +171,7 @@ impl Http1AccelerationPath {
         let fastopen = is_tls && topo.kernel.supports_tcp_fastopen_connect();
 
         let notsent_lowat = if topo.kernel.supports_tcp_notsent_lowat() {
-            Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
+            Some(topo.sizing.tcp_notsent_lowat)
         } else {
             None
         };
@@ -186,16 +186,9 @@ impl Http1AccelerationPath {
 
         let keepalive = Some(idle_timeout / 2);
 
-        // Enable SO_BUSY_POLL only on large multi-core hardware tiers where dedicated core polling
+        // Enable SO_BUSY_POLL only on multi-core hardware (>= 8 cores) where dedicated core polling
         // yields sub-millisecond tail latency wins without starving small-tier CPU budgets.
-        let busy_poll_us = if topo.kernel.supports_busy_poll()
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            ) {
+        let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             Some(50)
         } else {
             None
@@ -206,13 +199,7 @@ impl Http1AccelerationPath {
             ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
 
         let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            );
+            && topo.available_cores >= 8;
 
         let (rto_min_us, delack_max_us, rto_max_ms) =
             if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
@@ -425,21 +412,6 @@ impl Http1AccelerationPath {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = fd;
-    }
-}
-
-/// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
-///
-/// Keeps a 16KB floor so NIC TCP Segmentation Offload (TSO) is not starved and epoll is not woken per packet,
-/// while scaling up to 128KB on large servers to prevent kernel bufferbloat.
-pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
-    use velda_core::MemoryTier;
-    const KB: u32 = 1024;
-    match tier {
-        MemoryTier::Constrained | MemoryTier::Small => 16 * KB,
-        MemoryTier::Medium => 32 * KB,
-        MemoryTier::Large | MemoryTier::XLarge => 64 * KB,
-        MemoryTier::TwoXLarge | MemoryTier::Ultra => 128 * KB,
     }
 }
 

@@ -211,116 +211,22 @@ impl TcpListenerConfig {
         self
     }
 
-    /// Calculates sensible `TCP_NOTSENT_LOWAT` threshold in bytes for a given memory tier.
-    #[inline]
-    pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
-        match tier {
-            velda_core::MemoryTier::Constrained => 16 * 1024,
-            velda_core::MemoryTier::Small => 16 * 1024,
-            velda_core::MemoryTier::Medium => 32 * 1024,
-            velda_core::MemoryTier::Large => 64 * 1024,
-            velda_core::MemoryTier::XLarge => 64 * 1024,
-            velda_core::MemoryTier::TwoXLarge => 128 * 1024,
-            velda_core::MemoryTier::Ultra => 128 * 1024,
-        }
-    }
-
-    /// Creates a TCP listener configuration sized appropriately for the host's [`velda_core::MemoryTier`].
-    pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
-        const KB: usize = 1024;
-        // recv_buffer_size and send_buffer_size are None by default, allowing
-        // the Linux kernel dynamic TCP window auto-tuning (tcp_rmem / tcp_wmem)
-        // to scale dynamically from 4KB to 16MB based on BDP, while eliminating
-        // 2 setsockopt syscalls on every accepted connection.
-        let mut cfg = Self::default();
-
-        match tier {
-            velda_core::MemoryTier::Constrained => {
-                cfg.backlog = 1024;
-                cfg.copy_buffer_size = 16 * KB;
-            }
-            velda_core::MemoryTier::Small => {
-                cfg.backlog = 4096;
-                cfg.copy_buffer_size = 32 * KB;
-            }
-            velda_core::MemoryTier::Medium => {
-                cfg.backlog = 8192;
-                cfg.copy_buffer_size = 64 * KB;
-            }
-            velda_core::MemoryTier::Large => {
-                cfg.backlog = 16384;
-                cfg.copy_buffer_size = 64 * KB;
-            }
-            velda_core::MemoryTier::XLarge => {
-                cfg.backlog = 32768;
-                cfg.copy_buffer_size = 64 * KB;
-            }
-            velda_core::MemoryTier::TwoXLarge => {
-                cfg.backlog = 65535;
-                cfg.copy_buffer_size = 64 * KB;
-            }
-            velda_core::MemoryTier::Ultra => {
-                cfg.backlog = 65535;
-                cfg.copy_buffer_size = 64 * KB;
-            }
-        }
-        cfg
-    }
-
-    /// Returns the recommended L4 copy buffer size for a given [`velda_core::CpuTier`].
-    pub fn copy_buffer_size_for_cpu_tier(tier: velda_core::CpuTier) -> usize {
-        const KB: usize = 1024;
-        match tier {
-            velda_core::CpuTier::Constrained => 16 * KB,
-            velda_core::CpuTier::Small => 32 * KB,
-            velda_core::CpuTier::Medium => 64 * KB,
-            velda_core::CpuTier::Large => 64 * KB,
-            velda_core::CpuTier::XLarge => 64 * KB,
-            velda_core::CpuTier::TwoXLarge => 64 * KB,
-            velda_core::CpuTier::Ultra => 64 * KB,
-        }
-    }
-
-    /// Returns the recommended listener shard count for a given [`velda_core::CpuTier`].
-    pub fn concurrency_shards_for_cpu_tier(tier: velda_core::CpuTier) -> usize {
-        match tier {
-            velda_core::CpuTier::Constrained => 2,
-            velda_core::CpuTier::Small => 4,
-            velda_core::CpuTier::Medium => 8,
-            velda_core::CpuTier::Large => 16,
-            velda_core::CpuTier::XLarge => 32,
-            velda_core::CpuTier::TwoXLarge => 64,
-            velda_core::CpuTier::Ultra => 128,
-        }
-    }
-
-    /// Creates a TCP listener configuration combining CPU-driven and Memory-driven tiers.
-    pub fn for_tiers(cpu: velda_core::CpuTier, mem: velda_core::MemoryTier) -> Self {
-        let mut cfg = Self::for_tier(mem);
-        cfg.copy_buffer_size = Self::copy_buffer_size_for_cpu_tier(cpu);
-        cfg.concurrency_shards = Self::concurrency_shards_for_cpu_tier(cpu);
-        cfg
-    }
-
     /// Pre-compiles TCP listener acceleration settings from probed hardware topology.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
-        let mut cfg = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
-        cfg.concurrency_shards = topo.available_cores().max(1);
+        let mut cfg = Self {
+            backlog: topo.sizing.tcp_backlog as u32,
+            copy_buffer_size: topo.sizing.tcp_copy_buffer_size,
+            concurrency_shards: topo.available_cores().max(1),
+            ..Self::default()
+        };
+
         if topo.kernel.supports_tcp_fastopen_server() {
             cfg.fastopen_backlog = Some((cfg.backlog / 4).max(256));
         }
         if topo.kernel.supports_defer_accept() {
             cfg.defer_accept_secs = Some(1);
         }
-        if topo.kernel.supports_busy_poll()
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            )
-        {
+        if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             cfg.busy_poll_us = Some(50);
         }
         let ladder = topo.acceleration_ladder();
@@ -328,7 +234,7 @@ impl TcpListenerConfig {
             cfg.incoming_cpu = true;
         }
         if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
-            cfg.notsent_lowat = Some(Self::notsent_lowat_for_mem_tier(topo.memory_tier()));
+            cfg.notsent_lowat = Some(topo.sizing.tcp_notsent_lowat);
         }
         if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
             cfg.user_timeout = Some(Duration::from_secs(30));
@@ -378,109 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_config_for_tier() {
-        let constrained = TcpListenerConfig::for_tier(velda_core::MemoryTier::Constrained);
-        assert_eq!(constrained.backlog, 1024);
-        assert_eq!(constrained.recv_buffer_size, None);
-
-        let small = TcpListenerConfig::for_tier(velda_core::MemoryTier::Small);
-        assert_eq!(small.backlog, 4096);
-        assert_eq!(small.recv_buffer_size, None);
-
-        let medium = TcpListenerConfig::for_tier(velda_core::MemoryTier::Medium);
-        assert_eq!(medium.backlog, 8192);
-        assert_eq!(medium.recv_buffer_size, None);
-
-        let large = TcpListenerConfig::for_tier(velda_core::MemoryTier::Large);
-        assert_eq!(large.backlog, 16384);
-        assert_eq!(large.recv_buffer_size, None);
-
-        let xlarge = TcpListenerConfig::for_tier(velda_core::MemoryTier::XLarge);
-        assert_eq!(xlarge.backlog, 32768);
-        assert_eq!(xlarge.recv_buffer_size, None);
-
-        let two_xlarge = TcpListenerConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
-        assert_eq!(two_xlarge.backlog, 65535);
-        assert_eq!(two_xlarge.recv_buffer_size, None);
-
-        let ultra = TcpListenerConfig::for_tier(velda_core::MemoryTier::Ultra);
-        assert_eq!(ultra.backlog, 65535);
-        assert_eq!(ultra.recv_buffer_size, None);
-    }
-
-    #[test]
-    fn test_copy_buffer_size_for_cpu_tier() {
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::Constrained),
-            16 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::Small),
-            32 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::Medium),
-            64 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::Large),
-            64 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::XLarge),
-            64 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::TwoXLarge),
-            64 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::copy_buffer_size_for_cpu_tier(velda_core::CpuTier::Ultra),
-            64 * 1024
-        );
-    }
-
-    #[test]
-    fn test_tcp_config_tiers() {
-        let cfg =
-            TcpListenerConfig::for_tiers(velda_core::CpuTier::Ultra, velda_core::MemoryTier::Small);
-        assert_eq!(cfg.copy_buffer_size, 64 * 1024); // from Ultra CPU
-        assert_eq!(cfg.backlog, 4096); // from Small Memory
-        assert_eq!(cfg.recv_buffer_size, None); // dynamic auto-tuning by default
-        assert_eq!(cfg.concurrency_shards, 128); // from Ultra CPU
-        assert_eq!(cfg.reuseport, cfg!(unix));
-    }
-
-    #[test]
-    fn test_concurrency_shards_for_cpu_tier() {
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Constrained),
-            2
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Small),
-            4
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Medium),
-            8
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Large),
-            16
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::XLarge),
-            32
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::TwoXLarge),
-            64
-        );
-        assert_eq!(
-            TcpListenerConfig::concurrency_shards_for_cpu_tier(velda_core::CpuTier::Ultra),
-            128
-        );
+    fn test_tcp_config_for_topology() {
+        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let cfg = TcpListenerConfig::for_topology(&topo);
+        assert_eq!(cfg.concurrency_shards, 4);
+        assert_eq!(cfg.copy_buffer_size, 32 * 1024);
+        assert_eq!(cfg.backlog, 4096);
     }
 
     #[test]
@@ -499,19 +308,6 @@ mod tests {
         assert_eq!(cfg.notsent_lowat, Some(32768));
         assert_eq!(cfg.user_timeout, Some(Duration::from_secs(45)));
         assert!(cfg.freebind);
-
-        assert_eq!(
-            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Constrained),
-            16 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Medium),
-            32 * 1024
-        );
-        assert_eq!(
-            TcpListenerConfig::notsent_lowat_for_mem_tier(velda_core::MemoryTier::Ultra),
-            128 * 1024
-        );
     }
 
     #[test]

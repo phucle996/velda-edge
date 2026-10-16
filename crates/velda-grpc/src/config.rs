@@ -1,9 +1,7 @@
 //! Configuration parameters for gRPC server and client pipelines.
 //!
-//! Scaled deterministically by host [`MemoryTier`] with all 7 tiers explicitly matched.
+//! Continuously scaled by host hardware topology.
 //! Zero-IO, zero JSON parsing on hot paths.
-
-use velda_core::hardware::MemoryTier;
 
 /// Tunable settings for gRPC framing, metadata limits, and stream concurrency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,86 +24,96 @@ pub struct GrpcConfig {
     pub max_call_duration_ms: u64,
 }
 
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self::from_hardware(4, 8 * 1024 * 1024 * 1024)
+    }
+}
+
 impl GrpcConfig {
-    /// Probes host hardware topology and derives the configuration for the active [`MemoryTier`].
+    /// Probes host hardware topology and derives the configuration.
     pub fn auto() -> Self {
-        let hw = velda_core::global_hardware_topology();
-        Self::for_tier(hw.memory_tier())
+        Self::for_topology(velda_core::global_hardware_topology())
     }
 
-    /// Derives a [`GrpcConfig`] scaled deterministically for the given [`MemoryTier`].
-    pub const fn for_tier(tier: MemoryTier) -> Self {
-        match tier {
-            MemoryTier::Constrained => Self {
-                max_message_size: 4 * 1024 * 1024,
-                max_header_size: 16 * 1024,
-                max_headers: 32,
-                idle_timeout_ms: 15_000,
-                max_concurrent_streams: 64,
-                keepalive_ping_interval_ms: 30_000,
-                keepalive_ping_timeout_ms: 5_000,
-                max_call_duration_ms: 60_000,
-            },
-            MemoryTier::Small => Self {
-                max_message_size: 4 * 1024 * 1024,
-                max_header_size: 32 * 1024,
-                max_headers: 48,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 128,
-                keepalive_ping_interval_ms: 30_000,
-                keepalive_ping_timeout_ms: 5_000,
-                max_call_duration_ms: 60_000,
-            },
-            MemoryTier::Medium => Self {
-                max_message_size: 8 * 1024 * 1024,
-                max_header_size: 64 * 1024,
-                max_headers: 64,
-                idle_timeout_ms: 30_000,
-                max_concurrent_streams: 256,
-                keepalive_ping_interval_ms: 45_000,
-                keepalive_ping_timeout_ms: 10_000,
-                max_call_duration_ms: 120_000,
-            },
-            MemoryTier::Large => Self {
-                max_message_size: 16 * 1024 * 1024,
-                max_header_size: 64 * 1024,
-                max_headers: 96,
-                idle_timeout_ms: 45_000,
-                max_concurrent_streams: 256,
-                keepalive_ping_interval_ms: 60_000,
-                keepalive_ping_timeout_ms: 10_000,
-                max_call_duration_ms: 180_000,
-            },
-            MemoryTier::XLarge => Self {
-                max_message_size: 32 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 512,
-                keepalive_ping_interval_ms: 60_000,
-                keepalive_ping_timeout_ms: 10_000,
-                max_call_duration_ms: 300_000,
-            },
-            MemoryTier::TwoXLarge => Self {
-                max_message_size: 64 * 1024 * 1024,
-                max_header_size: 128 * 1024,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_concurrent_streams: 512,
-                keepalive_ping_interval_ms: 120_000,
-                keepalive_ping_timeout_ms: 20_000,
-                max_call_duration_ms: 300_000,
-            },
-            MemoryTier::Ultra => Self {
-                max_message_size: 128 * 1024 * 1024,
-                max_header_size: 256 * 1024,
-                max_headers: 256,
-                idle_timeout_ms: 120_000,
-                max_concurrent_streams: 512,
-                keepalive_ping_interval_ms: 120_000,
-                keepalive_ping_timeout_ms: 20_000,
-                max_call_duration_ms: 600_000,
-            },
+    /// Derives a [`GrpcConfig`] scaled deterministically from host hardware topology.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        Self {
+            max_message_size: topo.sizing.grpc_max_message_size,
+            max_header_size: topo.sizing.http1_max_header_size.max(16 * 1024),
+            max_headers: topo.sizing.http1_max_headers_count,
+            idle_timeout_ms: 30_000,
+            max_concurrent_streams: topo.sizing.h2_max_concurrent_streams,
+            keepalive_ping_interval_ms: 45_000,
+            keepalive_ping_timeout_ms: 10_000,
+            max_call_duration_ms: 120_000,
+        }
+    }
+
+    /// Derives a [`GrpcConfig`] scaled continuously from host CPU cores and RAM bytes.
+    pub const fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
+        const KB: usize = 1024;
+        const MB: usize = 1024 * KB;
+        const GB: usize = 1024 * MB;
+
+        let ram_gb = if ram_bytes / GB == 0 {
+            1
+        } else {
+            ram_bytes / GB
+        };
+        let max_message_size = {
+            let val = ram_gb * 4 * MB;
+            if val < 4 * MB {
+                4 * MB
+            } else if val > 64 * MB {
+                64 * MB
+            } else {
+                val
+            }
+        };
+
+        let max_header_size = {
+            let val = ram_gb * 16 * KB;
+            if val < 16 * KB {
+                16 * KB
+            } else if val > 128 * KB {
+                128 * KB
+            } else {
+                val
+            }
+        };
+
+        let max_headers = {
+            let val = ram_gb * 32;
+            if val < 32 {
+                32
+            } else if val > 128 {
+                128
+            } else {
+                val
+            }
+        };
+
+        let max_concurrent_streams = {
+            let val = (cores * 64) as u32;
+            if val < 64 {
+                64
+            } else if val > 512 {
+                512
+            } else {
+                val
+            }
+        };
+
+        Self {
+            max_message_size,
+            max_header_size,
+            max_headers,
+            idle_timeout_ms: 30_000,
+            max_concurrent_streams,
+            keepalive_ping_interval_ms: 45_000,
+            keepalive_ping_timeout_ms: 10_000,
+            max_call_duration_ms: 120_000,
         }
     }
 
@@ -178,17 +186,13 @@ mod tests {
     }
 
     #[test]
-    fn test_for_tier_explicit_all_tiers() {
-        let constrained = GrpcConfig::for_tier(MemoryTier::Constrained);
-        assert_eq!(constrained.max_concurrent_streams, 64);
-        assert_eq!(constrained.max_message_size, 4 * 1024 * 1024);
-
-        let medium = GrpcConfig::for_tier(MemoryTier::Medium);
-        assert_eq!(medium.max_concurrent_streams, 256);
-        assert_eq!(medium.max_message_size, 8 * 1024 * 1024);
-
-        let ultra = GrpcConfig::for_tier(MemoryTier::Ultra);
-        assert_eq!(ultra.max_concurrent_streams, 512);
-        assert_eq!(ultra.max_message_size, 128 * 1024 * 1024);
+    fn test_for_topology() {
+        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let config = GrpcConfig::for_topology(&topo);
+        assert_eq!(config.max_message_size, topo.sizing.grpc_max_message_size);
+        assert_eq!(
+            config.max_concurrent_streams,
+            topo.sizing.h2_max_concurrent_streams
+        );
     }
 }

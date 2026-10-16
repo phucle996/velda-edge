@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use crate::container::{max_concurrent_streams_for_mem_tier, probed_max_idle_per_key};
-
 /// Default idle timeout before an idle connection is considered expired (30 seconds).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -14,7 +12,7 @@ pub struct PoolConfig {
     /// Maximum number of idle connections retained per key container (default: dynamically computed from worker concurrency).
     /// Excess connections returned to the pool are closed immediately to prevent FD exhaustion (`EMFILE`).
     pub max_idle_per_key: usize,
-    /// Maximum concurrent streams per multiplexed connection (default: dynamically probed from MemoryTier).
+    /// Maximum concurrent streams per multiplexed connection (default: dynamically computed from HardwareSizing).
     pub max_concurrent_streams: u32,
     /// Default idle timeout before an idle connection is considered expired (default: 30s).
     pub idle_timeout: Duration,
@@ -25,10 +23,10 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        let mem = velda_core::global_hardware_topology().memory_tier();
+        let hw = velda_core::global_hardware_topology();
         Self {
-            max_idle_per_key: probed_max_idle_per_key(),
-            max_concurrent_streams: max_concurrent_streams_for_mem_tier(mem),
+            max_idle_per_key: hw.sizing.optimal_max_idle_per_key,
+            max_concurrent_streams: hw.sizing.pool_max_concurrent_streams,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
         }
@@ -39,12 +37,12 @@ impl PoolConfig {
     /// Returns pool configuration and concurrency shards directly using pre-computed values from [`HardwareTopology`].
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
         let config = Self {
-            max_idle_per_key: topo.optimal_max_idle_per_key,
-            max_concurrent_streams: max_concurrent_streams_for_mem_tier(topo.memory_tier()),
+            max_idle_per_key: topo.sizing.optimal_max_idle_per_key,
+            max_concurrent_streams: topo.sizing.pool_max_concurrent_streams,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
         };
-        (config, topo.concurrency_shards)
+        (config, topo.sizing.concurrency_shards)
     }
 }
 
@@ -84,23 +82,23 @@ mod tests {
         let topo_2 = velda_core::HardwareTopology::with_workers_and_memory(2, 512 * 1024 * 1024);
         let (cfg, shards) = PoolConfig::for_topology(&topo_2);
         assert_eq!(shards, 8);
-        assert_eq!(cfg.max_idle_per_key, 128);
+        assert_eq!(cfg.max_idle_per_key, 256);
         assert_eq!(cfg.max_concurrent_streams, 128);
 
-        // 16-core regional edge (4GB RAM -> MemoryTier::Medium)
+        // 16-core regional edge (4GB RAM)
         let topo_16 =
             velda_core::HardwareTopology::with_workers_and_memory(16, 4 * 1024 * 1024 * 1024);
         let (cfg, shards) = PoolConfig::for_topology(&topo_16);
         assert_eq!(shards, 32);
-        assert_eq!(cfg.max_idle_per_key, 1024);
-        assert_eq!(cfg.max_concurrent_streams, 256);
+        assert_eq!(cfg.max_idle_per_key, 256);
+        assert_eq!(cfg.max_concurrent_streams, 1024);
 
-        // 64-core hyperscale node (64GB RAM -> MemoryTier::XLarge)
+        // 64-core hyperscale node (64GB RAM)
         let topo_64 =
             velda_core::HardwareTopology::with_workers_and_memory(64, 64 * 1024 * 1024 * 1024);
         let (cfg, shards) = PoolConfig::for_topology(&topo_64);
         assert_eq!(shards, 128);
-        assert_eq!(cfg.max_idle_per_key, 4096);
-        assert_eq!(cfg.max_concurrent_streams, 512);
+        assert_eq!(cfg.max_idle_per_key, 256);
+        assert_eq!(cfg.max_concurrent_streams, 1024);
     }
 }

@@ -28,8 +28,6 @@ pub fn format_startup_banner(
     };
 
     let ram_gb = hardware.memory.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    let cpu_tier_str = hardware.cpu.tier.as_str();
-    let mem_tier_str = hardware.memory.tier.as_str();
     let accel_str = hardware.kernel.acceleration.as_str();
     let kernel_ver_str = hardware.kernel.version.to_string();
 
@@ -100,12 +98,12 @@ pub fn format_startup_banner(
                 "{c_gray}Platforms    :{c_reset} {c_white}Linux x86_64, aarch64 (ARM64), armv7 (ARM32){c_reset}"
             ),
             format!(
-                "{c_gray}CPU Detect   :{c_reset} {c_white}{} Cores{c_reset} {c_gray}=>{c_reset} {c_bcyan}Tier: {}{c_reset} {c_gray}({} Workers, Pinning: {}){c_reset}",
-                hardware.available_cores, cpu_tier_str, worker_threads, pin_str
+                "{c_gray}CPU Detect   :{c_reset} {c_white}{} Cores{c_reset} {c_gray}({} Workers, Pinning: {}){c_reset}",
+                hardware.available_cores, worker_threads, pin_str
             ),
             format!(
-                "{c_gray}RAM Detect   :{c_reset} {c_white}{:.1} GB{c_reset} {c_gray}=>{c_reset} {c_bcyan}Tier: {}{c_reset}",
-                ram_gb, mem_tier_str
+                "{c_gray}RAM Detect   :{c_reset} {c_white}{:.1} GB{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Shards, {} Max Sockets{c_reset}",
+                ram_gb, hardware.sizing.concurrency_shards, hardware.sizing.tcp_max_connections
             ),
             format!(
                 "{c_gray}Kernel       :{c_reset} {c_white}Linux {}{c_reset} {c_gray}=>{c_reset} {c_bcyan}Accel: {}{c_reset}",
@@ -166,10 +164,13 @@ pub fn format_startup_banner(
             ),
             "Platforms    : Linux x86_64, aarch64 (ARM64), armv7 (ARM32)".to_string(),
             format!(
-                "CPU Detect   : {} Cores => Tier: {} ({} Workers, Pinning: {})",
-                hardware.available_cores, cpu_tier_str, worker_threads, pin_str
+                "CPU Detect   : {} Cores ({} Workers, Pinning: {})",
+                hardware.available_cores, worker_threads, pin_str
             ),
-            format!("RAM Detect   : {:.1} GB => Tier: {}", ram_gb, mem_tier_str),
+            format!(
+                "RAM Detect   : {:.1} GB => {} Shards, {} Max Sockets",
+                ram_gb, hardware.sizing.concurrency_shards, hardware.sizing.tcp_max_connections
+            ),
             format!(
                 "Kernel       : Linux {} => Accel: {}",
                 kernel_ver_str, accel_str

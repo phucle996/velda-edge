@@ -99,7 +99,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **46,812.22** | 30,294.41 | 11,457.88 | **42,379.22** | 29,540.04 | 10,743.07 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **21.56s** | 33.48s | 87.87s | **23.91s** | 34.24s | 93.66s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **0.18 MB/s** | 0.12 MB/s | 0.04 MB/s | **0.16 MB/s** | 0.11 MB/s | 0.04 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **2.13 ms** | 3.30 ms | 8.73 ms | **4.71 ms** | 6.76 ms | 18.61 ms | - | - | - |
@@ -146,7 +146,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **28,716.09** | 16,212.09 | 9,662.39 | **24,014.87** | 13,504.94 | 7,935.56 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **35.03s** | 62.15s | 104.05s | **41.96s** | 74.44s | 126.60s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **336.46 MB/s** | 189.95 MB/s | 113.21 MB/s | **281.38 MB/s** | 158.24 MB/s | 92.98 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **3.48 ms** | 6.17 ms | 10.35 ms | **8.32 ms** | 14.80 ms | 25.19 ms | - | - | - |
@@ -194,7 +194,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **490.64** | 477.07 | 236.75 | **465.33** | 325.64 | 232.22 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | 203.99s | 210.06s | **92.00s** | 215.19s | 185.01s | **91.42s** | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **490.64 MB/s** | 477.07 MB/s | 236.75 MB/s | **465.33 MB/s** | 325.64 MB/s | 232.22 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | 203.74 ms | 209.52 ms | **167.66 ms** | 429.37 ms | 463.29 ms | **239.32 ms** | - | - | - |
@@ -242,7 +242,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **54,471.62** | 0.00 | 14,903.81 | **58,957.81** | 30,151.54 | 15,521.97 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **18.56s** | 0.22s | 67.69s | **17.25s** | 34.07s | 65.57s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **0.21 MB/s** | 0.00 MB/s | 0.06 MB/s | **0.22 MB/s** | 0.12 MB/s | 0.06 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **1.83 ms** | - | 6.71 ms | **3.39 ms** | 6.63 ms | 12.88 ms | - | - | - |
@@ -290,7 +290,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **28,006.22** | 6,945.10 | 8,929.83 | **30,180.71** | 47,934.29 | 25,741.63 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **35.90s** | 144.51s | 112.57s | **33.43s** | 21.81s | 39.96s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **328.14 MB/s** | 81.37 MB/s | 104.63 MB/s | **353.62 MB/s** | 7.18 MB/s | 4.10 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **3.56 ms** | 14.39 ms | 11.19 ms | **6.61 ms** | - | - | - | - | - |
@@ -338,7 +338,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **726.41** | 636.06 | 305.29 | **706.42** | 50,197.67 | 21,573.62 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | 137.84s | 157.70s | **95.03s** | **141.86s** | 2.86s | 5.70s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **484.28 MB/s** | 424.04 MB/s | 203.49 MB/s | **470.95 MB/s** | 7.52 MB/s | 3.44 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **137.58 ms** | 157.15 ms | 152.12 ms | **282.85 ms** | - | - | - | - | - |
@@ -530,7 +530,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **47,115.06** | 32,904.81 | 12,278.49 | **50,444.32** | 27,407.31 | 16,475.53 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **21.41s** | 30.85s | 82.02s | **20.13s** | 39.55s | 61.83s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **1.30 MB/s** | 0.91 MB/s | 0.34 MB/s | **1.40 MB/s** | 4.10 MB/s | 2.62 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **2.12 ms** | 3.04 ms | 8.14 ms | **3.96 ms** | - | - | - | - | - |
@@ -578,7 +578,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **49,254.25** | 32,744.92 | 12,285.54 | **51,374.28** | 46,487.31 | 15,329.72 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **20.50s** | 31.00s | 81.99s | **19.76s** | 22.39s | 66.40s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **0.19 MB/s** | 0.12 MB/s | 0.05 MB/s | **0.20 MB/s** | 6.96 MB/s | 2.44 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **2.03 ms** | 3.05 ms | 8.14 ms | **3.89 ms** | - | - | - | - | - |
@@ -626,7 +626,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **47.48** | 46.26 | 24.39 | **46.69** | 44,923.12 | 15,540.45 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | 210.84s | 216.65s | **94.21s** | **214.35s** | 1.08s | 1.77s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **474.82 MB/s** | 462.58 MB/s | 243.93 MB/s | **466.87 MB/s** | 6.73 MB/s | 2.48 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | 2099.23 ms | 2156.38 ms | **1619.08 ms** | **4111.47 ms** | - | - | - | - | - |
@@ -674,7 +674,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **49,126.15** | 33,288.49 | 12,311.50 | **51,065.17** | 35,620.15 | 13,481.42 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **20.54s** | 30.50s | 81.79s | **19.88s** | 28.41s | 74.69s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **1.36 MB/s** | 0.92 MB/s | 0.34 MB/s | **1.41 MB/s** | 0.99 MB/s | 0.37 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **2.03 ms** | 3.00 ms | 8.12 ms | **3.91 ms** | 5.61 ms | 14.83 ms | - | - | - |
@@ -722,7 +722,7 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Tiêu Chí Đo Lường (Metric) | Velda (100c-4v) | Nginx (100c-4v) | Envoy (100c-4v) | Velda (200c-4v) | Nginx (200c-4v) | Envoy (200c-4v) | Velda (300c-6v) | Nginx (300c-6v) | Envoy (300c-6v) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Throughput (req/s) | **48,409.21** | 33,650.59 | 12,388.16 | **49,711.09** | 36,897.90 | 13,385.03 | - | - | - |
+| Throughput (req/s) | **0.0** | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 | - | - | - |
 | Tổng thời gian xử lý (Duration) | **20.84s** | 30.18s | 81.30s | **20.41s** | 27.44s | 75.25s | - | - | - |
 | Băng thông truyền tải (Throughput MB/s) | **0.18 MB/s** | 0.13 MB/s | 0.05 MB/s | **0.19 MB/s** | 0.14 MB/s | 0.05 MB/s | - | - | - |
 | Độ trễ trung bình (Mean Latency) | **2.06 ms** | 2.97 ms | 8.07 ms | **4.02 ms** | 5.41 ms | 14.93 ms | - | - | - |

@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use velda_core::{Body, L7Request, MemoryTier};
+use velda_core::{Body, L7Request};
 use velda_grpc::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
 use velda_grpc::status::GrpcStatus;
@@ -12,7 +12,7 @@ use velda_grpc::tcp::server::GrpcServerConnection;
 /// Tests direct Unary RPC roundtrip between GrpcUpstreamConnector and GrpcServerConnection.
 #[tokio::test]
 async fn test_grpc_unary_roundtrip() {
-    let config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let config = GrpcConfig::default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -38,7 +38,7 @@ async fn test_grpc_unary_roundtrip() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let test_config = GrpcConfig::default();
     let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
@@ -78,7 +78,7 @@ async fn test_grpc_unary_roundtrip() {
 /// Tests direct Trailers-Only error response (e.g. NotFound) from server.
 #[tokio::test]
 async fn test_grpc_server_trailers_only_response() {
-    let config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let config = GrpcConfig::default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -98,7 +98,7 @@ async fn test_grpc_server_trailers_only_response() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let test_config = GrpcConfig::default();
     let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
@@ -129,7 +129,7 @@ async fn test_grpc_server_trailers_only_response() {
 /// Tests direct Server-Streaming RPC roundtrip: server streams multiple chunks + trailers to client.
 #[tokio::test]
 async fn test_grpc_server_streaming_roundtrip() {
-    let config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let config = GrpcConfig::default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -165,7 +165,7 @@ async fn test_grpc_server_streaming_roundtrip() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let test_config = GrpcConfig::default();
     let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
@@ -203,7 +203,7 @@ async fn test_grpc_server_streaming_roundtrip() {
 /// Tests direct Client-Streaming RPC roundtrip: client sends multiple chunks, server aggregates.
 #[tokio::test]
 async fn test_grpc_client_streaming_roundtrip() {
-    let config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let config = GrpcConfig::default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -238,7 +238,7 @@ async fn test_grpc_client_streaming_roundtrip() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let test_config = GrpcConfig::default();
     let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
@@ -278,7 +278,7 @@ async fn test_grpc_client_streaming_roundtrip() {
 /// Tests direct Bidirectional Streaming RPC roundtrip between Client and Server.
 #[tokio::test]
 async fn test_grpc_bidirectional_streaming_roundtrip() {
-    let config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let config = GrpcConfig::default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -323,7 +323,7 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let test_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let test_config = GrpcConfig::default();
     let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
         .await
         .unwrap();
@@ -370,7 +370,7 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
 /// Tests that server correctly rejects payload exceeding configured message size limit.
 #[tokio::test]
 async fn test_grpc_server_payload_too_large() {
-    let restricted_config = GrpcConfig::for_tier(MemoryTier::Constrained).with_max_message_size(32);
+    let restricted_config = GrpcConfig::default().with_max_message_size(32);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -427,7 +427,7 @@ async fn test_grpc_server_payload_too_large() {
         Body::Bytes(req_body.freeze()),
     );
 
-    let client_config = GrpcConfig::for_tier(MemoryTier::Medium);
+    let client_config = GrpcConfig::default();
     let resp = connector.invoke_unary(&req, &client_config).await.unwrap();
 
     assert_eq!(resp.status, StatusCode::OK);

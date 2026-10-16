@@ -15,7 +15,7 @@ use common::{CountingAllocator, format_bytes, format_duration, format_throughput
 use http::header::{CONTENT_TYPE, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::{Body, MemoryTier};
+use velda_core::Body;
 use velda_http1::{
     Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse, decode_request,
     decode_response, encode_request, encode_response,
@@ -80,7 +80,7 @@ fn bench_request_decoding() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let config = Http1Config::for_tier(MemoryTier::Medium);
+        let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
         for _ in 0..iters {
             let mut buf = BytesMut::from(raw_bytes);
             let req = decode_request(&mut buf, &config).unwrap().unwrap();
@@ -251,7 +251,7 @@ fn bench_upstream_codec() {
         ALLOCATOR.reset();
         let start = Instant::now();
 
-        let config = Http1Config::for_tier(MemoryTier::Medium);
+        let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
         for _ in 0..iters {
             let mut buf = BytesMut::from(&raw_resp[..]);
             let res = decode_response(&mut buf, &config).unwrap().unwrap();
@@ -285,8 +285,10 @@ async fn bench_pipelined_connection() {
 
     let iters = 50_000;
     let (mut client_io, server_io) = duplex(256 * 1024);
-    let mut server_conn =
-        Http1ServerConnection::new(server_io, Http1Config::for_tier(MemoryTier::Medium));
+    let mut server_conn = Http1ServerConnection::new(
+        server_io,
+        Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024),
+    );
 
     // Client writer task
     let client_task = tokio::spawn(async move {

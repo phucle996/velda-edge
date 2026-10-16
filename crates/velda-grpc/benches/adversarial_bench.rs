@@ -9,7 +9,6 @@ use common::{format_duration, format_throughput};
 use http::Method;
 use http::header::CONTENT_TYPE;
 use tokio::io::duplex;
-use velda_core::MemoryTier;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::error::GrpcError;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
@@ -34,7 +33,7 @@ async fn bench_oversized_payload_rejection() {
 
     const ITERS: u64 = 5_000;
     const MAX_SIZE: usize = 64;
-    let config = GrpcConfig::for_tier(MemoryTier::Constrained).with_max_message_size(MAX_SIZE);
+    let config = GrpcConfig::from_hardware(1, 512 * 1024 * 1024).with_max_message_size(MAX_SIZE);
 
     let (client_io, server_io) = duplex(256 * 1024);
 

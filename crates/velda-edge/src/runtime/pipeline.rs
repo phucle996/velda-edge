@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashMap;
 
-use velda_core::{MemoryTier, ProtocolFamily, StreamingMode};
+use velda_core::{ProtocolFamily, StreamingMode};
 use velda_grpc::GrpcConfig;
 use velda_http1::Http1Config;
 use velda_http2::Http2Config;
@@ -201,27 +201,7 @@ impl PipelineTable {
     /// Compiles a pipeline table from listener configurations using default hardware topology.
     pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
         let hw = velda_core::global_hardware_topology();
-        Self::build_with_hardware(listeners, hw.available_cores, hw.memory.total_bytes)
-    }
-
-    /// Compiles a pipeline table from listener configurations using the explicit memory tier.
-    ///
-    /// Resolves protocol limits from the configuration or falls back deterministically
-    /// by the provided [`MemoryTier`].
-    pub fn build_with_tier(
-        listeners: &[ListenerConfig],
-        tier: MemoryTier,
-    ) -> Result<Self, EdgeError> {
-        let (cores, ram_bytes) = match tier {
-            MemoryTier::Constrained => (1, 512 * 1024 * 1024),
-            MemoryTier::Small => (2, 2 * 1024 * 1024 * 1024),
-            MemoryTier::Medium => (4, 8 * 1024 * 1024 * 1024),
-            MemoryTier::Large => (8, 16 * 1024 * 1024 * 1024),
-            MemoryTier::XLarge => (16, 64 * 1024 * 1024 * 1024),
-            MemoryTier::TwoXLarge => (32, 128 * 1024 * 1024 * 1024),
-            MemoryTier::Ultra => (64, 512 * 1024 * 1024 * 1024),
-        };
-        Self::build_with_hardware(listeners, cores, ram_bytes)
+        Self::build_with_hardware(listeners, hw.available_cores, hw.memory_bytes)
     }
 
     /// Compiles a pipeline table from listener configurations using explicit hardware core and RAM parameters.
@@ -230,7 +210,6 @@ impl PipelineTable {
         cores: usize,
         ram_bytes: usize,
     ) -> Result<Self, EdgeError> {
-        let tier = MemoryTier::from_bytes(ram_bytes);
         let mut tcp = FxHashMap::default();
         let mut udp = FxHashMap::default();
 
@@ -260,7 +239,7 @@ impl PipelineTable {
                         );
                     }
                     "grpc" => {
-                        let config = resolve_grpc_config(listener, tier);
+                        let config = resolve_grpc_config(listener, cores, ram_bytes);
                         udp.insert(
                             listener.id.clone(),
                             UdpPipeline::Grpc {
@@ -282,7 +261,7 @@ impl PipelineTable {
             } else {
                 match app.as_str() {
                     "http" => {
-                        let http1_config = resolve_http1_config(listener, tier);
+                        let http1_config = resolve_http1_config(listener, cores, ram_bytes);
                         let http2_config = resolve_http2_config(listener, cores, ram_bytes);
                         if is_tls {
                             tcp.insert(
@@ -306,7 +285,7 @@ impl PipelineTable {
                         }
                     }
                     "http1" => {
-                        let config = resolve_http1_config(listener, tier);
+                        let config = resolve_http1_config(listener, cores, ram_bytes);
                         tcp.insert(
                             listener.id.clone(),
                             TcpPipeline::Http1 {
@@ -328,7 +307,7 @@ impl PipelineTable {
                         );
                     }
                     "grpc" => {
-                        let config = resolve_grpc_config(listener, tier);
+                        let config = resolve_grpc_config(listener, cores, ram_bytes);
                         tcp.insert(
                             listener.id.clone(),
                             TcpPipeline::Grpc {
@@ -374,8 +353,8 @@ impl PipelineTable {
     }
 }
 
-fn resolve_http1_config(listener: &ListenerConfig, tier: MemoryTier) -> Http1Config {
-    let mut config = Http1Config::for_tier(tier);
+fn resolve_http1_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize) -> Http1Config {
+    let mut config = Http1Config::from_hardware(cores, ram_bytes);
     if let Some(ref h1) = listener.http1 {
         if let Some(v) = h1.max_body_size {
             // Note: max_body_size is enforced strictly for Buffered strategy.
@@ -461,8 +440,8 @@ fn resolve_http2_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
     config
 }
 
-fn resolve_grpc_config(listener: &ListenerConfig, tier: MemoryTier) -> GrpcConfig {
-    let mut config = GrpcConfig::for_tier(tier);
+fn resolve_grpc_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize) -> GrpcConfig {
+    let mut config = GrpcConfig::from_hardware(cores, ram_bytes);
     if let Some(ref grpc) = listener.grpc {
         if let Some(v) = grpc.max_message_size {
             config.max_message_size = v;
@@ -629,13 +608,14 @@ mod tests {
     }
 
     #[test]
-    fn test_explicit_tier() {
+    fn test_explicit_hardware() {
         let listeners = vec![
             cfg("h1", "tcp", "http1", None, false),
             cfg("h2", "tcp", "http2", None, false),
         ];
 
-        let table = PipelineTable::build_with_tier(&listeners, MemoryTier::Ultra).unwrap();
+        let table =
+            PipelineTable::build_with_hardware(&listeners, 4, 8 * 1024 * 1024 * 1024).unwrap();
         assert!(table.tcp_pipeline("h1").is_some());
         assert!(table.tcp_pipeline("h2").is_some());
     }

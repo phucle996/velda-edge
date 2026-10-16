@@ -85,12 +85,9 @@ impl TrafficEngine {
         }
     }
 
-    /// Creates a traffic engine sized for the given hardware CPU and memory tiers.
-    pub fn for_tiers(
-        cpu: velda_core::hardware::CpuTier,
-        mem: velda_core::hardware::MemoryTier,
-    ) -> Self {
-        let cfg = super::config::EngineConfig::for_tiers(cpu, mem);
+    /// Creates a traffic engine sized for the given hardware topology.
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
+        let cfg = super::config::EngineConfig::for_topology(topo);
         Self::with_reconcile_capacity(cfg.reconcile_channel_capacity)
     }
 

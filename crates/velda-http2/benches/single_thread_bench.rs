@@ -9,7 +9,7 @@ use common::{CountingAllocator, format_throughput};
 use http::header::{CONTENT_TYPE, HeaderValue, USER_AGENT};
 use http::{HeaderMap, StatusCode};
 use tokio::io::duplex;
-use velda_core::{Body, L7Response, MemoryTier};
+use velda_core::{Body, L7Response};
 use velda_http2::config::Http2Config;
 use velda_http2::headers::{filter_h2_headers, sanitize_h2_headers};
 use velda_http2::server::Http2ServerConnection;
@@ -17,7 +17,7 @@ use velda_http2::server::Http2ServerConnection;
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
-const TEST_CONFIG: Http2Config = Http2Config::for_tier(MemoryTier::Medium);
+const TEST_CONFIG: Http2Config = Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
 #[tokio::main]
 async fn main() {

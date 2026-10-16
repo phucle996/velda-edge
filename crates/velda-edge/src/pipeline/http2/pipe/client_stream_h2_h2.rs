@@ -247,9 +247,7 @@ pub async fn serve(
         let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
         responder.send_response(&resp)?;
         if !receiver.is_end_stream() {
-            tokio::spawn(async move {
-                while let Ok(Some(_)) = receiver.recv_chunk().await {}
-            });
+            tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
         }
         Ok::<(), Http2Error>(())
     }

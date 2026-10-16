@@ -42,9 +42,9 @@ fn test_pool_config_defaults() {
 
     // with_workers sets capacity scaled to workers
     let p2 = PoolManager::<String, MockConn>::with_workers(2);
-    assert_eq!(p2.config().max_idle_per_key, 128);
+    assert_eq!(p2.config().max_idle_per_key, 256);
     let p64 = PoolManager::<String, MockConn>::with_workers(64);
-    assert_eq!(p64.config().max_idle_per_key, 4096);
+    assert_eq!(p64.config().max_idle_per_key, 256);
 }
 
 #[test]

@@ -74,60 +74,32 @@ pub struct OverloadConfig {
     pub critical_low_watermark: f64,
 }
 
-use crate::hardware::MemoryTier;
-
 impl OverloadConfig {
-    /// Constructs default watermark thresholds calibrated to the node's memory capacity tier.
+    /// Constructs default watermark thresholds calibrated to the node's memory capacity.
     ///
-    /// Smaller tiers (Constrained, Small) allocate larger headroom percentages (15% - 20%)
+    /// Smaller memory capacities allocate larger headroom percentages (20% - 30%)
     /// to compensate for low absolute megabyte limits before Linux OOMKilled triggers.
-    /// Large bare-metal tiers (Large, XLarge, Ultra) permit higher utilization (90% - 95%)
+    /// Large bare-metal hosts permit higher utilization (up to 90% - 95%)
     /// because even 5% headroom represents multiple gigabytes of safety margin.
-    pub const fn for_tier(tier: MemoryTier) -> Self {
-        match tier {
-            MemoryTier::Constrained => Self {
-                shedding_high_watermark: 0.70,
-                shedding_low_watermark: 0.60,
-                critical_high_watermark: 0.80,
-                critical_low_watermark: 0.70,
-            },
-            MemoryTier::Small => Self {
-                shedding_high_watermark: 0.75,
-                shedding_low_watermark: 0.65,
-                critical_high_watermark: 0.85,
-                critical_low_watermark: 0.75,
-            },
-            MemoryTier::Medium => Self {
-                shedding_high_watermark: 0.80,
-                shedding_low_watermark: 0.72,
-                critical_high_watermark: 0.88,
-                critical_low_watermark: 0.80,
-            },
-            MemoryTier::Large => Self {
-                shedding_high_watermark: 0.85,
-                shedding_low_watermark: 0.78,
-                critical_high_watermark: 0.92,
-                critical_low_watermark: 0.85,
-            },
-            MemoryTier::XLarge => Self {
-                shedding_high_watermark: 0.88,
-                shedding_low_watermark: 0.82,
-                critical_high_watermark: 0.94,
-                critical_low_watermark: 0.88,
-            },
-            MemoryTier::TwoXLarge | MemoryTier::Ultra => Self {
-                shedding_high_watermark: 0.90,
-                shedding_low_watermark: 0.85,
-                critical_high_watermark: 0.95,
-                critical_low_watermark: 0.90,
-            },
+    pub fn from_memory_bytes(total_bytes: usize) -> Self {
+        let gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let shedding_high = (0.70 + (gb / 64.0) * 0.20).clamp(0.70, 0.90);
+        let shedding_low = (shedding_high - 0.08).clamp(0.60, 0.85);
+        let critical_high = (shedding_high + 0.08).clamp(0.80, 0.95);
+        let critical_low = shedding_high;
+
+        Self {
+            shedding_high_watermark: shedding_high,
+            shedding_low_watermark: shedding_low,
+            critical_high_watermark: critical_high,
+            critical_low_watermark: critical_low,
         }
     }
 }
 
 impl Default for OverloadConfig {
     fn default() -> Self {
-        Self::for_tier(MemoryTier::Medium)
+        Self::from_memory_bytes(8 * 1024 * 1024 * 1024)
     }
 }
 
@@ -163,10 +135,10 @@ impl OverloadTracker {
         Self::new(config, total)
     }
 
-    /// Probes host topology and constructs an [`OverloadTracker`] scaled for active hardware tier.
+    /// Probes host topology and constructs an [`OverloadTracker`] scaled for active hardware.
     pub fn auto() -> Self {
         let topology = crate::hardware::global_hardware_topology();
-        let config = OverloadConfig::for_tier(topology.memory_tier());
+        let config = OverloadConfig::from_memory_bytes(topology.memory_bytes);
         Self::new(config, topology.memory_bytes)
     }
 

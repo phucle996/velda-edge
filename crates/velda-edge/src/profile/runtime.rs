@@ -22,22 +22,17 @@ pub struct RuntimeProfile {
 }
 
 impl RuntimeProfile {
-    /// Generates a runtime profile using explicit CPU and memory tiers,
-    /// while retaining physical hardware topology details (detected RAM, detected cores, kernel support).
-    pub fn for_tiers(
-        hardware: &HardwareTopology,
-        cpu_tier: velda_core::CpuTier,
-        memory_tier: velda_core::MemoryTier,
-    ) -> Self {
-        let dns_config = DnsResolverConfig::for_tier(memory_tier);
-        let mut engine_config = EngineConfig::for_tiers(cpu_tier, memory_tier);
+    /// Generates a default runtime profile from the probed hardware topology.
+    pub fn from_hardware(hardware: &HardwareTopology) -> Self {
+        let dns_config = DnsResolverConfig::for_topology(hardware);
+        let mut engine_config = EngineConfig::for_topology(hardware);
         let exact_cores = hardware.available_cores().max(1);
         engine_config.io_workers = exact_cores;
         engine_config.tcp = TcpListenerConfig::for_topology(hardware);
         engine_config.tcp.concurrency_shards = exact_cores;
         engine_config.udp = UdpSocketConfig::for_topology(hardware);
         engine_config.udp.concurrency_shards = exact_cores;
-        let tls_params = velda_tls::TlsServerParams::for_tiers(cpu_tier, memory_tier);
+        let tls_params = velda_tls::TlsServerParams::for_topology(hardware);
 
         Self {
             version: 1,
@@ -45,9 +40,6 @@ impl RuntimeProfile {
                 detected_ram_bytes: hardware.memory_bytes(),
                 detected_cores: hardware.available_cores(),
                 worker_threads: engine_config.io_workers,
-                cpu_tier: cpu_tier.as_str().to_string(),
-                memory_tier: memory_tier.as_str().to_string(),
-                tier: memory_tier.as_str().to_string(),
             },
             discovery: DiscoveryRuntimeConfig {
                 max_dns_cache_capacity: dns_config.cache_capacity,
@@ -98,13 +90,8 @@ impl RuntimeProfile {
                 send_tls13_tickets: tls_params.send_tls13_tickets,
                 handshake_timeout_secs: tls_params.handshake_timeout.as_secs(),
             },
-            overload: velda_core::OverloadConfig::for_tier(memory_tier),
+            overload: velda_core::OverloadConfig::from_memory_bytes(hardware.memory_bytes()),
         }
-    }
-
-    /// Generates a default runtime profile from the probed hardware topology.
-    pub fn from_hardware(hardware: &HardwareTopology) -> Self {
-        Self::for_tiers(hardware, hardware.cpu_tier(), hardware.memory_tier())
     }
 
     /// Converts the discovery section into a strongly-typed [`DnsResolverConfig`].
@@ -174,12 +161,6 @@ impl RuntimeProfile {
     pub fn to_udp_socket_config(&self) -> UdpSocketConfig {
         let topo = velda_core::hardware::global_hardware_topology();
         let mut cfg = UdpSocketConfig::for_topology(topo);
-
-        let mem = self.memory_tier();
-        let cpu = self.cpu_tier();
-        let tiered = UdpSocketConfig::for_tiers(cpu, mem);
-        cfg.recv_buffer_size = tiered.recv_buffer_size;
-        cfg.send_buffer_size = tiered.send_buffer_size;
         cfg.concurrency_shards = self.transport.io_workers.max(1);
 
         if let Some(r) = self.transport.udp.recv_buffer_size {
@@ -217,20 +198,13 @@ impl RuntimeProfile {
         self.tls.to_tls_server_params()
     }
 
-    /// Returns the effective memory tier, respecting operator override or fallback to probed hardware.
-    pub fn memory_tier(&self) -> velda_core::MemoryTier {
-        self.hardware
-            .memory_tier
-            .parse::<velda_core::MemoryTier>()
-            .or_else(|_| self.hardware.tier.parse::<velda_core::MemoryTier>())
-            .unwrap_or_else(|_| velda_core::hardware::global_hardware_topology().memory_tier())
+    /// Returns the detected memory bytes.
+    pub fn memory_bytes(&self) -> usize {
+        self.hardware.detected_ram_bytes
     }
 
-    /// Returns the effective CPU tier, respecting operator override or fallback to probed hardware.
-    pub fn cpu_tier(&self) -> velda_core::CpuTier {
-        self.hardware
-            .cpu_tier
-            .parse::<velda_core::CpuTier>()
-            .unwrap_or_else(|_| velda_core::hardware::global_hardware_topology().cpu_tier())
+    /// Returns the detected CPU cores.
+    pub fn available_cores(&self) -> usize {
+        self.hardware.detected_cores
     }
 }

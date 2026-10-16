@@ -106,72 +106,29 @@ impl Default for DnsResolverConfig {
 }
 
 impl DnsResolverConfig {
-    /// Constructs a resolver configuration tailored to the host's [`velda_core::MemoryTier`].
-    pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
-        match tier {
-            velda_core::MemoryTier::Constrained => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(15),
-                query_timeout: Duration::from_secs(3),
-                cache_capacity: 1_000,
-                lkg_capacity: 500,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::Small => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(10),
-                query_timeout: Duration::from_secs(2),
-                cache_capacity: 10_000,
-                lkg_capacity: 2_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::Medium => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(5),
-                query_timeout: Duration::from_secs(2),
-                cache_capacity: 50_000,
-                lkg_capacity: 10_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::Large => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(5),
-                query_timeout: Duration::from_millis(1500),
-                cache_capacity: 150_000,
-                lkg_capacity: 30_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::XLarge => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(5),
-                query_timeout: Duration::from_secs(1),
-                cache_capacity: 400_000,
-                lkg_capacity: 80_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::TwoXLarge => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(5),
-                query_timeout: Duration::from_secs(1),
-                cache_capacity: 1_000_000,
-                lkg_capacity: 200_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
-            velda_core::MemoryTier::Ultra => Self {
-                positive_ttl: Duration::from_secs(30),
-                hosts_ttl: Duration::from_secs(300),
-                negative_ttl: Duration::from_secs(5),
-                query_timeout: Duration::from_secs(1),
-                cache_capacity: 2_500_000,
-                lkg_capacity: 500_000,
-                max_negative_ttl: Duration::from_secs(60),
-            },
+    /// Constructs a resolver configuration tailored to the host's [`velda_core::HardwareTopology`].
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        let cache_capacity = topo.sizing.dns_cache_capacity;
+        let lkg_capacity = (cache_capacity / 5).max(100);
+        let query_timeout = if topo.available_cores >= 8 {
+            Duration::from_millis(1500)
+        } else {
+            Duration::from_secs(2)
+        };
+        let negative_ttl = if topo.memory_bytes < 1024 * 1024 * 1024 {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(5)
+        };
+
+        Self {
+            positive_ttl: Duration::from_secs(30),
+            hosts_ttl: Duration::from_secs(300),
+            negative_ttl,
+            query_timeout,
+            cache_capacity,
+            lkg_capacity,
+            max_negative_ttl: Duration::from_secs(60),
         }
     }
 }

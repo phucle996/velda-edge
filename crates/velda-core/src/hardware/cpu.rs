@@ -1,81 +1,7 @@
 //! CPU topology and core concurrency probe.
 //!
 //! Owns host CPU core discovery, container cgroups limits (v1 & v2),
-//! environment overrides, and CPU tier classification.
-
-/// Canonical CPU resource classification tiers for edge concurrency sizing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CpuTier {
-    /// Constrained Edge (1 – 2 cores, e.g., IoT gateways, embedded routers, small cgroups).
-    Constrained,
-    /// Small Edge (3 – 4 cores, e.g., standard micro instances).
-    Small,
-    /// Medium Edge (5 – 8 cores, e.g., standard 8-core workhorses).
-    Medium,
-    /// Large Edge (9 – 16 cores, e.g., regional edge nodes, Telco MEC).
-    Large,
-    /// Extra Large Edge (17 – 32 cores, e.g., heavy edge compute instances).
-    XLarge,
-    /// 2X-Large Edge (33 – 64 cores, e.g., high-density dual-socket edge servers).
-    TwoXLarge,
-    /// Ultra / Hyperscale (> 64 cores, e.g., massive bare-metal edge datacenters).
-    Ultra,
-}
-
-impl CpuTier {
-    /// Determines the CPU tier from available logical cores.
-    #[inline]
-    pub fn from_cores(cores: usize) -> Self {
-        if cores <= 2 {
-            Self::Constrained
-        } else if cores <= 4 {
-            Self::Small
-        } else if cores <= 8 {
-            Self::Medium
-        } else if cores <= 16 {
-            Self::Large
-        } else if cores <= 32 {
-            Self::XLarge
-        } else if cores <= 64 {
-            Self::TwoXLarge
-        } else {
-            Self::Ultra
-        }
-    }
-
-    /// Returns the canonical kebab-case string representation of this tier.
-    #[inline]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Constrained => "constrained",
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::Large => "large",
-            Self::XLarge => "xlarge",
-            Self::TwoXLarge => "2xlarge",
-            Self::Ultra => "ultra",
-        }
-    }
-}
-
-impl std::str::FromStr for CpuTier {
-    type Err = super::ParseTierError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "constrained" => Ok(Self::Constrained),
-            "small" => Ok(Self::Small),
-            "medium" => Ok(Self::Medium),
-            "large" => Ok(Self::Large),
-            "xlarge" => Ok(Self::XLarge),
-            "2xlarge" | "twoxlarge" => Ok(Self::TwoXLarge),
-            "ultra" => Ok(Self::Ultra),
-            other => Err(super::ParseTierError(format!(
-                "unknown cpu tier: '{other}'"
-            ))),
-        }
-    }
-}
+//! environment overrides, and CPU profile detection.
 
 /// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
 ///
@@ -139,8 +65,6 @@ impl CpuVectorCapabilities {
 pub struct CpuProfile {
     /// Number of logical CPU cores available to the process.
     pub available_cores: usize,
-    /// Classified CPU resource tier.
-    pub tier: CpuTier,
     /// Provenance source indicating how CPU capacity was resolved.
     pub source: &'static str,
     /// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
@@ -154,7 +78,6 @@ impl CpuProfile {
         let cores = available_cores.max(1);
         Self {
             available_cores: cores,
-            tier: CpuTier::from_cores(cores),
             source,
             vector_capabilities: CpuVectorCapabilities::detect(),
         }
@@ -275,42 +198,6 @@ pub fn probe_cpu() -> CpuProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_cpu_tier_from_cores() {
-        assert_eq!(CpuTier::from_cores(1), CpuTier::Constrained);
-        assert_eq!(CpuTier::from_cores(2), CpuTier::Constrained);
-        assert_eq!(CpuTier::from_cores(3), CpuTier::Small);
-        assert_eq!(CpuTier::from_cores(4), CpuTier::Small);
-        assert_eq!(CpuTier::from_cores(6), CpuTier::Medium);
-        assert_eq!(CpuTier::from_cores(8), CpuTier::Medium);
-        assert_eq!(CpuTier::from_cores(12), CpuTier::Large);
-        assert_eq!(CpuTier::from_cores(16), CpuTier::Large);
-        assert_eq!(CpuTier::from_cores(24), CpuTier::XLarge);
-        assert_eq!(CpuTier::from_cores(32), CpuTier::XLarge);
-        assert_eq!(CpuTier::from_cores(48), CpuTier::TwoXLarge);
-        assert_eq!(CpuTier::from_cores(64), CpuTier::TwoXLarge);
-        assert_eq!(CpuTier::from_cores(96), CpuTier::Ultra);
-        assert_eq!(CpuTier::from_cores(128), CpuTier::Ultra);
-    }
-
-    #[test]
-    fn test_cpu_tier_str_roundtrip() {
-        let tiers = [
-            CpuTier::Constrained,
-            CpuTier::Small,
-            CpuTier::Medium,
-            CpuTier::Large,
-            CpuTier::XLarge,
-            CpuTier::TwoXLarge,
-            CpuTier::Ultra,
-        ];
-        for tier in tiers {
-            assert_eq!(tier.as_str().parse::<CpuTier>().unwrap(), tier);
-        }
-        assert_eq!("twoxlarge".parse::<CpuTier>().unwrap(), CpuTier::TwoXLarge);
-        assert!("invalid".parse::<CpuTier>().is_err());
-    }
 
     #[test]
     fn test_probe_cpu() {

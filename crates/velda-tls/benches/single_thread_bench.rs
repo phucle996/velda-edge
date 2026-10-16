@@ -14,7 +14,6 @@ use std::time::Instant;
 use common::{CountingAllocator, build_test_sni_resolver, make_test_client, make_test_server};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::hardware::{CpuTier, MemoryTier};
 use velda_tls::TlsServerEngine;
 
 #[global_allocator]
@@ -110,7 +109,7 @@ async fn bench_metadata_extraction() {
     println!("| Operation | Iterations | Latency / op | Allocs / op | Throughput |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, cert_pem) = make_test_server(CpuTier::Medium, MemoryTier::Medium);
+    let (server_engine, cert_pem) = make_test_server(4, 4 * 1024 * 1024 * 1024);
     let client = make_test_client(&cert_pem, false);
 
     let (client_io, server_io) = duplex(65536);
@@ -154,7 +153,7 @@ async fn bench_handshake_and_resumption() {
     );
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, cert_pem) = make_test_server(CpuTier::Large, MemoryTier::Large);
+    let (server_engine, cert_pem) = make_test_server(8, 16 * 1024 * 1024 * 1024);
     let iters = 2_000;
 
     // 1. Full Handshake (no session cache)
@@ -255,7 +254,7 @@ fn bench_quic_config_compilation() {
     println!("| Operation | Iterations | Latency / op | Allocs / op | Throughput |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, _) = make_test_server(CpuTier::Medium, MemoryTier::Medium);
+    let (server_engine, _) = make_test_server(4, 4 * 1024 * 1024 * 1024);
     let iters = 50_000;
 
     ALLOCATOR.reset();

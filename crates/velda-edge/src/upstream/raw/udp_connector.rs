@@ -53,28 +53,18 @@ impl UdpAccelerationPath {
             };
 
         let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            );
+            && topo.available_cores >= 8;
 
-        let busy_poll_us = if topo.kernel.supports_busy_poll()
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            ) {
+        let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             Some(50)
         } else {
             None
         };
 
-        let (recv_buffer_size, send_buffer_size) = buffer_sizes_for_mem_tier(topo.memory_tier());
+        let (recv_buffer_size, send_buffer_size) = (
+            topo.sizing.udp_recv_buffer_size,
+            topo.sizing.udp_send_buffer_size,
+        );
 
         Self {
             bind_address_no_port,
@@ -238,22 +228,6 @@ impl UdpAccelerationPath {
     }
 }
 
-/// Returns recommended socket buffer sizes (recv, send) for a given [`velda_core::MemoryTier`].
-pub const fn buffer_sizes_for_mem_tier(tier: velda_core::MemoryTier) -> (usize, usize) {
-    use velda_core::MemoryTier;
-    const KB: usize = 1024;
-    const MB: usize = 1024 * 1024;
-    match tier {
-        MemoryTier::Constrained => (64 * KB, 64 * KB),
-        MemoryTier::Small => (128 * KB, 128 * KB),
-        MemoryTier::Medium => (256 * KB, 256 * KB),
-        MemoryTier::Large => (512 * KB, 512 * KB),
-        MemoryTier::XLarge => (MB, MB),
-        MemoryTier::TwoXLarge => (2 * MB, 2 * MB),
-        MemoryTier::Ultra => (4 * MB, 4 * MB),
-    }
-}
-
 /// Connects an ephemeral UDP socket to the target physical backend endpoint,
 /// applying pre-bind socket acceleration, binding to an ephemeral port,
 /// post-bind tuning, and connecting to the endpoint.
@@ -292,26 +266,4 @@ pub fn connect_udp_socket(
 
     let std_sock: std::net::UdpSocket = socket.into();
     tokio::net::UdpSocket::from_std(std_sock)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_udp_buffer_sizes_tier_scaling() {
-        use velda_core::MemoryTier;
-        assert_eq!(
-            buffer_sizes_for_mem_tier(MemoryTier::Constrained),
-            (64 * 1024, 64 * 1024)
-        );
-        assert_eq!(
-            buffer_sizes_for_mem_tier(MemoryTier::XLarge),
-            (1024 * 1024, 1024 * 1024)
-        );
-        assert_eq!(
-            buffer_sizes_for_mem_tier(MemoryTier::Ultra),
-            (4 * 1024 * 1024, 4 * 1024 * 1024)
-        );
-    }
 }

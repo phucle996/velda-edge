@@ -12,7 +12,6 @@ use std::time::Instant;
 use common::{CountingAllocator, build_test_sni_resolver, make_test_client, make_test_server};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::hardware::{CpuTier, MemoryTier};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -26,8 +25,8 @@ async fn audit_handshake_memory_stability() {
     println!("| Phase | Cycles | Total Allocs | Net Alloc Delta | Net Heap Delta | Status |");
     println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
-    // Sized for Constrained tier: 1024 cached sessions
-    let (server_engine, cert_pem) = make_test_server(CpuTier::Constrained, MemoryTier::Constrained);
+    // Sized for 1 core / 512MB RAM: 1024 cached sessions
+    let (server_engine, cert_pem) = make_test_server(1, 512 * 1024 * 1024);
     let client = make_test_client(&cert_pem, true);
 
     // Warm-up & pre-fill cache past capacity (1,500 handshakes to saturate 1,024 capacity)
@@ -134,7 +133,7 @@ fn audit_quic_config_compilation_memory() {
     println!("| Operation | Cycles | Net Alloc Delta | Net Heap Delta | Status |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let (server_engine, _) = make_test_server(CpuTier::Medium, MemoryTier::Medium);
+    let (server_engine, _) = make_test_server(4, 4 * 1024 * 1024 * 1024);
     let cycles = 5_000;
 
     let snap_before = ALLOCATOR.full_snapshot();

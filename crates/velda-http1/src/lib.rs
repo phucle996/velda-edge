@@ -44,10 +44,7 @@ pub use server::response::{
     send_response_parts,
 };
 
-// Upstream Client re-exports
-pub use client::connector::{
-    Http1AccelerationPath, UpstreamHttp1Stream, connect, notsent_lowat_for_mem_tier,
-};
+pub use client::connector::{Http1AccelerationPath, UpstreamHttp1Stream, connect};
 pub use client::header::{HOP_BY_HOP, extract_sni, resolve_sni, sanitize_headers, strip_port};
 pub use client::request::{
     Http1ClientRequest, Http1ClientRequestHead, encode_request, encode_request_head,

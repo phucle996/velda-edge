@@ -6,13 +6,13 @@
 //! - ClientStream (Plain/TLS): Consumes 100% of incoming body frames, returns byte count.
 //! - Duplex (Plain/TLS): Bidirectional real-time chunk echo.
 
-use std::convert::Infallible;
-use std::sync::LazyLock;
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode, header};
-use http_body_util::{BodyExt, Full, StreamBody};
 use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
+use std::convert::Infallible;
+use std::sync::LazyLock;
 
 pub type RespBody = BoxBody<Bytes, Infallible>;
 
@@ -28,15 +28,9 @@ static PAYLOAD_12KB: LazyLock<Bytes> = LazyLock::new(|| {
     data.push_str("{\"last\":true}]}");
     Bytes::from(data)
 });
-static PAYLOAD_1MB: LazyLock<Bytes> = LazyLock::new(|| {
-    Bytes::from(vec![0xAA; 1024 * 1024])
-});
-static CHUNK_64KB: LazyLock<Bytes> = LazyLock::new(|| {
-    Bytes::from(vec![0x55; 64 * 1024])
-});
-static CHUNK_8KB: LazyLock<Bytes> = LazyLock::new(|| {
-    Bytes::from(vec![0x77; 8 * 1024])
-});
+static PAYLOAD_1MB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0xAA; 1024 * 1024]));
+static CHUNK_64KB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0x55; 64 * 1024]));
+static CHUNK_8KB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0x77; 8 * 1024]));
 
 fn full_body(b: Bytes) -> RespBody {
     Full::new(b).map_err(|e| match e {}).boxed()
@@ -53,7 +47,11 @@ pub async fn dispatch(req: Request<Incoming>, is_tls: bool) -> Response<RespBody
     // ─────────────────────────────────────────────────────────────────────────
     if method == Method::POST && (path.contains("upload") || path.ends_with("/upload")) {
         let is_plain_route = !path.contains("/tls/") && !is_tls;
-        let pipe_name = if is_plain_route { "client_stream_plain" } else { "client_stream_tls" };
+        let pipe_name = if is_plain_route {
+            "client_stream_plain"
+        } else {
+            "client_stream_tls"
+        };
 
         let mut body = req.into_body();
         let mut total_bytes: u64 = 0;

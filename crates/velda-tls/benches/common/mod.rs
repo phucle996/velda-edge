@@ -10,7 +10,6 @@ use rcgen::generate_simple_self_signed;
 use rustls::ClientConfig;
 use rustls::client::ClientSessionMemoryCache;
 use tokio_rustls::TlsConnector;
-use velda_core::hardware::{CpuTier, MemoryTier};
 use velda_tls::pem::parse_ca_bundle_pem;
 use velda_tls::{ServerTlsConfig, SniResolver, TlsServerEngine, TlsServerParams};
 
@@ -106,7 +105,7 @@ pub fn make_test_cert(sans: Vec<String>) -> (String, String) {
 }
 
 /// Builds a test `TlsServerEngine` configured for "api.example.com" and "*.example.com".
-pub fn make_test_server(cpu: CpuTier, mem: MemoryTier) -> (TlsServerEngine, String) {
+pub fn make_test_server(cores: usize, ram_bytes: usize) -> (TlsServerEngine, String) {
     let (cert_pem, key_pem) = make_test_cert(vec![
         "api.example.com".into(),
         "*.example.com".into(),
@@ -126,7 +125,8 @@ pub fn make_test_server(cpu: CpuTier, mem: MemoryTier) -> (TlsServerEngine, Stri
         client_ca_pem: None,
     };
 
-    let params = TlsServerParams::for_tiers(cpu, mem);
+    let topo = velda_core::HardwareTopology::with_workers_and_memory(cores, ram_bytes);
+    let params = TlsServerParams::for_topology(&topo);
     let engine = TlsServerEngine::new_with_params(&[config], &params).unwrap();
     (engine, cert_pem)
 }

@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use velda_core::{Body, MemoryTier};
+use velda_core::Body;
 use velda_http1::{Http1Config, Http1ServerResponse, decode_request, encode_response};
 
 #[global_allocator]
@@ -49,7 +49,7 @@ fn bench_request_decoding_steady_state() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     for _ in 0..iters {
         let mut buf = BytesMut::from(&raw[..]);
         let req = decode_request(&mut buf, &config).unwrap().unwrap();
@@ -182,7 +182,7 @@ fn bench_multithread_storm_reclamation() {
 
         handles.push(thread::spawn(move || {
             bar.wait();
-            let config = Http1Config::for_tier(MemoryTier::Medium);
+            let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
             for _ in 0..ops_per_worker {
                 let mut buf = BytesMut::from(&p[..]);
                 let req = decode_request(&mut buf, &config).unwrap().unwrap();
@@ -244,7 +244,7 @@ fn bench_adversarial_zero_retention() {
     ALLOCATOR.reset();
     let start = Instant::now();
 
-    let config = Http1Config::for_tier(MemoryTier::Medium);
+    let config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
     for i in 0..iters {
         let payload = &hostile_payloads[i % hostile_payloads.len()];
         let mut buf = BytesMut::from(&payload[..]);

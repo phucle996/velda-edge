@@ -4,8 +4,6 @@
 //! sizing and safety limits — `velda-core::hardware` only probes the host, it does not
 //! dictate subsystem parameters.
 
-use velda_core::hardware::MemoryTier;
-
 /// Complete configuration and limits for the HTTP/1.1 protocol engine.
 ///
 /// Controls security limits (body, header, header count, inactivity timeout)
@@ -36,96 +34,61 @@ pub struct Http1Config {
     pub client_body_buffer_size: usize,
 }
 
+impl Default for Http1Config {
+    fn default() -> Self {
+        Self::auto()
+    }
+}
+
+#[inline]
+const fn clamp_usize(val: usize, min: usize, max: usize) -> usize {
+    if val < min {
+        min
+    } else if val > max {
+        max
+    } else {
+        val
+    }
+}
+
 impl Http1Config {
-    /// Creates configuration sized appropriately for the host's [`MemoryTier`].
-    pub const fn for_tier(tier: MemoryTier) -> Self {
-        const KB: usize = 1024;
-        const MB: usize = 1024 * KB;
-        match tier {
-            MemoryTier::Constrained => Self {
-                max_body_size: 2 * MB,
-                max_header_size: 8 * KB,
-                max_headers: 32,
-                idle_timeout_ms: 15_000,
-                max_keepalive_requests: 10_000,
-                header_read_timeout_ms: 10_000,
-                initial_buffer_capacity: 2 * KB,
-                shrink_threshold: 8 * KB,
-                client_body_buffer_size: 32 * KB,
-            },
-            MemoryTier::Small => Self {
-                max_body_size: 10 * MB,
-                max_header_size: 32 * KB,
-                max_headers: 64,
-                idle_timeout_ms: 30_000,
-                max_keepalive_requests: 1_000_000,
-                header_read_timeout_ms: 10_000,
-                initial_buffer_capacity: 4 * KB,
-                shrink_threshold: 16 * KB,
-                client_body_buffer_size: 64 * KB,
-            },
-            MemoryTier::Medium => Self {
-                max_body_size: 10 * MB,
-                max_header_size: 64 * KB,
-                max_headers: 64,
-                idle_timeout_ms: 30_000,
-                max_keepalive_requests: 10_000_000,
-                header_read_timeout_ms: 10_000,
-                initial_buffer_capacity: 4 * KB,
-                shrink_threshold: 16 * KB,
-                client_body_buffer_size: 128 * KB,
-            },
-            MemoryTier::Large => Self {
-                max_body_size: 20 * MB,
-                max_header_size: 64 * KB,
-                max_headers: 96,
-                idle_timeout_ms: 30_000,
-                max_keepalive_requests: 10_000_000,
-                header_read_timeout_ms: 15_000,
-                initial_buffer_capacity: 8 * KB,
-                shrink_threshold: 32 * KB,
-                client_body_buffer_size: 128 * KB,
-            },
-            MemoryTier::XLarge => Self {
-                max_body_size: 50 * MB,
-                max_header_size: 64 * KB,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_keepalive_requests: 10_000_000,
-                header_read_timeout_ms: 15_000,
-                initial_buffer_capacity: 8 * KB,
-                shrink_threshold: 64 * KB,
-                client_body_buffer_size: 256 * KB,
-            },
-            MemoryTier::TwoXLarge => Self {
-                max_body_size: 100 * MB,
-                max_header_size: 64 * KB,
-                max_headers: 128,
-                idle_timeout_ms: 60_000,
-                max_keepalive_requests: 10_000_000,
-                header_read_timeout_ms: 20_000,
-                initial_buffer_capacity: 16 * KB,
-                shrink_threshold: 64 * KB,
-                client_body_buffer_size: 256 * KB,
-            },
-            MemoryTier::Ultra => Self {
-                max_body_size: 100 * MB,
-                max_header_size: 128 * KB,
-                max_headers: 256,
-                idle_timeout_ms: 60_000,
-                max_keepalive_requests: 10_000_000,
-                header_read_timeout_ms: 20_000,
-                initial_buffer_capacity: 16 * KB,
-                shrink_threshold: 128 * KB,
-                client_body_buffer_size: 256 * KB,
-            },
+    /// Creates configuration sized appropriately from hardware sizing parameters.
+    pub const fn from_sizing(sizing: &velda_core::HardwareSizing) -> Self {
+        Self {
+            max_body_size: clamp_usize(
+                sizing.http1_max_chunk_size * 100,
+                10 * 1024 * 1024,
+                100 * 1024 * 1024,
+            ),
+            max_header_size: sizing.http1_max_header_size,
+            max_headers: sizing.http1_max_headers_count,
+            idle_timeout_ms: 30_000,
+            max_keepalive_requests: 10_000_000,
+            header_read_timeout_ms: 10_000,
+            initial_buffer_capacity: clamp_usize(
+                sizing.http1_max_buffer_size / 8,
+                2 * 1024,
+                16 * 1024,
+            ),
+            shrink_threshold: clamp_usize(sizing.http1_max_buffer_size / 2, 8 * 1024, 64 * 1024),
+            client_body_buffer_size: sizing.http1_max_buffer_size,
         }
+    }
+
+    /// Derives an [`Http1Config`] scaled continuously from host CPU cores and RAM bytes.
+    pub const fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
+        let sizing = velda_core::HardwareSizing::from_hardware(cores, ram_bytes);
+        Self::from_sizing(&sizing)
+    }
+
+    /// Creates configuration sized appropriately from hardware topology.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        Self::from_sizing(&topo.sizing)
     }
 
     /// Auto-probes the host hardware topology and returns the appropriate config.
     pub fn auto() -> Self {
-        let hw = velda_core::global_hardware_topology();
-        Self::for_tier(hw.memory_tier())
+        Self::for_topology(velda_core::global_hardware_topology())
     }
 
     /// Sets the maximum request body size in bytes for buffered requests.
@@ -199,100 +162,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_constrained_tier_bounds() {
-        let cfg = Http1Config::for_tier(MemoryTier::Constrained);
-        assert_eq!(cfg.max_body_size, 2 * 1024 * 1024);
-        assert_eq!(cfg.max_header_size, 8 * 1024);
-        assert_eq!(cfg.max_headers, 32);
-        assert_eq!(cfg.idle_timeout_ms, 15_000);
-        assert_eq!(cfg.initial_buffer_capacity, 2 * 1024);
-        assert_eq!(cfg.shrink_threshold, 8 * 1024);
-        assert_eq!(cfg.client_body_buffer_size, 32 * 1024);
-    }
-
-    #[test]
-    fn test_medium_tier_defaults() {
-        let cfg = Http1Config::for_tier(MemoryTier::Medium);
-        assert_eq!(cfg.max_body_size, 10 * 1024 * 1024);
-        assert_eq!(cfg.max_header_size, 64 * 1024);
-        assert_eq!(cfg.max_headers, 64);
-        assert_eq!(cfg.idle_timeout_ms, 30_000);
-        assert_eq!(cfg.initial_buffer_capacity, 4 * 1024);
-        assert_eq!(cfg.shrink_threshold, 16 * 1024);
-        assert_eq!(cfg.client_body_buffer_size, 128 * 1024);
-    }
-
-    #[test]
-    fn test_ultra_tier_limits() {
-        let cfg = Http1Config::for_tier(MemoryTier::Ultra);
-        assert_eq!(cfg.max_body_size, 100 * 1024 * 1024);
-        assert_eq!(cfg.max_header_size, 128 * 1024);
-        assert_eq!(cfg.max_headers, 256);
-        assert_eq!(cfg.idle_timeout_ms, 60_000);
-        assert_eq!(cfg.initial_buffer_capacity, 16 * 1024);
-        assert_eq!(cfg.shrink_threshold, 128 * 1024);
-        assert_eq!(cfg.client_body_buffer_size, 256 * 1024);
-    }
-
-    #[test]
-    fn test_tiers_monotonically_increase() {
-        let tiers = [
-            MemoryTier::Constrained,
-            MemoryTier::Small,
-            MemoryTier::Medium,
-            MemoryTier::Large,
-            MemoryTier::XLarge,
-            MemoryTier::TwoXLarge,
-            MemoryTier::Ultra,
-        ];
-        for window in tiers.windows(2) {
-            let prev = Http1Config::for_tier(window[0]);
-            let next = Http1Config::for_tier(window[1]);
-            assert!(
-                next.initial_buffer_capacity >= prev.initial_buffer_capacity,
-                "initial buffer capacity: {:?} ({}) < {:?} ({})",
-                window[1],
-                next.initial_buffer_capacity,
-                window[0],
-                prev.initial_buffer_capacity,
-            );
-            assert!(
-                next.max_body_size >= prev.max_body_size,
-                "max body size: {:?} ({}) < {:?} ({})",
-                window[1],
-                next.max_body_size,
-                window[0],
-                prev.max_body_size,
-            );
-            assert!(
-                next.client_body_buffer_size >= prev.client_body_buffer_size,
-                "client body buffer size: {:?} ({}) < {:?} ({})",
-                window[1],
-                next.client_body_buffer_size,
-                window[0],
-                prev.client_body_buffer_size,
-            );
-        }
-    }
-
-    #[test]
-    fn test_shrink_threshold() {
-        let tiers = [
-            MemoryTier::Constrained,
-            MemoryTier::Small,
-            MemoryTier::Medium,
-            MemoryTier::Large,
-            MemoryTier::XLarge,
-            MemoryTier::TwoXLarge,
-            MemoryTier::Ultra,
-        ];
-        for tier in tiers {
-            let cfg = Http1Config::for_tier(tier);
-            assert!(
-                cfg.shrink_threshold >= cfg.initial_buffer_capacity * 4,
-                "shrink_threshold must be at least 4x initial_buffer_capacity for {tier:?}"
-            );
-        }
+    fn test_http1_config_for_topology() {
+        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
+        let cfg = Http1Config::for_topology(&topo);
+        assert!(cfg.max_body_size >= 10 * 1024 * 1024);
+        assert!(cfg.max_header_size >= 8 * 1024);
+        assert!(cfg.max_headers >= 64);
+        assert!(cfg.initial_buffer_capacity >= 2 * 1024);
     }
 
     #[test]

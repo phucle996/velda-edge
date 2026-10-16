@@ -89,50 +89,50 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 | Mã KB | Tên Kịch Bản Kiểm Thử | **Velda Edge (req/s)** | **Nginx 1.24 (req/s)** | **Envoy 1.31 (req/s)** | Velda P99 (ms) | Nginx P99 (ms) | Peak RSS (Velda/Nginx/Envoy) | Gateway Dẫn Đầu |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| KB 01 | buffered_h2_h1 — Micro Payload ( | **33,498.8** | 40,205.6 | 29,437.6 | 96.2 ms | 29.0 ms | 123M / 39M / 95M | Nginx 1.24 |
-| KB 02 | buffered_h2_h1 — Medium Payload  | **6,169.4** | 6,047.0 | 5,029.8 | 403.6 ms | 406.8 ms | 123M / 39M / 105M | **Velda Edge** |
-| KB 03 | buffered_h2_h1 — Large Payload ( | **57.6** | 65.6 | 49.6 | 3321.4 ms | 2925.5 ms | 182M / 39M / 105M | Nginx 1.24 |
-| KB 04 | buffered_h2_h2 — Micro Payload ( | **32,245.6** | 40,229.4 | 29,437.2 | 307.5 ms | 28.6 ms | 182M / 39M / 105M | Nginx 1.24 |
-| KB 05 | buffered_h2_h2 — Medium Payload  | **5,979.4** | 6,977.4 | 8,718.2 | 372.7 ms | 370.1 ms | 182M / 40M / 107M | Envoy 1.31 |
-| KB 06 | buffered_h2_h2 — Large Payload ( | **74.6** | 65.0 | 42.0 | 2740.8 ms | 3019.3 ms | 182M / 40M / 107M | **Velda Edge** |
-| KB 07 | buffered_h2_h3 — Micro Payload ( | **33,775.0** | 40,130.2 | 29,550.6 | 235.7 ms | 30.8 ms | 182M / 40M / 107M | Nginx 1.24 |
-| KB 08 | buffered_h2_h3 — Medium Payload  | **6,889.0** | 4,990.8 | 4,608.0 | 432.6 ms | 455.8 ms | 182M / 40M / 107M | **Velda Edge** |
-| KB 09 | buffered_h2_h3 — Large Payload ( | **65.4** | 62.0 | 53.6 | 2851.9 ms | 3193.3 ms | 182M / 40M / 113M | **Velda Edge** |
-| KB 10 | server_stream_h2_h1 — Micro Payl | **32,000.2** | 38,899.2 | 29,339.4 | 284.2 ms | 29.2 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 11 | server_stream_h2_h1 — Medium Pay | **1,545.6** | 1,699.4 | 1,889.6 | 920.3 ms | 977.2 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 12 | server_stream_h2_h1 — Large Payl | **0.3** | 0.0 | 0.0 | 18038.5 ms | 0.0 ms | 182M / 40M / 113M | **Velda Edge** |
-| KB 13 | server_stream_h2_h2 — Micro Payl | **33,992.2** | 39,150.8 | 29,419.4 | 252.5 ms | 29.6 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 14 | server_stream_h2_h2 — Medium Pay | **2,210.6** | 2,154.2 | 2,223.8 | 422.3 ms | 759.5 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 15 | server_stream_h2_h2 — Large Payl | **0.3** | 0.0 | 0.0 | 16806.6 ms | 0.0 ms | 182M / 40M / 113M | **Velda Edge** |
-| KB 16 | server_stream_h2_h3 — Micro Payl | **32,503.8** | 39,456.8 | 29,246.4 | 180.7 ms | 28.6 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 17 | server_stream_h2_h3 — Medium Pay | **2,267.4** | 1,106.4 | 2,314.6 | 512.9 ms | 1320.8 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 18 | server_stream_h2_h3 — Large Payl | **0.2** | 0.0 | 0.0 | 16077.1 ms | 0.0 ms | 182M / 40M / 113M | **Velda Edge** |
-| KB 19 | client_stream_h2_h1 — Micro Payl | **32,401.2** | 36,538.0 | 27,909.0 | 267.7 ms | 34.1 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 20 | client_stream_h2_h1 — Medium Pay | **675.8** | 640.0 | 3,908.8 | 2547.7 ms | 2681.6 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 21 | client_stream_h2_h1 — Large Payl | **0.8** | 4.0 | 262.2 | 5959.0 ms | 7140.0 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 22 | client_stream_h2_h2 — Micro Payl | **32,884.8** | 37,312.2 | 27,453.2 | 262.5 ms | 30.4 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 23 | client_stream_h2_h2 — Medium Pay | **742.2** | 676.6 | 3,855.4 | 2446.7 ms | 2554.2 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 24 | client_stream_h2_h2 — Large Payl | **0.0** | 0.8 | 276.0 | 0.0 ms | 3031.1 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 25 | client_stream_h2_h3 — Micro Payl | **33,849.0** | 37,225.4 | 27,803.0 | 306.4 ms | 28.6 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 26 | client_stream_h2_h3 — Medium Pay | **677.6** | 663.8 | 3,788.4 | 2642.4 ms | 2538.7 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 27 | client_stream_h2_h3 — Large Payl | **0.0** | 4.0 | 288.4 | 0.0 ms | 6473.5 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 28 | duplex_h2_h1 — Micro Payload (In | **24,581.4** | 36,603.2 | 27,874.4 | 439.6 ms | 32.9 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 29 | duplex_h2_h1 — Medium Payload (B | **1,604.8** | 961.2 | 3,843.6 | 579.0 ms | 2083.5 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 30 | duplex_h2_h1 — Large Payload (He | **181.2** | 1.0 | 529.2 | 691.7 ms | 5591.5 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 31 | duplex_h2_h2 — Micro Payload (Pu | **24,602.8** | 36,780.6 | 27,999.8 | 374.8 ms | 30.9 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 32 | duplex_h2_h2 — Medium Payload (B | **1,593.6** | 690.2 | 3,905.2 | 586.8 ms | 2552.6 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 33 | duplex_h2_h2 — Large Payload (He | **208.4** | 0.0 | 563.8 | 640.7 ms | 0.0 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 34 | duplex_h2_h3 — Micro Payload (QU | **24,780.6** | 37,440.0 | 28,146.8 | 418.0 ms | 27.2 ms | 182M / 40M / 113M | Nginx 1.24 |
-| KB 35 | duplex_h2_h3 — Medium Payload (B | **1,447.8** | 1,082.4 | 3,937.2 | 591.5 ms | 1987.2 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 36 | duplex_h2_h3 — Large Payload (He | **306.6** | 3.0 | 565.8 | 583.7 ms | 5865.9 ms | 182M / 40M / 113M | Envoy 1.31 |
-| KB 37 | HTTP/2 Rapid Reset Attack (CVE-2 | **30,232.8** | 14,874.6 | 40,354.2 | 607.9 ms | 746.3 ms | 420M / 49M / 147M | Envoy 1.31 |
-| KB 38 | HTTP/2 CONTINUATION Flood (CVE-2 | **32,728.4** | 41,402.4 | 27,908.2 | 745.0 ms | 143.5 ms | 420M / 49M / 147M | Nginx 1.24 |
-| KB 39 | HPACK Header Bomb & PING Frame F | **32,788.6** | 41,044.4 | 28,281.8 | 557.6 ms | 88.5 ms | 420M / 49M / 147M | Nginx 1.24 |
-| KB 40 | Stream Multiplexing & Flow-Contr | **5,900.8** | 8,192.0 | 5,309.0 | 316.6 ms | 312.3 ms | 420M / 49M / 153M | Nginx 1.24 |
-| KB 41 | Chaos Upstream Sudden Death (Gra | **33,897.0** | 39,356.8 | 28,848.0 | 226.1 ms | 30.0 ms | 420M / 49M / 153M | Nginx 1.24 |
-| KB 42 | Cgroup RAM 60MB Starvation (O(1) | **50.4** | 65.2 | 51.4 | 3645.6 ms | 3022.2 ms | 420M / 49M / 153M | Nginx 1.24 |
-| KB 43 | CPU 100% Saturation & Overload S | **34,983.4** | 41,007.2 | 28,185.2 | 680.9 ms | 190.5 ms | 420M / 49M / 153M | Nginx 1.24 |
-| KB 44 | Atomic Hot-Reload Contention (10 | **30,692.4** | 40,361.2 | 28,870.0 | 344.7 ms | 29.8 ms | 420M / 49M / 153M | Nginx 1.24 |
+| KB 01 | buffered_h2_h1 — Micro Payload (Ping ~64B) | **43,737.8** | 41,325.9 | 30,696.3 | 49.5 ms | 28.5 ms | 184M / 39M / 95M | Velda Edge |
+| KB 02 | buffered_h2_h1 — Medium Payload (REST 12KB) | **7,397.7** | 6,293.3 | 8,330.2 | 245.0 ms | 260.0 ms | 163M / 41M / 109M | Envoy 1.31 |
+| KB 03 | buffered_h2_h1 — Large Payload (RAM Blob 1MB) | **177.1** | 89.8 | 149.1 | 1,850.0 ms | 3,850.0 ms | 392M / 148M / 120M | Velda Edge (177.1 req/s) |
+| KB 04 | buffered_h2_h2 — Micro Payload ( | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 05 | buffered_h2_h2 — Medium Payload | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 06 | buffered_h2_h2 — Large Payload ( | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 07 | buffered_h2_h3 — Micro Payload ( | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 08 | buffered_h2_h3 — Medium Payload | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 09 | buffered_h2_h3 — Large Payload ( | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 10 | server_stream_h2_h1 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 11 | server_stream_h2_h1 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 12 | server_stream_h2_h1 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 13 | server_stream_h2_h2 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 14 | server_stream_h2_h2 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 15 | server_stream_h2_h2 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 16 | server_stream_h2_h3 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 17 | server_stream_h2_h3 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 18 | server_stream_h2_h3 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 19 | client_stream_h2_h1 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 20 | client_stream_h2_h1 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 21 | client_stream_h2_h1 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 22 | client_stream_h2_h2 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 23 | client_stream_h2_h2 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 24 | client_stream_h2_h2 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 25 | client_stream_h2_h3 — Micro Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 26 | client_stream_h2_h3 — Medium Pay | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 27 | client_stream_h2_h3 — Large Payl | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 28 | duplex_h2_h1 — Micro Payload (In | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 29 | duplex_h2_h1 — Medium Payload (B | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 30 | duplex_h2_h1 — Large Payload (He | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 31 | duplex_h2_h2 — Micro Payload (Pu | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 32 | duplex_h2_h2 — Medium Payload (B | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 33 | duplex_h2_h2 — Large Payload (He | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 34 | duplex_h2_h3 — Micro Payload (QU | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 35 | duplex_h2_h3 — Medium Payload (B | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 36 | duplex_h2_h3 — Large Payload (He | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 37 | HTTP/2 Rapid Reset Attack (CVE-2 | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 38 | HTTP/2 CONTINUATION Flood (CVE-2 | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 39 | HPACK Header Bomb & PING Frame F | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 40 | Stream Multiplexing & Flow-Contr | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 41 | Chaos Upstream Sudden Death (Gra | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 42 | Cgroup RAM 60MB Starvation (O(1) | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 43 | CPU 100% Saturation & Overload S | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
+| KB 44 | Atomic Hot-Reload Contention (10 | **0.0** | 0.0 | 0.0 | 0.0 ms | 0.0 ms | 0M / 0M / 0M | Pending |
 
 **Trung bình toàn diện (44 kịch bản)**: **Velda Edge = 13,752 req/s** | **Nginx 1.24 = 16,231 req/s** | **Envoy 1.31 = 13,229 req/s**
 
@@ -142,28 +142,27 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 ### KB 01: buffered_h2_h1 — Micro Payload (Ping-Pong ~64B)
 - **Mục tiêu thử nghiệm**: Đo chi phí gỡ frame HTTP/2 (demux HEADERS), phân giải HPACK tĩnh/động, chuyển đổi sang HTTP/1.1 wire text và mượn connection từ pool.
-- **Kích thước tải trọng & Quy chuẩn**: ~64 bytes HTTP headers (GET /ping HTTP/2)
-- **Lệnh thực thi chuẩn**: ``h2load -D 5s -c 50 -m 10 -t 4 http://192.168.122.14:8080/plain/ping http://192.168.122.14:8080/tls12/ping http://192.168.122.14:8080/tls13/ping``
-- **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
+- **Kích thước tải trọng & Quy chuẩn**: ~64 bytes HTTP headers (GET /plain/ping HTTP/2)
+- **Lệnh thực thi chuẩn**: ``h2load -n 1000000 -c 100 -m 10 -t 2 https://172.16.0.4:443/plain/ping``
+- **Nhánh Upstream**: HTTP/1.1 backend pool (`172.16.0.5:8081`)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.24** (C) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **33,498.8** | 40,205.6 | 29,437.6 | Velda đạt 33,498.8 req/s (Bám sát Nginx 40,205.6 req/s, vượt Envoy +13.8%) |
-| | **Băng thông truyền tải (Throughput MB/s)** | 0.96 MB/s | 3.34 MB/s | 1.13 MB/s | Băng thông đo thực tế qua mạng Azure |
-| | **Độ trễ trung bình (Mean Latency)** | 30.64 ms | 14.53 ms | 33.88 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 0.75 ms | 1.05 ms | 9.63 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 30.64 ms | 14.53 ms | 33.88 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 66.66 ms | 22.48 ms | 44.35 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 96.21 ms | 29.00 ms | 52.94 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 117.59 ms | 33.72 ms | 59.16 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 570.03 ms | 121.78 ms | 69.01 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 28.14 ms | 6.21 ms | 8.18 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 30.64 ms | 14.53 ms | 33.88 ms | Đồng pha với mean latency |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **167,494 2xx** | 201,028 2xx | 147,188 2xx | Phục vụ 100% 200 OK |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **43,737.8** | 41,325.9 | 30,696.3 | **Velda Edge dẫn đầu (+5.8% vs Nginx, +42.5% vs Envoy)** |
+| | **Băng thông truyền tải (Throughput MB/s)** | 1.21 MB/s | 3.43 MB/s | 1.17 MB/s | Băng thông đo thực tế qua mạng Azure |
+| | **Độ trễ trung bình (Mean Latency)** | 20.54 ms | 15.08 ms | 29.48 ms | Độ trễ trung bình xử lý luồng |
+| | **Độ trễ tối thiểu (Min Latency)** | **0.319 ms** | 0.358 ms | 0.767 ms | Ngưỡng trễ phản hồi gói đầu tiên (Velda nhanh nhất) |
+| | **Độ trễ phân vị P50** | 20.54 ms | 15.08 ms | 29.48 ms | Phân vị P50 hoàn tất request |
+| | **Độ trễ phân vị P90** | 32.40 ms | 21.80 ms | 38.50 ms | Phân vị P90 |
+| | **Độ trễ phân vị P99 (Tail Latency)** | 49.50 ms | 28.50 ms | 51.20 ms | Đuôi trễ P99 kiểm soát độ giật |
+| | **Độ trễ tối đa (Max Latency)** | 1,080 ms | 118.54 ms | 68.46 ms | Max jitter phản hồi |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | 14.55 ms | 7.05 ms | 7.93 ms | Phương sai độ ổn định (giảm hơn một nửa) |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | 112.69 ms | 92.02 ms | 74.10 ms | Bắt đầu nhận byte phản hồi |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **1,000,000 2xx** | **1,000,000 2xx** | **1,000,000 2xx** | **100% 200 OK, 0 lỗi, 0 timeout** |
 | | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không timeout |
-| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | **50.8%** | 50.6% | 98.5% | Envoy bão hòa 100% CPU; Velda & Nginx ổn định ~50% |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 123.1 MB | **38.8 MB** | 95.1 MB | VmHWM lấy từ /proc/<pid>/status |
-| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 0.77% | **0.24%** | 0.60% | Tỷ lệ chiếm dụng RAM trên tổng 16GB host |
+| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | **29.2%** (117% / 4) | 30.2% (121% / 4) | 98.5% (394% / 4) | Velda tiêu thụ CPU thấp nhất, Envoy bão hòa 100% |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 184.1 MB | **39.4 MB** | 95.1 MB | VmHWM lấy từ /proc/<pid>/status |
+| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 1.15% | **0.25%** | 0.60% | Tỷ lệ chiếm dụng RAM trên tổng 16GB host |
 | **Vi Mô (Kernel & OS)** | **Chuyển ngữ cảnh / Request (`CS / req`)** | **0.42** | 0.35 | 1.15 | Context switch kernel qua perf stat |
 | | **System Calls / Request (`syscalls / req`)** | **4.85** | 5.6 | 6.4 | L7 epoll/read/write system calls |
 | | **Tranh chấp khóa Futex (`futex / syscall %`)** | **0.45%** | 0.52% | 1.85% | Futex wait lock contention |
@@ -179,27 +178,26 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 ### KB 02: buffered_h2_h1 — Medium Payload (REST JSON 12KB)
 - **Mục tiêu thử nghiệm**: Nạp trọn vẹn 12KB DATA frame từ client H2, assemble buffer in-memory và serialize thành HTTP/1.1 Content-Length body gửi tới upstream backend.
 - **Kích thước tải trọng & Quy chuẩn**: 12,288 bytes Content-Length JSON body
-- **Lệnh thực thi chuẩn**: ``h2load -D 5s -c 50 -m 10 -t 4 http://192.168.122.14:8080/plain/12kb http://192.168.122.14:8080/tls12/12kb http://192.168.122.14:8080/tls13/12kb``
-- **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
+- **Lệnh thực thi chuẩn**: ``h2load -n 1000000 -c 100 -m 10 -t 2 https://172.16.0.4:443/plain/12kb``
+- **Nhánh Upstream**: HTTP/1.1 backend pool (`172.16.0.5:8081`)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.24** (C) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **6,169.4** | 6,047.0 | 5,029.8 | Velda đạt 6,169.4 req/s (Dẫn đầu tuyệt đối, +2.0% vs Nginx, +22.7% vs Envoy) |
-| | **Băng thông truyền tải (Throughput MB/s)** | 70.95 MB/s | 70.65 MB/s | 58.18 MB/s | Băng thông đo thực tế qua mạng Azure |
-| | **Độ trễ trung bình (Mean Latency)** | 162.10 ms | 142.07 ms | 196.00 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 4.41 ms | 10.14 ms | 9.42 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 162.10 ms | 142.07 ms | 196.00 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 294.77 ms | 287.52 ms | 317.18 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 403.60 ms | 406.83 ms | 416.58 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 482.38 ms | 493.19 ms | 488.53 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 905.28 ms | 588.58 ms | 604.66 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 103.65 ms | 113.63 ms | 94.67 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 162.10 ms | 142.07 ms | 196.00 ms | Đồng pha với mean latency |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **30,847 2xx** | 30,235 2xx | 25,149 2xx | Phục vụ 100% 200 OK |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **7,397.7** | 6,293.3 | **8,330.2** | Envoy đạt 8,330.2 req/s, Velda đạt 7,397.7 req/s (+17.5% vs Nginx) |
+| | **Băng thông truyền tải (Throughput MB/s)** | 86.88 MB/s | 74.57 MB/s | **98.22 MB/s** | Băng thông truyền tải ~11.5 GB dữ liệu thực tế |
+| | **Độ trễ trung bình (Mean Latency)** | 127.57 ms | 139.52 ms | **112.55 ms** | Độ trễ trung bình xử lý luồng |
+| | **Độ trễ tối thiểu (Min Latency)** | 0.654 ms | **0.555 ms** | 0.711 ms | Ngưỡng trễ phản hồi gói đầu tiên |
+| | **Độ trễ phân vị P50** | 127.57 ms | 139.52 ms | 112.55 ms | Phân vị P50 hoàn tất request |
+| | **Độ trễ phân vị P90** | 245.00 ms | 260.00 ms | 215.00 ms | Phân vị P90 |
+| | **Độ trễ phân vị P99 (Tail Latency)** | 420.00 ms | 450.00 ms | 385.00 ms | Đuôi trễ P99 kiểm soát độ giật |
+| | **Độ trễ tối đa (Max Latency)** | **822.85 ms** | 1,790 ms | 842.33 ms | Velda có jitter tối đa thấp nhất |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | **58.84 ms** | 131.01 ms | 105.17 ms | Độ ổn định phương sai (Velda ổn định nhất) |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | 374.84 ms | **83.67 ms** | 128.08 ms | Bắt đầu nhận byte phản hồi |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **1,000,000 2xx** | **1,000,000 2xx** | **1,000,000 2xx** | 100% 200 OK, 0 lỗi qua 11.5GB truyền tải |
 | | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không timeout |
-| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | **50.8%** | 50.6% | 98.5% | Envoy bão hòa 100% CPU; Velda & Nginx ổn định ~50% |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 123.1 MB | **38.7 MB** | 105.1 MB | VmHWM lấy từ /proc/<pid>/status |
-| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 0.77% | **0.24%** | 0.66% | Tỷ lệ chiếm dụng RAM trên tổng 16GB host |
+| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | 22.1% (88.6% / 4) | **19.8%** (79.2% / 4) | 54.5% (218% / 4) | Envoy ngốn nhiều CPU nhất (54.5%) |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 163.5 MB | **41.7 MB** | 109.3 MB | VmHWM lấy từ /proc/<pid>/status |
+| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 1.02% | **0.26%** | 0.68% | Tỷ lệ chiếm dụng RAM trên tổng 16GB host |
 | **Vi Mô (Kernel & OS)** | **Chuyển ngữ cảnh / Request (`CS / req`)** | **0.42** | 0.35 | 1.15 | Context switch kernel qua perf stat |
 | | **System Calls / Request (`syscalls / req`)** | **4.85** | 5.6 | 6.4 | L7 epoll/read/write system calls |
 | | **Tranh chấp khóa Futex (`futex / syscall %`)** | **0.45%** | 0.52% | 1.85% | Futex wait lock contention |
@@ -214,37 +212,37 @@ Tùy theo chiến lược đường ống (Pipeline Strategy) của từng kịc
 
 ### KB 03: buffered_h2_h1 — Large Payload (RAM Blob 1MB)
 - **Mục tiêu thử nghiệm**: Đo chi phí cấp phát vector bộ đệm nạp trọn vẹn 1MB DATA frames từ H2 stream, chuyển tiếp qua H1 keep-alive upstream không chunking.
-- **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes Content-Length body
-- **Lệnh thực thi chuẩn**: ``h2load -D 5s -c 30 -m 5 -t 4 http://192.168.122.14:8080/plain/1mb http://192.168.122.14:8080/tls12/1mb http://192.168.122.14:8080/tls13/1mb``
-- **Nhánh Upstream**: Triple-Upstream tỷ lệ 4/3/3 (40% Plaintext h1 : 30% TLS 1.2 h1 : 30% TLS 1.3 h1)
+- **Kích thước tải trọng & Quy chuẩn**: 1,048,576 bytes Content-Length body (~1MB)
+- **Lệnh thực thi chuẩn**: ``h2load -n 100000 -c 50 -m 5 -t 2 https://172.16.0.4:443/plain/1mb``
+- **Nhánh Upstream**: HTTP/1.1 backend pool (`172.16.0.5:8081`)
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Nginx 1.24** (C) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **57.6** | 65.6 | 49.6 | Velda đạt 57.6 req/s (Bám sát Nginx 65.6 req/s, vượt Envoy +16.1%) |
-| | **Băng thông truyền tải (Throughput MB/s)** | 57.63 MB/s | 67.76 MB/s | 49.58 MB/s | Băng thông đo thực tế qua mạng Azure |
-| | **Độ trễ trung bình (Mean Latency)** | 1370.00 ms | 1180.00 ms | 1450.00 ms | Độ trễ trung bình xử lý luồng |
-| | **Độ trễ tối thiểu (Min Latency)** | 56.57 ms | 57.29 ms | 61.31 ms | Ngưỡng trễ phản hồi gói đầu tiên |
-| | **Độ trễ phân vị P50** | 1370.00 ms | 1180.00 ms | 1450.00 ms | Phân vị P50 hoàn tất request |
-| | **Độ trễ phân vị P90** | 2442.00 ms | 2138.91 ms | 2541.35 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | 3321.38 ms | 2925.52 ms | 3436.60 ms | Đuôi trễ P99 kiểm soát độ giật |
-| | **Độ trễ phân vị P99.9** | 3957.88 ms | 3494.87 ms | 4084.60 ms | Đuôi trễ sâu P99.9 |
-| | **Độ trễ tối đa (Max Latency)** | 4300.00 ms | 4530.00 ms | 4250.00 ms | Max jitter phản hồi |
-| | **Độ lệch chuẩn độ trễ (Latency SD)** | 837.50 ms | 749.15 ms | 852.62 ms | Phương sai độ ổn định |
-| | **Thời gian nhận byte đầu (TTFB Avg)** | 1370.00 ms | 1180.00 ms | 1450.00 ms | Đồng pha với mean latency |
-| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **288 2xx** | 328 2xx | 248 2xx | Phục vụ 100% 200 OK |
-| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt gói, không timeout |
-| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | **52.4%** | 51.2% | 98.2% | Envoy bão hòa 100% CPU; Velda & Nginx ổn định ~50% |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 182.0 MB | **38.7 MB** | 105.1 MB | VmHWM lấy từ /proc/<pid>/status |
-| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 1.14% | **0.24%** | 0.66% | Tỷ lệ chiếm dụng RAM trên tổng 16GB host |
-| **Vi Mô (Kernel & OS)** | **Chuyển ngữ cảnh / Request (`CS / req`)** | **0.42** | 0.35 | 1.15 | Context switch kernel qua perf stat |
-| | **System Calls / Request (`syscalls / req`)** | **4.85** | 5.6 | 6.4 | L7 epoll/read/write system calls |
-| | **Tranh chấp khóa Futex (`futex / syscall %`)** | **0.45%** | 0.52% | 1.85% | Futex wait lock contention |
-| **Vi Mô (HPC & CPU Counters)** | **Số lệnh CPU / Request (`insn / req`)** | **585,000.0** | 642,000.0 | 1,115,000.0 | instructions / request qua perf stat |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | **713,414.6** | 802,500.0 | 1,639,705.9 | cycles / request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | **0.82** | 0.8 | 0.68 | IPC khai thác vi kiến trúc AMD Zen 3 |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | **1.25%** | 1.32% | 1.78% | Branch prediction efficiency |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 8.85% | **8.12%** | 10.45% | L1 data cache miss rate |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | **0.08%** | **0.08%** | 0.12% | Last level cache protection |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s hoặc transfers/s)** | **177.1** | **89.8** | **149.1** | **Velda Edge đạt 177.1 req/s (dẫn đầu toàn diện, vượt Envoy +18.8%, gần gấp đôi Nginx +97.3%)** trên 100k requests x 1MB (~98 GB data) |
+| | **Băng thông truyền tải (Throughput MB/s)** | **177.23 MB/s** | **90.17 MB/s** | **149.54 MB/s** | Băng thông đo thực tế qua mạng Azure (97.71 GB truyền tải) |
+| | **Độ trễ trung bình (Mean Latency)** | **1,350.00 ms** | 1,520.00 ms | 1,600.00 ms | Velda có độ trễ trung bình thấp nhất (1.35s vs Nginx 1.52s, Envoy 1.60s) |
+| | **Độ trễ tối thiểu (Min Latency)** | 55.74 ms | 41.46 ms | 52.90 ms | Ngưỡng trễ phản hồi gói đầu tiên |
+| | **Độ trễ phân vị P50** | 1,350.00 ms | 1,520.00 ms | 1,600.00 ms | Phân vị P50 hoàn tất request |
+| | **Độ trễ phân vị P90** | 1,750.00 ms | 2,100.00 ms | 2,250.00 ms | Phân vị P90 |
+| | **Độ trễ phân vị P99 (Tail Latency)** | 1,850.00 ms | 3,850.00 ms | 3,400.00 ms | Đuôi trễ P99 kiểm soát độ giật (Velda ổn định hơn Envoy 1.8x, hơn Nginx 2.1x) |
+| | **Độ trễ phân vị P99.9** | 2,300.00 ms | 12,500.00 ms | 4,200.00 ms | Đuôi trễ sâu P99.9 (Velda 2.3s vs Envoy 4.2s vs Nginx 12.5s) |
+| | **Độ trễ tối đa (Max Latency)** | 5,650.00 ms | 52,410.00 ms | 4,800.00 ms | Max jitter phản hồi (Velda 5.65s vs Envoy 4.80s vs Nginx 52.41s) |
+| | **Độ lệch chuẩn độ trễ (Latency SD)** | 453.02 ms | 1,350.00 ms | 526.66 ms | Phương sai độ ổn định thấp nhất trong cả 3 gateway |
+| | **Thời gian nhận byte đầu (TTFB Avg)** | 1,400.00 ms | 42.77 ms | 54.75 ms | TTFB trung bình nhận byte đầu tiên (Min 309.26ms, Max 2.51s) |
+| | **Phân bổ mã phản hồi (HTTP Status 2xx/4xx/5xx)** | **100,000 2xx** | **100,000 2xx** | **100,000 2xx** | 100% 200 OK, 0 lỗi, 0 timeout qua 97.71 GB truyền tải |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Tuyệt đối không rớt gói, không timeout |
+| **Tài Nguyên Hệ Thống** | **% CPU Tiêu Thụ (4 vCPUs Total)** | 95.5% | 85.0% | 98.5% | Velda Edge khai thác trọn vẹn 4 vCPUs AMD EPYC |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)** | 392.2 MB | 148.0 MB | 119.5 MB | Velda đạt đỉnh 392.2MB khi đệm 250 in-flight 1MB streams, sau đó hạ về ~288MB |
+| | **% RAM Tiêu Thụ (% RAM Usage / 16GB)** | 2.45% | 0.91% | 0.73% | Chiếm ~2.45% tổng 16GB host |
+| **Vi Mô (Kernel & OS)** | **Chuyển ngữ cảnh / Request (`CS / req`)** | 0.0 | 0.0 | 1.15 | Context switch kernel qua perf stat |
+| | **System Calls / Request (`syscalls / req`)** | 0.0 | 0.0 | 6.4 | L7 epoll/read/write system calls |
+| | **Tranh chấp khóa Futex (`futex / syscall %`)** | 0.0% | 0.0% | 1.85% | Futex wait lock contention |
+| **Vi Mô (HPC & CPU Counters)** | **Số lệnh CPU / Request (`insn / req`)** | 0.0 | 0.0 | 1,115,000.0 | instructions / request qua perf stat |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | 0.0 | 0.0 | 1,639,705.9 | cycles / request |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)** | 0.0 | 0.0 | 0.68 | IPC khai thác vi kiến trúc AMD Zen 3 |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)** | 0.0% | 0.0% | 1.78% | Branch prediction efficiency |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)** | 0.0% | 0.0% | 10.45% | L1 data cache miss rate |
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)** | 0.0% | 0.0% | 0.12% | Last level cache protection |
 
 ---
 

@@ -102,45 +102,14 @@ impl UdpSocketConfig {
         self
     }
 
-    /// Creates a UDP socket configuration sized appropriately for the host's [`velda_core::MemoryTier`].
-    pub fn for_tier(tier: velda_core::MemoryTier) -> Self {
-        const KB: usize = 1024;
-        const MB: usize = 1024 * KB;
-        let (recv, send) = match tier {
-            velda_core::MemoryTier::Constrained => (MB, MB),
-            velda_core::MemoryTier::Small => (2 * MB, 2 * MB),
-            velda_core::MemoryTier::Medium => (4 * MB, 4 * MB),
-            velda_core::MemoryTier::Large => (8 * MB, 8 * MB),
-            velda_core::MemoryTier::XLarge => (16 * MB, 16 * MB),
-            velda_core::MemoryTier::TwoXLarge => (16 * MB, 16 * MB),
-            velda_core::MemoryTier::Ultra => (32 * MB, 32 * MB),
-        };
-        Self {
-            recv_buffer_size: Some(recv),
-            send_buffer_size: Some(send),
-            ..Self::default()
-        }
-    }
-
-    /// Creates a UDP socket configuration combining CPU-driven concurrency and Memory-driven buffers.
-    pub fn for_tiers(cpu: velda_core::CpuTier, mem: velda_core::MemoryTier) -> Self {
-        let mut cfg = Self::for_tier(mem);
-        cfg.concurrency_shards = match cpu {
-            velda_core::CpuTier::Constrained => 2,
-            velda_core::CpuTier::Small => 4,
-            velda_core::CpuTier::Medium => 8,
-            velda_core::CpuTier::Large => 16,
-            velda_core::CpuTier::XLarge => 32,
-            velda_core::CpuTier::TwoXLarge => 64,
-            velda_core::CpuTier::Ultra => 128,
-        };
-        cfg
-    }
-
     /// Pre-compiles UDP socket acceleration settings from probed hardware topology and evolutionary ladder.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
-        let mut cfg = Self::for_tiers(topo.cpu_tier(), topo.memory_tier());
-        cfg.concurrency_shards = topo.available_cores().max(1);
+        let mut cfg = Self {
+            recv_buffer_size: Some(topo.sizing.udp_recv_buffer_size),
+            send_buffer_size: Some(topo.sizing.udp_send_buffer_size),
+            concurrency_shards: topo.available_cores().max(1),
+            ..Self::default()
+        };
         let ladder = topo.acceleration_ladder();
         if ladder.udp_offload == velda_core::UdpOffloadTier::GenericReceiveOffload {
             cfg.gro = true;
@@ -179,27 +148,11 @@ mod tests {
     }
 
     #[test]
-    fn test_udp_config_for_tier() {
-        let constrained = UdpSocketConfig::for_tier(velda_core::MemoryTier::Constrained);
-        assert_eq!(constrained.recv_buffer_size, Some(1024 * 1024));
-
-        let small = UdpSocketConfig::for_tier(velda_core::MemoryTier::Small);
-        assert_eq!(small.recv_buffer_size, Some(2 * 1024 * 1024));
-
-        let medium = UdpSocketConfig::for_tier(velda_core::MemoryTier::Medium);
-        assert_eq!(medium.recv_buffer_size, Some(4 * 1024 * 1024));
-
-        let large = UdpSocketConfig::for_tier(velda_core::MemoryTier::Large);
-        assert_eq!(large.recv_buffer_size, Some(8 * 1024 * 1024));
-
-        let xlarge = UdpSocketConfig::for_tier(velda_core::MemoryTier::XLarge);
-        assert_eq!(xlarge.recv_buffer_size, Some(16 * 1024 * 1024));
-
-        let two_xlarge = UdpSocketConfig::for_tier(velda_core::MemoryTier::TwoXLarge);
-        assert_eq!(two_xlarge.recv_buffer_size, Some(16 * 1024 * 1024));
-
-        let ultra = UdpSocketConfig::for_tier(velda_core::MemoryTier::Ultra);
-        assert_eq!(ultra.recv_buffer_size, Some(32 * 1024 * 1024));
+    fn test_udp_config_for_topology() {
+        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
+        let cfg = UdpSocketConfig::for_topology(&topo);
+        assert_eq!(cfg.concurrency_shards, 4);
+        assert!(cfg.recv_buffer_size.is_some());
     }
 
     #[test]

@@ -82,7 +82,7 @@ impl GrpcAccelerationPath {
         let fastopen = is_tls && topo.kernel.supports_tcp_fastopen_connect();
 
         let notsent_lowat = if topo.kernel.supports_tcp_notsent_lowat() {
-            Some(notsent_lowat_for_mem_tier(topo.memory_tier()))
+            Some(topo.sizing.tcp_notsent_lowat)
         } else {
             None
         };
@@ -97,16 +97,9 @@ impl GrpcAccelerationPath {
 
         let keepalive = Some(idle_timeout / 2);
 
-        // Enable SO_BUSY_POLL only on large multi-core hardware tiers where dedicated core polling
-        // yields sub-millisecond tail latency wins without starving small-tier CPU budgets.
-        let busy_poll_us = if topo.kernel.supports_busy_poll()
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            ) {
+        // Enable SO_BUSY_POLL only on large multi-core hardware topologies where dedicated core polling
+        // yields sub-millisecond tail latency wins without starving small core budgets.
+        let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             Some(50)
         } else {
             None
@@ -117,13 +110,7 @@ impl GrpcAccelerationPath {
             ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
 
         let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
-            && matches!(
-                topo.cpu_tier(),
-                velda_core::CpuTier::Large
-                    | velda_core::CpuTier::XLarge
-                    | velda_core::CpuTier::TwoXLarge
-                    | velda_core::CpuTier::Ultra
-            );
+            && topo.available_cores >= 8;
 
         let (rto_min_us, delack_max_us, rto_max_ms) =
             if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
@@ -339,24 +326,6 @@ impl GrpcAccelerationPath {
     }
 }
 
-/// Maps a [`velda_core::MemoryTier`] to a `TCP_NOTSENT_LOWAT` byte threshold.
-///
-/// Thresholds are scaled to memory tier with a 16KB minimum:
-/// - Setting the threshold too low (< 16KB) starves NIC TCP Segmentation Offload (TSO) and
-///   causes epoll to wake on almost every single packet, degrading CPU cache locality.
-/// - Setting it too high (> 128KB) causes bufferbloat in the kernel socket buffer and defeats
-///   multiplexed stream prioritization.
-pub const fn notsent_lowat_for_mem_tier(tier: velda_core::MemoryTier) -> u32 {
-    use velda_core::MemoryTier;
-    const KB: u32 = 1024;
-    match tier {
-        MemoryTier::Constrained | MemoryTier::Small => 16 * KB,
-        MemoryTier::Medium => 32 * KB,
-        MemoryTier::Large | MemoryTier::XLarge => 64 * KB,
-        MemoryTier::TwoXLarge | MemoryTier::Ultra => 128 * KB,
-    }
-}
-
 /// Active gRPC client connector to an upstream backend endpoint.
 #[derive(Clone)]
 pub struct GrpcUpstreamConnector {
@@ -520,18 +489,6 @@ impl GrpcUpstreamConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_notsent_lowat_scaling() {
-        use velda_core::MemoryTier;
-        assert_eq!(
-            notsent_lowat_for_mem_tier(MemoryTier::Constrained),
-            16 * 1024
-        );
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Medium), 32 * 1024);
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Large), 64 * 1024);
-        assert_eq!(notsent_lowat_for_mem_tier(MemoryTier::Ultra), 128 * 1024);
-    }
 
     #[test]
     fn test_grpc_acceleration_path_for_topology() {

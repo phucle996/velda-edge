@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use rustls::ServerConfig;
 use rustls::server::WebPkiClientVerifier;
-use velda_core::hardware::{CpuTier, MemoryTier};
 
 use super::resolver::SniResolver;
 use crate::error::TlsError;
@@ -44,41 +43,20 @@ pub struct TlsServerParams {
 }
 
 impl TlsServerParams {
-    /// Creates parameters sized appropriately for the host's [`CpuTier`] and [`MemoryTier`].
-    pub fn for_tiers(cpu: CpuTier, mem: MemoryTier) -> Self {
-        let (session_cache_capacity, session_shards, max_early_data_size) = match mem {
-            MemoryTier::Constrained => (1024, 4, 0),
-            MemoryTier::Small => (2 * 1024, 8, 4 * 1024),
-            MemoryTier::Medium => (8 * 1024, 16, 8 * 1024),
-            MemoryTier::Large => (16 * 1024, 32, 8 * 1024),
-            MemoryTier::XLarge => (32 * 1024, 32, 16 * 1024),
-            MemoryTier::TwoXLarge => (64 * 1024, 64, 16 * 1024),
-            MemoryTier::Ultra => (128 * 1024, 128, 32 * 1024),
-        };
-
-        let (send_tls13_tickets, timeout_secs) = match cpu {
-            CpuTier::Constrained => (1, 10),
-            CpuTier::Small => (2, 8),
-            CpuTier::Medium => (4, 5),
-            CpuTier::Large => (4, 5),
-            CpuTier::XLarge => (6, 3),
-            CpuTier::TwoXLarge => (8, 3),
-            CpuTier::Ultra => (8, 2),
-        };
-
+    /// Creates parameters sized appropriately for the host hardware topology.
+    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
         Self {
-            session_cache_capacity,
-            session_shards,
-            max_early_data_size,
-            send_tls13_tickets,
-            handshake_timeout: Duration::from_secs(timeout_secs),
+            session_cache_capacity: topo.sizing.tls_session_cache_capacity,
+            session_shards: topo.sizing.concurrency_shards,
+            max_early_data_size: topo.sizing.tls_max_early_data_size,
+            send_tls13_tickets: topo.sizing.tls_send_tls13_tickets as usize,
+            handshake_timeout: Duration::from_secs(if topo.available_cores >= 8 { 5 } else { 10 }),
         }
     }
 
     /// Creates parameters sized using the global hardware topology probe.
     pub fn from_hardware() -> Self {
-        let hw = velda_core::global_hardware_topology();
-        Self::for_tiers(hw.cpu_tier(), hw.memory_tier())
+        Self::for_topology(velda_core::global_hardware_topology())
     }
 
     /// Sets the session cache capacity.
@@ -264,62 +242,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tls_server_params_across_all_tiers() {
-        // Constrained
-        let p_constrained =
-            TlsServerParams::for_tiers(CpuTier::Constrained, MemoryTier::Constrained);
-        assert_eq!(p_constrained.session_cache_capacity, 1024);
-        assert_eq!(p_constrained.session_shards, 4);
-        assert_eq!(p_constrained.max_early_data_size, 0);
-        assert_eq!(p_constrained.send_tls13_tickets, 1);
-        assert_eq!(p_constrained.handshake_timeout, Duration::from_secs(10));
+    fn test_tls_server_params_for_topology() {
+        let topo_1c_1g =
+            velda_core::HardwareTopology::with_workers_and_memory(1, 1024 * 1024 * 1024);
+        let p_1c = TlsServerParams::for_topology(&topo_1c_1g);
+        assert_eq!(
+            p_1c.session_cache_capacity,
+            topo_1c_1g.sizing.tls_session_cache_capacity
+        );
+        assert_eq!(p_1c.session_shards, topo_1c_1g.sizing.concurrency_shards);
+        assert_eq!(p_1c.handshake_timeout, Duration::from_secs(10));
 
-        // Small
-        let p_small = TlsServerParams::for_tiers(CpuTier::Small, MemoryTier::Small);
-        assert_eq!(p_small.session_cache_capacity, 2048);
-        assert_eq!(p_small.session_shards, 8);
-        assert_eq!(p_small.max_early_data_size, 4096);
-        assert_eq!(p_small.send_tls13_tickets, 2);
-        assert_eq!(p_small.handshake_timeout, Duration::from_secs(8));
-
-        // Medium
-        let p_med = TlsServerParams::for_tiers(CpuTier::Medium, MemoryTier::Medium);
-        assert_eq!(p_med.session_cache_capacity, 8192);
-        assert_eq!(p_med.session_shards, 16);
-        assert_eq!(p_med.max_early_data_size, 8192);
-        assert_eq!(p_med.send_tls13_tickets, 4);
-        assert_eq!(p_med.handshake_timeout, Duration::from_secs(5));
-
-        // Large
-        let p_large = TlsServerParams::for_tiers(CpuTier::Large, MemoryTier::Large);
-        assert_eq!(p_large.session_cache_capacity, 16384);
-        assert_eq!(p_large.session_shards, 32);
-        assert_eq!(p_large.max_early_data_size, 8192);
-        assert_eq!(p_large.send_tls13_tickets, 4);
-        assert_eq!(p_large.handshake_timeout, Duration::from_secs(5));
-
-        // XLarge
-        let p_xlarge = TlsServerParams::for_tiers(CpuTier::XLarge, MemoryTier::XLarge);
-        assert_eq!(p_xlarge.session_cache_capacity, 32768);
-        assert_eq!(p_xlarge.session_shards, 32);
-        assert_eq!(p_xlarge.max_early_data_size, 16384);
-        assert_eq!(p_xlarge.send_tls13_tickets, 6);
-        assert_eq!(p_xlarge.handshake_timeout, Duration::from_secs(3));
-
-        // TwoXLarge
-        let p_2xlarge = TlsServerParams::for_tiers(CpuTier::TwoXLarge, MemoryTier::TwoXLarge);
-        assert_eq!(p_2xlarge.session_cache_capacity, 65536);
-        assert_eq!(p_2xlarge.session_shards, 64);
-        assert_eq!(p_2xlarge.max_early_data_size, 16384);
-        assert_eq!(p_2xlarge.send_tls13_tickets, 8);
-        assert_eq!(p_2xlarge.handshake_timeout, Duration::from_secs(3));
-
-        // Ultra
-        let p_ultra = TlsServerParams::for_tiers(CpuTier::Ultra, MemoryTier::Ultra);
-        assert_eq!(p_ultra.session_cache_capacity, 131072);
-        assert_eq!(p_ultra.session_shards, 128);
-        assert_eq!(p_ultra.max_early_data_size, 32768);
-        assert_eq!(p_ultra.send_tls13_tickets, 8);
-        assert_eq!(p_ultra.handshake_timeout, Duration::from_secs(2));
+        let topo_16c_32g =
+            velda_core::HardwareTopology::with_workers_and_memory(16, 32 * 1024 * 1024 * 1024);
+        let p_16c = TlsServerParams::for_topology(&topo_16c_32g);
+        assert_eq!(
+            p_16c.session_cache_capacity,
+            topo_16c_32g.sizing.tls_session_cache_capacity
+        );
+        assert_eq!(p_16c.session_shards, topo_16c_32g.sizing.concurrency_shards);
+        assert_eq!(p_16c.handshake_timeout, Duration::from_secs(5));
     }
 }
