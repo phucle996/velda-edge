@@ -30,6 +30,29 @@ impl SecurityHeadersPlugin {
             frame_options: HeaderValue::from_static("DENY"),
         }
     }
+
+    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, crate::error::PluginError> {
+        let hsts_max_age = config
+            .config
+            .get("hsts_max_age_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(31_536_000);
+
+        let include_subdomains = config
+            .config
+            .get("include_subdomains")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let mut plugin = Self::new(&config.id);
+        plugin.hsts_max_age_secs = hsts_max_age;
+        plugin.include_subdomains = include_subdomains;
+
+        Ok(plugin)
+    }
 }
 
 impl PostResponsePlugin for SecurityHeadersPlugin {
@@ -59,5 +82,15 @@ impl PostResponsePlugin for SecurityHeadersPlugin {
             REFERRER_POLICY,
             HeaderValue::from_static("strict-origin-when-cross-origin"),
         );
+    }
+
+    #[inline]
+    fn capability(&self) -> crate::capability::PluginCapability {
+        crate::capability::PluginCapability::header_only(crate::capability::AccessLevel::Write)
+    }
+
+    #[inline]
+    fn supported_protocols(&self) -> crate::capability::SupportedProtocols {
+        crate::capability::SupportedProtocols::ALL_HTTP
     }
 }

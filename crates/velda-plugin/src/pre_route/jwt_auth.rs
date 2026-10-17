@@ -26,6 +26,33 @@ impl JwtAuthPlugin {
             subject_header: HeaderName::from_static("x-authenticated-user"),
         }
     }
+
+    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    ///
+    /// # Module Ownership Invariant
+    /// Parsing logic, schema defaults, and header sanitization belong strictly to the
+    /// plugin itself, keeping central factories razor-thin and decoupled.
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, crate::error::PluginError> {
+        let issuer = config
+            .config
+            .get("issuer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://auth.internal");
+
+        let mut plugin = Self::new(&config.id, issuer);
+        if let Some(subject_hdr) = config
+            .config
+            .get("subject_header")
+            .and_then(|v| v.as_str())
+            .and_then(|s| HeaderName::from_bytes(s.as_bytes()).ok())
+        {
+            plugin.subject_header = subject_hdr;
+        }
+
+        Ok(plugin)
+    }
 }
 
 impl PreRoutePlugin for JwtAuthPlugin {
@@ -104,5 +131,15 @@ impl PreRoutePlugin for JwtAuthPlugin {
         );
 
         Action::Continue
+    }
+
+    #[inline]
+    fn capability(&self) -> crate::capability::PluginCapability {
+        crate::capability::PluginCapability::header_only(crate::capability::AccessLevel::Write)
+    }
+
+    #[inline]
+    fn supported_protocols(&self) -> crate::capability::SupportedProtocols {
+        crate::capability::SupportedProtocols::ALL_L7
     }
 }

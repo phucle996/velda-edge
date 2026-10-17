@@ -1,152 +1,153 @@
 # velda-plugin
 
-> **Status: Architectural Design & Future Roadmap**  
-> This crate specifies the architectural blueprint and execution model for Velda Edge's plugin system. Implementation will follow in subsequent development phases.
+High-performance, protocol-bound, phase-differentiated Plugin Engine for the **Velda Edge Data Plane**.
+
+> [!NOTE]
+> For a step-by-step tutorial on authoring, registering, and testing custom plugins, see the [Plugin Authoring Guide](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/AUTHORING_PLUGINS.md).
 
 ---
 
-## 1. Mission & Architectural Philosophy
+## 1. Architectural Philosophy & Invariants
 
-Velda Edge rejects the traditional "generic dynamic plugin" model used by legacy API gateways (Kong, APISIX, Spring Cloud Gateway). In those systems, plugins accept a generic `GenericRequest` or a loose data bag (`HashMap<String, Box<dyn Any>>`) configured dynamically via JSON or environment variables.
+Legacy API gateways (Kong, APISIX, Spring Cloud Gateway) rely on generic, dynamic plugin models where plugins accept untyped maps (`HashMap<String, Box<dyn Any>>`) or generic request abstractions. In high-performance edge computing, that pattern introduces severe operational risks:
 
-In high-performance edge computing, that pattern introduces severe operational risks:
-1. **Runtime Type-Casting Panics**: When a plugin written for HTTP REST traffic is attached to a gRPC or raw TCP listener, runtime downcasting fails, causing crashes or malformed protocol states.
-2. **Leaky Protocol Abstractions**: Forcing gRPC into an HTTP model destroys gRPC semantics (canonical `grpc-status` trailers, 5-byte Length-Prefixed Message binary framing, and bidirectional streaming).
-3. **Hot-Path Indirection & Invalidation**: Virtual dispatch, heap-allocated dynamic bags, and JSON inspection on every request violate the Zero-IO hot-path invariant.
+1. **Runtime Type-Casting Panics**: When an HTTP REST plugin is attached to a gRPC or raw TCP pipeline, runtime downcasting panics or corrupts framing.
+2. **Leaky Protocol Abstractions**: Attempting to force gRPC through HTTP semantics destroys gRPC status codes (`grpc-status` trailers), binary framing (5-byte Length-Prefixed Messages), and duplex streaming.
+3. **Hot-Path Virtual Indirection**: Dynamic JSON parsing, schema validation, and reflection on every request violate the Zero-IO hot-path invariant.
 
-### The Velda Invariant: Protocol-Bound Plugins (Compile-Time Protocol Mapping)
+### The Velda Invariants
 
-Velda Edge establishes **Protocol-Bound Plugins**:
-- **Explicit Protocol Binding**: A plugin explicitly declares which protocol(s) it supports directly in code.
-- **Zero Runtime Reflection**: Plugins receive native, protocol-specific structures directly (e.g., `Http1RequestHead`, `GrpcServerStream`) rather than generic abstraction layers.
-- **Compiled Dispatch**: Plugin attachment is resolved and compiled into RAM ahead of time (`RuntimeSnapshot`). Zero JSON parsing, zero dynamic schema validation, and zero reflection in the request serving path.
-- **"Duplicate First, Abstract Second" (Rule 2.1)**: If a plugin author wants to support both HTTP/1.1 and gRPC, they implement dedicated hooks for each. A few lines of duplication guarantee 100% protocol compatibility, zero leaky abstractions, and allow the Rust compiler to monomorphize and inline handlers directly into the serving loop.
+- **Protocol-Bound Plugins**: Plugins explicitly declare supported protocols via bitflags ([`SupportedProtocols`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/capability.rs#L28)). Mismatches fail fast at sync/compilation time, never in runtime traffic serving.
+- **Reverse Permission Granting ([`PluginCapability`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/capability.rs#L68))**: Plugins declare their exact authority level ([`AccessLevel`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/capability.rs#L15)) separately for Headers and Payloads (`None < Read < Write`).
+- **Orthogonal Streaming Pipe Decoupling**: Plugins requiring body write/buffering cannot be attached to streaming pipelines (`streaming.client` or `streaming.server`), preventing deadlocks and memory bloat.
+- **Hybrid Deterministic Stable Sort**: Execution order within each phase is resolved strictly via:
+  $$\text{Phase Isolation} \implies \text{Priority (Descending: } 1000 \to 1) \implies \text{JSON Declaration Index (Ascending)}$$
+- **Zero-IO in Serving**: All plugins are instantiated and compiled ahead of time into a static execution plan ([`RoutePluginPlan`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/plan.rs#L30)). Zero allocations, zero JSON parsing, and zero lock contention on the serving hot path.
 
 ---
 
-## 2. Protocol Isolation & Pipeline Alignment
+## 2. Phase-Separated Hook Architecture
 
-According to **Rule 2.7 of `AGENTS.md`** (*"HTTP is HTTP, gRPC is gRPC. Both protocols have distinct semantics and must remain completely decoupled"*), plugins must align with strict pipeline isolation:
+Plugins execute across four strictly isolated lifecycle phases:
 
 ```
-[ Ingress Connection ]
-         │
-         ▼
-[ Protocol Classifier (velda-composer) ]
-         │
-         ├──────────────────────────────┬──────────────────────────────┐
-         ▼ (protocol = "http1")         ▼ (protocol = "http2")         ▼ (protocol = "grpc")
-┌──────────────────────────────┐ ┌──────────────────────────────┐ ┌──────────────────────────────┐
-│ HTTP/1.1 Ingress Pipeline    │ │ HTTP/2 Multiplexed Pipeline  │ │ Dedicated gRPC Pipeline      │
-│                              │ │                              │ │                              │
-│ Hook: on_request_head        │ │ Hook: on_stream_headers      │ │ Hook: on_stream_start        │
-│   (Http1Plugin)              │ │   (Http2Plugin)              │ │   (GrpcPlugin)               │
-│                              │ │                              │ │                              │
-│ Hook: on_request_body        │ │ Hook: on_stream_data         │ │ Hook: on_message_frame       │
-│   (WAF Payload Inspection)   │ │   (WAF Payload Inspection)   │ │   (Protobuf / Auth Check)    │
-│                              │ │                              │ │                              │
-│ Hook: on_response_head       │ │ Hook: on_response_headers    │ │ Hook: on_stream_trailers     │
-│   (HSTS, CORS, Security)     │ │   (HSTS, CORS, Security)     │ │   (grpc-status injection)    │
-└──────────────────────────────┘ └──────────────────────────────┘ └──────────────────────────────┘
+[ Ingress Protocol Decoder ]
+             │
+             ▼
+┌─────────────────────────┐
+│ Phase 1: Pre-Route      │ ── Evaluated before route matching & body streaming.
+│ (PreRoutePlugin)        │    Fail-fast authentication (JWT), IP filtering, WAF header checks.
+└────────────┬────────────┘
+             │
+             ▼
+[ Route Trie Matching & Upstream Selection ]
+             │
+             ▼
+┌─────────────────────────┐
+│ Phase 2: Pre-Upstream   │ ── Evaluated after route & backend target are resolved.
+│ (PreUpstreamPlugin)     │    Rate limiting, token injection, header mutation.
+└────────────┬────────────┘
+             │
+             ▼
+[ Upstream Backend Execution ]
+             │
+             ▼
+┌─────────────────────────┐
+│ Phase 3: Post-Response  │ ── Evaluated on response before downstream encoding.
+│ (PostResponsePlugin)    │    Security headers (HSTS, CSP), CORS headers, compression.
+└────────────┬────────────┘
+             │
+             ▼
+[ Egress Protocol Encoder ]
+
+┌─────────────────────────┐
+│ Phase 4: Background     │ ── Runs exclusively on auxiliary supervisor cores.
+│ (BackgroundPlugin)      │    Prometheus exporter, health check probes. Zero traffic worker impact.
+└─────────────────────────┘
 ```
 
----
+### Phase Contracts
 
-## 3. Phase-Separated Hook Architecture
-
-To maximize throughput and protect backend infrastructure from DoS/WAF attacks, plugins operate across distinct lifecycle phases:
-
-### Phase 1: Head / Metadata Phase (`on_request_head`)
-* **Authority**: Inspects and mutates request metadata (URI, Method, Headers, Query parameters).
-* **Use Cases**: Authentication (JWT / API Key), Rate Limiting (IP/Token bucket), Path Rewriting, CORS pre-flight, Header-based WAF rules (User-Agent, SQLi in Query).
-* **Fail-Fast Advantage**: If a request is unauthorized or malicious, the plugin returns `Action::Respond(401/403/429)` or `Action::Reject`. The connection is terminated **without allocating memory or reading a single byte of the request body**.
-
-### Phase 2: Payload / Body Phase (`on_request_body`)
-* **Authority**: Inspects or transforms the payload body (streamed chunks or contiguous memory).
-* **Use Cases**: Deep WAF scanning (SQLi/XSS in JSON/XML payloads), payload decryption, request decompression.
-* **Selective Execution**: Only routes configured with body inspection execute this phase. Standard proxy/GET routes bypass this phase with zero overhead.
-
-### Phase 3: Response Phase (`on_response_head` & `on_response_body`)
-* **Authority**: Inspects or mutates response status, headers, and outgoing body.
-* **Use Cases**: Security headers injection (HSTS, CSP, X-Frame-Options), response compression (Gzip/Brotli), PII data masking.
+| Phase | Trait | Primary Hook | Authority Contract |
+| :--- | :--- | :--- | :--- |
+| **`pre_route`** | [`PreRoutePlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/mod.rs#L23) | `on_request(&self, req: &mut L7Request) -> Action` | [`Action::Continue`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs), [`Action::Respond(401/403)`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs), [`Action::Reject`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs) |
+| **`pre_upstream`** | [`PreUpstreamPlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/mod.rs#L22) | `on_upstream_request(&self, req: &mut L7Request) -> Action` | [`Action::Continue`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs), [`Action::Respond(429)`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs), [`Action::Reject`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs) |
+| **`post_response`** | [`PostResponsePlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/mod.rs#L22) | `on_response(&self, resp: &mut L7Response)` | In-place header & status mutation |
+| **`background`** | [`BackgroundPlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/mod.rs#L25) | `run(self, shutdown) -> Future<Output = Result<(), PluginError>>` | Auxiliary supervisory execution loop |
 
 ---
 
-## 4. Constrained Authority Contract (`Action`)
+## 3. Reverse Permission Granting & Streaming Decoupling
 
-Plugins in Velda Edge do not own socket connections, thread pools, or routing tables. Their decision authority is strictly bounded to the canonical [`Action`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs) contract:
+Velda Edge plugins must declare their exact access requirements:
 
 ```rust
-pub enum Action<TResponse> {
-    /// Allow the request to proceed to the next plugin or upstream.
-    Continue,
+use velda_plugin::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 
-    /// Short-circuit the workflow and return an immediate response to the client.
-    /// Example: 401 Unauthorized, 403 Forbidden, 429 Too Many Requests.
-    Respond(TResponse),
+impl PreRoutePlugin for MyCustomAuthPlugin {
+    // 1. Declare exact permission boundaries: Read headers only, zero payload access
+    fn capability(&self) -> PluginCapability {
+        PluginCapability::header_only(AccessLevel::Read)
+    }
 
-    /// Immediately reject and tear down the connection.
-    /// Example: Malformed framing, security protocol violation.
-    Reject(velda_core::Error),
+    // 2. Declare supported protocols via bitflags
+    fn supported_protocols(&self) -> SupportedProtocols {
+        SupportedProtocols::HTTP1 | SupportedProtocols::HTTP2 | SupportedProtocols::HTTP3
+    }
+    
+    // ...
 }
 ```
 
----
+### Orthogonal Pipe Validation Matrix
 
-## 5. Conceptual Trait Signatures (Blueprint)
+| Plugin Payload Authority | `streaming.client == false` (Buffered) | `streaming.client == true` (Stream Upload) |
+| :--- | :---: | :---: |
+| `payload_access: None` | **Compatible** | **Compatible** |
+| `payload_access: Read` | **Compatible** | **Compatible** |
+| `payload_access: Write` | **Compatible** | **Rejected at Sync ([`PluginError::StreamingConflict`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/error.rs))** |
 
-When implemented, plugins will define narrow, type-safe traits without dynamic downcasting:
-
-### HTTP/1.1 Plugin Contract
-```rust
-pub trait Http1Plugin: Send + Sync {
-    /// Invoked immediately after request line and headers are decoded.
-    fn on_request_head(&self, head: &mut velda_http1::RequestHead) -> Action<velda_http1::ResponseHead> {
-        Action::Continue
-    }
-
-    /// Invoked when request payload is ready for inspection.
-    fn on_request_body(&self, body: &mut velda_core::Body) -> Action<velda_http1::ResponseHead> {
-        Action::Continue
-    }
-
-    /// Invoked before response headers are flushed downstream.
-    fn on_response_head(&self, head: &mut velda_http1::ResponseHead) -> Action<()> {
-        Action::Continue
-    }
-}
-```
-
-### gRPC Plugin Contract
-```rust
-pub trait GrpcPlugin: Send + Sync {
-    /// Invoked on RPC stream initiation (:path = /service/method).
-    fn on_stream_start(&self, parts: &http::request::Parts) -> Action<velda_grpc::GrpcStatus> {
-        Action::Continue
-    }
-
-    /// Invoked on each 5-byte Length-Prefixed Message frame.
-    fn on_message(&self, message_frame: &[u8]) -> Action<velda_grpc::GrpcStatus> {
-        Action::Continue
-    }
-
-    /// Invoked before trailing metadata (grpc-status) is sent.
-    fn on_trailers(&self, status: &mut velda_grpc::GrpcStatus) -> Action<()> {
-        Action::Continue
-    }
-}
-```
+> [!IMPORTANT]
+> A plugin requiring body write/buffering attached to a streaming pipe will be rejected **fail-fast at configuration compile time**. It will never enter the Data Plane hot path.
 
 ---
 
-## 6. Implementation Roadmap
+## 4. Phase Sub-Dispatchers & Open-Closed Factory
 
-- [ ] **Stage 1**: Define core plugin lifecycle contracts in `velda-plugin` (`PluginId`, `Action`, execution chain coordinator).
-- [ ] **Stage 2**: Implement `Http1PluginChain` in `velda-edge::pipeline::http1`.
-- [ ] **Stage 3**: Implement `GrpcPluginChain` in `velda-edge::pipeline::grpc`.
-- [ ] **Stage 4**: Compile-time route-to-plugin mapping in `velda-router`.
-- [ ] **Stage 5**: Standard built-in plugins:
-  - `cors`: Cross-Origin Resource Sharing header management.
-  - `rate_limit`: In-memory sliding window token bucket.
-  - `jwt_auth`: Fast zero-copy JWT verification.
-  - `waf_header`: Rule-based header, URI, and User-Agent scanner.
+To prevent [`factory.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs) from becoming a monolithic "God Factory" as the number of plugins grows:
+
+1. **Plugin-Owned Deserialization**: Every plugin implements `from_config(&PluginConfig) -> Result<Self, PluginError>` in its own module.
+2. **Phase Sub-Dispatchers**: Each phase module (`pre_route/mod.rs`, `pre_upstream/mod.rs`, `post_response/mod.rs`, `background/mod.rs`) defines a local `instantiate(config)` function.
+3. **Razor-Thin Factory**: [`factory::instantiate_plugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs#L85) only validates `canonical_phase_for_type` and delegates to the appropriate phase sub-dispatcher.
+
+---
+
+## 5. Built-in Production Plugins
+
+| Plugin Name | Phase | Default Protocols | Description |
+| :--- | :---: | :---: | :--- |
+| [`jwt_auth`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/jwt_auth.rs) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Bearer token validation, subject extraction into `x-authenticated-user`. |
+| [`ip_filter`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/ip_filter.rs) | `pre_route` | All Protocols (L4/L7) | Client IP allowlist / denylist filtering with `X-Forwarded-For` support. |
+| [`rate_limit`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/rate_limit.rs) | `pre_upstream` | All Protocols | In-memory token bucket rate limiting with `Retry-After` header generation. |
+| [`header_mutation`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/header_mutation.rs) | `pre_upstream` | All L7 | Sets or strips HTTP headers before upstream backend forwarding. |
+| [`security_headers`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/security_headers.rs) | `post_response` | All L7 | Injects enterprise security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`). |
+| [`cors`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/cors.rs) | `post_response` | All L7 | Injects CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`). |
+| [`prometheus_exporter`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/prometheus/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Auxiliary Core. |
+| [`health_probe`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/health_probe.rs) | `background` | Management (:8081) | Kubernetes liveness and readiness probe HTTP endpoint. |
+
+---
+
+## 6. Verification & Test Suite
+
+Run unit and integration tests across the plugin crate:
+
+```bash
+# Check formatting
+rtk cargo fmt --check -p velda-plugin
+
+# Strict clippy linting
+rtk cargo clippy -p velda-plugin --all-targets --all-features -- -D warnings
+
+# Execute test suite
+rtk cargo test -p velda-plugin
+```

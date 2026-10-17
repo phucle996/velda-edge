@@ -64,6 +64,8 @@ pub struct PluginConfig {
     #[serde(rename = "type")]
     pub plugin_type: String,
     pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
+    #[serde(default)]
+    pub priority: Option<i32>,
     #[serde(with = "json_value_bincode")]
     pub config: serde_json::Value,
 }
@@ -380,6 +382,7 @@ mod tests {
             id: "p1".into(),
             plugin_type: "rate_limit".into(),
             phase: "invalid_phase".into(),
+            priority: None,
             config: serde_json::json!({}),
         }];
 
@@ -396,6 +399,7 @@ mod tests {
             id: "jwt-auth".into(),
             plugin_type: "jwt".into(),
             phase: "pre_route".into(),
+            priority: Some(100),
             config: serde_json::json!({ "issuer": "auth.example.com", "max_age": 3600 }),
         }];
 
@@ -407,6 +411,7 @@ mod tests {
             unpack_plugins_from_binary(&binary).expect("Should unpack plugins");
         assert_eq!(header.revision, 15);
         assert_eq!(restored, plugins);
+        assert_eq!(restored[0].priority, Some(100));
 
         persist_plugins(tmp.path(), json_bytes, &binary).expect("Should persist plugins");
         assert!(tmp.path().join("config/plugins.json").exists());
@@ -422,6 +427,7 @@ mod tests {
                     "id": "metrics-exp",
                     "type": "prometheus_exporter",
                     "phase": "background",
+                    "priority": 50,
                     "config": {
                         "listen": "0.0.0.0:9090",
                         "path": "/metrics",
@@ -449,6 +455,7 @@ mod tests {
         }"#;
 
         let mut plugins = parse_plugins(json.as_bytes()).expect("parse should succeed");
+        assert_eq!(plugins[0].priority, Some(50));
         validate_plugins(&mut plugins).expect("validation should succeed");
     }
 
@@ -458,6 +465,7 @@ mod tests {
             id: "prom-1".into(),
             plugin_type: "prometheus_exporter".into(),
             phase: "pre_route".into(),
+            priority: None,
             config: serde_json::json!({
                 "listen": "0.0.0.0:9090",
                 "path": "/metrics",

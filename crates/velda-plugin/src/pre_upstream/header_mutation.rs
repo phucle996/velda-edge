@@ -30,6 +30,37 @@ impl HeaderMutationPlugin {
             remove_headers,
         }
     }
+
+    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, crate::error::PluginError> {
+        let mut set_headers = Vec::new();
+        if let Some(set_obj) = config.config.get("set").and_then(|v| v.as_object()) {
+            for (k, v) in set_obj {
+                if let (Ok(name), Some(val)) = (
+                    HeaderName::from_bytes(k.as_bytes()),
+                    v.as_str().and_then(|s| HeaderValue::from_str(s).ok()),
+                ) {
+                    set_headers.push((name, val));
+                }
+            }
+        }
+
+        let mut remove_headers = Vec::new();
+        if let Some(rem_arr) = config.config.get("remove").and_then(|v| v.as_array()) {
+            for item in rem_arr {
+                if let Some(name) = item
+                    .as_str()
+                    .and_then(|s| HeaderName::from_bytes(s.as_bytes()).ok())
+                {
+                    remove_headers.push(name);
+                }
+            }
+        }
+
+        Ok(Self::new(&config.id, set_headers, remove_headers))
+    }
 }
 
 impl PreUpstreamPlugin for HeaderMutationPlugin {
@@ -48,5 +79,15 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         }
 
         Action::Continue
+    }
+
+    #[inline]
+    fn capability(&self) -> crate::capability::PluginCapability {
+        crate::capability::PluginCapability::header_only(crate::capability::AccessLevel::Write)
+    }
+
+    #[inline]
+    fn supported_protocols(&self) -> crate::capability::SupportedProtocols {
+        crate::capability::SupportedProtocols::ALL_L7
     }
 }

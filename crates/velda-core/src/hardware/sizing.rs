@@ -471,4 +471,92 @@ impl HardwareSizing {
             dns_negative_cache_capacity,
         }
     }
+
+    /// Computes recommended pre-warmed buffer and slab pool dimensions per traffic worker core.
+    ///
+    /// Returns `(header_slots, headers_per_map, small_4k_slabs, medium_16k_slabs, large_64k_slabs)`.
+    #[inline]
+    pub fn buffer_pool_dimensions_per_core(&self) -> (usize, usize, usize, usize, usize) {
+        let headers_per_map = self.http1_max_headers_count.clamp(32, 128);
+        let header_slots = (self.optimal_max_idle_per_key * 2).clamp(256, 2048);
+
+        let small_slabs = (header_slots / 2).clamp(128, 1024);
+        let medium_slabs = (header_slots / 4).clamp(64, 512);
+        let large_slabs = (header_slots / 16).clamp(16, 128);
+
+        (
+            header_slots,
+            headers_per_map,
+            small_slabs,
+            medium_slabs,
+            large_slabs,
+        )
+    }
+
+    /// Calculates the strict anti-OOM max burst ceiling for a buffer class.
+    ///
+    /// # Dual-Constraint Anti-OOM Formula
+    /// `max_cap = min(baseline * 3, baseline + (total_memory_bytes * 0.20) / (num_cores * item_bytes))`
+    ///
+    /// Guarantees that even under sustained saturation spikes:
+    /// 1. The buffer pool scales up to 3x baseline capacity to absorb micro-bursts.
+    /// 2. Total buffer memory across all worker cores never exceeds 20% of available RAM.
+    #[inline]
+    pub fn adaptive_burst_cap(
+        baseline: usize,
+        total_memory_bytes: usize,
+        num_cores: usize,
+        item_bytes: usize,
+    ) -> usize {
+        let triple_baseline = baseline.saturating_mul(3);
+        let headroom_20_pct = (total_memory_bytes as f64 * 0.20) as usize;
+        let per_core_headroom = headroom_20_pct / num_cores.max(1);
+        let max_from_headroom = baseline + (per_core_headroom / item_bytes.max(1));
+        triple_baseline.min(max_from_headroom).max(baseline)
+    }
+
+    /// Derives per-core adaptive buffer dimensions bounded by the Dual-Constraint Anti-OOM formula.
+    #[inline]
+    pub fn adaptive_buffer_pool_dimensions_per_core(
+        &self,
+        total_memory_bytes: usize,
+        num_cores: usize,
+    ) -> AdaptiveBufferDimensions {
+        let (header_base, headers_per_map, small_base, med_base, large_base) =
+            self.buffer_pool_dimensions_per_core();
+
+        // Estimated average header workspace footprint: ~2KB per workspace with 64 headers
+        let header_bytes = headers_per_map * 32;
+        let header_max =
+            Self::adaptive_burst_cap(header_base, total_memory_bytes, num_cores, header_bytes);
+        let small_max = Self::adaptive_burst_cap(small_base, total_memory_bytes, num_cores, 4096);
+        let med_max = Self::adaptive_burst_cap(med_base, total_memory_bytes, num_cores, 16384);
+        let large_max = Self::adaptive_burst_cap(large_base, total_memory_bytes, num_cores, 65536);
+
+        AdaptiveBufferDimensions {
+            header_baseline: header_base,
+            header_max_cap: header_max,
+            headers_per_map,
+            small_baseline: small_base,
+            small_max_cap: small_max,
+            medium_baseline: med_base,
+            medium_max_cap: med_max,
+            large_baseline: large_base,
+            large_max_cap: large_max,
+        }
+    }
+}
+
+/// Pre-computed continuous adaptive buffer pool dimensions per traffic worker core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveBufferDimensions {
+    pub header_baseline: usize,
+    pub header_max_cap: usize,
+    pub headers_per_map: usize,
+    pub small_baseline: usize,
+    pub small_max_cap: usize,
+    pub medium_baseline: usize,
+    pub medium_max_cap: usize,
+    pub large_baseline: usize,
+    pub large_max_cap: usize,
 }

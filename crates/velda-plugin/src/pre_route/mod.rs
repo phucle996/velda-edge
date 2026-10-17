@@ -11,6 +11,8 @@
 use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
+use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+
 pub mod ip_filter;
 pub mod jwt_auth;
 
@@ -24,6 +26,18 @@ pub trait PreRoutePlugin: Send + Sync {
 
     /// Evaluated on downstream request head before route lookup.
     fn on_request(&self, req: &mut L7Request) -> Action;
+
+    /// Declares the reverse-permission capabilities required by this plugin.
+    fn capability(&self) -> PluginCapability;
+
+    /// Hardcoded network/application protocols supported by this plugin.
+    fn supported_protocols(&self) -> SupportedProtocols;
+
+    /// Execution direction. Always [`Direction::Request`] for pre-route plugins.
+    #[inline(always)]
+    fn direction(&self) -> Direction {
+        Direction::Request
+    }
 }
 
 /// Executes a linear chain of pre-route plugins.
@@ -38,6 +52,24 @@ pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Requ
         }
     }
     Action::Continue
+}
+
+/// Sub-dispatcher: instantiates concrete [`PreRoutePlugin`] instances for this phase.
+///
+/// # Open-Closed Principle (OCP)
+/// Adding a new pre-route plugin requires adding exactly 1 match arm here, delegating
+/// config extraction and validation to the plugin's own `from_config` implementation.
+pub fn instantiate(
+    config: &velda_sync::post_sync::plugin::PluginConfig,
+) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
+    match config.plugin_type.as_str() {
+        "jwt_auth" | "jwt" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
+        "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
+        other => Err(crate::error::PluginError::Config(format!(
+            "Unsupported pre_route plugin type '{other}' for plugin '{}'",
+            config.id
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@
 //! Higher-level crates such as `velda-transport`, `velda-router`,
 //! `velda-plugin`, and `velda-upstream` build on these contracts.
 
+pub mod buffer;
 pub mod context;
 pub mod endpoint;
 pub mod error;
@@ -29,6 +30,16 @@ pub mod protocol;
 pub mod provenance;
 pub mod streaming;
 pub mod types;
+
+// -----------------------------------------------------------------------------
+// Pre-warmed Buffer & Slab Pools
+// -----------------------------------------------------------------------------
+
+pub use buffer::{
+    AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderWorkspace, HeaderWorkspaceLease,
+    PayloadSlab, PayloadSlabLease, PayloadSlabPool, ShardedBufferPool, SlabClass,
+};
+pub use hardware::AdaptiveBufferDimensions;
 
 // -----------------------------------------------------------------------------
 // Protocol Family

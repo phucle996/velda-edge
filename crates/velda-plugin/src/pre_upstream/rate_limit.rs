@@ -39,6 +39,19 @@ impl RateLimitPlugin {
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
+
+    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, crate::error::PluginError> {
+        let limit = config
+            .config
+            .get("limit_per_second")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000);
+
+        Ok(Self::new(&config.id, limit))
+    }
 }
 
 impl PreUpstreamPlugin for RateLimitPlugin {
@@ -70,5 +83,15 @@ impl PreUpstreamPlugin for RateLimitPlugin {
                 .with_header(RETRY_AFTER, HeaderValue::from_static("1")),
             )
         }
+    }
+
+    #[inline]
+    fn capability(&self) -> crate::capability::PluginCapability {
+        crate::capability::PluginCapability::header_only(crate::capability::AccessLevel::Read)
+    }
+
+    #[inline]
+    fn supported_protocols(&self) -> crate::capability::SupportedProtocols {
+        crate::capability::SupportedProtocols::ALL_L7
     }
 }

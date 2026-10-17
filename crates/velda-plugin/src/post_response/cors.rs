@@ -31,6 +31,25 @@ impl CorsResponsePlugin {
             allow_credentials,
         }
     }
+
+    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, crate::error::PluginError> {
+        let allow_origin = config
+            .config
+            .get("allow_origin")
+            .and_then(|v| v.as_str())
+            .unwrap_or("*");
+
+        let allow_credentials = config
+            .config
+            .get("allow_credentials")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        Ok(Self::new(&config.id, allow_origin, allow_credentials))
+    }
 }
 
 impl PostResponsePlugin for CorsResponsePlugin {
@@ -52,5 +71,15 @@ impl PostResponsePlugin for CorsResponsePlugin {
 
         resp.headers
             .insert(VARY, HeaderValue::from_static("Origin"));
+    }
+
+    #[inline]
+    fn capability(&self) -> crate::capability::PluginCapability {
+        crate::capability::PluginCapability::header_only(crate::capability::AccessLevel::Write)
+    }
+
+    #[inline]
+    fn supported_protocols(&self) -> crate::capability::SupportedProtocols {
+        crate::capability::SupportedProtocols::ALL_HTTP
     }
 }

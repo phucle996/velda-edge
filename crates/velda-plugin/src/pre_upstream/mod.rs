@@ -10,6 +10,8 @@
 use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
+use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+
 pub mod header_mutation;
 pub mod rate_limit;
 
@@ -23,6 +25,18 @@ pub trait PreUpstreamPlugin: Send + Sync {
 
     /// Evaluated on routed request before sending to upstream backend.
     fn on_upstream_request(&self, req: &mut L7Request) -> Action;
+
+    /// Declares the reverse-permission capabilities required by this plugin.
+    fn capability(&self) -> PluginCapability;
+
+    /// Hardcoded network/application protocols supported by this plugin.
+    fn supported_protocols(&self) -> SupportedProtocols;
+
+    /// Execution direction. Always [`Direction::Request`] for pre-upstream plugins.
+    #[inline(always)]
+    fn direction(&self) -> Direction {
+        Direction::Request
+    }
 }
 
 /// Executes a linear chain of pre-upstream plugins.
@@ -40,6 +54,24 @@ pub fn run_pre_upstream_plugins(
         }
     }
     Action::Continue
+}
+
+/// Sub-dispatcher: instantiates concrete [`PreUpstreamPlugin`] instances for this phase.
+///
+/// # Open-Closed Principle (OCP)
+/// Adding a new pre-upstream plugin requires adding exactly 1 match arm here, delegating
+/// config extraction and validation to the plugin's own `from_config` implementation.
+pub fn instantiate(
+    config: &velda_sync::post_sync::plugin::PluginConfig,
+) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
+    match config.plugin_type.as_str() {
+        "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
+        "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
+        other => Err(crate::error::PluginError::Config(format!(
+            "Unsupported pre_upstream plugin type '{other}' for plugin '{}'",
+            config.id
+        ))),
+    }
 }
 
 #[cfg(test)]

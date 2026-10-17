@@ -10,14 +10,20 @@
 //!     (e.g., Prometheus Exporter, Health Probes).
 
 pub mod background;
+pub mod capability;
 pub mod error;
+pub mod factory;
+pub mod plan;
 pub mod post_response;
 pub mod pre_route;
 pub mod pre_upstream;
 
 pub use background::prometheus::{PrometheusExporter, format_snapshot};
 pub use background::{BackgroundPlugin, HealthProbePlugin};
+pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
+pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
+pub use plan::{RoutePluginPlan, StablyOrderedPlugin, sort_plugins_stable};
 pub use post_response::{
     CorsResponsePlugin, PostResponsePlugin, SecurityHeadersPlugin, run_post_response_plugins,
 };

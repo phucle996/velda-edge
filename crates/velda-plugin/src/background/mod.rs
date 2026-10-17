@@ -13,6 +13,8 @@ use tokio::sync::watch;
 
 use crate::error::PluginError;
 
+use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+
 pub mod health_probe;
 pub mod prometheus;
 
@@ -29,4 +31,41 @@ pub trait BackgroundPlugin: Send + Sync {
         self: Box<Self>,
         shutdown: watch::Receiver<bool>,
     ) -> impl Future<Output = Result<(), PluginError>> + Send;
+
+    /// Declares the reverse-permission capabilities (always default None for background services).
+    #[inline(always)]
+    fn capability(&self) -> PluginCapability {
+        PluginCapability::default()
+    }
+
+    /// Hardcoded network/application protocols supported by this plugin.
+    #[inline(always)]
+    fn supported_protocols(&self) -> SupportedProtocols {
+        SupportedProtocols::empty()
+    }
+
+    /// Execution direction. Always [`Direction::Background`] for background auxiliary plugins.
+    #[inline(always)]
+    fn direction(&self) -> Direction {
+        Direction::Background
+    }
+}
+
+/// Sub-dispatcher: instantiates background auxiliary plugin descriptors.
+///
+/// # Open-Closed Principle (OCP)
+/// Background auxiliary services are instantiated on dedicated supervisory threads.
+pub fn instantiate(
+    config: &velda_sync::post_sync::plugin::PluginConfig,
+) -> Result<crate::factory::LoadedPlugin, PluginError> {
+    match config.plugin_type.as_str() {
+        "health_probe" | "prometheus_exporter" => Ok(crate::factory::LoadedPlugin::Background {
+            id: config.id.clone(),
+            plugin_type: config.plugin_type.clone(),
+        }),
+        other => Err(PluginError::Config(format!(
+            "Unsupported background plugin type '{other}' for plugin '{}'",
+            config.id
+        ))),
+    }
 }

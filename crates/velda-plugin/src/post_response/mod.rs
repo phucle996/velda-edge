@@ -10,6 +10,8 @@
 use std::sync::Arc;
 use velda_core::L7Response;
 
+use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+
 pub mod cors;
 pub mod security_headers;
 
@@ -23,6 +25,18 @@ pub trait PostResponsePlugin: Send + Sync {
 
     /// Evaluated on outgoing response before downstream encoding.
     fn on_response(&self, resp: &mut L7Response);
+
+    /// Declares the reverse-permission capabilities required by this plugin.
+    fn capability(&self) -> PluginCapability;
+
+    /// Hardcoded network/application protocols supported by this plugin.
+    fn supported_protocols(&self) -> SupportedProtocols;
+
+    /// Execution direction. Always [`Direction::Response`] for post-response plugins.
+    #[inline(always)]
+    fn direction(&self) -> Direction {
+        Direction::Response
+    }
 }
 
 /// Executes a linear chain of post-response plugins on the outgoing response.
@@ -30,6 +44,24 @@ pub trait PostResponsePlugin: Send + Sync {
 pub fn run_post_response_plugins(chain: &[Arc<dyn PostResponsePlugin>], resp: &mut L7Response) {
     for plugin in chain {
         plugin.on_response(resp);
+    }
+}
+
+/// Sub-dispatcher: instantiates concrete [`PostResponsePlugin`] instances for this phase.
+///
+/// # Open-Closed Principle (OCP)
+/// Adding a new post-response plugin requires adding exactly 1 match arm here, delegating
+/// config extraction and validation to the plugin's own `from_config` implementation.
+pub fn instantiate(
+    config: &velda_sync::post_sync::plugin::PluginConfig,
+) -> Result<Arc<dyn PostResponsePlugin>, crate::error::PluginError> {
+    match config.plugin_type.as_str() {
+        "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),
+        "cors" => Ok(Arc::new(CorsResponsePlugin::from_config(config)?)),
+        other => Err(crate::error::PluginError::Config(format!(
+            "Unsupported post_response plugin type '{other}' for plugin '{}'",
+            config.id
+        ))),
     }
 }
 

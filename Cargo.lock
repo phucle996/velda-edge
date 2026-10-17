@@ -2155,10 +2155,12 @@ name = "velda-plugin"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bitflags",
  "bytes",
  "http",
  "httparse",
  "rcgen",
+ "rustc-hash",
  "rustls",
  "serde",
  "serde_json",
