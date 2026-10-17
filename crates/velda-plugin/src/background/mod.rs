@@ -58,13 +58,15 @@ pub trait BackgroundPlugin: Send + Sync {
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<crate::factory::LoadedPlugin, PluginError> {
-    match config.plugin_type.as_str() {
-        "health_probe" | "prometheus_exporter" => Ok(crate::factory::LoadedPlugin::Background {
+    match config.id.as_str() {
+        "health_probe" => Ok(crate::factory::LoadedPlugin::Background {
             id: config.id.clone(),
-            plugin_type: config.plugin_type.clone(),
+        }),
+        "prometheus_exporter" => Ok(crate::factory::LoadedPlugin::Background {
+            id: config.id.clone(),
         }),
         other => Err(PluginError::Config(format!(
-            "Unsupported background plugin type '{other}' for plugin '{}'",
+            "Unsupported background plugin '{other}' for plugin '{}'",
             config.id
         ))),
     }

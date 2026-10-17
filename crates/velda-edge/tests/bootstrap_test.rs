@@ -106,8 +106,7 @@ async fn test_bootstrap_with_prometheus_exporter() {
 
     // Compile plugins.bin with Prometheus exporter
     let exporter_plugin = PluginConfig {
-        id: "prom-exporter-test".into(),
-        plugin_type: "prometheus_exporter".into(),
+        id: "prometheus_exporter".into(),
         phase: "background".into(),
         priority: None,
         config: serde_json::json!({

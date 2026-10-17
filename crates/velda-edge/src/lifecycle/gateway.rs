@@ -83,7 +83,7 @@ pub async fn run_gateway(
             rt.config
                 .plugins
                 .iter()
-                .find(|p| p.plugin_type == "prometheus_exporter")
+                .find(|p| p.id == "prometheus_exporter")
                 .cloned()
         };
 

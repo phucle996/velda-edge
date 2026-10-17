@@ -14,11 +14,11 @@
       },
       "upstream": "users",
       "plugins": [
-        "auth-jwt",
-        "api-resource-limit",
-        "api-rate-limit",
-        "security-headers",
-        "access-log"
+        "jwt_auth",
+        "resource_limit",
+        "rate_limit",
+        "security_headers",
+        "access_log"
       ]
     },
     {
@@ -34,9 +34,9 @@
       },
       "upstream": "events",
       "plugins": [
-        "auth-jwt",
-        "stream-resource-limit",
-        "access-log"
+        "jwt_auth",
+        "resource_limit",
+        "access_log"
       ]
     },
     {
@@ -52,9 +52,9 @@
       },
       "upstream": "grpc-users",
       "plugins": [
-        "auth-jwt",
-        "grpc-resource-limit",
-        "access-log"
+        "jwt_auth",
+        "resource_limit",
+        "access_log"
       ]
     },
     {
@@ -70,9 +70,9 @@
       },
       "upstream": "realtime",
       "plugins": [
-        "auth-jwt",
-        "realtime-resource-limit",
-        "access-log"
+        "jwt_auth",
+        "resource_limit",
+        "access_log"
       ]
     },
     {
@@ -87,8 +87,8 @@
       },
       "upstream": "tcp-backend",
       "plugins": [
-        "tcp-resource-limit",
-        "access-log"
+        "resource_limit",
+        "access_log"
       ]
     }
   ]

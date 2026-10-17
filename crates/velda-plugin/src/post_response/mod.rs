@@ -55,11 +55,11 @@ pub fn run_post_response_plugins(chain: &[Arc<dyn PostResponsePlugin>], resp: &m
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PostResponsePlugin>, crate::error::PluginError> {
-    match config.plugin_type.as_str() {
+    match config.id.as_str() {
         "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),
         "cors" => Ok(Arc::new(CorsResponsePlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
-            "Unsupported post_response plugin type '{other}' for plugin '{}'",
+            "Unsupported post_response plugin '{other}' for plugin '{}'",
             config.id
         ))),
     }

@@ -22,7 +22,7 @@ pub enum LoadedPlugin {
     PreRoute(Arc<dyn PreRoutePlugin>),
     PreUpstream(Arc<dyn PreUpstreamPlugin>),
     PostResponse(Arc<dyn PostResponsePlugin>),
-    Background { id: String, plugin_type: String },
+    Background { id: String },
 }
 
 impl LoadedPlugin {
@@ -32,7 +32,7 @@ impl LoadedPlugin {
             Self::PreRoute(p) => p.id(),
             Self::PreUpstream(p) => p.id(),
             Self::PostResponse(p) => p.id(),
-            Self::Background { id, .. } => id,
+            Self::Background { id } => id,
         }
     }
 
@@ -57,17 +57,11 @@ impl LoadedPlugin {
     }
 }
 
-/// Returns the expected canonical execution phase for a known plugin type.
+/// Returns the expected canonical execution phase for a known plugin identifier.
 ///
 /// Used for fail-fast PhaseMismatch validation prior to sub-dispatcher delegation.
-pub fn canonical_phase_for_type(plugin_type: &str) -> Option<&'static str> {
-    match plugin_type {
-        "jwt_auth" | "jwt" | "ip_filter" => Some("pre_route"),
-        "rate_limit" | "header_mutation" => Some("pre_upstream"),
-        "security_headers" | "cors" => Some("post_response"),
-        "health_probe" | "prometheus_exporter" => Some("background"),
-        _ => None,
-    }
+pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
+    velda_sync::post_sync::plugin::canonical_phase_for_id(id)
 }
 
 /// Instantiates a concrete plugin instance by dispatching to the dedicated phase sub-dispatcher.
@@ -83,8 +77,15 @@ pub fn canonical_phase_for_type(plugin_type: &str) -> Option<&'static str> {
 /// Each concrete plugin defines its own `from_config` constructor, enforcing strict module
 /// ownership and ensuring `factory.rs` never bloats as new plugins are added.
 pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginError> {
+    let effective_phase = if config.phase.is_empty() {
+        canonical_phase_for_id(&config.id).unwrap_or("")
+    } else {
+        config.phase.as_str()
+    };
+
     // 1. Fail-fast PhaseMismatch validation if a known plugin is configured under the wrong phase
-    if let Some(expected_phase) = canonical_phase_for_type(&config.plugin_type)
+    if let Some(expected_phase) = canonical_phase_for_id(&config.id)
+        && !config.phase.is_empty()
         && config.phase != expected_phase
     {
         return Err(PluginError::PhaseMismatch {
@@ -95,7 +96,7 @@ pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginE
     }
 
     // 2. Delegate to the dedicated phase sub-dispatcher
-    match config.phase.as_str() {
+    match effective_phase {
         "pre_route" => crate::pre_route::instantiate(config).map(LoadedPlugin::PreRoute),
         "pre_upstream" => crate::pre_upstream::instantiate(config).map(LoadedPlugin::PreUpstream),
         "post_response" => {
@@ -242,36 +243,33 @@ mod tests {
     #[test]
     fn test_instantiate_plugins() {
         let cfg_jwt = PluginConfig {
-            id: "jwt-1".into(),
-            plugin_type: "jwt_auth".into(),
+            id: "jwt_auth".into(),
             phase: "pre_route".into(),
             priority: Some(100),
             config: serde_json::json!({ "issuer": "https://auth.internal" }),
         };
         let p1 = instantiate_plugin(&cfg_jwt).expect("Should instantiate jwt");
-        assert_eq!(p1.id(), "jwt-1");
+        assert_eq!(p1.id(), "jwt_auth");
         assert!(matches!(p1, LoadedPlugin::PreRoute(_)));
 
         let cfg_rate = PluginConfig {
-            id: "rate-1".into(),
-            plugin_type: "rate_limit".into(),
+            id: "rate_limit".into(),
             phase: "pre_upstream".into(),
             priority: Some(50),
-            config: serde_json::json!({ "limit_per_second": 500 }),
+            config: serde_json::json!({ "rate_per_second": 500 }),
         };
         let p2 = instantiate_plugin(&cfg_rate).expect("Should instantiate rate_limit");
-        assert_eq!(p2.id(), "rate-1");
+        assert_eq!(p2.id(), "rate_limit");
         assert!(matches!(p2, LoadedPlugin::PreUpstream(_)));
 
         let cfg_cors = PluginConfig {
-            id: "cors-1".into(),
-            plugin_type: "cors".into(),
+            id: "cors".into(),
             phase: "post_response".into(),
             priority: None,
             config: serde_json::json!({ "allow_origin": "https://example.com" }),
         };
         let p3 = instantiate_plugin(&cfg_cors).expect("Should instantiate cors");
-        assert_eq!(p3.id(), "cors-1");
+        assert_eq!(p3.id(), "cors");
         assert!(matches!(p3, LoadedPlugin::PostResponse(_)));
     }
 
@@ -280,46 +278,43 @@ mod tests {
         let mut available = FxHashMap::default();
 
         let cfg_jwt = PluginConfig {
-            id: "jwt-1".into(),
-            plugin_type: "jwt_auth".into(),
+            id: "jwt_auth".into(),
             phase: "pre_route".into(),
             priority: Some(10),
             config: serde_json::json!({ "issuer": "https://auth.internal" }),
         };
         available.insert(
-            "jwt-1".to_string(),
+            "jwt_auth".to_string(),
             (instantiate_plugin(&cfg_jwt).unwrap(), Some(10)),
         );
 
         let cfg_ip = PluginConfig {
-            id: "ip-1".into(),
-            plugin_type: "ip_filter".into(),
+            id: "ip_filter".into(),
             phase: "pre_route".into(),
             priority: Some(100),
-            config: serde_json::json!({ "mode": "allow", "ips": ["127.0.0.1"] }),
+            config: serde_json::json!({ "mode": "allow", "allow_cidrs": ["127.0.0.1/32"] }),
         };
         available.insert(
-            "ip-1".to_string(),
+            "ip_filter".to_string(),
             (instantiate_plugin(&cfg_ip).unwrap(), Some(100)),
         );
 
         let cfg_cors = PluginConfig {
-            id: "cors-1".into(),
-            plugin_type: "cors".into(),
+            id: "cors".into(),
             phase: "post_response".into(),
             priority: None,
             config: serde_json::json!({ "allow_origin": "*" }),
         };
         available.insert(
-            "cors-1".to_string(),
+            "cors".to_string(),
             (instantiate_plugin(&cfg_cors).unwrap(), None),
         );
 
-        // Declaration order: jwt-1 (priority 10), then ip-1 (priority 100), then cors-1 (post_response)
+        // Declaration order: jwt_auth (priority 10), then ip_filter (priority 100), then cors (post_response)
         let route_plugins = vec![
-            "jwt-1".to_string(),
-            "ip-1".to_string(),
-            "cors-1".to_string(),
+            "jwt_auth".to_string(),
+            "ip_filter".to_string(),
+            "cors".to_string(),
         ];
 
         let plan = build_route_plugin_plan(
@@ -331,14 +326,14 @@ mod tests {
         )
         .expect("Should build plan");
 
-        // pre_route hooks should be ordered by priority: ip-1 (100) first, then jwt-1 (10)
+        // pre_route hooks should be ordered by priority: ip_filter (100) first, then jwt_auth (10)
         assert_eq!(plan.pre_route_hooks.len(), 2);
-        assert_eq!(plan.pre_route_hooks[0].id(), "ip-1");
-        assert_eq!(plan.pre_route_hooks[1].id(), "jwt-1");
+        assert_eq!(plan.pre_route_hooks[0].id(), "ip_filter");
+        assert_eq!(plan.pre_route_hooks[1].id(), "jwt_auth");
 
         // post_response hooks
         assert_eq!(plan.post_response_hooks.len(), 1);
-        assert_eq!(plan.post_response_hooks[0].id(), "cors-1");
+        assert_eq!(plan.post_response_hooks[0].id(), "cors");
 
         // Zero-copy streaming active because payload access is None!
         assert!(plan.is_request_payload_passthrough());
@@ -366,19 +361,18 @@ mod tests {
         let mut available = FxHashMap::default();
 
         let cfg_cors = PluginConfig {
-            id: "cors-1".into(),
-            plugin_type: "cors".into(),
+            id: "cors".into(),
             phase: "post_response".into(),
             priority: None,
             config: serde_json::json!({ "allow_origin": "*" }),
         };
         available.insert(
-            "cors-1".to_string(),
+            "cors".to_string(),
             (instantiate_plugin(&cfg_cors).unwrap(), None),
         );
 
         // Attempting to attach HTTP-only CORS plugin to gRPC route!
-        let route_plugins = vec!["cors-1".to_string()];
+        let route_plugins = vec!["cors".to_string()];
 
         let res = build_route_plugin_plan(
             "route-grpc-test",
@@ -394,7 +388,7 @@ mod tests {
                 route_protocol,
                 ..
             }) => {
-                assert_eq!(plugin_id, "cors-1");
+                assert_eq!(plugin_id, "cors");
                 assert_eq!(route_protocol, ProtocolFamily::Grpc);
             }
             _ => panic!("Expected ProtocolMismatch error"),

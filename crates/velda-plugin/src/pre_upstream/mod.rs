@@ -16,7 +16,10 @@ pub mod header_mutation;
 pub mod rate_limit;
 
 pub use header_mutation::HeaderMutationPlugin;
-pub use rate_limit::RateLimitPlugin;
+pub use rate_limit::{
+    FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
+    RateLimitPlugin, TlsSource,
+};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -64,11 +67,11 @@ pub fn run_pre_upstream_plugins(
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
-    match config.plugin_type.as_str() {
+    match config.id.as_str() {
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
-            "Unsupported pre_upstream plugin type '{other}' for plugin '{}'",
+            "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
         ))),
     }

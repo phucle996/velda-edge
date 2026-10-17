@@ -61,13 +61,30 @@ pub struct PluginsFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginConfig {
     pub id: String,
-    #[serde(rename = "type")]
-    pub plugin_type: String,
+    #[serde(default)]
     pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
     #[serde(default)]
     pub priority: Option<i32>,
     #[serde(with = "json_value_bincode")]
     pub config: serde_json::Value,
+}
+
+/// Returns the canonical execution phase for a known plugin identifier.
+pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
+    match id {
+        "jwt_auth" => Some("pre_route"),
+        "ip_filter" => Some("pre_route"),
+        "resource_limit" => Some("pre_route"),
+        "waf" => Some("pre_route"),
+        "rate_limit" => Some("pre_upstream"),
+        "header_mutation" => Some("pre_upstream"),
+        "security_headers" => Some("post_response"),
+        "cors" => Some("post_response"),
+        "access_log" => Some("post_response"),
+        "prometheus_exporter" => Some("background"),
+        "health_probe" => Some("background"),
+        _ => None,
+    }
 }
 
 mod json_value_bincode {
@@ -146,7 +163,6 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
 
     for plugin in plugins {
         trim_in_place(&mut plugin.id);
-        trim_in_place(&mut plugin.plugin_type);
         trim_in_place(&mut plugin.phase);
         plugin.phase.make_ascii_lowercase();
 
@@ -166,12 +182,11 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
             });
         }
 
-        // Fail fast: empty plugin type
-        if plugin.plugin_type.is_empty() {
-            return Err(SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!("Plugin '{}' must specify a type", plugin.id),
-            });
+        // Auto-infer empty phase from canonical phase mapping
+        if plugin.phase.is_empty()
+            && let Some(canonical) = canonical_phase_for_id(&plugin.id)
+        {
+            plugin.phase = canonical.to_string();
         }
 
         let is_valid_phase = matches!(
@@ -189,16 +204,13 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
             });
         }
 
-        // Modular semantic validation dispatched per plugin type
-        match plugin.plugin_type.as_str() {
+        // Modular semantic validation dispatched per plugin ID
+        match plugin.id.as_str() {
             "prometheus_exporter" => {
                 if plugin.phase != "background" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' of type 'prometheus_exporter' must specify phase 'background'",
-                            plugin.id
-                        ),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
                     });
                 }
 
@@ -361,8 +373,7 @@ mod tests {
             "schema_version": 1,
             "plugins": [
                 {
-                    "id": " jwt-auth ",
-                    "type": "jwt",
+                    "id": " jwt_auth ",
                     "phase": "PRE_ROUTE",
                     "config": { "issuer": "auth.example.com" }
                 }
@@ -372,15 +383,14 @@ mod tests {
         let mut plugins = parse_plugins(json.as_bytes()).unwrap();
         assert_eq!(plugins.len(), 1);
         validate_plugins(&mut plugins).unwrap();
-        assert_eq!(plugins[0].id, "jwt-auth");
+        assert_eq!(plugins[0].id, "jwt_auth");
         assert_eq!(plugins[0].phase, "pre_route");
     }
 
     #[test]
     fn test_invalid_phase_fails() {
         let mut plugins = vec![PluginConfig {
-            id: "p1".into(),
-            plugin_type: "rate_limit".into(),
+            id: "rate_limit".into(),
             phase: "invalid_phase".into(),
             priority: None,
             config: serde_json::json!({}),
@@ -396,8 +406,7 @@ mod tests {
     fn test_plugin_binary_roundtrip() {
         let tmp = tempdir().unwrap();
         let plugins = vec![PluginConfig {
-            id: "jwt-auth".into(),
-            plugin_type: "jwt".into(),
+            id: "jwt_auth".into(),
             phase: "pre_route".into(),
             priority: Some(100),
             config: serde_json::json!({ "issuer": "auth.example.com", "max_age": 3600 }),
@@ -424,8 +433,7 @@ mod tests {
             "schema_version": 1,
             "plugins": [
                 {
-                    "id": "metrics-exp",
-                    "type": "prometheus_exporter",
+                    "id": "prometheus_exporter",
                     "phase": "background",
                     "priority": 50,
                     "config": {
@@ -462,8 +470,7 @@ mod tests {
     #[test]
     fn test_prometheus_exporter_must_be_background() {
         let mut plugins = vec![PluginConfig {
-            id: "prom-1".into(),
-            plugin_type: "prometheus_exporter".into(),
+            id: "prometheus_exporter".into(),
             phase: "pre_route".into(),
             priority: None,
             config: serde_json::json!({

@@ -62,11 +62,11 @@ pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Requ
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
-    match config.plugin_type.as_str() {
-        "jwt_auth" | "jwt" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
+    match config.id.as_str() {
+        "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
-            "Unsupported pre_route plugin type '{other}' for plugin '{}'",
+            "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
         ))),
     }

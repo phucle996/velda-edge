@@ -189,28 +189,28 @@ pub use api_key::ApiKeyAuthPlugin;
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
-    match config.plugin_type.as_str() {
-        "jwt_auth" | "jwt" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
+    match config.id.as_str() {
+        "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
         // Add your plugin here:
-        "api_key" | "api_key_auth" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),
+        "api_key" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
-            "Unsupported pre_route plugin type '{other}' for plugin '{}'",
+            "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
         ))),
     }
 }
 ```
 
-### 2. Register Canonical Phase in Factory
-Open [`crates/velda-plugin/src/factory.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs#L60) and add your type string to [`canonical_phase_for_type`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs#L60):
+### 2. Register Canonical Phase in velda-sync
+Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/mod.rs) and add your id string to [`canonical_phase_for_id`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/mod.rs):
 
 ```rust
-pub fn canonical_phase_for_type(plugin_type: &str) -> Option<&'static str> {
-    match plugin_type {
-        "jwt_auth" | "jwt" | "ip_filter" | "api_key" | "api_key_auth" => Some("pre_route"),
+pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
+    match id {
+        "jwt_auth" | "ip_filter" | "resource_limit" | "waf" | "api_key" => Some("pre_route"),
         "rate_limit" | "header_mutation" => Some("pre_upstream"),
-        "security_headers" | "cors" => Some("post_response"),
+        "security_headers" | "cors" | "access_log" => Some("post_response"),
         "health_probe" | "prometheus_exporter" => Some("background"),
         _ => None,
     }
@@ -268,8 +268,7 @@ mod tests {
     #[test]
     fn test_api_key_from_config() {
         let config = PluginConfig {
-            id: "api-key-test".into(),
-            plugin_type: "api_key".into(),
+            id: "api_key".into(),
             phase: "pre_route".into(),
             priority: Some(500),
             config: json!({
@@ -279,7 +278,7 @@ mod tests {
         };
 
         let plugin = ApiKeyAuthPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "api-key-test");
+        assert_eq!(plugin.id, "api_key");
         assert_eq!(plugin.header_name, HeaderName::from_static("x-custom-key"));
         assert!(plugin.valid_keys.contains("key-alpha"));
     }
