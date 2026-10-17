@@ -27,10 +27,10 @@ Choose the earliest phase that satisfies your plugin's requirements:
 
 | Phase | Trait | Location | When to Use |
 | :--- | :--- | :--- | :--- |
-| **`pre_route`** | [`PreRoutePlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/mod.rs#L23) | `src/pre_route/` | Authentication, IP firewalls, WAF header checks, DDoS filtering. Fails fast **before** route trie matching and body reading. |
-| **`pre_upstream`** | [`PreUpstreamPlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/mod.rs#L22) | `src/pre_upstream/` | Request header mutations, backend authentication token injection, local token bucket rate limiting. Runs **after** the target upstream pool/endpoint is chosen. |
-| **`post_response`** | [`PostResponsePlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/mod.rs#L22) | `src/post_response/` | Security response headers (HSTS, CSP), CORS response headers, response header scrubbing. Mutates [`L7Response`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/l7/response.rs) in place. |
-| **`background`** | [`BackgroundPlugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/mod.rs#L25) | `src/background/` | Long-lived auxiliary services (telemetry exporters, health probes). Runs strictly on dedicated Auxiliary Cores. |
+| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `src/pre_route/` | Authentication, IP firewalls, WAF header checks, DDoS filtering. Fails fast **before** route trie matching and body reading. |
+| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `src/pre_upstream/` | Request header mutations, backend authentication token injection, local token bucket rate limiting. Runs **after** the target upstream pool/endpoint is chosen. |
+| **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `src/post_response/` | Security response headers (HSTS, CSP), CORS response headers, response header scrubbing. Mutates [`L7Response`](../velda-core/src/l7/response.rs) in place. |
+| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `src/background/` | Long-lived auxiliary services (telemetry exporters, health probes). Runs strictly on dedicated Auxiliary Cores. |
 
 ---
 
@@ -169,7 +169,7 @@ impl PreRoutePlugin for ApiKeyAuthPlugin {
 }
 ```
 
-### Understanding Authority Contracts ([`Action`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/lifecycle.rs))
+### Understanding Authority Contracts ([`Action`](../velda-core/src/lifecycle.rs))
 
 * **`Action::Continue`**: Allows the pipeline to proceed to the next plugin or route matching.
 * **`Action::Respond(response)`**: Short-circuits immediately. The request body is not read, upstream connections are not leased, and `response` is serialized directly downstream.
@@ -180,7 +180,7 @@ impl PreRoutePlugin for ApiKeyAuthPlugin {
 ## 5. Step 4: Register in the Phase Sub-Dispatcher
 
 ### 1. Export in Phase Module
-Open the `mod.rs` of your selected phase (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/mod.rs)):
+Open the `mod.rs` of your selected phase (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](src/pre_route/mod.rs)):
 
 ```rust
 pub mod api_key;
@@ -203,7 +203,7 @@ pub fn instantiate(
 ```
 
 ### 2. Register Canonical Phase in velda-sync
-Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/mod.rs) and add your id string to [`canonical_phase_for_id`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/mod.rs):
+Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](../velda-sync/src/post_sync/plugin/mod.rs) and add your id string to [`canonical_phase_for_id`](../velda-sync/src/post_sync/plugin/mod.rs):
 
 ```rust
 pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
@@ -218,7 +218,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
 ```
 
 > [!TIP]
-> Notice that you **do not** touch [`instantiate_plugin`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs#L85) or [`build_route_plugin_plan`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/factory.rs#L120). The factory is open for extension but closed for modification.
+> Notice that you **do not** touch [`instantiate_plugin`](src/factory.rs) or [`build_route_plugin_plan`](src/factory.rs). The factory is open for extension but closed for modification.
 
 ---
 

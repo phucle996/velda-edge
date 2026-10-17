@@ -1,85 +1,11 @@
-//! ============================================================================
-//! VELDA EDGE PLUGIN MANIFEST & HUMAN SPECIFICATION
-//! ============================================================================
+//! Security Response Headers Plugin (`security_headers`).
 //!
-//! - **PLUGIN NAME**: `SECURITY_HEADERS`
-//! - **CANONICAL PHASE**: `POST_RESPONSE`
-//! - **EXECUTION ORDER**: STABLY SORTED DESCENDING BY ROUTE PRIORITY (DEFAULT: STANDARD POST-RESPONSE ORDER)
-//! - **REVERSE CAPABILITIES**: HEADER-ONLY WRITE (`PluginCapability::header_only(AccessLevel::Write)`)
-//! - **SUPPORTED PROTOCOLS**: `ALL_HTTP` (`SupportedProtocols::ALL_HTTP`: HTTP/1.1, HTTP/2, HTTP/3)
+//! Evaluated during `post_response` phase immediately before encoding downstream frames.
+//! Injects pre-computed browser hardening headers (HSTS, nosniff, X-Frame-Options,
+//! Referrer-Policy, CSP, Permissions-Policy) with zero heap allocations on the hot path.
 //!
-//! ----------------------------------------------------------------------------
-//! ### 1. PURPOSE & WHAT IT PROTECTS ("Phục vụ cái gì?")
-//! ----------------------------------------------------------------------------
-//! Enforces client-side browser hardening and OWASP L7 hygiene on outgoing HTTP responses.
-//! This plugin instructs user-agents (browsers) to activate internal sandbox defenses against
-//! standard client-side attack vectors:
-//!
-//! 1. **Strict-Transport-Security (HSTS - RFC 6797)**:
-//!    Forces browsers to communicate strictly over HTTPS for a defined duration, permanently
-//!    neutralizing SSL-Stripping Man-In-The-Middle (MITM) downgrade attacks.
-//! 2. **X-Content-Type-Options (RFC 7231 / MIME Sniffing Standard)**:
-//!    Sets `nosniff`, disabling browser MIME-type guessing. Prevents drive-by download and
-//!    MIME-confusion attacks where malicious scripts are disguised as benign assets (e.g. image files).
-//! 3. **X-Frame-Options (RFC 7034)**:
-//!    Enforces `DENY` or `SAMEORIGIN` to forbid or restrict embedding within `<iframe>` tags,
-//!    neutralizing UI Redressing and Clickjacking exploits.
-//! 4. **Referrer-Policy (W3C Specification)**:
-//!    Enforces `strict-origin-when-cross-origin` (or custom policy) to prevent query parameters,
-//!    session IDs, or PII tokens from leaking to external domains via the HTTP `Referer` header.
-//! 5. **Content-Security-Policy (CSP - W3C Level 3)**:
-//!    Optionally declares authorized domains for scripts, styles, images, and child frames,
-//!    mitigating Cross-Site Scripting (XSS) and covert data exfiltration.
-//! 6. **Permissions-Policy (W3C Specification)**:
-//!    Optionally restricts unneeded browser hardware capabilities (camera, microphone, geolocation).
-//!
-//! ----------------------------------------------------------------------------
-//! ### 2. WHAT IS OUT OF SCOPE ("KHÔNG phục vụ cái gì? Ranh giới cấm")
-//! ----------------------------------------------------------------------------
-//! - **DOES NOT protect backend servers**: It does not inspect payloads, block SQL Injection,
-//!   prevent Remote Code Execution (RCE), or absorb L7 DDoS floods.
-//! - **DOES NOT handle CORS**: Cross-Origin Resource Sharing is owned exclusively by the `cors`
-//!   plugin, which manages Preflight `OPTIONS` and dynamic Origin reflection.
-//! - **DOES NOT perform arbitrary header transformations**: Dynamic variable substitutions
-//!   (`$request_id`, `$upstream_addr`) are owned strictly by the `header_mutation` plugin.
-//! - **DOES NOT buffer or inspect response payloads**: Purely operates on response headers,
-//!   preserving zero-alloc streaming pipe invariants across all HTTP protocols.
-//!
-//! ----------------------------------------------------------------------------
-//! ### 3. ARCHITECTURAL & HOT-PATH INVARIANTS ("Notes & Performance Contracts")
-//! ----------------------------------------------------------------------------
-//! - **Zero-Allocation Hot Path**:
-//!   All `HeaderName` and `HeaderValue` pairs are pre-computed, pre-formatted, and validated
-//!   once during initialization (`from_config`). Serving a response executes a tight contiguous
-//!   iteration cloning `HeaderValue` (O(1) atomic ref-count increment on internal `Bytes`,
-//!   strictly **0 heap allocations** on the request hot path).
-//! - **Granular Toggles**:
-//!   Every single security header can be enabled, customized, or disabled individually,
-//!   ensuring applications requiring iframe embedding or custom staging configs are never broken.
-//!
-//! ----------------------------------------------------------------------------
-//! ### 4. CONFIGURATION SCHEMA EXAMPLE
-//! ----------------------------------------------------------------------------
-//! ```json
-//! {
-//!   "id": "security_headers",
-//!   "priority": 100,
-//!   "config": {
-//!     "hsts": {
-//!       "enable": true,
-//!       "max_age_secs": 31536000,
-//!       "include_subdomains": true,
-//!       "preload": false
-//!     },
-//!     "frame_options": "DENY",
-//!     "content_type_nosniff": true,
-//!     "referrer_policy": "strict-origin-when-cross-origin",
-//!     "csp": "default-src 'self'",
-//!     "permissions_policy": "camera=(), microphone=(), geolocation=()"
-//!   }
-//! }
-//! ```
-//! ============================================================================
+//! Full schema specification, allowed values, and configuration examples:
+//! See [`README.md`](./README.md).
 
 use http::header::{
     HeaderName, HeaderValue, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,

@@ -177,7 +177,7 @@ impl RedisConnectionPool {
 
                     // 2. Perform batched pipeline execution to Redis
                     if !batch.is_empty() {
-                        // In production with enterprise Redis driver, execute MULTI/EXEC or EVALSHA here.
+                        // In production with Redis driver, execute MULTI/EXEC or EVALSHA here.
                         // On connection error: mark is_connected = false, trigger exponential backoff.
                         tracing::trace!(
                             target: "velda::plugin::rate_limit::redis",

@@ -1,4 +1,4 @@
-//! Enterprise Rate Limiting Pre-Upstream Subsystem.
+//! Rate Limiting Pre-Upstream Subsystem.
 //!
 //! Provides multi-algorithm traffic shaping, distributed Redis synchronization via
 //! auxiliary cores, flexible key resolution strategies, and zero-allocation hot paths.

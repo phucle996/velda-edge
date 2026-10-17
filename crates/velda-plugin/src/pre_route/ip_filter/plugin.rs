@@ -1,73 +1,11 @@
-//! ============================================================================
-//! VELDA EDGE PLUGIN MANIFEST & HUMAN SPECIFICATION
-//! ============================================================================
+//! IP / CIDR Subnet Access Filter Plugin (`ip_filter`).
 //!
-//! - **PLUGIN NAME**: `IP_FILTER`
-//! - **CANONICAL PHASE**: `PRE_ROUTE`
-//! - **EXECUTION ORDER**: STABLY SORTED DESCENDING BY ROUTE PRIORITY (FAIL-FAST GATEKEEPER)
-//! - **REVERSE CAPABILITIES**: HEADER-ONLY READ (`PluginCapability::header_only(AccessLevel::Read)`)
-//! - **SUPPORTED PROTOCOLS**: `ALL_L7` (`SupportedProtocols::ALL_L7`: HTTP/1.1, HTTP/2, HTTP/3, gRPC)
+//! Evaluated during `pre_route` phase prior to routing trie lookups and body streaming.
+//! Enforces zero-allocation bitmask CIDR matching on IPv4/IPv6 addresses with allow/deny modes
+//! and exception precedence.
 //!
-//! ----------------------------------------------------------------------------
-//! ### 1. PURPOSE & WHAT IT PROTECTS ("Phục vụ cái gì?")
-//! ----------------------------------------------------------------------------
-//! Acts as an L7 edge gatekeeper enforcing IP address and CIDR subnet access control
-//! before route lookup, body streaming, or upstream leasing.
-//!
-//! 1. **Fail-Fast Access Control**:
-//!    Rejects unauthorized clients immediately with 403 Forbidden, saving 100% of CPU cycles
-//!    that would otherwise be wasted on routing trie lookups, body streaming, or upstream pool leases.
-//! 2. **CIDR Subnet Filtering (IPv4 & IPv6)**:
-//!    Supports both single IP addresses (`192.168.1.50`, `::1`) and broad network prefixes
-//!    (`10.0.0.0/8`, `172.16.0.0/12`, `2001:db8::/32`) using zero-allocation bitmask math.
-//! 3. **Operational Mode Switching (AllowList vs DenyList)**:
-//!    - `AllowList` (Whitelist): Only authorized networks can access; all others are rejected.
-//!    - `DenyList` (Blacklist): Specific malicious or abusive networks are blocked; all others pass.
-//! 4. **Exception Handling & Incident Lockdown**:
-//!    Allows maintaining both `allow_cidrs` and `deny_cidrs` simultaneously.
-//!    Deny rules take precedence over allow rules (e.g. allow entire VPC `10.0.0.0/8` except compromised host `10.0.5.99`).
-//!
-//! ----------------------------------------------------------------------------
-//! ### 2. WHAT IS OUT OF SCOPE ("KHÔNG phục vụ cái gì? Ranh giới cấm")
-//! ----------------------------------------------------------------------------
-//! - **DOES NOT inspect or mutate request headers/body**: Operates purely on client IP detection.
-//! - **DOES NOT perform cryptographic token validation**: Token/Subject authentication is owned by `jwt_auth`.
-//! - **DOES NOT enforce traffic rate pacing**: Request pacing and burst limiting is owned by `rate_limit`.
-//! - **DOES NOT manage L4 TCP firewalling**: L4 raw socket drops belong to kernel/iptables/eBPF;
-//!   this plugin operates at L7 HTTP/gRPC ingress.
-//!
-//! ----------------------------------------------------------------------------
-//! ### 3. ARCHITECTURAL & HOT-PATH INVARIANTS ("Notes & Performance Contracts")
-//! ----------------------------------------------------------------------------
-//! - **Zero-Allocation Hot Path**:
-//!   All CIDR strings are parsed, normalized, and pre-compiled at configuration time into
-//!   strongly-typed [`IpNetwork`] structures with pre-calculated integer bitmasks (`u32` for IPv4,
-//!   `u128` for IPv6). Matching on hot path executes in single-digit nanoseconds using pure bitwise operations
-//!   (`(ip_bits & mask) == net_bits`), performing strictly **0 heap allocations**.
-//! - **Strict "none" Sentinel Value**:
-//!   In JSON configuration, any unused list must be explicitly declared as `"none"`
-//!   (e.g. `"deny_cidrs": "none"`).
-//!
-//! ----------------------------------------------------------------------------
-//! ### 4. CONFIGURATION SCHEMA EXAMPLE
-//! ----------------------------------------------------------------------------
-//! ```json
-//! {
-//!   "id": "ip_filter",
-//!   "priority": 100,
-//!   "config": {
-//!     "mode": "allow",
-//!     "allow_cidrs": [
-//!       "10.0.0.0/8",
-//!       "192.168.1.0/24",
-//!       "2001:db8::/32"
-//!     ],
-//!     "deny_cidrs": "none",
-//!     "client_ip_source": "x_forwarded_for"
-//!   }
-//! }
-//! ```
-//! ============================================================================
+//! Full schema specification, allowed values, and configuration examples:
+//! See [`README.md`](./README.md).
 
 use std::net::IpAddr;
 

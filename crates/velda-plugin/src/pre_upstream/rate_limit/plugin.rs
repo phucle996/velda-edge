@@ -1,42 +1,11 @@
-//! ============================================================================
-//! PLUGIN MANIFEST & CONTRACT
-//! ============================================================================
-//! PLUGIN NAME:           ENTERPRISE RATE LIMITER
-//! CANONICAL PHASE:       PRE_UPSTREAM
-//! EXECUTION ORDER:       EVALUATED AFTER ROUTING & ENDPOINT SELECTION,
-//!                        IMMEDIATELY PRIOR TO UPSTREAM CONNECTION LEASING
-//! REVERSE CAPABILITIES:  HEADER READ (CLIENT IP / KEY HEADERS),
-//!                        RESPONSE GENERATION (ACTION::RESPOND 429 TOO MANY REQUESTS)
-//! SUPPORTED PROTOCOLS:   ALL_L7 (HTTP/1.1, HTTP/2, HTTP/3, GRPC)
+//! Rate Limit Plugin (`rate_limit`).
 //!
-//! PURPOSE:
-//! High-throughput request pacing and traffic shaping engine with multi-algorithm
-//! support (Token Bucket, Sliding Window, Fixed Window), dual-backend architecture
-//! (In-Memory Sharded Lock-Free State + Redis Cluster Synchronization via Auxiliary
-//! Background Workers), flexible key resolution strategies (Priority Fallback vs
-//! Composite Multi-Dimensional), and resilient failover behaviors.
+//! Evaluated during `pre_upstream` phase immediately before leasing backend connections.
+//! Provides lock-striped in-memory token bucket / sliding window rate limiting (~15ns hot path)
+//! with optional asynchronous Redis cluster batching.
 //!
-//! WHAT IT PROTECTS:
-//! Protects upstream backend services, connection pools, and edge proxy hardware
-//! against DDoS amplification, brute-force credential stuffing, API scraping,
-//! and runaway upstream saturation.
-//!
-//! OUT OF SCOPE:
-//! - IP Subnet CIDR Filtering (Strictly owned by `ip_filter` in `pre_route`).
-//! - L7 Path/Host Routing (Owned by `velda-router`).
-//! - Cryptographic TLS Handshakes (Owned by `velda-tls`).
-//!
-//! ARCHITECTURAL INVARIANTS:
-//! - Zero Network I/O on Serving Hot-Path: `on_upstream_request` runs 100% in-memory.
-//! - Auxiliary Execution: Redis synchronization and batch flushing execute exclusively
-//!   on background auxiliary supervisor runtimes / pinned auxiliary cores (`velda_core::hardware::partition`).
-//! - Explicit Sentinel Standard: Unused or omitted JSON configuration fields MUST be
-//!   explicitly set to `"none"`.
-//! - Resilient Failover: Automatic fallback to local in-memory pacing on Redis outage.
-//! - Batching & Pipelining: High-frequency request increments are aggregated and flushed
-//!   in atomic batches to prevent Redis connection storms.
-//!
-//! ============================================================================
+//! Full schema specification, allowed values, and configuration examples:
+//! See [`README.md`](./README.md).
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
@@ -142,7 +111,7 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// Production implementation of the Enterprise Rate Limiter Pre-Upstream plugin.
+/// Production implementation of the Rate Limiter Pre-Upstream plugin.
 pub struct RateLimitPlugin {
     pub id: String,
     pub config: RateLimitConfig,

@@ -126,5 +126,5 @@ Empirical simulation of four real-world deployment profiles with O(1) topology v
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Profile A: Edge Micro-Gateway** | 2 Cores, 2GB RAM (IoT/Branch) | 5 | 2 | **~512 KB** | **130,185,618 ops/s** | **7.68 ns** | Fits in L1/L2 cache; zero swap; ~512 KB RAM per upstream |
 | **Profile B: Standard Edge Ingress** | 8 Cores, 16GB RAM (Cloud VM/K8s) | 25 | 8 | **~512 KB** | **371,788,444 ops/s** | **2.69 ns** | Shared L3 cache; near-linear scaling; zero memory pressure |
-| **Profile C: Enterprise High-Throughput** | 32 Cores, 64GB RAM (Bare-Metal) | 100 | 32 | **~512 KB** | **477,087,926 ops/s** | **2.10 ns** | Multi-socket L3 cache; high parallel connection reuse |
+| **Profile C: Large-Scale High-Throughput** | 32 Cores, 64GB RAM (Bare-Metal) | 100 | 32 | **~512 KB** | **477,087,926 ops/s** | **2.10 ns** | Multi-socket L3 cache; high parallel connection reuse |
 | **Profile D: Hyperscale Core Gateway** | 128 Cores, 256GB RAM (Datacenter) | 500 | 128 | **~512 KB** | **432,475,183 ops/s** | **2.31 ns** | Cross-NUMA node atomic reads; ArcSwap avoids bus locking |

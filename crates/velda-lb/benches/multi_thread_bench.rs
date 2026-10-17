@@ -259,7 +259,7 @@ fn bench_simulated_hardware_profiles() {
             arch_note: "Shared L3 cache; near-linear scaling; no memory pressure",
         },
         HardwareSpec {
-            name: "Profile C: Enterprise High-Throughput",
+            name: "Profile C: Large-Scale High-Throughput",
             spec: "32 Cores, 64GB RAM (Bare-Metal)",
             backends: 100,
             workers: 32,
