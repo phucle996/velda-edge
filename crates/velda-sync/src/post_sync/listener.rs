@@ -76,6 +76,10 @@ pub struct Http1ListenerConfig {
     pub header_read_timeout_ms: Option<u64>,
     #[serde(default)]
     pub client_body_buffer_size: Option<usize>,
+    #[serde(default)]
+    pub initial_buffer_capacity: Option<usize>,
+    #[serde(default)]
+    pub shrink_threshold: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

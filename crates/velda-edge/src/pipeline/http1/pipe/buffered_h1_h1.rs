@@ -10,15 +10,13 @@
 
 use std::sync::Arc;
 
-use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use velda_core::Body;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
-    Http1ServerRequestHead, Http1ServerResponse, read_response_head, sanitize_headers,
-    send_request,
+    Http1ServerRequestHead, Http1ServerResponse, encode_response_head, is_connection_close,
+    read_response_head, sanitize_headers, send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -120,7 +118,7 @@ where
 
         match exchange_attempt.await {
             Ok(head_and_framing) => head_and_framing,
-            Err(e) if upstream_lease.is_reused() && e.is_stale_connection() => {
+            Err(e) if upstream_lease.is_reused && e.is_stale_connection() => {
                 upstream_lease.mark_closed();
                 drop(upstream_lease);
 
@@ -197,51 +195,86 @@ where
         || resp_head.status == http::StatusCode::NO_CONTENT
         || resp_head.status == http::StatusCode::NOT_MODIFIED;
 
-    let body = if is_head || is_no_body_status {
-        Body::Empty
-    } else {
-        match resp_framing {
-            Http1BodyFraming::Empty => Body::Empty,
-            Http1BodyFraming::ContentLength(len) => {
-                if len > cfg.max_body_size {
-                    upstream_lease.mark_closed();
-                    return Err(Http1Error::PayloadTooLarge(len));
-                }
-                if conn.upstream_read_buf.len() < len {
-                    let needed = len - conn.upstream_read_buf.len();
-                    conn.upstream_read_buf.reserve(needed);
-                    while conn.upstream_read_buf.len() < len {
-                        let n = upstream_lease.read_buf(&mut conn.upstream_read_buf).await?;
-                        if n == 0 {
-                            upstream_lease.mark_closed();
-                            return Err(Http1Error::Parse(
-                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                            ));
-                        }
+    let body_len = match resp_framing {
+        Http1BodyFraming::Empty => 0,
+        Http1BodyFraming::ContentLength(len) => {
+            if len > cfg.max_body_size {
+                upstream_lease.mark_closed();
+                return Err(Http1Error::PayloadTooLarge(len));
+            }
+            if conn.upstream_read_buf.len() < len {
+                let needed = len - conn.upstream_read_buf.len();
+                conn.upstream_read_buf.reserve(needed);
+                while conn.upstream_read_buf.len() < len {
+                    let n = upstream_lease.read_buf(&mut conn.upstream_read_buf).await?;
+                    if n == 0 {
+                        upstream_lease.mark_closed();
+                        return Err(Http1Error::Parse(
+                            "Unexpected EOF while reading upstream response body: premature connection close".into(),
+                        ));
                     }
-                }
-                if len <= 4096 {
-                    let body_bytes = bytes::Bytes::copy_from_slice(&conn.upstream_read_buf[..len]);
-                    conn.upstream_read_buf.advance(len);
-                    if conn.upstream_read_buf.is_empty() {
-                        conn.upstream_read_buf.clear();
-                    }
-                    Body::Bytes(body_bytes)
-                } else {
-                    Body::Bytes(conn.upstream_read_buf.split_to(len).freeze())
                 }
             }
-            Http1BodyFraming::Chunked => unreachable!(),
+            len
         }
+        Http1BodyFraming::Chunked => unreachable!(),
     };
 
-    // 8. Send response downstream (align response version with downstream request)
+    // 8. Align response version with downstream request
     if req.version == http::Version::HTTP_10 {
         resp_head.version = http::Version::HTTP_10;
     }
-    let resp =
-        Http1ServerResponse::new(resp_head.status, resp_head.version, resp_head.headers, body);
-    conn.send_response(&resp).await?;
+
+    let is_no_body = is_head || is_no_body_status;
+    let actual_body_len = if is_no_body { 0 } else { body_len };
+    let force_close = conn.is_closed() || is_connection_close(&resp_head.headers);
+
+    // 9. Encode response head into downstream write_buf
+    conn.write_buf.clear();
+    encode_response_head(
+        resp_head.version,
+        resp_head.status,
+        &resp_head.headers,
+        Some(actual_body_len),
+        force_close,
+        &mut conn.write_buf,
+    );
+
+    // 10. DROP UPSTREAM LEASE IMMEDIATELY before starting downstream transmission!
+    // Returning the connection to the pool early eliminates pool starvation under high concurrency.
+    drop(upstream_lease);
+
+    // 11. Zero-Copy Vectored Write downstream (writev)
+    // Directly transmits headers (conn.write_buf) and body (conn.upstream_read_buf) without
+    // any intermediate memcpy or buffer reallocation on the hot path.
+    if !is_no_body && body_len > 0 {
+        let mut b1 = &conn.write_buf[..];
+        let mut b2 = &conn.upstream_read_buf[..body_len];
+        while !b1.is_empty() || !b2.is_empty() {
+            let bufs = [std::io::IoSlice::new(b1), std::io::IoSlice::new(b2)];
+            let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
+            let n = conn.stream.write_vectored(bufs_slice).await?;
+            if n == 0 {
+                return Err(Http1Error::ConnectionClosed);
+            }
+            if n < b1.len() {
+                b1 = &b1[n..];
+            } else {
+                let rem = n - b1.len();
+                b1 = &[];
+                b2 = &b2[rem..];
+            }
+        }
+        conn.upstream_read_buf.clear();
+    } else {
+        conn.upstream_read_buf.clear();
+        conn.stream.write_all(&conn.write_buf).await?;
+    }
+    conn.write_buf.clear();
+
+    if force_close {
+        conn.mark_close();
+    }
 
     Ok(())
 }

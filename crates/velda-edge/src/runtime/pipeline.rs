@@ -378,6 +378,12 @@ fn resolve_http1_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
         if let Some(v) = h1.client_body_buffer_size {
             config.client_body_buffer_size = v;
         }
+        if let Some(v) = h1.initial_buffer_capacity {
+            config.initial_buffer_capacity = v;
+        }
+        if let Some(v) = h1.shrink_threshold {
+            config.shrink_threshold = v;
+        }
     }
     config
 }

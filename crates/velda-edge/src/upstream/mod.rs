@@ -22,3 +22,4 @@ pub use http::{Http1Upstream, Http2Upstream, Http3Upstream, UpstreamHttp1Stream}
 pub use lb::{EdgeUpstream, LbAlgorithm};
 pub use raw::{TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream};
 pub use table::{GrpcUpstream, HttpUpstream, RawUpstream, SubUpstreamTable, UpstreamTable};
+pub use velda_upstream::AdaptiveConcurrencyGate;

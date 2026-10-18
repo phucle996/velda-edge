@@ -35,6 +35,7 @@ struct BenchmarkResult {
     status_5xx: usize,
     errors: usize,
     success_rate: f64,
+    duration_s: f64,
 }
 
 struct ParsedUrl {
@@ -71,6 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut urls: Vec<String> = Vec::new();
     let mut total_requests: usize = 50_000;
+    let mut requests_explicit = false;
+    let mut duration_secs: Option<u64> = None;
     let mut concurrency: usize = 100;
     let mut timeout_secs: u64 = 10;
     let mut json_output = false;
@@ -85,9 +88,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 1;
                 }
             }
+            "-i" | "--input-file" => {
+                if i + 1 < args.len() {
+                    let file_content = std::fs::read_to_string(&args[i + 1])?;
+                    for line in file_content.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                            urls.push(trimmed.to_string());
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "-D" | "--duration" => {
+                if i + 1 < args.len() {
+                    let raw = args[i + 1].trim_end_matches('s').trim_end_matches('S');
+                    duration_secs = Some(raw.parse()?);
+                    i += 1;
+                }
+            }
             "-n" | "--requests" => {
                 if i + 1 < args.len() {
                     total_requests = args[i + 1].parse()?;
+                    requests_explicit = true;
                     i += 1;
                 }
             }
@@ -118,6 +141,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
         i += 1;
+    }
+
+    if duration_secs.is_some() && !requests_explicit {
+        total_requests = usize::MAX;
     }
 
     if urls.is_empty() {
@@ -166,7 +193,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let eff_host = effective_host.clone();
 
         let task = tokio::spawn(async move {
-            let mut latencies: Vec<f64> = Vec::with_capacity(total_requests / concurrency + 64);
+            let cap = if total_requests == usize::MAX {
+                50_000
+            } else {
+                total_requests / concurrency + 64
+            };
+            let mut latencies: Vec<f64> = Vec::with_capacity(cap);
             let mut bytes_transferred: usize = 0;
             let mut status_2xx: usize = 0;
             let mut status_4xx: usize = 0;
@@ -174,8 +206,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut errors: usize = 0;
 
             let mut client_idx = worker_id % clients.len();
+            let duration_limit = duration_secs.map(std::time::Duration::from_secs);
 
             loop {
+                if let Some(dur) = duration_limit
+                    && bench_start.elapsed() >= dur
+                {
+                    break;
+                }
                 let req_idx = counter.fetch_add(1, Ordering::Relaxed);
                 if req_idx >= total_requests {
                     break;
@@ -269,7 +307,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tasks.push(task);
     }
 
-    let mut all_latencies: Vec<f64> = Vec::with_capacity(total_requests);
+    let cap_all = if total_requests == usize::MAX {
+        250_000
+    } else {
+        total_requests
+    };
+    let mut all_latencies: Vec<f64> = Vec::with_capacity(cap_all);
     let mut total_bytes: usize = 0;
     let mut total_2xx: usize = 0;
     let mut total_4xx: usize = 0;
@@ -294,6 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let elapsed = bench_start.elapsed();
     let succeeded = all_latencies.len();
+    let total_executed = succeeded + total_errors;
     let rps = if elapsed.as_secs_f64() > 0.0 {
         succeeded as f64 / elapsed.as_secs_f64()
     } else {
@@ -351,8 +395,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         0.0
     };
 
-    let success_rate = if total_requests > 0 {
-        round2(100.0 * succeeded as f64 / total_requests as f64)
+    let success_rate = if total_executed > 0 {
+        round2(100.0 * succeeded as f64 / total_executed as f64)
     } else {
         100.0
     };
@@ -370,13 +414,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         p999_ms: round2(p999_ms),
         ttfb_ms: round2(mean_ms),
         connect_ms: round2(connect_time_ms),
-        total_req: total_requests,
+        total_req: total_executed,
         succeeded,
         status_2xx: total_2xx,
         status_4xx: total_4xx,
         status_5xx: total_5xx,
         errors: total_errors,
         success_rate,
+        duration_s: round2(elapsed.as_secs_f64()),
     };
 
     if json_output {

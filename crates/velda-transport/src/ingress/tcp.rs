@@ -113,6 +113,13 @@ impl TcpIngress {
         Ok(conn.with_listener_id(Arc::clone(&self.listener_id)))
     }
 
+    /// Attempts to accept an incoming connection from the first shard without waiting.
+    pub fn try_accept(&self) -> Result<Option<Connection>> {
+        self.listeners[0]
+            .try_accept()
+            .map(|opt| opt.map(|conn| conn.with_listener_id(Arc::clone(&self.listener_id))))
+    }
+
     /// Spawns an ingress accept loop for each listener shard on the provided `JoinSet`.
     pub fn spawn_accept_loop<H, Fut>(
         ingress: Arc<Self>,
@@ -183,6 +190,41 @@ impl TcpIngress {
                         "TCP ingress accepted connection"
                     );
                     tokio::spawn(handler(conn.with_listener_id(Arc::clone(&listener_id))));
+
+                    // Multi-accept drain loop: drain up to 32 pending connections immediately
+                    // from kernel backlog without re-registering epoll interest
+                    let mut batch = 0;
+                    while batch < 32 {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                        match ingress.listeners[shard_idx].try_accept() {
+                            Ok(Some(conn)) => {
+                                batch += 1;
+                                tracing::debug!(
+                                    listener_id = %listener_id,
+                                    conn_id = %conn.id(),
+                                    shard = shard_idx,
+                                    peer = %conn.peer(),
+                                    batch,
+                                    "TCP ingress batch-accepted connection"
+                                );
+                                tokio::spawn(handler(
+                                    conn.with_listener_id(Arc::clone(&listener_id)),
+                                ));
+                            }
+                            Ok(None) => break, // kernel backlog drained
+                            Err(err) => {
+                                tracing::warn!(
+                                    listener_id = %listener_id,
+                                    shard = shard_idx,
+                                    error = %err,
+                                    "TCP try_accept error during batch drain"
+                                );
+                                break;
+                            }
+                        }
+                    }
                 }
                 Ok(None) => {
                     tracing::info!(

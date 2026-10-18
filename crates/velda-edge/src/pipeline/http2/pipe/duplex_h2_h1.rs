@@ -68,7 +68,11 @@ pub async fn serve(
         }
     };
 
-    let mut write_buf = bytes::BytesMut::with_capacity(1024);
+    let (upstream_stream, read_buf, write_buf) = lease.split_all();
+    write_buf.clear();
+    if write_buf.capacity() < 1024 {
+        write_buf.reserve(1024 - write_buf.capacity());
+    }
 
     // 5. Send HTTP/1.1 request head
     velda_http1::client::encode_request_head(
@@ -76,10 +80,10 @@ pub async fn serve(
         &head.uri,
         &head.headers,
         None,
-        &mut write_buf,
+        write_buf,
     );
 
-    if let Err(e) = lease.write_all(&write_buf).await {
+    if let Err(e) = upstream_stream.write_all(write_buf).await {
         lease.mark_closed();
         tracing::warn!(error = %e, upstream = %upstream.id(), "Failed to send duplex request head");
         let err_resp = L7Response::from_bytes(
@@ -91,7 +95,7 @@ pub async fn serve(
     }
 
     // 6. Split HTTP/1.1 stream into read and write halves for concurrent duplex execution
-    let (mut read_half, mut write_half) = tokio::io::split(&mut *lease);
+    let (mut read_half, mut write_half) = tokio::io::split(upstream_stream);
 
     // Upload task: pipes downstream H2 DATA frames into upstream H1 chunked encoding
     let coalesce_limit = upstream.config.client_body_buffer_size;
@@ -126,15 +130,11 @@ pub async fn serve(
 
     // Download task: reads upstream H1 response and streams H2 DATA frames downstream
     let download_fut = async {
-        let read_cap = upstream.config.client_body_buffer_size;
-        let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
-        let (resp_head, framing) = velda_http1::client::read_response_head(
-            &mut read_half,
-            &mut read_buf,
-            &upstream.config,
-        )
-        .await
-        .map_err(std::io::Error::other)?;
+        read_buf.clear();
+        let (resp_head, framing) =
+            velda_http1::client::read_response_head(&mut read_half, read_buf, &upstream.config)
+                .await
+                .map_err(std::io::Error::other)?;
 
         let mut clean_headers = resp_head.headers;
         velda_http1::client::sanitize_headers(&mut clean_headers);
@@ -146,7 +146,7 @@ pub async fn serve(
         match framing {
             Http1BodyFraming::Empty => {}
             Http1BodyFraming::Chunked => loop {
-                match velda_http1::client::read_next_chunk(&mut read_half, &mut read_buf).await {
+                match velda_http1::client::read_next_chunk(&mut read_half, read_buf).await {
                     Ok(Some(chunk)) => {
                         stream_sender
                             .send_chunk(chunk)
@@ -164,12 +164,8 @@ pub async fn serve(
                 let chunk_limit = upstream.config.client_body_buffer_size;
                 while remaining > 0 {
                     let to_read = remaining.min(chunk_limit);
-                    match velda_http1::client::read_chunk_sized(
-                        &mut read_half,
-                        &mut read_buf,
-                        to_read,
-                    )
-                    .await
+                    match velda_http1::client::read_chunk_sized(&mut read_half, read_buf, to_read)
+                        .await
                     {
                         Ok(Some(chunk)) => {
                             remaining = remaining.saturating_sub(chunk.len());

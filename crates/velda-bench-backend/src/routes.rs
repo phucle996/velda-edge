@@ -31,6 +31,14 @@ static PAYLOAD_12KB: LazyLock<Bytes> = LazyLock::new(|| {
 static PAYLOAD_1MB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0xAA; 1024 * 1024]));
 static CHUNK_64KB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0x55; 64 * 1024]));
 static CHUNK_8KB: LazyLock<Bytes> = LazyLock::new(|| Bytes::from(vec![0x77; 8 * 1024]));
+static DYNAMIC_BUFFER: LazyLock<Bytes> = LazyLock::new(|| {
+    let mut data = Vec::with_capacity(2 * 1024 * 1024);
+    while data.len() < 2 * 1024 * 1024 {
+        data.extend_from_slice(b"{\"id\":12345,\"status\":\"active\",\"data\":\"abcdefghijklmnopqrstuvwxyz0123456789\"}\n");
+    }
+    data.truncate(2 * 1024 * 1024);
+    Bytes::from(data)
+});
 
 fn full_body(b: Bytes) -> RespBody {
     Full::new(b).map_err(|e| match e {}).boxed()
@@ -38,8 +46,41 @@ fn full_body(b: Bytes) -> RespBody {
 
 /// Routes an incoming request to one of the 8 canonical routes based on pipe and TLS mode.
 pub async fn dispatch(req: Request<Incoming>, is_tls: bool) -> Response<RespBody> {
-    let path = req.uri().path();
+    let uri = req.uri();
+    let path = uri.path();
     let method = req.method().clone();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DYNAMIC CONTINUOUS SLICE: /bytes/<N> or ?bytes=<N> (1B to 2MB)
+    // Zero allocation, instant O(1) RAM slicing for continuous random production simulation
+    // ─────────────────────────────────────────────────────────────────────────
+    let mut dynamic_bytes: Option<usize> = None;
+    if let Some(query) = uri.query() {
+        for part in query.split('&') {
+            if let Some(val) = part.strip_prefix("bytes=")
+                && let Ok(n) = val.parse::<usize>()
+            {
+                dynamic_bytes = Some(n.clamp(1, 2 * 1024 * 1024));
+                break;
+            }
+        }
+    }
+    if dynamic_bytes.is_none()
+        && let Some(pos) = path.find("/bytes/")
+    {
+        let sub = &path[pos + 7..];
+        let num_str = sub.split('/').next().unwrap_or(sub);
+        if let Ok(n) = num_str.parse::<usize>() {
+            dynamic_bytes = Some(n.clamp(1, 2 * 1024 * 1024));
+        }
+    }
+    if let Some(n) = dynamic_bytes {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(full_body(DYNAMIC_BUFFER.slice(..n)))
+            .unwrap();
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // PIPE 3: ClientStream (Upload) — Plain & TLS

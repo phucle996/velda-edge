@@ -2160,6 +2160,7 @@ dependencies = [
  "http",
  "httparse",
  "rcgen",
+ "ring",
  "rustc-hash",
  "rustls",
  "serde",

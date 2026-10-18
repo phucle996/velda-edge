@@ -126,7 +126,7 @@ To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factor
 
 | Plugin Name | Phase | Default Protocols | Description |
 | :--- | :---: | :---: | :--- |
-| [`jwt_auth`](src/pre_route/jwt_auth.rs) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Bearer token validation, subject extraction into `x-authenticated-user`. |
+| [`jwt_auth`](src/pre_upstream/jwt_auth/) | `pre_upstream` | HTTP/1.1, HTTP/2, HTTP/3 | Route-scoped JWT validation, dual caching, flexible claim extraction. |
 | [`ip_filter`](src/pre_route/ip_filter/) | `pre_route` | All Protocols (L4/L7) | Client IP allowlist / denylist filtering with `X-Forwarded-For` support. |
 | [`rate_limit`](src/pre_upstream/rate_limit/) | `pre_upstream` | All Protocols | In-memory token bucket rate limiting with `Retry-After` header generation. |
 | [`header_mutation`](src/pre_upstream/header_mutation.rs) | `pre_upstream` | All L7 | Sets or strips HTTP headers before upstream backend forwarding. |

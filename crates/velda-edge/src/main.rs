@@ -11,9 +11,9 @@ use velda_edge::{EdgeConfig, EdgeSupervisor, HardwareTopology, resolve_runtime_p
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// High-performance Datacenter Jemalloc profile (Cloudflare Pingora-aligned):
+// High-performance Datacenter Jemalloc profile:
 // - background_thread:true: Purges dirty pages in dedicated background thread, eliminating latency spikes on worker threads.
-// - dirty_decay_ms / muzzy_decay_ms: 30000ms: Retains active page arenas across request bursts without issuing frequent kernel madvise syscalls.
+// - dirty_decay_ms / muzzy_decay_ms: 1000ms: Rapidly returns deallocated pages to OS kernel after load bursts.
 // - percpu_arena:percpu: Binds memory arenas strictly to physical CPU cores, eliminating cross-core cache invalidation.
 // - abort_conf:true: Fails fast on misconfigured allocator flags.
 #[cfg(all(
@@ -23,7 +23,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ))]
 #[unsafe(export_name = "malloc_conf")]
 pub static MALLOC_CONF: &[u8] =
-    b"background_thread:true,dirty_decay_ms:30000,muzzy_decay_ms:30000,percpu_arena:percpu,abort_conf:true\0";
+    b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000,percpu_arena:percpu,abort_conf:true\0";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check CLI arguments first before runtime bootstrap

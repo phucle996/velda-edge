@@ -17,6 +17,9 @@ use super::response::Http2Responder;
 use crate::config::Http2Config;
 use crate::error::Http2Error;
 
+/// Incoming HTTP/2 streaming request tuple: request head, stream receiver, and dedicated responder.
+pub type Http2StreamingParts = (Http2ServerRequestHead, Http2StreamReceiver, Http2Responder);
+
 /// Control Frame Flood Tracker (Anti-DoS Heuristic for HTTP/2).
 ///
 /// Tracks total bytes read from transport against actual payload bytes received
@@ -248,6 +251,53 @@ where
     ) -> Result<Option<(L7Request, Http2Responder)>, Http2Error> {
         let opt = self.accept_h2_request().await?;
         Ok(opt.map(|(req, responder)| (req.into_l7_request(), responder)))
+    }
+
+    /// Opportunistically attempts to accept the next multiplexed request stream without parking the task
+    /// if stream frames are already buffered in the H2 state machine.
+    ///
+    /// Returns:
+    /// - `Some(Ok(Some(head, receiver, responder)))` if an incoming stream was ready immediately.
+    /// - `Some(Ok(None))` if the remote peer closed the connection (EOF).
+    /// - `None` if no stream is currently pending (would park / `Poll::Pending`).
+    /// - `Some(Err(e))` if an H2 framing error or flood was detected.
+    pub fn try_accept_streaming_request(
+        &mut self,
+    ) -> Option<Result<Option<Http2StreamingParts>, Http2Error>> {
+        if self.flood_tracker.is_flood_detected() {
+            return Some(Err(Http2Error::FloodDetected));
+        }
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match self.connection.poll_accept(&mut cx) {
+            std::task::Poll::Ready(Some(Ok((request, respond)))) => {
+                let stream_id = respond.stream_id();
+                let (parts, body_stream) = request.into_parts();
+                let head = Http2ServerRequestHead::new(
+                    parts.method,
+                    parts.uri,
+                    parts.headers,
+                    Some(stream_id),
+                );
+                self.flood_tracker
+                    .on_payload_read(head.estimated_header_bytes());
+
+                let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
+                    .with_flood_tracker(Arc::clone(&self.flood_tracker));
+                let responder =
+                    Http2Responder::new(respond).with_alt_svc(self.config.alt_svc_header_value());
+
+                Some(Ok(Some((head, receiver, responder))))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                if self.flood_tracker.is_flood_detected() {
+                    return Some(Err(Http2Error::FloodDetected));
+                }
+                Some(Err(Http2Error::from(e)))
+            }
+            std::task::Poll::Ready(None) => Some(Ok(None)),
+            std::task::Poll::Pending => None,
+        }
     }
 
     /// Accepts the next multiplexed request stream as an incoming head, progressive stream receiver,

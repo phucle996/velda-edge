@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "ip_filter",
+      "config": {
+        "mode": "allow",
+        "allow_cidrs": [
+          "10.0.0.0/8",
+          "192.168.1.0/24",
+          "2001:db8::/32"
+        ],
+        "deny_cidrs": [],
+        "client_ip_source": "x_forwarded_for"
+      }
+    },
+    {
+      "id": "resource_limit",
+      "config": {
+        "max_body_size_bytes": 10485760,
+        "max_concurrent_requests": 10000
+      }
+    },
+    {
+      "id": "waf",
+      "config": {
+        "mode": "block",
+        "ruleset": "owasp_core"
+      }
+    },
+    {
+      "id": "jwt_auth",
+      "config": {
+        "algorithm": "RS256",
+        "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0YpE3u9jN6x7zQjRzW4V\n+Q2g3Z7tK5vL8mNp4rQ5s6t7u8v9w0x1y2z3A4B5C6D7E8F9G0H1I2J3K4L5M6N7\nO8P9Q0R1S2T3U4V5W6X7Y8Z9a0b1c2d3e4f5g6h7i8j9k0l1m2n3o4p5q6r7s8t9\nu0v1w2x3y4z5A6B7C8D9E0F1G2H3I4J5K6L7M8N9O0P1Q2R3S4T5U6V7W8X9Y0Z\n1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7A8B9C0D1E2F\n3G4H5I6J7K8L9M0N1O2P3Q==\n-----END PUBLIC KEY-----\n",
+        "token_sources": [
+          {
+            "type": "header",
+            "name": "authorization",
+            "prefix": "Bearer "
+          },
+          {
+            "type": "cookie",
+            "name": "access_token"
+          }
+        ],
+        "validate_exp": true,
+        "clock_skew_secs": 60,
+        "issuer": "https://identity.internal.net",
+        "audience": "api.velda.io",
+        "claims_to_headers": {
+          "sub": "x-user-id",
+          "email": "x-user-email",
+          "roles": "x-user-roles"
+        },
+        "assert_claims": {
+          "iss": "https://identity.internal.net"
+        },
+        "cache_shards": 64,
+        "cache_shard_capacity": 2048,
+        "cache_ttl_secs": 300,
+        "negative_cache_ttl_secs": 10
+      }
+    },
+    {
+      "id": "rate_limit",
+      "config": {
+        "algorithm": "token_bucket",
+        "backend": "memory",
+        "rate_per_second": 1000,
+        "burst_capacity": 2000,
+        "key_strategy": "priority",
+        "key_headers": [
+          "x-api-key",
+          "x-user-id",
+          "client_ip"
+        ],
+        "fallback_behavior": "memory"
+      }
+    },
+    {
+      "id": "header_mutation",
+      "config": {
+        "set_headers": {
+          "x-gateway-proxy": "velda-edge",
+          "x-forwarded-proto": "https"
+        },
+        "remove_headers": [
+          "x-powered-by",
+          "server"
+        ]
+      }
+    },
+    {
+      "id": "security_headers",
+      "config": {
+        "hsts": {
+          "enable": true,
+          "max_age_secs": 31536000,
+          "include_subdomains": true,
+          "preload": false
+        },
+        "frame_options": "DENY",
+        "content_type_nosniff": true,
+        "referrer_policy": "strict-origin-when-cross-origin"
+      }
+    },
+    {
+      "id": "cors",
+      "config": {
+        "allow_origins": [
+          "https://app.velda.io",
+          "https://console.velda.io"
+        ],
+        "allow_methods": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "OPTIONS"
+        ],
+        "allow_headers": [
+          "authorization",
+          "content-type",
+          "x-requested-with",
+          "x-api-key"
+        ],
+        "expose_headers": [
+          "x-request-id"
+        ],
+        "allow_credentials": true,
+        "max_age_secs": 86400
+      }
+    },
+    {
+      "id": "access_log",
+      "config": {
+        "include_request_id": true,
+        "include_route_id": true,
+        "include_upstream": true,
+        "include_latency": true
+      }
+    },
+    {
+      "id": "prometheus_exporter",
+      "config": {
+        "listen": "0.0.0.0:9090",
+        "path": "/metrics",
+        "protocol": "http",
+        "scrape": {
+          "timeout_ms": 5000,
+          "max_concurrency": 16,
+          "max_buffer_size_kb": 256
+        },
+        "tls": {
+          "mode": "none"
+        },
+        "cors": {
+          "enabled": false
+        },
+        "auth": {
+          "mode": "none"
+        }
+      }
+    }
+  ]
+}

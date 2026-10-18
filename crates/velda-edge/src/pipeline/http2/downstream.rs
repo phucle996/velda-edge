@@ -112,8 +112,11 @@ pub async fn run_http2_loop<IO>(
 
     match Http2ServerConnection::handshake(stream, config).await {
         Ok(mut conn) => loop {
-            let accept_result =
-                tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await;
+            let accept_result = if let Some(res) = conn.try_accept_streaming_request() {
+                Ok(res)
+            } else {
+                tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await
+            };
             match accept_result {
                 Ok(Ok(Some((mut head, receiver, mut responder)))) => {
                     requests_served = requests_served.saturating_add(1);

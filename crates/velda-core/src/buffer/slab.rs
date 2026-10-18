@@ -127,6 +127,16 @@ pub struct PayloadSlabPool {
     idle_ttl: Duration,
 }
 
+impl std::fmt::Debug for PayloadSlabPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PayloadSlabPool")
+            .field("active_small", &self.active_small.load(Ordering::Relaxed))
+            .field("active_medium", &self.active_medium.load(Ordering::Relaxed))
+            .field("active_large", &self.active_large.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 impl PayloadSlabPool {
     /// Creates and eagerly warms up all slab classes with default 3x burst ceilings and 15s TTL.
     pub fn new(small_baseline: usize, medium_baseline: usize, large_baseline: usize) -> Arc<Self> {

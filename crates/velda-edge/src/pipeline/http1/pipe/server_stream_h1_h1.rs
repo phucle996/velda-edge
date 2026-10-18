@@ -130,7 +130,7 @@ where
 
         match exchange_attempt.await {
             Ok(head_and_framing) => head_and_framing,
-            Err(e) if upstream_lease.is_reused() && e.is_stale_connection() => {
+            Err(e) if upstream_lease.is_reused && e.is_stale_connection() => {
                 upstream_lease.mark_closed();
                 drop(upstream_lease);
 
@@ -289,8 +289,10 @@ where
 
             let available = conn.upstream_read_buf.len().min(total_len);
             if available == total_len {
-                // [FAST-PATH]: Entire response body is already present in memory!
-                // Coalesce Head + Chunk + Terminator (0\r\n\r\n) into a single socket write syscall!
+                // [FAST-PATH]: Entire response body is already present in memory.
+                // Drop upstream lease immediately before downstream socket write to avoid pool starvation.
+                drop(upstream_lease);
+
                 let body_slice = if total_len > 0 {
                     Some(&conn.upstream_read_buf[..total_len])
                 } else {
@@ -310,6 +312,9 @@ where
                 }
                 if total_len > 0 {
                     conn.upstream_read_buf.advance(total_len);
+                    if conn.upstream_read_buf.is_empty() {
+                        conn.upstream_read_buf.clear();
+                    }
                 }
                 return Ok(());
             }
@@ -318,13 +323,17 @@ where
             conn.send_response_head_chunked(&server_head).await?;
 
             if available > 0 {
-                let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
-                if let Err(e) = send_chunk(&mut conn.stream, &first_chunk).await {
+                let first_chunk = &conn.upstream_read_buf[..available];
+                if let Err(e) = send_chunk(&mut conn.stream, first_chunk).await {
                     tracing::debug!(
                         error = %e,
                         "Downstream client disconnected while writing initial chunk"
                     );
                     client_disconnected = true;
+                }
+                conn.upstream_read_buf.advance(available);
+                if conn.upstream_read_buf.is_empty() {
+                    conn.upstream_read_buf.clear();
                 }
             }
 
@@ -408,7 +417,11 @@ where
                 conn.upstream_read_buf.advance(total_wire);
 
                 if is_terminated {
-                    // Entire micro-SSE response was emitted in a single atomic socket write syscall!
+                    // Entire response was emitted in a single atomic socket write syscall.
+                    drop(upstream_lease);
+                    if conn.upstream_read_buf.is_empty() {
+                        conn.upstream_read_buf.clear();
+                    }
                     return Ok(());
                 }
 
@@ -452,6 +465,11 @@ where
     if client_disconnected {
         upstream_lease.mark_closed();
         return Err(Http1Error::ConnectionClosed);
+    }
+
+    drop(upstream_lease);
+    if conn.upstream_read_buf.is_empty() {
+        conn.upstream_read_buf.clear();
     }
 
     send_chunked_end(&mut conn.stream).await?;

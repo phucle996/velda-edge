@@ -150,7 +150,7 @@ async fn forward_buffered(
     };
 
     let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
-    responder.send_response(&resp)?;
+    responder.send_response_owned(resp)?;
 
     Ok(())
 }

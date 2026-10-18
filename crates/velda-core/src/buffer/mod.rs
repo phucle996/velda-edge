@@ -51,6 +51,7 @@ pub struct AdaptivePoolConfig {
 }
 
 /// Combined core-local buffer pool containing pre-warmed headers and payload slabs.
+#[derive(Clone, Debug)]
 pub struct CoreBufferPool {
     pub core_id: usize,
     pub headers: Arc<HeaderPool>,
@@ -108,8 +109,15 @@ impl CoreBufferPool {
 }
 
 /// Sharded collection of core-local buffer pools partitioned across available traffic worker cores.
+#[derive(Clone, Debug)]
 pub struct ShardedBufferPool {
     pools: Arc<[CoreBufferPool]>,
+}
+
+impl Default for ShardedBufferPool {
+    fn default() -> Self {
+        Self::new(1, 64, 32, 16, 16, 16)
+    }
 }
 
 impl ShardedBufferPool {

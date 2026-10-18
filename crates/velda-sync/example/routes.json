@@ -13,13 +13,16 @@
         "downstream_idle_ms": 60000
       },
       "upstream": "users",
-      "plugins": [
-        "jwt_auth",
-        "resource_limit",
-        "rate_limit",
-        "security_headers",
-        "access_log"
-      ]
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth",
+          "rate_limit"
+        ],
+        "post_response": [
+          "security_headers",
+          "access_log"
+        ]
+      }
     },
     {
       "id": "events",
@@ -33,11 +36,14 @@
         "downstream_idle_ms": 900000
       },
       "upstream": "events",
-      "plugins": [
-        "jwt_auth",
-        "resource_limit",
-        "access_log"
-      ]
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
     },
     {
       "id": "grpc-users",
@@ -51,11 +57,14 @@
         "downstream_idle_ms": 300000
       },
       "upstream": "grpc-users",
-      "plugins": [
-        "jwt_auth",
-        "resource_limit",
-        "access_log"
-      ]
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
     },
     {
       "id": "websocket",
@@ -69,11 +78,14 @@
         "downstream_idle_ms": 1800000
       },
       "upstream": "realtime",
-      "plugins": [
-        "jwt_auth",
-        "resource_limit",
-        "access_log"
-      ]
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
     },
     {
       "id": "tcp-stream",
@@ -86,10 +98,12 @@
         "downstream_idle_ms": 300000
       },
       "upstream": "tcp-backend",
-      "plugins": [
-        "resource_limit",
-        "access_log"
-      ]
+      "plugins": {
+        "pre_upstream": [],
+        "post_response": [
+          "access_log"
+        ]
+      }
     }
   ]
 }

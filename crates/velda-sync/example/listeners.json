@@ -15,7 +15,6 @@
         "enabled": false
       },
       "http1": {
-        "_comment_max_body_size": "NOTE: Enforced strictly for Buffered strategy. Streaming strategies scale dynamically with constant memory footprint.",
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
@@ -39,8 +38,10 @@
       "tls": {
         "enabled": true
       },
+      "pre_route": [
+        "ip_filter"
+      ],
       "http1": {
-        "_comment_max_body_size": "NOTE: Enforced strictly for Buffered strategy. Streaming strategies scale dynamically with constant memory footprint.",
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
@@ -49,7 +50,6 @@
         "header_read_timeout_ms": 10000
       },
       "http2": {
-        "_comment_max_body_size": "NOTE: Enforced strictly for Buffered strategy. Streaming strategies scale dynamically with constant memory footprint.",
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,
@@ -101,7 +101,6 @@
         "enabled": true
       },
       "http3": {
-        "_comment_max_body_size": "NOTE: Enforced strictly for Buffered strategy. Streaming strategies scale dynamically with constant memory footprint.",
         "max_body_size": 10485760,
         "max_header_size": 65536,
         "max_headers": 64,

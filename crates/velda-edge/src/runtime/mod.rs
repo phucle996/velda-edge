@@ -83,6 +83,8 @@ pub struct Runtime {
     pub tls_client: Option<TlsClientEngine>,
     /// Thread-safe resource saturation and overload circuit breaker.
     pub overload: Arc<OverloadTracker>,
+    /// Pre-warmed sharded user-space buffer and object pool for zero-allocation serving.
+    pub buffer_pool: Arc<velda_core::ShardedBufferPool>,
 }
 
 /// Thread-safe, lock-free container for the active [`Runtime`] snapshot.

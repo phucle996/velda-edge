@@ -145,10 +145,10 @@ impl HardwareSizing {
     ///   datagram bursts are absorbed without dropped frames.
     ///
     /// ### 9. HTTP/2 & gRPC Flow Control Windows
-    /// - **Stream Window**: `((memory_bytes / (1024 * 1024 * 1024)) * 256 * 1024).clamp(65_535, 4 * 1024 * 1024) as u32`
-    /// - **Connection Window**: `((memory_bytes / (1024 * 1024 * 1024)) * 1024 * 1024).clamp(1_048_576, 16 * 1024 * 1024) as u32`
-    /// - **Rationale**: RFC 9113 baseline (65,535 bytes) is inadequate for 1MB+ payloads over high-latency WAN.
-    ///   Scaling smoothly up to 4MB stream and 16MB connection windows eliminates WINDOW_UPDATE round-trip stalling.
+    /// - **Stream Window**: Clamped to 65,535 bytes (RFC 9113 baseline) to eliminate per-stream buffer waste.
+    /// - **Connection Window**: `((memory_bytes / (1024 * 1024 * 1024)) * 256 * 1024).clamp(1_048_576, 2 * 1024 * 1024) as u32`
+    /// - **Rationale**: Bounding connection window to 1-2MB and stream window to RFC baseline absorbs WAN bursts
+    ///   while preventing hundreds of concurrent streams from allocating hundreds of MBs in internal ring buffers.
     ///
     /// ### 10. TLS Session Cache
     /// - **Formula**: `((memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536)`
@@ -348,23 +348,14 @@ impl HardwareSizing {
         };
 
         // 6. L7 HTTP/2 parameters
-        let h2_initial_stream_window_size = {
-            let val = (ram_gb * 256 * KB) as u32;
-            if val < 65535 {
-                65535
-            } else if val > 4 * MB as u32 {
-                4 * MB as u32
-            } else {
-                val
-            }
-        };
+        let h2_initial_stream_window_size = 65535;
 
         let h2_initial_connection_window_size = {
-            let val = (ram_gb * MB) as u32;
+            let val = (ram_gb * 256 * KB) as u32;
             if val < MB as u32 {
                 MB as u32
-            } else if val > 16 * MB as u32 {
-                16 * MB as u32
+            } else if val > 2 * MB as u32 {
+                2 * MB as u32
             } else {
                 val
             }

@@ -66,7 +66,7 @@ async fn test_end_to_end_manifest_sync_composition() {
     let upstreams_bytes = fs::read(&upstreams_bin).unwrap();
     let (u_header, u_list) = upstream::unpack_upstreams_from_binary(&upstreams_bytes).unwrap();
     assert_eq!(u_header.revision, 42);
-    assert_eq!(u_list.len(), 5);
+    assert_eq!(u_list.len(), 6);
 
     // Listeners
     let listeners_bin = storage_dir.path().join("runtime/listeners.bin");
@@ -82,7 +82,7 @@ async fn test_end_to_end_manifest_sync_composition() {
     let plugins_bytes = fs::read(&plugins_bin).unwrap();
     let (p_header, p_list) = plugin::unpack_plugins_from_binary(&plugins_bytes).unwrap();
     assert_eq!(p_header.revision, 42);
-    assert_eq!(p_list.len(), 7);
+    assert_eq!(p_list.len(), 10);
 
     // TLS
     let tls_bin = storage_dir.path().join("runtime/tls.bin");

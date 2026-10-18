@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "upstreams": [
+    {
+      "id": "users",
+      "mode": "dns",
+      "protocol": {
+        "transport": "tcp",
+        "application": "http1",
+        "streaming": []
+      },
+      "target": {
+        "host": "users.default.svc.cluster.local",
+        "port": 8080
+      },
+      "resolver": {
+        "mode": "custom",
+        "nameservers": [
+          "10.96.0.10:53"
+        ],
+        "timeout_ms": 200,
+        "retries": 2
+      },
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 5000,
+        "idle_ms": 30000
+      },
+      "pool": {
+        "concurrency_shards": 2,
+        "max_idle_per_key": 32,
+        "idle_timeout_ms": 30000,
+        "max_lifetime_ms": 1800000
+      },
+      "health_check": {
+        "passive": {
+          "enabled": true,
+          "max_consecutive_failures": 3,
+          "cooldown_ms": 10000
+        },
+        "active": {
+          "enabled": true,
+          "interval_ms": 5000,
+          "timeout_ms": 1000,
+          "unhealthy_threshold": 3,
+          "healthy_threshold": 2,
+          "check_type": "http",
+          "path": "/healthz",
+          "expected_statuses": [
+            200,
+            204
+          ]
+        }
+      }
+    },
+    {
+      "id": "events",
+      "mode": "dns",
+      "protocol": {
+        "transport": "tcp",
+        "application": "http1",
+        "streaming": [
+          "server"
+        ]
+      },
+      "target": {
+        "host": "events.default.svc.cluster.local",
+        "port": 8080
+      },
+      "resolver": {
+        "mode": "system",
+        "timeout_ms": 500,
+        "retries": 1
+      },
+      "load_balancer": {
+        "algorithm": "least_connections"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 900000,
+        "idle_ms": 900000
+      },
+      "pool": {
+        "concurrency_shards": 2,
+        "max_idle_per_key": 64,
+        "idle_timeout_ms": 60000,
+        "max_lifetime_ms": 3600000
+      }
+    },
+    {
+      "id": "grpc-users",
+      "mode": "endpoints",
+      "protocol": {
+        "transport": "tcp",
+        "application": "grpc",
+        "streaming": [
+          "client",
+          "server"
+        ]
+      },
+      "endpoints": [
+        {
+          "address": "10.0.1.10:50051",
+          "weight": 100
+        },
+        {
+          "address": "10.0.1.11:50051",
+          "weight": 100
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 300,
+        "request_ms": 300000,
+        "idle_ms": 60000
+      },
+      "pool": {
+        "concurrency_shards": 4,
+        "max_idle_per_key": 16,
+        "max_concurrent_streams": 256,
+        "idle_timeout_ms": 30000,
+        "max_lifetime_ms": 1800000
+      }
+    },
+    {
+      "id": "realtime",
+      "mode": "endpoints",
+      "protocol": {
+        "transport": "tcp",
+        "application": "http1",
+        "streaming": [
+          "client",
+          "server"
+        ]
+      },
+      "endpoints": [
+        {
+          "address": "10.0.2.10:8080",
+          "weight": 100
+        },
+        {
+          "address": "10.0.2.11:8080",
+          "weight": 100
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "ip_hash"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 1800000,
+        "idle_ms": 1800000
+      },
+      "pool": {
+        "concurrency_shards": 2,
+        "max_idle_per_key": 16,
+        "idle_timeout_ms": 30000,
+        "max_lifetime_ms": 1800000
+      }
+    },
+    {
+      "id": "tcp-backend",
+      "mode": "endpoints",
+      "protocol": {
+        "transport": "tcp",
+        "application": "raw",
+        "streaming": []
+      },
+      "endpoints": [
+        {
+          "address": "10.0.3.10:9000",
+          "weight": 100
+        },
+        {
+          "address": "10.0.3.11:9000",
+          "weight": 50
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "weighted_round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 300000,
+        "idle_ms": 300000
+      },
+      "pool": {
+        "concurrency_shards": 2,
+        "max_idle_per_key": 32,
+        "idle_timeout_ms": 60000,
+        "max_lifetime_ms": 1800000
+      }
+    },
+    {
+      "id": "secure-api",
+      "mode": "endpoints",
+      "protocol": {
+        "transport": "tcp",
+        "application": "http2",
+        "streaming": []
+      },
+      "endpoints": [
+        {
+          "address": "10.0.4.10:8443",
+          "weight": 100
+        }
+      ],
+      "load_balancer": {
+        "algorithm": "round_robin"
+      },
+      "timeouts": {
+        "connect_ms": 500,
+        "request_ms": 5000,
+        "idle_ms": 30000
+      },
+      "tls": {
+        "ca_pem": "-----BEGIN CERTIFICATE-----\nMIIBZjCCAQygAwIBAgIUFMPUbJepgolcK6Y7Nlrt+VXx+ccwCgYIKoZIzj0EAwIw\nITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWduZWQgY2VydDAgFw03NTAxMDEwMDAw\nMDBaGA80MDk2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWcmNnZW4gc2VsZiBzaWdu\nZWQgY2VydDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJq7zcW+Brn4pkSTwb5p\ntNMlzZzdftKe2pzJKdmuIWVtb/5H5IXpD0OFmcXwosJAfPQvL1aOSm3MBRgZ00pE\nz7ujIDAeMBwGA1UdEQQVMBOCEWFkbWluLWNhLmludGVybmFsMAoGCCqGSM49BAMC\nA0gAMEUCIQDhyyelwXxvKj+keCJT+MV+FHha3UQMAetqO3myl7n9NwIgRYPLOTwp\ngVAo4D48o1cu+jYjKW/RGOCwXGrgDOULB7s=\n-----END CERTIFICATE-----\n",
+        "client_cert_pem": null,
+        "client_key_pem": null,
+        "versions": [
+          "tls1.2",
+          "tls1.3"
+        ],
+        "alpn": [
+          "h2"
+        ],
+        "insecure_skip_verify": false
+      },
+      "pool": {
+        "concurrency_shards": 2,
+        "max_idle_per_key": 32,
+        "max_concurrent_streams": 256,
+        "idle_timeout_ms": 30000,
+        "max_lifetime_ms": 1800000
+      }
+    }
+  ]
+}

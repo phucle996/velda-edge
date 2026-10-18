@@ -184,6 +184,7 @@ pub fn generate_realistic_workload(
             health_check: None,
             tls: None,
             pool: None,
+            buffer: None,
         });
     }
 

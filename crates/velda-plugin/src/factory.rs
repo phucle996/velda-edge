@@ -244,13 +244,13 @@ mod tests {
     fn test_instantiate_plugins() {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_route".into(),
+            phase: "pre_upstream".into(),
             priority: Some(100),
-            config: serde_json::json!({ "issuer": "https://auth.internal" }),
+            config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
         };
         let p1 = instantiate_plugin(&cfg_jwt).expect("Should instantiate jwt");
         assert_eq!(p1.id(), "jwt_auth");
-        assert!(matches!(p1, LoadedPlugin::PreRoute(_)));
+        assert!(matches!(p1, LoadedPlugin::PreUpstream(_)));
 
         let cfg_rate = PluginConfig {
             id: "rate_limit".into(),
@@ -279,13 +279,13 @@ mod tests {
 
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_route".into(),
-            priority: Some(10),
-            config: serde_json::json!({ "issuer": "https://auth.internal" }),
+            phase: "pre_upstream".into(),
+            priority: Some(200),
+            config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
         };
         available.insert(
             "jwt_auth".to_string(),
-            (instantiate_plugin(&cfg_jwt).unwrap(), Some(10)),
+            (instantiate_plugin(&cfg_jwt).unwrap(), Some(200)),
         );
 
         let cfg_ip = PluginConfig {
@@ -310,7 +310,7 @@ mod tests {
             (instantiate_plugin(&cfg_cors).unwrap(), None),
         );
 
-        // Declaration order: jwt_auth (priority 10), then ip_filter (priority 100), then cors (post_response)
+        // Declaration order: jwt_auth, ip_filter, cors
         let route_plugins = vec![
             "jwt_auth".to_string(),
             "ip_filter".to_string(),
@@ -326,10 +326,13 @@ mod tests {
         )
         .expect("Should build plan");
 
-        // pre_route hooks should be ordered by priority: ip_filter (100) first, then jwt_auth (10)
-        assert_eq!(plan.pre_route_hooks.len(), 2);
+        // pre_route hooks
+        assert_eq!(plan.pre_route_hooks.len(), 1);
         assert_eq!(plan.pre_route_hooks[0].id(), "ip_filter");
-        assert_eq!(plan.pre_route_hooks[1].id(), "jwt_auth");
+
+        // pre_upstream hooks
+        assert_eq!(plan.pre_upstream_hooks.len(), 1);
+        assert_eq!(plan.pre_upstream_hooks[0].id(), "jwt_auth");
 
         // post_response hooks
         assert_eq!(plan.post_response_hooks.len(), 1);

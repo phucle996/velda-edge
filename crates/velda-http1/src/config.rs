@@ -29,7 +29,7 @@ pub struct Http1Config {
     pub initial_buffer_capacity: usize,
     /// Capacity threshold above which idle buffers are shrunk back to `initial_buffer_capacity`.
     pub shrink_threshold: usize,
-    /// Read buffer size for client upload bodies (equivalent to Nginx's `client_body_buffer_size`).
+    /// Read buffer size for client upload bodies.
     /// Determines the capacity reserved for reading payload chunks from the downstream socket into RAM.
     pub client_body_buffer_size: usize,
 }
@@ -66,11 +66,11 @@ impl Http1Config {
             max_keepalive_requests: 10_000_000,
             header_read_timeout_ms: 10_000,
             initial_buffer_capacity: clamp_usize(
-                sizing.http1_max_buffer_size / 8,
-                2 * 1024,
-                16 * 1024,
+                sizing.http1_max_buffer_size / 32,
+                4 * 1024,
+                8 * 1024,
             ),
-            shrink_threshold: clamp_usize(sizing.http1_max_buffer_size / 2, 8 * 1024, 64 * 1024),
+            shrink_threshold: clamp_usize(sizing.http1_max_buffer_size / 8, 16 * 1024, 32 * 1024),
             client_body_buffer_size: sizing.http1_max_buffer_size,
         }
     }

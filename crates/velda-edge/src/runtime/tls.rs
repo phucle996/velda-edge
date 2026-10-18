@@ -155,6 +155,7 @@ mod tests {
                 insecure_skip_verify: false,
             }),
             pool: None,
+            buffer: None,
         }];
 
         let engine = compile_tls_client(&upstreams)

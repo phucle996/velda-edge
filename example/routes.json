@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "routes": [
+    {
+      "id": "api",
+      "kind": "l7",
+      "listener": "web-in",
+      "match": {
+        "host": "api.example.com",
+        "path_prefix": "/api"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 60000
+      },
+      "upstream": "users",
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth",
+          "rate_limit"
+        ],
+        "post_response": [
+          "security_headers",
+          "access_log"
+        ]
+      }
+    },
+    {
+      "id": "events",
+      "kind": "l7",
+      "listener": "web-in",
+      "match": {
+        "host": "api.example.com",
+        "path": "/events"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 900000
+      },
+      "upstream": "events",
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
+    },
+    {
+      "id": "grpc-users",
+      "kind": "l7",
+      "listener": "grpc-in",
+      "match": {
+        "host": "grpc.example.com",
+        "path_prefix": "/users."
+      },
+      "timeouts": {
+        "downstream_idle_ms": 300000
+      },
+      "upstream": "grpc-users",
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
+    },
+    {
+      "id": "websocket",
+      "kind": "l7",
+      "listener": "web-in",
+      "match": {
+        "host": "ws.example.com",
+        "path_prefix": "/ws"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 1800000
+      },
+      "upstream": "realtime",
+      "plugins": {
+        "pre_upstream": [
+          "jwt_auth"
+        ],
+        "post_response": [
+          "access_log"
+        ]
+      }
+    },
+    {
+      "id": "tcp-stream",
+      "kind": "l4",
+      "listener": "tcp-ingress",
+      "match": {
+        "protocol": "tcp"
+      },
+      "timeouts": {
+        "downstream_idle_ms": 300000
+      },
+      "upstream": "tcp-backend",
+      "plugins": {
+        "pre_upstream": [],
+        "post_response": [
+          "access_log"
+        ]
+      }
+    }
+  ]
+}

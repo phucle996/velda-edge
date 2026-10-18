@@ -69,6 +69,25 @@ pub struct UpstreamConfig {
     pub tls: Option<UpstreamTlsConfig>,
     #[serde(default)]
     pub pool: Option<UpstreamPoolConfig>,
+    #[serde(default)]
+    pub buffer: Option<UpstreamBufferConfig>,
+}
+
+/// Upstream reverse proxy buffering and regulation configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpstreamBufferConfig {
+    #[serde(default)]
+    pub proxy_buffering: Option<bool>,
+    #[serde(default)]
+    pub proxy_buffer_size: Option<usize>,
+    #[serde(default)]
+    pub client_body_buffer_size: Option<usize>,
+    #[serde(default)]
+    pub max_body_size: Option<usize>,
+    #[serde(default)]
+    pub proxy_buffers_count: Option<usize>,
+    #[serde(default)]
+    pub proxy_buffers_size: Option<usize>,
 }
 
 /// Upstream connection pool tuning options configured per-upstream.
@@ -250,14 +269,23 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
 
         let is_valid_algo = matches!(
             upstream.load_balancer.algorithm.as_str(),
-            "round_robin" | "least_connections" | "random" | "ip_hash"
+            "round_robin"
+                | "least_connections"
+                | "least_conn"
+                | "random"
+                | "ip_hash"
+                | "hash"
+                | "weighted_round_robin"
+                | "wrr"
+                | "p2c"
+                | "power_of_two_choices"
         );
 
         if !is_valid_algo {
             return Err(SyncError::Validation {
                 domain: "upstreams".into(),
                 reason: format!(
-                    "Upstream '{}': unsupported load_balancer algorithm '{}'; must be 'round_robin', 'least_connections', 'random', or 'ip_hash'",
+                    "Upstream '{}': unsupported load_balancer algorithm '{}'; must be 'round_robin', 'least_connections', 'random', 'ip_hash', 'weighted_round_robin', or 'p2c'",
                     upstream.id, upstream.load_balancer.algorithm
                 ),
             });
@@ -494,6 +522,55 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                     domain: "upstreams".into(),
                     reason: format!(
                         "Upstream '{}': 'pool.max_lifetime_ms' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+        }
+
+        // Validation: buffer regulation options if configured
+        if let Some(ref buf) = upstream.buffer {
+            if buf.proxy_buffer_size == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'buffer.proxy_buffer_size' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if buf.client_body_buffer_size == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'buffer.client_body_buffer_size' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if buf.max_body_size == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'buffer.max_body_size' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if buf.proxy_buffers_count == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'buffer.proxy_buffers_count' must be > 0 if specified",
+                        upstream.id
+                    ),
+                });
+            }
+            if buf.proxy_buffers_size == Some(0) {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': 'buffer.proxy_buffers_size' must be > 0 if specified",
                         upstream.id
                     ),
                 });
@@ -1007,6 +1084,7 @@ mod tests {
             health_check: None,
             tls: None,
             pool: None,
+            buffer: None,
         }
     }
 

@@ -190,10 +190,9 @@ pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
     match config.id.as_str() {
-        "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
         // Add your plugin here:
-        "api_key" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),
+        "waf" => Ok(Arc::new(WafPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
@@ -208,13 +207,14 @@ Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](../velda-sync/src/post_sy
 ```rust
 pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
-        "jwt_auth" | "ip_filter" | "resource_limit" | "waf" | "api_key" => Some("pre_route"),
-        "rate_limit" | "header_mutation" => Some("pre_upstream"),
+        "ip_filter" | "resource_limit" | "waf" => Some("pre_route"),
+        "jwt_auth" | "rate_limit" | "header_mutation" => Some("pre_upstream"),
         "security_headers" | "cors" | "access_log" => Some("post_response"),
         "health_probe" | "prometheus_exporter" => Some("background"),
         _ => None,
     }
 }
+
 ```
 
 > [!TIP]

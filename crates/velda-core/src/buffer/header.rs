@@ -116,6 +116,15 @@ pub struct HeaderPool {
     idle_ttl: Duration,
 }
 
+impl std::fmt::Debug for HeaderPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderPool")
+            .field("active_leases", &self.active_leases.load(Ordering::Relaxed))
+            .field("initial_header_capacity", &self.initial_header_capacity)
+            .finish()
+    }
+}
+
 impl HeaderPool {
     /// Creates and eagerly warms up a pool with a pre-allocated number of baseline slots
     /// and a default 3x max burst ceiling with 15-second TTL.

@@ -361,6 +361,7 @@ pub fn build_upstreams(
                         pool_config,
                         shard_count,
                         http1_acceleration,
+                        config.buffer.as_ref(),
                     )))),
                 );
             }
@@ -446,6 +447,7 @@ mod tests {
             health_check: None,
             tls: None,
             pool: None,
+            buffer: None,
         }
     }
 

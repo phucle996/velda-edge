@@ -14,10 +14,8 @@ use velda_core::{Action, L7Request};
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod ip_filter;
-pub mod jwt_auth;
 
 pub use ip_filter::{IpFilterMode, IpFilterPlugin};
-pub use jwt_auth::JwtAuthPlugin;
 
 /// Contract for plugins evaluated prior to route matching.
 pub trait PreRoutePlugin: Send + Sync {
@@ -63,7 +61,6 @@ pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
     match config.id.as_str() {
-        "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
@@ -75,42 +72,27 @@ pub fn instantiate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::header::AUTHORIZATION;
-    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+    use http::{HeaderMap, Method, StatusCode, Uri, Version};
     use velda_core::Body;
 
     #[test]
-    fn test_pre_route_jwt_auth_rejects_missing_token() {
-        let plugin = Arc::new(JwtAuthPlugin::new("jwt-test", "https://auth.internal"));
-        let chain: Vec<Arc<dyn PreRoutePlugin>> = vec![plugin];
+    fn test_pre_route_ip_filter_execution() {
+        let config = velda_sync::post_sync::plugin::PluginConfig {
+            id: "ip_filter".into(),
+            phase: "pre_route".into(),
+            priority: Some(100),
+            config: serde_json::json!({
+                "mode": "deny",
+                "deny_cidrs": ["192.168.1.100/32"],
+                "client_ip_source": "x_forwarded_for"
+            }),
+        };
 
-        let mut req = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/v1/resource"),
-            Version::HTTP_11,
-            HeaderMap::new(),
-            Body::Empty,
-        );
-
-        let action = run_pre_route_plugins(&chain, &mut req);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            }
-            _ => panic!("Expected Action::Respond(401)"),
-        }
-    }
-
-    #[test]
-    fn test_pre_route_jwt_auth_accepts_valid_header() {
-        let plugin = Arc::new(JwtAuthPlugin::new("jwt-test", "https://auth.internal"));
+        let plugin = instantiate(&config).expect("instantiate ip_filter");
         let chain: Vec<Arc<dyn PreRoutePlugin>> = vec![plugin];
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer header.payload.signature"),
-        );
+        headers.insert("x-forwarded-for", "192.168.1.100".parse().unwrap());
 
         let mut req = L7Request::new(
             Method::GET,
@@ -121,7 +103,11 @@ mod tests {
         );
 
         let action = run_pre_route_plugins(&chain, &mut req);
-        assert!(matches!(action, Action::Continue));
-        assert!(req.headers.contains_key("x-authenticated-user"));
+        match action {
+            Action::Respond(resp) => {
+                assert_eq!(resp.status, StatusCode::FORBIDDEN);
+            }
+            _ => panic!("Expected Action::Respond(403)"),
+        }
     }
 }

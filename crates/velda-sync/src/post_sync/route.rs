@@ -58,6 +58,83 @@ pub struct RouteConfig {
     pub plugins: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct IngestRoutesFile {
+    pub schema_version: u32,
+    pub routes: Vec<IngestRouteConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct IngestRouteConfig {
+    pub id: String,
+    pub kind: String,
+    pub listener: String,
+    #[serde(rename = "match")]
+    pub match_rule: RouteMatch,
+    #[serde(default)]
+    pub timeouts: RouteTimeouts,
+    pub upstream: String,
+    #[serde(default, deserialize_with = "deserialize_route_plugins")]
+    pub plugins: Vec<String>,
+}
+
+fn deserialize_route_plugins<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RoutePluginsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for RoutePluginsVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str(
+                "a list of plugin names or a phased object { pre_upstream: [...], post_response: [...] }",
+            )
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut list = Vec::new();
+            while let Some(item) = seq.next_element::<String>()? {
+                list.push(item);
+            }
+            Ok(list)
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut pre_upstream = Vec::new();
+            let mut post_response = Vec::new();
+
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "pre_upstream" => {
+                        pre_upstream = map.next_value::<Vec<String>>()?;
+                    }
+                    "post_response" => {
+                        post_response = map.next_value::<Vec<String>>()?;
+                    }
+                    _ => {
+                        let _ = map.next_value::<serde_json::Value>()?;
+                    }
+                }
+            }
+
+            let mut result = Vec::with_capacity(pre_upstream.len() + post_response.len());
+            result.extend(pre_upstream);
+            result.extend(post_response);
+            Ok(result)
+        }
+    }
+
+    deserializer.deserialize_any(RoutePluginsVisitor)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RouteMatch {
     pub host: Option<String>,
@@ -77,10 +154,11 @@ pub struct RouteTimeouts {
 
 /// Parses raw JSON into route configurations.
 pub fn parse_routes(payload: &[u8]) -> Result<Vec<RouteConfig>, SyncError> {
-    let file: RoutesFile = serde_json::from_slice(payload).map_err(|e| SyncError::InvalidJson {
-        domain: "routes".into(),
-        reason: e.to_string(),
-    })?;
+    let file: IngestRoutesFile =
+        serde_json::from_slice(payload).map_err(|e| SyncError::InvalidJson {
+            domain: "routes".into(),
+            reason: e.to_string(),
+        })?;
 
     if file.schema_version != 1 {
         return Err(SyncError::Validation {
@@ -92,7 +170,19 @@ pub fn parse_routes(payload: &[u8]) -> Result<Vec<RouteConfig>, SyncError> {
         });
     }
 
-    Ok(file.routes)
+    Ok(file
+        .routes
+        .into_iter()
+        .map(|r| RouteConfig {
+            id: r.id,
+            kind: r.kind,
+            listener: r.listener,
+            match_rule: r.match_rule,
+            timeouts: r.timeouts,
+            upstream: r.upstream,
+            plugins: r.plugins,
+        })
+        .collect())
 }
 
 // ============================================================================
@@ -491,5 +581,41 @@ mod tests {
         persist_routes(tmp.path(), json_bytes, &binary).expect("Should persist routes");
         assert!(tmp.path().join("config/routes.json").exists());
         assert!(tmp.path().join("runtime/routes.bin").exists());
+    }
+
+    #[test]
+    fn test_parse_phased_and_flat_route_plugins() {
+        let phased_json = br#"{
+            "schema_version": 1,
+            "routes": [
+                {
+                    "id": "phased-api",
+                    "kind": "l7",
+                    "listener": "http-in",
+                    "match": { "path_prefix": "/api" },
+                    "upstream": "users",
+                    "plugins": {
+                        "pre_upstream": ["jwt_auth", "rate_limit"],
+                        "post_response": ["security_headers", "access_log"]
+                    }
+                },
+                {
+                    "id": "flat-api",
+                    "kind": "l7",
+                    "listener": "http-in",
+                    "match": { "path_prefix": "/flat" },
+                    "upstream": "users",
+                    "plugins": ["jwt_auth", "rate_limit"]
+                }
+            ]
+        }"#;
+
+        let routes = parse_routes(phased_json).expect("phased and flat plugins must parse");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes[0].plugins,
+            vec!["jwt_auth", "rate_limit", "security_headers", "access_log"]
+        );
+        assert_eq!(routes[1].plugins, vec!["jwt_auth", "rate_limit"]);
     }
 }

@@ -124,6 +124,7 @@ mod tests {
             health_check: None,
             tls: None,
             pool: None,
+            buffer: None,
         }
     }
 

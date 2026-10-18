@@ -79,16 +79,15 @@ pub async fn serve(
         }
     };
 
-    let mut write_buf = bytes::BytesMut::with_capacity(1024);
-
-    // 5. Serialize & send HTTP/1.1 request
+    // 5. Serialize & send HTTP/1.1 request using pre-allocated pooled lease.write_buf
+    let (stream, write_buf) = lease.split_write();
     let send_res = velda_http1::client::send_request_parts(
         &head.method,
         &head.uri,
         &head.headers,
         &body,
-        &mut *lease,
-        &mut write_buf,
+        stream,
+        write_buf,
     )
     .await;
 
@@ -111,13 +110,10 @@ pub async fn serve(
         return;
     }
 
-    // 6. Read and decode HTTP/1.1 response
-    let read_cap = upstream.config.client_body_buffer_size;
-    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
+    // 6. Read and decode HTTP/1.1 response using pre-allocated pooled lease.read_buf (zero heap allocations)
+    let (stream, read_buf) = lease.split_read();
     let (head, framing) =
-        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
-            .await
-        {
+        match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
             Ok(res) => res,
             Err(e) => {
                 lease.mark_closed();
@@ -150,21 +146,31 @@ pub async fn serve(
                 return;
             }
             if body_len > 0 {
-                while read_buf.len() < body_len {
-                    let needed = body_len - read_buf.len();
-                    if read_buf.capacity() - read_buf.len() < needed {
-                        read_buf.reserve(needed);
+                if lease.read_buf.len() < body_len {
+                    let needed = body_len - lease.read_buf.len();
+                    if lease.read_buf.capacity() - lease.read_buf.len() < needed {
+                        lease.read_buf.reserve(needed);
                     }
-                    match lease.read_buf(&mut read_buf).await {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(_) => {
-                            lease.mark_closed();
-                            break;
+                }
+                let mut read_failed = false;
+                {
+                    let (stream, read_buf) = lease.split_read();
+                    while read_buf.len() < body_len {
+                        match stream.read_buf(read_buf).await {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(_) => {
+                                read_failed = true;
+                                break;
+                            }
                         }
                     }
                 }
-                velda_core::Body::Bytes(read_buf.split_to(read_buf.len().min(body_len)).freeze())
+                if read_failed {
+                    lease.mark_closed();
+                }
+                let body_slice = &lease.read_buf[..lease.read_buf.len().min(body_len)];
+                velda_core::Body::Bytes(bytes::Bytes::copy_from_slice(body_slice))
             } else {
                 velda_core::Body::Empty
             }
@@ -172,19 +178,22 @@ pub async fn serve(
         velda_http1::server::request::Http1BodyFraming::Chunked => {
             let mut chunked_body = bytes::BytesMut::new();
             let mut failed = false;
-            loop {
-                match velda_http1::client::read_next_chunk(&mut *lease, &mut read_buf).await {
-                    Ok(Some(chunk)) => {
-                        if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
+            {
+                let (stream, read_buf) = lease.split_read();
+                loop {
+                    match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                        Ok(Some(chunk)) => {
+                            if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
+                                failed = true;
+                                break;
+                            }
+                            chunked_body.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
                             failed = true;
                             break;
                         }
-                        chunked_body.extend_from_slice(&chunk);
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        failed = true;
-                        break;
                     }
                 }
             }
@@ -205,10 +214,17 @@ pub async fn serve(
         lease.mark_closed();
     }
 
+    // 7. Clear read buffer preserving pool allocation, then DROP LEASE IMMEDIATELY!
+    // Returning the upstream connection to the pool BEFORE sending downstream frames
+    // eliminates pool starvation under high stream concurrency.
+    lease.read_buf.clear();
+    drop(lease);
+
+    // 8. Send HTTP/2 response downstream
     let mut clean_headers = head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
     let l7_resp = L7Response::new(head.status, http::Version::HTTP_2, clean_headers, body);
-    let _ = responder.send_response(&l7_resp);
+    let _ = responder.send_response_owned(l7_resp);
 }
 
 /// Helper to check whether upstream backend signaled `Connection: close`.

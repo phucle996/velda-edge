@@ -153,6 +153,11 @@ impl Http2Responder {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
+    /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning.
+    pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
+        self.send_parts_owned(response.status, &response.headers, response.body)
+    }
+
     /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.
     pub fn send_response_and_cancel_upload(
         &mut self,
@@ -202,6 +207,36 @@ impl Http2Responder {
             && !b.is_empty()
         {
             send_stream.send_data(b.clone(), true)?;
+        }
+
+        Ok(())
+    }
+
+    /// Sends an HTTP/2 response given owned discrete parts, eliminating `Bytes` cloning.
+    pub fn send_parts_owned(
+        &mut self,
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: Body,
+    ) -> Result<(), Http2Error> {
+        let is_no_body = status.is_informational()
+            || status == StatusCode::NO_CONTENT
+            || status == StatusCode::NOT_MODIFIED;
+
+        let has_body = !is_no_body && !body.is_empty();
+        let http_response = self.prepare_h2_response(status, headers)?;
+
+        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
+
+        if has_body {
+            match body {
+                Body::Bytes(b) => {
+                    if !b.is_empty() {
+                        send_stream.send_data(b, true)?;
+                    }
+                }
+                Body::Empty => {}
+            }
         }
 
         Ok(())

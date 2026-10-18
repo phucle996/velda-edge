@@ -14,10 +14,12 @@ use velda_tls::TlsClientEngine;
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;
 
-/// Pooled HTTP/1.1 client connection resource.
+/// Pooled HTTP/1.1 client connection resource with pre-allocated wire buffers.
 #[derive(Debug)]
 pub struct Http1ClientResource {
     pub stream: UpstreamHttp1Stream,
+    pub read_buf: bytes::BytesMut,
+    pub write_buf: bytes::BytesMut,
     pub created_at: Instant,
     pub last_used_at: Instant,
 }
@@ -54,28 +56,59 @@ impl PoolableResource for Http1ClientResource {
 
 /// RAII lease guard for an acquired HTTP/1.1 upstream stream.
 ///
-/// Automatically returns healthy connections to the pool on drop,
+/// Automatically returns healthy connections and pre-warmed buffers to the pool on drop,
 /// or closes them if marked as non-reusable (e.g. after stream errors or `Connection: close`).
 pub struct Http1Lease {
     stream: Option<UpstreamHttp1Stream>,
+    pub read_buf: bytes::BytesMut,
+    pub write_buf: bytes::BytesMut,
     pub endpoint: SocketAddr,
     pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
     reusable: bool,
     pub is_reused: bool,
     created_at: Instant,
+    pub proxy_buffer_size: usize,
 }
 
 impl Http1Lease {
-    /// Returns true if this connection was leased from the keep-alive pool (reused).
-    #[inline]
-    pub fn is_reused(&self) -> bool {
-        self.is_reused
-    }
-
     /// Marks the leased connection as dirty/closed, preventing its return to the pool.
     #[inline]
     pub fn mark_closed(&mut self) {
         self.reusable = false;
+    }
+
+    /// Borrows the active stream handle and pooled read buffer simultaneously.
+    #[inline]
+    pub fn split_read(&mut self) -> (&mut UpstreamHttp1Stream, &mut bytes::BytesMut) {
+        (
+            self.stream.as_mut().expect("stream must be active"),
+            &mut self.read_buf,
+        )
+    }
+
+    /// Borrows the active stream handle and pooled write buffer simultaneously.
+    #[inline]
+    pub fn split_write(&mut self) -> (&mut UpstreamHttp1Stream, &mut bytes::BytesMut) {
+        (
+            self.stream.as_mut().expect("stream must be active"),
+            &mut self.write_buf,
+        )
+    }
+
+    /// Borrows the active stream handle, pooled read buffer, and write buffer simultaneously.
+    #[inline]
+    pub fn split_all(
+        &mut self,
+    ) -> (
+        &mut UpstreamHttp1Stream,
+        &mut bytes::BytesMut,
+        &mut bytes::BytesMut,
+    ) {
+        (
+            self.stream.as_mut().expect("stream must be active"),
+            &mut self.read_buf,
+            &mut self.write_buf,
+        )
     }
 }
 
@@ -101,8 +134,20 @@ impl Drop for Http1Lease {
             return;
         }
         if let Some(stream) = self.stream.take() {
+            let mut read_buf = std::mem::take(&mut self.read_buf);
+            let mut write_buf = std::mem::take(&mut self.write_buf);
+            read_buf.clear();
+            if read_buf.capacity() > 16384 {
+                read_buf = bytes::BytesMut::with_capacity(4096);
+            }
+            write_buf.clear();
+            if write_buf.capacity() < 4096 || write_buf.capacity() > 16384 {
+                write_buf = bytes::BytesMut::with_capacity(4096);
+            }
             let res = Http1ClientResource {
                 stream,
+                read_buf,
+                write_buf,
                 created_at: self.created_at,
                 last_used_at: Instant::now(),
             };
@@ -132,6 +177,8 @@ pub struct Http1Upstream {
     pub acceleration: velda_http1::Http1AccelerationPath,
     /// [PRE-COMPILED]: Pre-computed HTTP/1.1 protocol engine configuration.
     pub config: velda_http1::config::Http1Config,
+    /// Configured buffer capacity for reading upstream responses.
+    pub proxy_buffer_size: usize,
 }
 
 impl std::fmt::Debug for Http1Upstream {
@@ -142,6 +189,7 @@ impl std::fmt::Debug for Http1Upstream {
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
             .field("acceleration", &self.acceleration)
+            .field("proxy_buffer_size", &self.proxy_buffer_size)
             .finish()
     }
 }
@@ -155,8 +203,33 @@ impl Http1Upstream {
         pool_config: PoolConfig,
         shard_count: usize,
         acceleration: velda_http1::Http1AccelerationPath,
+        buffer_config: Option<&velda_sync::post_sync::upstream::UpstreamBufferConfig>,
     ) -> Self {
-        let strategy = Http1PipeStrategy::from_streaming(streaming);
+        let strategy = if let Some(buf) = buffer_config
+            && let Some(buffering) = buf.proxy_buffering
+        {
+            if buffering {
+                Http1PipeStrategy::Buffered
+            } else {
+                Http1PipeStrategy::from_streaming(streaming)
+            }
+        } else {
+            Http1PipeStrategy::from_streaming(streaming)
+        };
+        let mut config = velda_http1::config::Http1Config::auto();
+        let mut proxy_buffer_size = 32768;
+        if let Some(buf) = buffer_config {
+            if let Some(pbs) = buf.proxy_buffer_size {
+                proxy_buffer_size = pbs;
+                config.initial_buffer_capacity = pbs;
+            }
+            if let Some(cbbs) = buf.client_body_buffer_size {
+                config.client_body_buffer_size = cbbs;
+            }
+            if let Some(mbs) = buf.max_body_size {
+                config.max_body_size = mbs;
+            }
+        }
         let pool = Arc::new(PoolManager::with_config_and_shards(
             pool_config,
             shard_count,
@@ -168,7 +241,8 @@ impl Http1Upstream {
             streaming,
             strategy,
             acceleration,
-            config: velda_http1::config::Http1Config::auto(),
+            config,
+            proxy_buffer_size,
         }
     }
 
@@ -192,11 +266,34 @@ impl Http1Upstream {
         let idle_timeout = self.inner.timeouts().idle;
         let pool = &self.pool;
 
-        let (stream, endpoint, created_at, is_reused) = self
+        let (stream, read_buf, write_buf, endpoint, created_at, is_reused) = self
             .inner
             .execute(|endpoint| async move {
                 if let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
-                    return Ok::<_, String>((res.stream, endpoint, res.created_at, true));
+                    return Ok::<_, String>((
+                        res.stream,
+                        res.read_buf,
+                        res.write_buf,
+                        endpoint,
+                        res.created_at,
+                        true,
+                    ));
+                }
+
+                // Under high burst concurrency, in-flight upstream requests typically return
+                // their leased connection within 0.5-1ms. Yield once to let completed tasks
+                // recycle connections before initiating an expensive TCP handshake.
+                tokio::task::yield_now().await;
+
+                if let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
+                    return Ok::<_, String>((
+                        res.stream,
+                        res.read_buf,
+                        res.write_buf,
+                        endpoint,
+                        res.created_at,
+                        true,
+                    ));
                 }
 
                 let stream = velda_http1::client::connect(
@@ -208,18 +305,28 @@ impl Http1Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                Ok::<_, String>((stream, endpoint, Instant::now(), false))
+                Ok::<_, String>((
+                    stream,
+                    bytes::BytesMut::with_capacity(4096),
+                    bytes::BytesMut::with_capacity(4096),
+                    endpoint,
+                    Instant::now(),
+                    false,
+                ))
             })
             .await
             .map_err(EdgeError::Upstream)?;
 
         Ok(Http1Lease {
             stream: Some(stream),
+            read_buf,
+            write_buf,
             endpoint,
             pool: Arc::clone(&self.pool),
             reusable: true,
             is_reused,
             created_at,
+            proxy_buffer_size: self.proxy_buffer_size,
         })
     }
 
@@ -253,11 +360,14 @@ impl Http1Upstream {
 
         Ok(Http1Lease {
             stream: Some(stream),
+            read_buf: bytes::BytesMut::with_capacity(4096),
+            write_buf: bytes::BytesMut::with_capacity(4096),
             endpoint,
             pool: Arc::clone(&self.pool),
             reusable: true,
             is_reused: false,
             created_at: Instant::now(),
+            proxy_buffer_size: self.proxy_buffer_size,
         })
     }
 }

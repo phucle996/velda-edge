@@ -253,6 +253,7 @@ pub fn build_mock_upstreams(count: usize) -> Vec<UpstreamConfig> {
             health_check: None,
             tls: None,
             pool: None,
+            buffer: None,
         });
     }
 
@@ -329,6 +330,7 @@ pub fn build_mock_runtime(
         tls_server: None,
         tls_client: None,
         overload: std::sync::Arc::new(velda_core::OverloadTracker::auto()),
+        buffer_pool: std::sync::Arc::new(velda_core::ShardedBufferPool::default()),
     }
 }
 

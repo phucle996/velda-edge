@@ -76,6 +76,21 @@ pub async fn run_gateway(
         shutdown.clone(),
     );
 
+    // 3b. Spawn background Auxiliary Buffer Pool Sweeper task (evicts burst slabs after idle TTL)
+    let sweeper_pool = shared_runtime.load().buffer_pool.clone();
+    let mut sweeper_shutdown = shutdown.clone();
+    let _sweeper_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let _ = sweeper_pool.sweep_all_cores(std::time::Instant::now());
+                }
+                _ = sweeper_shutdown.changed() => break,
+            }
+        }
+    });
+
     // 4. Spawn background Auxiliary Prometheus Exporter if configured in plugins
     let exporter_task = {
         let active_exporter = {

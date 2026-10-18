@@ -79,16 +79,15 @@ pub async fn serve(
         }
     };
 
-    let mut write_buf = bytes::BytesMut::with_capacity(1024);
-
-    // 5. Send HTTP/1.1 request head and body
+    // 5. Send HTTP/1.1 request head and body using pre-allocated pooled write_buf
+    let (stream, write_buf) = lease.split_write();
     let send_res = velda_http1::client::send_request_parts(
         &head.method,
         &head.uri,
         &head.headers,
         &body,
-        &mut *lease,
-        &mut write_buf,
+        stream,
+        write_buf,
     )
     .await;
 
@@ -111,13 +110,10 @@ pub async fn serve(
         return;
     }
 
-    // 6. Read HTTP/1.1 response head from upstream
-    let read_cap = upstream.config.client_body_buffer_size;
-    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
+    // 6. Read HTTP/1.1 response head from upstream using pre-allocated pooled read_buf
+    let (stream, read_buf) = lease.split_read();
     let (resp_head, framing) =
-        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
-            .await
-        {
+        match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
             Ok(parts) => parts,
             Err(e) => {
                 lease.mark_closed();
@@ -158,29 +154,31 @@ pub async fn serve(
     // 9. Stream response chunks based on HTTP/1.1 framing
     let stream_res = match framing {
         Http1BodyFraming::Empty => Ok(()),
-        Http1BodyFraming::Chunked => loop {
-            match velda_http1::client::read_next_chunk(&mut *lease, &mut read_buf).await {
-                Ok(Some(chunk)) => {
-                    if let Err(e) = stream_sender.send_chunk(chunk).await {
-                        break Err(e);
+        Http1BodyFraming::Chunked => {
+            let (stream, read_buf) = lease.split_read();
+            loop {
+                match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                    Ok(Some(chunk)) => {
+                        if let Err(e) = stream_sender.send_chunk(chunk).await {
+                            break Err(e);
+                        }
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(_) => {
+                        lease.mark_closed();
+                        break Ok(());
                     }
                 }
-                Ok(None) => break Ok(()),
-                Err(_) => {
-                    lease.mark_closed();
-                    break Ok(());
-                }
             }
-        },
+        }
         Http1BodyFraming::ContentLength(total_len) => {
             let mut remaining = total_len;
             let mut failed = false;
             let chunk_limit = upstream.config.client_body_buffer_size;
+            let (stream, read_buf) = lease.split_read();
             while remaining > 0 {
                 let to_read = remaining.min(chunk_limit);
-                match velda_http1::client::read_chunk_sized(&mut *lease, &mut read_buf, to_read)
-                    .await
-                {
+                match velda_http1::client::read_chunk_sized(stream, read_buf, to_read).await {
                     Ok(Some(chunk)) => {
                         remaining = remaining.saturating_sub(chunk.len());
                         if let Err(e) = stream_sender.send_chunk(chunk).await {
@@ -207,6 +205,10 @@ pub async fn serve(
     if conn_close || stream_res.is_err() {
         lease.mark_closed();
     }
+
+    // Drop upstream lease immediately to return connection to the pool
+    lease.read_buf.clear();
+    drop(lease);
 
     let _ = stream_sender.finish();
 }

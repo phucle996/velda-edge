@@ -124,7 +124,7 @@ impl Http1ServerResponse {
 }
 
 #[inline]
-fn is_connection_close(headers: &HeaderMap) -> bool {
+pub fn is_connection_close(headers: &HeaderMap) -> bool {
     headers
         .get(http::header::CONNECTION)
         .and_then(|h| h.to_str().ok())

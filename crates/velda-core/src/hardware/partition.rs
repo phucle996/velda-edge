@@ -100,7 +100,7 @@ impl CorePartition {
                 mode: CorePartitionMode::Cooperative,
                 is_shared: true,
             },
-            2 | 3 => Self {
+            2..=4 => Self {
                 allowed_cores: allowed.to_vec(),
                 traffic_cores: allowed.to_vec(),
                 auxiliary_cores: Vec::new(),
@@ -108,7 +108,7 @@ impl CorePartition {
                 is_shared: true,
             },
             _ => {
-                // >= 4 Cores: Split strictly. Cores 0..N-2 for Traffic, Core N-1 for Auxiliary.
+                // >= 5 Cores: Split strictly. Cores 0..N-2 for Traffic, Core N-1 for Auxiliary.
                 let split_idx = total - 1;
                 let traffic = allowed[..split_idx].to_vec();
                 let auxiliary = vec![allowed[split_idx]];
@@ -179,13 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn test_core_partition_four_cores_dedicated() {
+    fn test_core_partition_four_cores_balanced() {
         let p = CorePartition::plan(&[0, 1, 2, 3]);
-        assert_eq!(p.mode, CorePartitionMode::Dedicated);
-        assert_eq!(p.traffic_cores, vec![0, 1, 2]);
-        assert_eq!(p.auxiliary_cores, vec![3]);
-        assert!(!p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), Some(3));
+        assert_eq!(p.mode, CorePartitionMode::Balanced);
+        assert_eq!(p.traffic_cores, vec![0, 1, 2, 3]);
+        assert!(p.auxiliary_cores.is_empty());
+        assert!(p.is_shared);
+        assert_eq!(p.dedicated_auxiliary_core(), None);
     }
 
     #[test]

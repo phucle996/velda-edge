@@ -27,9 +27,8 @@ pub use plan::{RoutePluginPlan, StablyOrderedPlugin, sort_plugins_stable};
 pub use post_response::{
     CorsResponsePlugin, PostResponsePlugin, SecurityHeadersPlugin, run_post_response_plugins,
 };
-pub use pre_route::{
-    IpFilterMode, IpFilterPlugin, JwtAuthPlugin, PreRoutePlugin, run_pre_route_plugins,
-};
+pub use pre_route::{IpFilterMode, IpFilterPlugin, PreRoutePlugin, run_pre_route_plugins};
 pub use pre_upstream::{
-    HeaderMutationPlugin, PreUpstreamPlugin, RateLimitPlugin, run_pre_upstream_plugins,
+    HeaderMutationPlugin, JwtAlgorithm, JwtAuthPlugin, PreUpstreamPlugin, RateLimitPlugin,
+    TokenSource, run_pre_upstream_plugins,
 };

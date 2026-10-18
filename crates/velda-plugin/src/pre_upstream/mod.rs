@@ -13,9 +13,11 @@ use velda_core::{Action, L7Request};
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod header_mutation;
+pub mod jwt_auth;
 pub mod rate_limit;
 
 pub use header_mutation::HeaderMutationPlugin;
+pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use rate_limit::{
     FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
     RateLimitPlugin, TlsSource,
@@ -68,6 +70,7 @@ pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
     match config.id.as_str() {
+        "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(

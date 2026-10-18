@@ -96,32 +96,36 @@ pub async fn serve(
         }
     };
 
-    // 6. Encode HTTP/1.1 request head
+    // 6. Borrow pooled buffers from upstream lease
+    let (upstream_stream, read_buf, write_buf) = lease.split_all();
+    write_buf.clear();
     let initial_cap = 1024
         + if !is_chunked {
             first_chunk.as_ref().map_or(0, |c| c.len())
         } else {
             0
         };
-    let mut write_buf = bytes::BytesMut::with_capacity(initial_cap);
+    if write_buf.capacity() < initial_cap {
+        write_buf.reserve(initial_cap - write_buf.capacity());
+    }
     velda_http1::client::encode_request_head(
         &head.method,
         &head.uri,
         &head.headers,
         None,
-        &mut write_buf,
+        write_buf,
     );
 
     // 7. Split HTTP/1.1 stream into read and write halves for concurrent execution
     let (resp_res, should_close) = {
-        let (mut read_half, mut write_half) = tokio::io::split(&mut *lease);
+        let (mut read_half, mut write_half) = tokio::io::split(upstream_stream);
 
         let upload_fut = async {
             if !is_chunked {
                 if let Some(chunk) = first_chunk {
                     write_buf.extend_from_slice(&chunk);
                 }
-                write_half.write_all(&write_buf).await?;
+                write_half.write_all(write_buf).await?;
                 if !is_fin {
                     while let Some(chunk) = receiver
                         .recv_coalesced_chunk(coalesce_limit)
@@ -137,7 +141,7 @@ pub async fn serve(
                     }
                 }
             } else {
-                write_half.write_all(&write_buf).await?;
+                write_half.write_all(write_buf).await?;
                 if let Some(chunk) = first_chunk
                     && !chunk.is_empty()
                 {
@@ -170,13 +174,12 @@ pub async fn serve(
         };
 
         let download_fut = async {
-            let read_cap = upstream.config.client_body_buffer_size;
-            let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
+            read_buf.clear();
             loop {
-                match read_half.read_buf(&mut read_buf).await {
+                match read_half.read_buf(read_buf).await {
                     Ok(0) => {
                         if let Ok(Some(resp)) =
-                            velda_http1::client::decode_response(&mut read_buf, &upstream.config)
+                            velda_http1::client::decode_response(read_buf, &upstream.config)
                         {
                             return Ok(resp);
                         } else {
@@ -188,7 +191,7 @@ pub async fn serve(
                     }
                     Ok(_) => {
                         if let Ok(Some(resp)) =
-                            velda_http1::client::decode_response(&mut read_buf, &upstream.config)
+                            velda_http1::client::decode_response(read_buf, &upstream.config)
                         {
                             return Ok(resp);
                         }
@@ -225,6 +228,8 @@ pub async fn serve(
     if should_close {
         lease.mark_closed();
     }
+    // Drop upstream lease immediately to return connection and pooled buffers to upstream pool
+    drop(lease);
 
     match resp_res {
         Ok(l7_resp) => {

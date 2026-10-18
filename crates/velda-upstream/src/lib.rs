@@ -7,10 +7,12 @@
 //! **Router decides $\rightarrow$ Upstream resolves $\rightarrow$ Protocol connects & executes.**
 
 pub mod error;
+pub mod gate;
 pub mod health;
 pub mod upstream;
 
 // Re-exports for clean, ergonomic usage within upstream
 pub use error::{Result, UpstreamError};
+pub use gate::AdaptiveConcurrencyGate;
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
 pub use upstream::{Upstream, UpstreamTimeouts};

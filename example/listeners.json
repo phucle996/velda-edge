@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "listeners": [
+    {
+      "id": "http-in",
+      "address": "127.0.0.1:61080",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "family": "http",
+        "streaming": []
+      },
+      "tls": {
+        "enabled": false
+      },
+      "http1": {
+        "max_body_size": 10485760,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_keepalive_requests": 10000,
+        "header_read_timeout_ms": 10000
+      }
+    },
+    {
+      "id": "web-in",
+      "address": "127.0.0.1:61443",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "family": "http",
+        "streaming": [
+          "server"
+        ]
+      },
+      "tls": {
+        "enabled": true
+      },
+      "pre_route": [
+        "ip_filter"
+      ],
+      "http1": {
+        "max_body_size": 10485760,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_keepalive_requests": 10000,
+        "header_read_timeout_ms": 10000
+      },
+      "http2": {
+        "max_body_size": 10485760,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "max_consecutive_resets": 500,
+        "max_pending_control_frames": 200,
+        "max_continuation_frames": 16
+      }
+    },
+    {
+      "id": "grpc-in",
+      "address": "127.0.0.1:61051",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "family": "grpc",
+        "streaming": [
+          "client",
+          "server"
+        ]
+      },
+      "tls": {
+        "enabled": true
+      },
+      "grpc": {
+        "max_message_size": 8388608,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "keepalive_ping_interval_ms": 45000,
+        "keepalive_ping_timeout_ms": 10000,
+        "max_call_duration_ms": 120000
+      }
+    },
+    {
+      "id": "h3-in",
+      "address": "127.0.0.1:61444",
+      "transport": {
+        "protocol": "udp"
+      },
+      "application": {
+        "family": "http",
+        "streaming": []
+      },
+      "tls": {
+        "enabled": true
+      },
+      "http3": {
+        "max_body_size": 10485760,
+        "max_header_size": 65536,
+        "max_headers": 64,
+        "idle_timeout_ms": 30000,
+        "max_concurrent_streams": 256,
+        "max_concurrent_uni_streams": 64,
+        "max_qpack_table_capacity": 8192
+      }
+    },
+    {
+      "id": "tcp-ingress",
+      "address": "127.0.0.1:61900",
+      "transport": {
+        "protocol": "tcp"
+      },
+      "application": {
+        "family": "raw",
+        "streaming": []
+      },
+      "tls": {
+        "enabled": false
+      },
+      "raw": {
+        "copy_buffer_size": 16384,
+        "idle_timeout_ms": 30000
+      }
+    }
+  ]
+}

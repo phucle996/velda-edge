@@ -94,6 +94,26 @@ pub fn load_initial_runtime(
     };
 
     let topo = velda_core::global_hardware_topology();
+    let dims = topo
+        .sizing
+        .adaptive_buffer_pool_dimensions_per_core(topo.memory_bytes, topo.available_cores);
+    let pool_config = velda_core::AdaptivePoolConfig {
+        header_slots: dims.header_baseline,
+        header_max_cap: dims.header_max_cap,
+        headers_per_map: dims.headers_per_map,
+        small_slabs: dims.small_baseline,
+        small_max_cap: dims.small_max_cap,
+        medium_slabs: dims.medium_baseline,
+        medium_max_cap: dims.medium_max_cap,
+        large_slabs: dims.large_baseline,
+        large_max_cap: dims.large_max_cap,
+        idle_ttl: std::time::Duration::from_secs(15),
+    };
+    let buffer_pool = Arc::new(velda_core::ShardedBufferPool::with_adaptive_limits(
+        topo.available_cores,
+        pool_config,
+    ));
+
     let pipelines = crate::runtime::pipeline::PipelineTable::build_with_hardware(
         &runtime_config.listeners,
         topo.available_cores,
@@ -109,6 +129,7 @@ pub fn load_initial_runtime(
         tls_server,
         tls_client,
         overload: Arc::new(velda_core::OverloadTracker::with_config(profile.overload)),
+        buffer_pool,
     })
 }
 
@@ -222,7 +243,9 @@ pub async fn apply_reload(
         }
     }
 
-    let overload = shared_runtime.load().overload.clone();
+    let current_rt = shared_runtime.load();
+    let overload = current_rt.overload.clone();
+    let buffer_pool = current_rt.buffer_pool.clone();
     let candidate = Runtime {
         revision: new_revision,
         config,
@@ -232,6 +255,7 @@ pub async fn apply_reload(
         tls_server,
         tls_client,
         overload,
+        buffer_pool,
     };
 
     // Pre-validate that all declared listener addresses parse cleanly into IngressBindings

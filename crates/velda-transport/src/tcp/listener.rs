@@ -247,6 +247,53 @@ impl TcpListener {
             .await
             .map_err(TransportError::Accept)?;
 
+        self.setup_accepted_stream(stream, peer_addr)
+    }
+
+    /// Attempts to accept a pending connection without waiting.
+    ///
+    /// On Linux, executes `libc::accept4` with `SOCK_NONBLOCK | SOCK_CLOEXEC` directly
+    /// to drain the kernel SYN backlog without epoll churn.
+    pub fn try_accept(&self) -> Result<Option<Connection>> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let fd = self.listener.as_raw_fd();
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of_val(&storage) as libc::socklen_t;
+            let res = unsafe {
+                libc::accept4(
+                    fd,
+                    &mut storage as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                    libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                )
+            };
+            if res < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(TransportError::Accept(err));
+            }
+            let std_stream = unsafe { std::net::TcpStream::from_raw_fd(res) };
+            let stream =
+                tokio::net::TcpStream::from_std(std_stream).map_err(TransportError::Accept)?;
+            let peer_addr = stream.peer_addr().map_err(TransportError::Accept)?;
+            self.setup_accepted_stream(stream, peer_addr).map(Some)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
+
+    #[inline]
+    fn setup_accepted_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+        peer_addr: SocketAddr,
+    ) -> Result<Connection> {
         if self.config.nodelay {
             let _ = stream.set_nodelay(true);
         }
@@ -528,6 +575,21 @@ impl TcpListener {
                         "Accepted TCP connection"
                     );
                     tokio::spawn(handler(conn));
+
+                    let mut batch = 0;
+                    while batch < 32 {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                        match self.try_accept() {
+                            Ok(Some(conn)) => {
+                                batch += 1;
+                                tokio::spawn(handler(conn));
+                            }
+                            Ok(None) => break,
+                            Err(_) => break,
+                        }
+                    }
                 }
                 Ok(None) => {
                     tracing::info!(listen_addr = %self.local_addr, "TCP listener shutting down gracefully");

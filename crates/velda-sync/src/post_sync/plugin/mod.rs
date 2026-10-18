@@ -72,7 +72,7 @@ pub struct PluginConfig {
 /// Returns the canonical execution phase for a known plugin identifier.
 pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
-        "jwt_auth" => Some("pre_route"),
+        "jwt_auth" => Some("pre_upstream"),
         "ip_filter" => Some("pre_route"),
         "resource_limit" => Some("pre_route"),
         "waf" => Some("pre_route"),
@@ -374,7 +374,7 @@ mod tests {
             "plugins": [
                 {
                     "id": " jwt_auth ",
-                    "phase": "PRE_ROUTE",
+                    "phase": "PRE_UPSTREAM",
                     "config": { "issuer": "auth.example.com" }
                 }
             ]
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(plugins.len(), 1);
         validate_plugins(&mut plugins).unwrap();
         assert_eq!(plugins[0].id, "jwt_auth");
-        assert_eq!(plugins[0].phase, "pre_route");
+        assert_eq!(plugins[0].phase, "pre_upstream");
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let plugins = vec![PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_route".into(),
+            phase: "pre_upstream".into(),
             priority: Some(100),
             config: serde_json::json!({ "issuer": "auth.example.com", "max_age": 3600 }),
         }];
