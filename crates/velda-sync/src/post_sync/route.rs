@@ -319,8 +319,79 @@ pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
                 reason: format!("Route '{}' path '{}' must start with '/'", route.id, path),
             });
         }
+
+        // Protocol-exclusive plugin validation when route match rule specifies protocol
+        if let Some(proto) = &route.match_rule.protocol {
+            let proto_lower = proto.to_ascii_lowercase();
+            for plugin_id in &route.plugins {
+                if plugin_id == "grpc_fault_injection" && proto_lower != "grpc" {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}': plugin 'grpc_fault_injection' can only be applied to 'grpc' routes, found protocol '{}'",
+                            route.id, proto
+                        ),
+                    });
+                }
+                if plugin_id == "http_fault_injection"
+                    && (proto_lower == "grpc"
+                        || proto_lower == "raw"
+                        || proto_lower == "tcp"
+                        || proto_lower == "udp")
+                {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}': plugin 'http_fault_injection' cannot be applied to '{}' routes; only HTTP family is supported",
+                            route.id, proto
+                        ),
+                    });
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+/// Validates cross-domain protocol compatibility between routes and listeners.
+///
+/// Enforces that protocol-exclusive plugins (e.g. `grpc_fault_injection` strictly for gRPC,
+/// `http_fault_injection` strictly for HTTP) are never attached to mismatched listeners.
+pub fn validate_routes_with_listeners(
+    routes: &[RouteConfig],
+    listeners: &[super::listener::ListenerConfig],
+) -> Result<(), SyncError> {
+    use std::collections::HashMap;
+    let listener_map: HashMap<&str, &str> = listeners
+        .iter()
+        .map(|l| (l.id.as_str(), l.application.protocol.as_str()))
+        .collect();
+
+    for route in routes {
+        if let Some(&listener_proto) = listener_map.get(route.listener.as_str()) {
+            for plugin_id in &route.plugins {
+                if plugin_id == "grpc_fault_injection" && listener_proto != "grpc" {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin 'grpc_fault_injection' which is strictly restricted to 'grpc'",
+                            route.id, route.listener, listener_proto
+                        ),
+                    });
+                }
+                if plugin_id == "http_fault_injection" && listener_proto != "http" {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin 'http_fault_injection' which is strictly restricted to 'http'",
+                            route.id, route.listener, listener_proto
+                        ),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -617,5 +688,109 @@ mod tests {
             vec!["jwt_auth", "rate_limit", "security_headers", "access_log"]
         );
         assert_eq!(routes[1].plugins, vec!["jwt_auth", "rate_limit"]);
+    }
+
+    #[test]
+    fn test_grpc_and_http_fault_injection_protocol_compatibility() {
+        use super::super::listener::{
+            ListenerApplicationConfig, ListenerConfig, ListenerTransportConfig,
+        };
+
+        let listeners = vec![
+            ListenerConfig {
+                id: "grpc-in".into(),
+                address: "0.0.0.0:50051".into(),
+                transport: ListenerTransportConfig {
+                    protocol: "tcp".into(),
+                },
+                application: ListenerApplicationConfig {
+                    protocol: "grpc".into(),
+                    version: None,
+                    streaming: velda_core::StreamingMode::DISABLED,
+                },
+                tls: Default::default(),
+                http1: None,
+                http2: None,
+                http3: None,
+                grpc: None,
+                raw: None,
+            },
+            ListenerConfig {
+                id: "http-in".into(),
+                address: "0.0.0.0:80".into(),
+                transport: ListenerTransportConfig {
+                    protocol: "tcp".into(),
+                },
+                application: ListenerApplicationConfig {
+                    protocol: "http".into(),
+                    version: None,
+                    streaming: velda_core::StreamingMode::DISABLED,
+                },
+                tls: Default::default(),
+                http1: None,
+                http2: None,
+                http3: None,
+                grpc: None,
+                raw: None,
+            },
+        ];
+
+        // 1. Valid gRPC route with grpc_fault_injection
+        let valid_grpc_routes = vec![RouteConfig {
+            id: "grpc-route".into(),
+            kind: "l7".into(),
+            listener: "grpc-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/order.v1.OrderService".into()),
+                protocol: Some("grpc".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "order-grpc".into(),
+            plugins: vec!["grpc_fault_injection".into()],
+        }];
+        assert!(validate_routes_with_listeners(&valid_grpc_routes, &listeners).is_ok());
+
+        // 2. Invalid: grpc_fault_injection on an HTTP listener -> MUST FAIL!
+        let invalid_grpc_routes = vec![RouteConfig {
+            id: "bad-http-route".into(),
+            kind: "l7".into(),
+            listener: "http-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/api/v1".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "web-backend".into(),
+            plugins: vec!["grpc_fault_injection".into()],
+        }];
+        let err = validate_routes_with_listeners(&invalid_grpc_routes, &listeners);
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("strictly restricted to 'grpc'")
+        );
+
+        // 3. Invalid: http_fault_injection on a gRPC listener -> MUST FAIL!
+        let invalid_http_routes = vec![RouteConfig {
+            id: "bad-grpc-route".into(),
+            kind: "l7".into(),
+            listener: "grpc-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/payment.v1.PaymentService".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "payment-grpc".into(),
+            plugins: vec!["http_fault_injection".into()],
+        }];
+        let err2 = validate_routes_with_listeners(&invalid_http_routes, &listeners);
+        assert!(err2.is_err());
+        assert!(
+            err2.unwrap_err()
+                .to_string()
+                .contains("strictly restricted to 'http'")
+        );
     }
 }

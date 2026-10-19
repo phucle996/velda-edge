@@ -179,6 +179,14 @@ impl SyncComposition {
                     "routes" => {
                         let mut routes = post_sync::route::parse_routes(&content)?;
                         post_sync::route::validate_routes(&mut routes)?;
+                        let lkg_listeners = self.storage_dir.join("runtime/listeners.bin");
+                        if lkg_listeners.exists()
+                            && let Ok(bytes) = std::fs::read(&lkg_listeners)
+                            && let Ok((_, listeners)) =
+                                post_sync::listener::unpack_listeners_from_binary(&bytes)
+                        {
+                            post_sync::route::validate_routes_with_listeners(&routes, &listeners)?;
+                        }
                         let bin = post_sync::route::compile_routes_to_binary(
                             &routes, domain_rev, checksum,
                         )?;

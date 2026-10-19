@@ -92,6 +92,19 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     }
 }
 
+/// Returns the restricted protocol family for a known plugin identifier, if any.
+/// Plugins returning `Some("grpc")` are strictly forbidden on HTTP/Raw routes.
+/// Plugins returning `Some("http")` are strictly forbidden on gRPC/Raw routes.
+pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
+    match id {
+        "grpc_fault_injection" => Some("grpc"),
+        "http_fault_injection" => Some("http"),
+        "cors_preflight" => Some("http"),
+        "cors" => Some("http"),
+        _ => None,
+    }
+}
+
 mod json_value_bincode {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -223,6 +236,52 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     &plugin.id,
                     &plugin.config,
                 )?;
+            }
+            "grpc_fault_injection" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                if let Some(status) = plugin
+                    .config
+                    .get("abort")
+                    .and_then(|a| a.get("grpc_status"))
+                    .and_then(|s| s.as_u64())
+                    && status > 16
+                {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}': grpc_status must be between 0 and 16, got {status}",
+                            plugin.id
+                        ),
+                    });
+                }
+            }
+            "http_fault_injection" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                if let Some(status) = plugin
+                    .config
+                    .get("abort")
+                    .and_then(|a| a.get("http_status"))
+                    .and_then(|s| s.as_u64())
+                    && !(200..=599).contains(&status)
+                {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}': http_status must be between 200 and 599, got {status}",
+                            plugin.id
+                        ),
+                    });
+                }
             }
             _ => {
                 // Future plugins will dispatch to their respective validation modules
