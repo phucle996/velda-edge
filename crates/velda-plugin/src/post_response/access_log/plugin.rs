@@ -189,9 +189,8 @@ impl PostResponsePlugin for AccessLogPlugin {
             });
 
         let request_id = if self.config.include_request_id {
-            resp.headers
+            req_headers
                 .get("x-request-id")
-                .or_else(|| req_headers.get("x-request-id"))
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -201,7 +200,6 @@ impl PostResponsePlugin for AccessLogPlugin {
         let route_id = if self.config.include_route_id {
             resp.headers
                 .get("x-route-id")
-                .or_else(|| resp.headers.get("x-velda-route"))
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -211,8 +209,6 @@ impl PostResponsePlugin for AccessLogPlugin {
         let upstream = if self.config.include_upstream {
             resp.headers
                 .get("x-upstream-addr")
-                .or_else(|| resp.headers.get("x-upstream-id"))
-                .or_else(|| resp.headers.get("x-upstream"))
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -222,8 +218,6 @@ impl PostResponsePlugin for AccessLogPlugin {
         let latency_ms = if self.config.include_latency {
             resp.headers
                 .get("x-response-time")
-                .or_else(|| resp.headers.get("x-upstream-response-time"))
-                .or_else(|| resp.headers.get("x-latency-ms"))
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.trim_end_matches("ms").trim().parse::<f64>().ok())
         } else {
@@ -283,7 +277,6 @@ mod tests {
         let (plugin, mut rx) = AccessLogPlugin::new_with_receiver("access_log", config);
 
         let mut headers = HeaderMap::new();
-        headers.insert("x-request-id", HeaderValue::from_static("req-12345"));
         headers.insert("x-route-id", HeaderValue::from_static("route-orders"));
         headers.insert(
             "x-upstream-addr",
@@ -298,7 +291,8 @@ mod tests {
             headers,
             Body::Bytes(bytes::Bytes::from_static(b"response-body")),
         );
-        let req_headers = HeaderMap::new();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert("x-request-id", HeaderValue::from_static("req-12345"));
 
         plugin.on_response(&req_headers, &mut resp);
 

@@ -72,16 +72,8 @@ impl ResponseHeaderValueSpec {
                     .get("x-request-id")
                     .cloned()
                     .or_else(|| Some(velda_core::next_request_id().1)),
-                ResponseDynamicVar::RouteId => resp
-                    .headers
-                    .get("x-route-id")
-                    .or_else(|| resp.headers.get("x-velda-route"))
-                    .cloned(),
-                ResponseDynamicVar::UpstreamAddr => resp
-                    .headers
-                    .get("x-upstream-addr")
-                    .or_else(|| resp.headers.get("x-upstream-id"))
-                    .cloned(),
+                ResponseDynamicVar::RouteId => resp.headers.get("x-route-id").cloned(),
+                ResponseDynamicVar::UpstreamAddr => resp.headers.get("x-upstream-addr").cloned(),
                 ResponseDynamicVar::Status => HeaderValue::from_str(resp.status.as_str()).ok(),
                 ResponseDynamicVar::TimestampEpoch => {
                     let now = SystemTime::now()

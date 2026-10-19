@@ -48,28 +48,12 @@ pub struct ResponseCompressionConfig {
 impl Default for ResponseCompressionConfig {
     fn default() -> Self {
         Self {
-            algorithms: vec![
-                CompressionAlgorithm::Zstd,
-                CompressionAlgorithm::Brotli,
-                CompressionAlgorithm::Gzip,
-                CompressionAlgorithm::Deflate,
-            ],
+            algorithms: Vec::new(),
             min_length: 256,
             gzip_level: 6,
             brotli_level: 4,
             zstd_level: 3,
-            content_types: vec![
-                "application/json".to_string(),
-                "text/plain".to_string(),
-                "text/html".to_string(),
-                "text/css".to_string(),
-                "application/javascript".to_string(),
-                "text/javascript".to_string(),
-                "application/xml".to_string(),
-                "text/xml".to_string(),
-                "application/graphql+json".to_string(),
-                "image/svg+xml".to_string(),
-            ],
+            content_types: Vec::new(),
         }
     }
 }
@@ -91,6 +75,10 @@ impl ResponseCompressionPlugin {
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    ///
+    /// # Explicit Declaration Invariant
+    /// Both `algorithms` and `content_types` MUST be explicitly configured.
+    /// If omitted or empty, compression is disabled for this plugin instance.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
         let defaults = ResponseCompressionConfig::default();
 
@@ -102,7 +90,7 @@ impl ResponseCompressionPlugin {
             PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
         })?;
 
-        // 1. Parse algorithms list
+        // 1. Parse algorithms list (MUST be explicitly declared)
         let mut algorithms = Vec::new();
         if let Some(arr) = raw.get("algorithms").and_then(|v| v.as_array()) {
             for item in arr {
@@ -110,9 +98,6 @@ impl ResponseCompressionPlugin {
                     algorithms.push(algo);
                 }
             }
-        }
-        if algorithms.is_empty() {
-            algorithms = defaults.algorithms;
         }
 
         // 2. Parse min_length threshold
@@ -141,7 +126,7 @@ impl ResponseCompressionPlugin {
             .map(|v| v as i32)
             .unwrap_or(defaults.zstd_level);
 
-        // 4. Parse content_types whitelist
+        // 4. Parse content_types whitelist (MUST be explicitly declared)
         let mut content_types = Vec::new();
         if let Some(arr) = raw.get("content_types").and_then(|v| v.as_array()) {
             for item in arr {
@@ -149,9 +134,6 @@ impl ResponseCompressionPlugin {
                     content_types.push(s.to_lowercase());
                 }
             }
-        }
-        if content_types.is_empty() {
-            content_types = defaults.content_types;
         }
 
         Ok(Self::new(
@@ -192,6 +174,13 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
     }
 
     fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
+        // Guard 0: Explicit Declaration Invariant
+        // Both `algorithms` and `content_types` MUST be explicitly declared in configuration.
+        // If unconfigured or empty, server does NOT support compression on this route and returns uncompressed.
+        if self.config.algorithms.is_empty() || self.config.content_types.is_empty() {
+            return;
+        }
+
         // Guard 1: Status Code Eligibility (RFC 9110)
         // 204 No Content, 304 Not Modified, and 1xx Informational MUST NOT contain body or be compressed.
         if resp.status == StatusCode::NO_CONTENT
@@ -305,10 +294,25 @@ mod tests {
     use std::time::Duration;
     use velda_core::Body;
 
+    fn standard_test_config() -> ResponseCompressionConfig {
+        ResponseCompressionConfig {
+            algorithms: vec![
+                CompressionAlgorithm::Zstd,
+                CompressionAlgorithm::Brotli,
+                CompressionAlgorithm::Gzip,
+                CompressionAlgorithm::Deflate,
+            ],
+            min_length: 256,
+            gzip_level: 6,
+            brotli_level: 4,
+            zstd_level: 3,
+            content_types: vec!["application/json".to_string(), "text/plain".to_string()],
+        }
+    }
+
     #[test]
     fn test_compression_default_priority_zstd() {
-        let plugin =
-            ResponseCompressionPlugin::new("compress-1", ResponseCompressionConfig::default());
+        let plugin = ResponseCompressionPlugin::new("compress-1", standard_test_config());
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(
@@ -351,7 +355,8 @@ mod tests {
     fn test_compression_brotli_explicit() {
         let config = ResponseCompressionConfig {
             algorithms: vec![CompressionAlgorithm::Brotli, CompressionAlgorithm::Gzip],
-            ..Default::default()
+            content_types: vec!["text/plain".to_string()],
+            ..standard_test_config()
         };
         let plugin = ResponseCompressionPlugin::new("compress-br", config);
 
@@ -380,8 +385,7 @@ mod tests {
 
     #[test]
     fn test_compression_gzip_when_only_gzip_accepted() {
-        let plugin =
-            ResponseCompressionPlugin::new("compress-gz", ResponseCompressionConfig::default());
+        let plugin = ResponseCompressionPlugin::new("compress-gz", standard_test_config());
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -411,7 +415,7 @@ mod tests {
             "compress-min",
             ResponseCompressionConfig {
                 min_length: 256,
-                ..Default::default()
+                ..standard_test_config()
             },
         );
 
@@ -436,8 +440,7 @@ mod tests {
 
     #[test]
     fn test_compression_bypass_already_compressed() {
-        let plugin =
-            ResponseCompressionPlugin::new("compress-skip", ResponseCompressionConfig::default());
+        let plugin = ResponseCompressionPlugin::new("compress-skip", standard_test_config());
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
@@ -461,8 +464,7 @@ mod tests {
 
     #[test]
     fn test_compression_bypass_non_compressible_mime() {
-        let plugin =
-            ResponseCompressionPlugin::new("compress-mime", ResponseCompressionConfig::default());
+        let plugin = ResponseCompressionPlugin::new("compress-mime", standard_test_config());
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
@@ -479,8 +481,7 @@ mod tests {
 
     #[test]
     fn test_compression_bypass_status_204_and_304() {
-        let plugin =
-            ResponseCompressionPlugin::new("compress-status", ResponseCompressionConfig::default());
+        let plugin = ResponseCompressionPlugin::new("compress-status", standard_test_config());
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
@@ -492,6 +493,57 @@ mod tests {
         let mut resp304 = L7Response::empty(StatusCode::NOT_MODIFIED);
         plugin.on_response(&req_headers, &mut resp304);
         assert!(!resp304.headers.contains_key(CONTENT_ENCODING));
+    }
+
+    #[test]
+    fn test_compression_unconfigured_or_empty_returns_uncompressed() {
+        // Neither algorithms nor content_types declared -> compression disabled
+        let plugin =
+            ResponseCompressionPlugin::new("compress-empty", ResponseCompressionConfig::default());
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
+
+        let payload =
+            b"{\"message\":\"should not be compressed because config is empty\"}".repeat(20);
+        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        plugin.on_response(&req_headers, &mut resp);
+
+        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
+        match resp.body {
+            Body::Bytes(b) => assert_eq!(b, payload),
+            _ => panic!("Expected Body::Bytes"),
+        }
+    }
+
+    #[test]
+    fn test_from_config_empty_object_does_not_compress() {
+        let plugin_cfg = PluginConfig {
+            id: "response_compression".into(),
+            phase: "post_response".into(),
+            config: serde_json::json!({}),
+        };
+        let plugin = ResponseCompressionPlugin::from_config(&plugin_cfg).unwrap();
+        assert!(plugin.config.algorithms.is_empty());
+        assert!(plugin.config.content_types.is_empty());
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
+
+        let payload = b"{\"message\":\"unconfigured returns raw uncompressed\"}".repeat(20);
+        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        plugin.on_response(&req_headers, &mut resp);
+        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
+        match resp.body {
+            Body::Bytes(b) => assert_eq!(b, payload),
+            _ => panic!("Expected Body::Bytes"),
+        }
     }
 
     #[test]
@@ -514,7 +566,8 @@ mod tests {
             "compress-1",
             ResponseCompressionConfig {
                 algorithms: vec![CompressionAlgorithm::Gzip],
-                ..Default::default()
+                content_types: vec!["application/json".to_string()],
+                ..standard_test_config()
             },
         );
 

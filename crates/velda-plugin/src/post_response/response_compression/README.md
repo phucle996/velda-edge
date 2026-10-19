@@ -55,18 +55,19 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `algorithms` | `string[]` | `["zstd", "br", "gzip", "deflate"]` | Enabled compression algorithms in server preference order. |
+| `algorithms` | `string[]` | `[]` (Required) | Enabled compression algorithms in server preference order. Must be explicitly declared; if omitted/empty, compression is disabled. |
 | `min_length` | `integer` | `256` | Minimum uncompressed byte threshold. Payloads below this threshold are skipped to prevent framing inflation. |
 | `gzip_level` | `integer` | `6` | Gzip/Deflate compression level (1-9). |
 | `brotli_level` | `integer` | `4` | Brotli compression quality (0-11). Level 4 is recommended for edge performance. |
 | `zstd_level` | `integer` | `3` | Zstandard compression level (1-22). Level 3 offers optimal speed/ratio balance. |
-| `content_types`| `string[]` | Standard text/JSON list | MIME type prefixes eligible for compression. |
+| `content_types`| `string[]` | `[]` (Required) | MIME type prefixes eligible for compression. Must be explicitly declared; if omitted/empty or unmatched, responses return uncompressed. |
 
 ---
 
 ## 3. Invariants & Safeguards
 
-1. **Zero Double-Compression**: If upstream or cache already emitted a `Content-Encoding` header, compression is bypassed unconditionally.
-2. **Status Code Safeguard**: Responses with status `204 No Content`, `304 Not Modified`, or `1xx Informational` are never compressed.
-3. **Inflation Safeguard**: If the compressed payload size is equal to or larger than the raw uncompressed body, the uncompressed body is retained.
-4. **Cache Poisoning Prevention**: Automatically injects or appends `Vary: Accept-Encoding` (RFC 9110 § 12.5.5) on all compressed responses.
+1. **Explicit Declaration Invariant**: `algorithms` and `content_types` **must be explicitly declared** in plugin config. If omitted or empty (`"config": {}`), the server does not support compression and returns uncompressed payloads.
+2. **Zero Double-Compression**: If upstream or cache already emitted a `Content-Encoding` header, compression is bypassed unconditionally.
+3. **Status Code Safeguard**: Responses with status `204 No Content`, `304 Not Modified`, or `1xx Informational` are never compressed.
+4. **Inflation Safeguard**: If the compressed payload size is equal to or larger than the raw uncompressed body, the uncompressed body is retained.
+5. **Cache Poisoning Prevention**: Automatically injects or appends `Vary: Accept-Encoding` (RFC 9110 § 12.5.5) on all compressed responses.

@@ -64,10 +64,10 @@ As with all Velda Edge plugins, **never specify `phase` or `priority`** in user 
 
 | Parameter | Type | Default | Description |
 | :--- | :---: | :---: | :--- |
-| `include_request_id` | boolean | `true` | Extracts `x-request-id` header if present. |
-| `include_route_id` | boolean | `true` | Extracts `x-route-id` or `x-velda-route` header if present. |
-| `include_upstream` | boolean | `true` | Extracts `x-upstream-addr` or `x-upstream-id` header if present. |
-| `include_latency` | boolean | `true` | Extracts `x-response-time` or `x-upstream-response-time` header if present. |
+| `include_request_id` | boolean | `true` | Extracts authoritative `x-request-id` header from incoming request workspace. |
+| `include_route_id` | boolean | `true` | Extracts canonical `x-route-id` header from response. |
+| `include_upstream` | boolean | `true` | Extracts canonical `x-upstream-addr` header from response. |
+| `include_latency` | boolean | `true` | Extracts canonical `x-response-time` header from response. |
 | `format` | string | `"json"` | Serialization format (`"json"` or `"text"`). |
 | `buffer_capacity` | integer | `65536` | Bounded capacity of the lock-free non-blocking queue. |
 

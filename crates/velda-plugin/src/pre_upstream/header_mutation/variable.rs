@@ -101,7 +101,6 @@ impl HeaderValueSpec {
                     let route = req
                         .headers
                         .get("x-route-id")
-                        .or_else(|| req.headers.get("x-velda-route"))
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("unknown-route");
                     HeaderValue::from_str(route).ok()
