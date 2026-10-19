@@ -35,8 +35,9 @@ pub use pre_route::{
 };
 pub use pre_upstream::{
     ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, CanaryConfig, CanaryPlugin, HashSource,
-    HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, JwtAlgorithm, JwtAuthPlugin, KeySource,
-    MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, RateLimitPlugin,
-    RequestMirrorConfig, RequestMirrorPlugin, TokenSource, UrlRewriteConfig, UrlRewritePlugin,
-    run_pre_upstream_plugins,
+    HeaderMatchRule, HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, HttpAbortConfig,
+    HttpDelayConfig, HttpFaultCondition, HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm,
+    JwtAuthPlugin, KeySource, MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin,
+    QueryStrategy, RateLimitPlugin, RequestMirrorConfig, RequestMirrorPlugin, TokenSource,
+    UrlRewriteConfig, UrlRewritePlugin, run_pre_upstream_plugins,
 };

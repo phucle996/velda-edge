@@ -15,6 +15,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod api_key_auth;
 pub mod canary;
 pub mod header_mutation;
+pub mod http_fault_injection;
 pub mod jwt_auth;
 pub mod rate_limit;
 pub mod request_mirror;
@@ -24,6 +25,10 @@ pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
+};
+pub use http_fault_injection::{
+    HeaderMatchRule, HttpAbortConfig, HttpDelayConfig, HttpFaultCondition,
+    HttpFaultInjectionPlugin, IpRangeMatcher,
 };
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use rate_limit::{
@@ -65,9 +70,17 @@ pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
     req: &mut L7Request,
 ) -> Action {
-    for plugin in chain {
+    for (idx, plugin) in chain.iter().enumerate() {
         match plugin.on_upstream_request(req) {
             Action::Continue => continue,
+            Action::Delay { duration, and_then } => {
+                if and_then.is_continue() {
+                    let next = run_pre_upstream_plugins(&chain[idx + 1..], req);
+                    return Action::delay(duration, next);
+                } else {
+                    return Action::Delay { duration, and_then };
+                }
+            }
             action => return action,
         }
     }
@@ -90,6 +103,7 @@ pub fn instantiate(
         "canary" => Ok(Arc::new(CanaryPlugin::from_config(config)?)),
         "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
+        "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id

@@ -32,6 +32,7 @@
 //! and HTTP decoding is not implemented here.
 
 use std::future::Future;
+use std::time::Duration;
 
 use crate::{context::RequestContext, error::Error, l7::response::L7Response};
 
@@ -124,6 +125,12 @@ pub enum Action {
     /// The proxy is responsible for translating the error into
     /// an appropriate client-facing response.
     Reject(Error),
+
+    /// Delay execution for the specified duration before continuing with `and_then`.
+    Delay {
+        duration: Duration,
+        and_then: Box<Action>,
+    },
 }
 
 impl Action {
@@ -131,6 +138,16 @@ impl Action {
     #[inline]
     pub const fn r#continue() -> Self {
         Self::Continue
+    }
+
+    /// Constructs a `Delay` action that pauses execution non-blocking for `duration`
+    /// before evaluating `and_then`.
+    #[inline]
+    pub fn delay(duration: Duration, and_then: Action) -> Self {
+        Self::Delay {
+            duration,
+            and_then: Box::new(and_then),
+        }
     }
 
     /// Constructs a `Respond` action with the given L7 HTTP response.
@@ -161,6 +178,12 @@ impl Action {
     #[inline]
     pub const fn is_rejected(&self) -> bool {
         matches!(self, Self::Reject(_))
+    }
+
+    /// Returns `true` when the action requires a delay before proceeding.
+    #[inline]
+    pub const fn is_delay(&self) -> bool {
+        matches!(self, Self::Delay { .. })
     }
 }
 
@@ -244,5 +267,12 @@ mod tests {
         assert!(!rej.is_continue());
         assert!(!rej.is_response());
         assert!(rej.is_rejected());
+        assert!(!rej.is_delay());
+
+        let d = Action::delay(Duration::from_millis(100), Action::r#continue());
+        assert!(!d.is_continue());
+        assert!(!d.is_response());
+        assert!(!d.is_rejected());
+        assert!(d.is_delay());
     }
 }
