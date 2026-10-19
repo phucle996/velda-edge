@@ -221,20 +221,29 @@ pub fn encode_status_line(version: Version, status: StatusCode, dst: &mut BytesM
     dst.put_slice(b"\r\n");
 }
 
-/// Serializes HTTP/1.1 response head metadata with zero heap allocations.
-pub fn encode_response_head(
+/// Serializes HTTP/1.1 response head metadata with zero heap allocations,
+/// automatically enforcing the system-wide L7 `x-request-id` header invariant.
+///
+/// Invariant:
+/// - If response headers already contain `x-request-id`, it is written as-is.
+/// - If response headers do not contain `x-request-id` and a `request_id` is supplied,
+///   it is serialized directly to the wire buffer without any heap allocations.
+pub fn encode_head(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
     body_len: Option<usize>,
     force_close: bool,
+    request_id: Option<&HeaderValue>,
     dst: &mut BytesMut,
 ) {
     // Fast O(1) capacity estimation: avoids redundant pass over all response headers
-    dst.reserve(128 + headers.len() * 48);
+    let extra_req_id_len = if request_id.is_some() { 64 } else { 0 };
+    dst.reserve(128 + headers.len() * 48 + extra_req_id_len);
 
     encode_status_line(version, status, dst);
     let mut has_conn = false;
+    let mut has_req_id = false;
     for (name, val) in headers {
         if name == http::header::CONNECTION {
             has_conn = true;
@@ -242,6 +251,8 @@ pub fn encode_response_head(
                 dst.put_slice(b"connection: close\r\n");
                 continue;
             }
+        } else if name == "x-request-id" {
+            has_req_id = true;
         }
         dst.put_slice(name.as_str().as_bytes());
         dst.put_slice(b": ");
@@ -251,6 +262,13 @@ pub fn encode_response_head(
 
     if force_close && !has_conn {
         dst.put_slice(b"connection: close\r\n");
+    }
+
+    // Invariant: L7 Request ID is always serialized to downstream wire buffer
+    if !has_req_id && let Some(req_id) = request_id {
+        dst.put_slice(b"x-request-id: ");
+        dst.put_slice(req_id.as_bytes());
+        dst.put_slice(b"\r\n");
     }
 
     if let Some(len) = body_len
@@ -268,17 +286,22 @@ pub fn encode_response_head(
     dst.put_slice(b"\r\n");
 }
 
-/// Serializes only the HTTP/1.1 response head with `Transfer-Encoding: chunked`.
-pub fn encode_response_head_chunked(
+/// Serializes only the HTTP/1.1 response head with `Transfer-Encoding: chunked`,
+/// automatically enforcing the system-wide L7 `x-request-id` header invariant.
+pub fn encode_chunked_head(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
     force_close: bool,
+    request_id: Option<&HeaderValue>,
     dst: &mut BytesMut,
 ) {
     let mut needed = 64;
     for (name, val) in headers {
         needed += name.as_str().len() + val.as_bytes().len() + 4;
+    }
+    if request_id.is_some() {
+        needed += 64;
     }
     dst.reserve(needed);
 
@@ -286,6 +309,7 @@ pub fn encode_response_head_chunked(
 
     let mut has_te = false;
     let mut has_conn = false;
+    let mut has_req_id = false;
     for (name, val) in headers {
         if name == http::header::CONTENT_LENGTH {
             continue;
@@ -300,6 +324,9 @@ pub fn encode_response_head_chunked(
                 continue;
             }
         }
+        if name == "x-request-id" {
+            has_req_id = true;
+        }
         dst.put_slice(name.as_str().as_bytes());
         dst.put_slice(b": ");
         dst.put_slice(val.as_bytes());
@@ -308,6 +335,13 @@ pub fn encode_response_head_chunked(
 
     if force_close && !has_conn {
         dst.put_slice(b"connection: close\r\n");
+    }
+
+    // Invariant: L7 Request ID is always serialized to downstream wire buffer
+    if !has_req_id && let Some(req_id) = request_id {
+        dst.put_slice(b"x-request-id: ");
+        dst.put_slice(req_id.as_bytes());
+        dst.put_slice(b"\r\n");
     }
 
     if !has_te {
@@ -323,12 +357,13 @@ pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
         Body::Bytes(bytes) => Some(bytes.len()),
     };
 
-    encode_response_head(
+    encode_head(
         response.version,
         response.status,
         &response.headers,
         body_len,
         false,
+        None,
         dst,
     );
 
@@ -341,32 +376,76 @@ pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
     }
 }
 
-/// Internal pipeline helper: serializes response head and body to stream with vectored write and flush.
-async fn send_response_stream<W>(
+/// Serializes and writes an HTTP/1.1 response to downstream stream with request ID injection.
+pub async fn send_response<W>(
     stream: &mut W,
     write_buf: &mut BytesMut,
-    version: Version,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &Body,
+    response: &Http1ServerResponse,
     force_close: bool,
+    request_id: Option<&HeaderValue>,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_response_head(
-        version,
-        status,
-        headers,
-        Some(body.len()),
+    encode_head(
+        response.version,
+        response.status,
+        &response.headers,
+        Some(response.body.len()),
         force_close,
+        request_id,
         write_buf,
     );
 
-    let is_no_body = status.is_informational()
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::NOT_MODIFIED;
+    let is_no_body = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
+
+    if !is_no_body
+        && let Body::Bytes(bytes) = &response.body
+        && bytes.len() <= 65536
+    {
+        write_buf.extend_from_slice(bytes);
+        stream.write_all(write_buf).await?;
+        return Ok(force_close || is_connection_close(&response.headers));
+    }
+
+    stream.write_all(write_buf).await?;
+
+    if !is_no_body && let Body::Bytes(bytes) = &response.body {
+        stream.write_all(bytes).await?;
+    }
+
+    Ok(force_close || is_connection_close(&response.headers))
+}
+
+/// Serializes and writes HTTP/1.1 response parts with request ID injection.
+pub async fn send_parts<W>(
+    stream: &mut W,
+    write_buf: &mut BytesMut,
+    head: &Http1ServerResponseHead,
+    body: &Body,
+    force_close: bool,
+    request_id: Option<&HeaderValue>,
+) -> Result<bool, Http1Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_buf.clear();
+    encode_head(
+        head.version,
+        head.status,
+        &head.headers,
+        Some(body.len()),
+        force_close,
+        request_id,
+        write_buf,
+    );
+
+    let is_no_body = head.status.is_informational()
+        || head.status == StatusCode::NO_CONTENT
+        || head.status == StatusCode::NOT_MODIFIED;
 
     if !is_no_body
         && let Body::Bytes(bytes) = body
@@ -374,7 +453,7 @@ where
     {
         write_buf.extend_from_slice(bytes);
         stream.write_all(write_buf).await?;
-        return Ok(force_close || is_connection_close(headers));
+        return Ok(force_close || is_connection_close(&head.headers));
     }
 
     stream.write_all(write_buf).await?;
@@ -383,96 +462,49 @@ where
         stream.write_all(bytes).await?;
     }
 
-    Ok(force_close || is_connection_close(headers))
-}
-
-/// Serializes and writes an HTTP/1.1 response to downstream stream using zero-copy body streaming.
-pub async fn send_response<W>(
-    stream: &mut W,
-    write_buf: &mut BytesMut,
-    response: &Http1ServerResponse,
-    force_close: bool,
-) -> Result<bool, Http1Error>
-where
-    W: AsyncWrite + Unpin,
-{
-    send_response_stream(
-        stream,
-        write_buf,
-        response.version,
-        response.status,
-        &response.headers,
-        &response.body,
-        force_close,
-    )
-    .await
-}
-
-/// Serializes and writes HTTP/1.1 response parts without heap cloning.
-pub async fn send_response_parts<W>(
-    stream: &mut W,
-    write_buf: &mut BytesMut,
-    head: &Http1ServerResponseHead,
-    body: &Body,
-    force_close: bool,
-) -> Result<bool, Http1Error>
-where
-    W: AsyncWrite + Unpin,
-{
-    send_response_stream(
-        stream,
-        write_buf,
-        head.version,
-        head.status,
-        &head.headers,
-        body,
-        force_close,
-    )
-    .await
+    Ok(force_close || is_connection_close(&head.headers))
 }
 
 /// Serializes and writes only the HTTP/1.1 response head with `Transfer-Encoding: chunked`.
-pub async fn send_response_head_chunked<W>(
+pub async fn send_chunked_head<W>(
     stream: &mut W,
     write_buf: &mut BytesMut,
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
     force_close: bool,
+    request_id: Option<&HeaderValue>,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_response_head_chunked(version, status, headers, force_close, write_buf);
+    encode_chunked_head(version, status, headers, force_close, request_id, write_buf);
     stream.write_all(write_buf).await?;
 
     Ok(force_close || is_connection_close(headers))
 }
 
-/// Serializes and writes the HTTP/1.1 response head with `Transfer-Encoding: chunked`,
-/// optionally coalescing an initial chunk payload and terminal chunk into the same wire transmission.
-///
-/// Eliminates separate socket write syscalls when response chunks are already present in RAM.
-pub async fn send_response_head_chunked_coalesced<W>(
+/// Serializes and writes chunked response head coalescing initial body bytes in a single transmission.
+pub async fn send_head_coalesced<W>(
     stream: &mut W,
     write_buf: &mut BytesMut,
     head: &Http1ServerResponseHead,
     initial_chunk: Option<&[u8]>,
     is_terminated: bool,
     force_close: bool,
+    request_id: Option<&HeaderValue>,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
-    use bytes::BufMut;
-
     write_buf.clear();
-    encode_response_head_chunked(
+    encode_chunked_head(
         head.version,
         head.status,
         &head.headers,
         force_close,
+        request_id,
         write_buf,
     );
 
@@ -497,6 +529,94 @@ where
     Ok(force_close || is_connection_close(&head.headers))
 }
 
+// ---------------------------------------------------------------------------
+// Backward Compatibility Aliases
+// ---------------------------------------------------------------------------
+#[inline]
+pub fn encode_response_head(
+    version: Version,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body_len: Option<usize>,
+    force_close: bool,
+    dst: &mut BytesMut,
+) {
+    encode_head(version, status, headers, body_len, force_close, None, dst);
+}
+
+#[inline]
+pub fn encode_response_head_chunked(
+    version: Version,
+    status: StatusCode,
+    headers: &HeaderMap,
+    force_close: bool,
+    dst: &mut BytesMut,
+) {
+    encode_chunked_head(version, status, headers, force_close, None, dst);
+}
+
+#[inline]
+pub async fn send_response_parts<W>(
+    stream: &mut W,
+    write_buf: &mut BytesMut,
+    head: &Http1ServerResponseHead,
+    body: &Body,
+    force_close: bool,
+) -> Result<bool, Http1Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    send_parts(stream, write_buf, head, body, force_close, None).await
+}
+
+#[inline]
+pub async fn send_response_head_chunked<W>(
+    stream: &mut W,
+    write_buf: &mut BytesMut,
+    version: Version,
+    status: StatusCode,
+    headers: &HeaderMap,
+    force_close: bool,
+) -> Result<bool, Http1Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    send_chunked_head(
+        stream,
+        write_buf,
+        version,
+        status,
+        headers,
+        force_close,
+        None,
+    )
+    .await
+}
+
+#[inline]
+pub async fn send_response_head_chunked_coalesced<W>(
+    stream: &mut W,
+    write_buf: &mut BytesMut,
+    head: &Http1ServerResponseHead,
+    initial_chunk: Option<&[u8]>,
+    is_terminated: bool,
+    force_close: bool,
+) -> Result<bool, Http1Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    send_head_coalesced(
+        stream,
+        write_buf,
+        head,
+        initial_chunk,
+        is_terminated,
+        force_close,
+        None,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,7 +639,7 @@ mod tests {
 
         let mut write_buf1 = BytesMut::new();
         let mut stream1 = Vec::new();
-        let close1 = send_response(&mut stream1, &mut write_buf1, &resp, false)
+        let close1 = send_response(&mut stream1, &mut write_buf1, &resp, false, None)
             .await
             .unwrap();
 
@@ -560,6 +680,77 @@ mod tests {
         let text = std::str::from_utf8(&stream).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("transfer-encoding: chunked\r\n"));
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_encode_response_head_with_request_id_injected() {
+        let headers = HeaderMap::new();
+        let mut dst = BytesMut::new();
+        let req_id = HeaderValue::from_static("test-w3c-trace-id-12345");
+
+        encode_head(
+            Version::HTTP_11,
+            StatusCode::OK,
+            &headers,
+            Some(42),
+            false,
+            Some(&req_id),
+            &mut dst,
+        );
+
+        let text = std::str::from_utf8(&dst).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("x-request-id: test-w3c-trace-id-12345\r\n"));
+        assert!(text.contains("content-length: 42\r\n"));
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_encode_response_head_with_request_id_no_duplicate() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-request-id"),
+            HeaderValue::from_static("existing-req-id"),
+        );
+        let mut dst = BytesMut::new();
+        let fallback_req_id = HeaderValue::from_static("fallback-req-id");
+
+        encode_head(
+            Version::HTTP_11,
+            StatusCode::OK,
+            &headers,
+            None,
+            false,
+            Some(&fallback_req_id),
+            &mut dst,
+        );
+
+        let text = std::str::from_utf8(&dst).unwrap();
+        assert!(text.contains("x-request-id: existing-req-id\r\n"));
+        assert!(!text.contains("fallback-req-id"));
+        assert_eq!(text.matches("x-request-id:").count(), 1);
+    }
+
+    #[test]
+    fn test_encode_response_head_chunked_with_request_id() {
+        let headers = HeaderMap::new();
+        let mut dst = BytesMut::new();
+        let req_id = HeaderValue::from_static("trace-chunked-999");
+
+        encode_chunked_head(
+            Version::HTTP_11,
+            StatusCode::CREATED,
+            &headers,
+            false,
+            Some(&req_id),
+            &mut dst,
+        );
+
+        let text = std::str::from_utf8(&dst).unwrap();
+        assert!(text.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(text.contains("transfer-encoding: chunked\r\n"));
+        assert!(text.contains("x-request-id: trace-chunked-999\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
     }
 }

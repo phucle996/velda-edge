@@ -119,6 +119,9 @@ where
         }
     };
 
+    let req_id_val = conn.request_id().cloned();
+    let should_close = conn.close_requested;
+
     // 6. Split downstream IO into concurrent Read and Write halves
     let (mut client_read, mut client_write) = tokio::io::split(&mut conn.stream);
     let read_buf = &mut conn.read_buf;
@@ -245,20 +248,18 @@ where
             );
         }
 
-        let should_close = conn.close_requested;
-
         let is_no_body_status = parts.status.is_informational()
             || parts.status == http::StatusCode::NO_CONTENT
             || parts.status == http::StatusCode::NOT_MODIFIED;
-
         if is_no_body_status {
             let mut write_buf = bytes::BytesMut::with_capacity(256);
-            velda_http1::encode_response_head(
+            velda_http1::encode_head(
                 http::Version::HTTP_11,
                 parts.status,
                 &parts.headers,
                 Some(0),
                 should_close,
+                req_id_val.as_ref(),
                 &mut write_buf,
             );
             client_write.write_all(&write_buf).await?;
@@ -289,12 +290,13 @@ where
                 }
             }
             let mut write_buf = bytes::BytesMut::with_capacity(256 + body_buf.len());
-            velda_http1::encode_response_head(
+            velda_http1::encode_head(
                 http::Version::HTTP_11,
                 parts.status,
                 &parts.headers,
                 Some(body_buf.len()),
                 should_close,
+                req_id_val.as_ref(),
                 &mut write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
@@ -306,13 +308,14 @@ where
 
         // True progressive chunked streaming path
         let mut write_buf = bytes::BytesMut::with_capacity(512);
-        velda_http1::send_response_head_chunked(
+        velda_http1::send_chunked_head(
             &mut client_write,
             &mut write_buf,
             http::Version::HTTP_11,
             parts.status,
             &parts.headers,
             should_close,
+            req_id_val.as_ref(),
         )
         .await?;
 

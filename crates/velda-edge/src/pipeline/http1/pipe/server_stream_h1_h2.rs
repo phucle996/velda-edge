@@ -227,18 +227,7 @@ where
 
     match first_chunk_opt {
         None => {
-            let close = velda_http1::server::response::send_response_head_chunked_coalesced(
-                &mut conn.stream,
-                &mut conn.write_buf,
-                &resp_head,
-                None,
-                true,
-                conn.close_requested,
-            )
-            .await?;
-            if close {
-                conn.close_requested = true;
-            }
+            let _close = conn.send_head_coalesced(&resp_head, None, true).await?;
             return Ok(());
         }
         Some(first_chunk) => {
@@ -249,19 +238,9 @@ where
             let is_terminated = body_stream.is_end_stream()
                 || matches!(poll_ready_chunk(&mut body_stream), Some(None));
 
-            let close = velda_http1::server::response::send_response_head_chunked_coalesced(
-                &mut conn.stream,
-                &mut conn.write_buf,
-                &resp_head,
-                Some(&first_chunk),
-                is_terminated,
-                conn.close_requested,
-            )
-            .await?;
-            if close {
-                conn.close_requested = true;
-            }
-
+            let _close = conn
+                .send_head_coalesced(&resp_head, Some(&first_chunk), is_terminated)
+                .await?;
             if is_terminated {
                 return Ok(());
             }

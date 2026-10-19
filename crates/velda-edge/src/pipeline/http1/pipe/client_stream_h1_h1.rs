@@ -18,8 +18,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, ProgressiveChunkDecoder, encode_chunk, encode_response_head,
-    read_response_head, sanitize_headers, send_chunk, send_chunked_end, send_request,
+    Http1ServerResponse, ProgressiveChunkDecoder, encode_chunk, read_response_head,
+    sanitize_headers, send_chunk, send_chunked_end, send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -114,13 +114,12 @@ where
 
             if is_head || is_no_body_status {
                 conn.write_buf.clear();
-                encode_response_head(
+                conn.encode_response_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,
                     Some(0),
                     conn.close_requested,
-                    &mut conn.write_buf,
                 );
                 conn.stream.write_all(&conn.write_buf).await?;
                 if resp_head
@@ -137,13 +136,12 @@ where
             match resp_framing {
                 Http1BodyFraming::Empty => {
                     conn.write_buf.clear();
-                    encode_response_head(
+                    conn.encode_response_head(
                         resp_head.version,
                         resp_head.status,
                         &resp_head.headers,
                         Some(0),
                         conn.close_requested,
-                        &mut conn.write_buf,
                     );
                     conn.stream.write_all(&conn.write_buf).await?;
                     if resp_head
@@ -174,13 +172,12 @@ where
                         }
                     }
                     conn.write_buf.clear();
-                    encode_response_head(
+                    conn.encode_response_head(
                         resp_head.version,
                         resp_head.status,
                         &resp_head.headers,
                         Some(len),
                         conn.close_requested,
-                        &mut conn.write_buf,
                     );
                     if len > 0 {
                         conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);
@@ -326,13 +323,12 @@ where
 
         if is_head || is_no_body_status {
             conn.write_buf.clear();
-            encode_response_head(
+            conn.encode_response_head(
                 resp_head.version,
                 resp_head.status,
                 &resp_head.headers,
                 Some(0),
                 conn.close_requested,
-                &mut conn.write_buf,
             );
             conn.stream.write_all(&conn.write_buf).await?;
             if resp_head
@@ -349,13 +345,12 @@ where
         match resp_framing {
             Http1BodyFraming::Empty => {
                 conn.write_buf.clear();
-                encode_response_head(
+                conn.encode_response_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,
                     Some(0),
                     conn.close_requested,
-                    &mut conn.write_buf,
                 );
                 conn.stream.write_all(&conn.write_buf).await?;
                 if resp_head
@@ -386,13 +381,12 @@ where
                     }
                 }
                 conn.write_buf.clear();
-                encode_response_head(
+                conn.encode_response_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,
                     Some(len),
                     conn.close_requested,
-                    &mut conn.write_buf,
                 );
                 if len > 0 {
                     conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);

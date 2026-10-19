@@ -304,13 +304,14 @@ where
                 } else {
                     None
                 };
-                let close = velda_http1::server::response::send_response_head_chunked_coalesced(
+                let close = velda_http1::send_head_coalesced(
                     &mut conn.stream,
                     &mut conn.write_buf,
                     &server_head,
                     body_slice,
                     true,
                     conn.close_requested,
+                    conn.current_request_id.as_ref(),
                 )
                 .await?;
                 if close {
@@ -386,19 +387,9 @@ where
                 sent_via_coalesced = true;
                 if is_term1 {
                     conn.upstream_read_buf.advance(wire1);
-                    let close =
-                        velda_http1::server::response::send_response_head_chunked_coalesced(
-                            &mut conn.stream,
-                            &mut conn.write_buf,
-                            &server_head,
-                            None,
-                            true,
-                            conn.close_requested,
-                        )
+                    let _close = conn
+                        .send_response_head_chunked_coalesced(&server_head, None, true)
                         .await?;
-                    if close {
-                        conn.close_requested = true;
-                    }
                     return Ok(());
                 }
 
@@ -408,13 +399,14 @@ where
                         _ => (false, wire1),
                     };
 
-                let close = velda_http1::server::response::send_response_head_chunked_coalesced(
+                let close = velda_http1::send_head_coalesced(
                     &mut conn.stream,
                     &mut conn.write_buf,
                     &server_head,
                     Some(payload1),
                     is_terminated,
                     conn.close_requested,
+                    conn.current_request_id.as_ref(),
                 )
                 .await?;
                 if close {

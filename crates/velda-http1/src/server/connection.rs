@@ -13,8 +13,8 @@ use super::request::{
     decode_request_head,
 };
 use super::response::{
-    Http1ServerResponse, Http1ServerResponseHead, send_response, send_response_head_chunked,
-    send_response_parts,
+    Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head, encode_head,
+    send_chunked_head, send_head_coalesced, send_parts, send_response,
 };
 use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
@@ -29,6 +29,7 @@ pub struct Http1ServerConnection<IO> {
     pub upstream_read_buf: BytesMut,
     pub upstream_write_buf: BytesMut,
     pub close_requested: bool,
+    pub current_request_id: Option<http::header::HeaderValue>,
     config: Http1Config,
 }
 
@@ -45,6 +46,7 @@ where
             upstream_read_buf: BytesMut::with_capacity(config.initial_buffer_capacity),
             upstream_write_buf: BytesMut::with_capacity(4096),
             close_requested: false,
+            current_request_id: None,
             config,
         }
     }
@@ -82,6 +84,7 @@ where
     pub async fn next_request_head(
         &mut self,
     ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
+        self.current_request_id = None;
         if self.close_requested {
             return Ok(None);
         }
@@ -184,6 +187,7 @@ where
 
     /// Reads and decodes the next full HTTP/1.1 request (head + body).
     pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Error> {
+        self.current_request_id = None;
         if self.close_requested {
             return Ok(None);
         }
@@ -251,9 +255,89 @@ where
         }
     }
 
+    /// Sets the authoritative L7 Request ID for the currently active request transaction.
+    #[inline]
+    pub fn set_request_id(&mut self, request_id: Option<http::header::HeaderValue>) {
+        self.current_request_id = request_id;
+    }
+
+    /// Returns the authoritative L7 Request ID for the current request transaction, if any.
+    #[inline]
+    pub fn request_id(&self) -> Option<&http::header::HeaderValue> {
+        self.current_request_id.as_ref()
+    }
+
+    /// Serializes response head into internal write_buf, automatically injecting the connection's
+    /// authoritative L7 Request ID if not already present in `headers`.
+    #[inline]
+    pub fn encode_head(
+        &mut self,
+        version: http::Version,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+        body_len: Option<usize>,
+        force_close: bool,
+    ) {
+        encode_head(
+            version,
+            status,
+            headers,
+            body_len,
+            force_close,
+            self.current_request_id.as_ref(),
+            &mut self.write_buf,
+        );
+    }
+
+    /// Backward-compatibility alias for `encode_head`.
+    #[inline]
+    pub fn encode_response_head(
+        &mut self,
+        version: http::Version,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+        body_len: Option<usize>,
+        force_close: bool,
+    ) {
+        self.encode_head(version, status, headers, body_len, force_close);
+    }
+
+    /// Serializes chunked response head into internal write_buf, automatically injecting the
+    /// connection's authoritative L7 Request ID if not already present in `headers`.
+    #[inline]
+    pub fn encode_chunked_head(
+        &mut self,
+        version: http::Version,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+        force_close: bool,
+    ) {
+        encode_chunked_head(
+            version,
+            status,
+            headers,
+            force_close,
+            self.current_request_id.as_ref(),
+            &mut self.write_buf,
+        );
+    }
+
+    /// Backward-compatibility alias for `encode_chunked_head`.
+    #[inline]
+    pub fn encode_response_head_chunked(
+        &mut self,
+        version: http::Version,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+        force_close: bool,
+    ) {
+        self.encode_chunked_head(version, status, headers, force_close);
+    }
+
     /// Serializes and flushes an HTTP/1.1 downstream response back to the client.
     ///
-    /// Automatically streams the response body with zero-copy transmission.
+    /// Automatically streams the response body with zero-copy transmission and enforces
+    /// the authoritative L7 `x-request-id` header invariant.
     pub async fn send_response(
         &mut self,
         response: &Http1ServerResponse,
@@ -263,6 +347,7 @@ where
             &mut self.write_buf,
             response,
             self.close_requested,
+            self.current_request_id.as_ref(),
         )
         .await?;
 
@@ -287,18 +372,19 @@ where
         self.send_response(&server_resp).await
     }
 
-    /// Serializes and flushes response head and body separately.
-    pub async fn send_response_parts(
+    /// Serializes and flushes response head and body separately with authoritative L7 request ID injection.
+    pub async fn send_parts(
         &mut self,
         head: &Http1ServerResponseHead,
         body: &Body,
     ) -> Result<(), Http1Error> {
-        let close = send_response_parts(
+        let close = send_parts(
             &mut self.stream,
             &mut self.write_buf,
             head,
             body,
             self.close_requested,
+            self.current_request_id.as_ref(),
         )
         .await?;
 
@@ -309,20 +395,32 @@ where
         Ok(())
     }
 
+    /// Backward-compatibility alias for `send_parts`.
+    #[inline]
+    pub async fn send_response_parts(
+        &mut self,
+        head: &Http1ServerResponseHead,
+        body: &Body,
+    ) -> Result<(), Http1Error> {
+        self.send_parts(head, body).await
+    }
+
     /// Sends the HTTP/1.1 response head configured for progressive chunked streaming.
     ///
-    /// Sets `Transfer-Encoding: chunked` and immediately flushes the head to the client.
-    pub async fn send_response_head_chunked(
+    /// Sets `Transfer-Encoding: chunked`, enforces authoritative L7 request ID injection,
+    /// and immediately flushes the head to the client.
+    pub async fn send_chunked_head(
         &mut self,
         head: &Http1ServerResponseHead,
     ) -> Result<(), Http1Error> {
-        let close = send_response_head_chunked(
+        let close = send_chunked_head(
             &mut self.stream,
             &mut self.write_buf,
             head.version,
             head.status,
             &head.headers,
             self.close_requested,
+            self.current_request_id.as_ref(),
         )
         .await?;
 
@@ -331,6 +429,15 @@ where
         }
 
         Ok(())
+    }
+
+    /// Backward-compatibility alias for `send_chunked_head`.
+    #[inline]
+    pub async fn send_response_head_chunked(
+        &mut self,
+        head: &Http1ServerResponseHead,
+    ) -> Result<(), Http1Error> {
+        self.send_chunked_head(head).await
     }
 
     /// Sends the HTTP/1.1 response head configured for progressive chunked streaming from upstream client head.
@@ -340,7 +447,45 @@ where
     ) -> Result<(), Http1Error> {
         let server_head =
             Http1ServerResponseHead::new(head.status, head.version, head.headers.clone());
-        self.send_response_head_chunked(&server_head).await
+        self.send_chunked_head(&server_head).await
+    }
+
+    /// Serializes and flushes response head with chunked framing, optionally coalescing
+    /// an initial chunk payload and terminal chunk into the same wire transmission.
+    pub async fn send_head_coalesced(
+        &mut self,
+        head: &Http1ServerResponseHead,
+        initial_chunk: Option<&[u8]>,
+        is_terminated: bool,
+    ) -> Result<bool, Http1Error> {
+        let close = send_head_coalesced(
+            &mut self.stream,
+            &mut self.write_buf,
+            head,
+            initial_chunk,
+            is_terminated,
+            self.close_requested,
+            self.current_request_id.as_ref(),
+        )
+        .await?;
+
+        if close {
+            self.close_requested = true;
+        }
+
+        Ok(close)
+    }
+
+    /// Backward-compatibility alias for `send_head_coalesced`.
+    #[inline]
+    pub async fn send_response_head_chunked_coalesced(
+        &mut self,
+        head: &Http1ServerResponseHead,
+        initial_chunk: Option<&[u8]>,
+        is_terminated: bool,
+    ) -> Result<bool, Http1Error> {
+        self.send_head_coalesced(head, initial_chunk, is_terminated)
+            .await
     }
 
     /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).

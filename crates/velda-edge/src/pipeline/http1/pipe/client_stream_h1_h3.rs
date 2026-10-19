@@ -291,16 +291,15 @@ where
         || resp_stream.status == StatusCode::NOT_MODIFIED;
 
     if is_no_body_status {
-        let mut write_buf = BytesMut::with_capacity(256);
-        velda_http1::encode_response_head(
+        conn.write_buf.clear();
+        conn.encode_response_head(
             http::Version::HTTP_11,
             resp_stream.status,
             &resp_stream.headers,
             Some(0),
             should_close,
-            &mut write_buf,
         );
-        conn.stream.write_all(&write_buf).await?;
+        conn.stream.write_all(&conn.write_buf).await?;
         conn.stream.flush().await?;
         return Ok(());
     }
@@ -326,13 +325,12 @@ where
             }
         }
         conn.write_buf.clear();
-        velda_http1::encode_response_head(
+        conn.encode_response_head(
             http::Version::HTTP_11,
             resp_stream.status,
             &resp_stream.headers,
             Some(body_buf.len()),
             should_close,
-            &mut conn.write_buf,
         );
         conn.write_buf.extend_from_slice(&body_buf);
         conn.stream.write_all(&conn.write_buf).await?;
@@ -340,16 +338,14 @@ where
     }
 
     // Progressive chunked streaming path
-    let mut write_buf = BytesMut::with_capacity(512);
-    velda_http1::send_response_head_chunked(
-        &mut conn.stream,
-        &mut write_buf,
+    conn.write_buf.clear();
+    conn.encode_response_head_chunked(
         http::Version::HTTP_11,
         resp_stream.status,
         &resp_stream.headers,
         should_close,
-    )
-    .await?;
+    );
+    conn.stream.write_all(&conn.write_buf).await?;
 
     while let Some(chunk_res) = resp_stream.next_chunk().await {
         match chunk_res {

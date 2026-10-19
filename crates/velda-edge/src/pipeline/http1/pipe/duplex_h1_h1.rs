@@ -206,16 +206,16 @@ where
                     } else {
                         None
                     };
-                    let close =
-                        velda_http1::server::response::send_response_head_chunked_coalesced(
-                            &mut conn.stream,
-                            &mut conn.write_buf,
-                            &server_head,
-                            body_slice,
-                            true,
-                            conn.close_requested,
-                        )
-                        .await?;
+                    let close = velda_http1::send_head_coalesced(
+                        &mut conn.stream,
+                        &mut conn.write_buf,
+                        &server_head,
+                        body_slice,
+                        true,
+                        conn.close_requested,
+                        conn.current_request_id.as_ref(),
+                    )
+                    .await?;
                     if close {
                         conn.close_requested = true;
                     }
@@ -225,18 +225,7 @@ where
                     return Ok(());
                 }
 
-                let close = velda_http1::server::response::send_response_head_chunked(
-                    &mut conn.stream,
-                    &mut conn.write_buf,
-                    server_head.version,
-                    server_head.status,
-                    &server_head.headers,
-                    conn.close_requested,
-                )
-                .await?;
-                if close {
-                    conn.close_requested = true;
-                }
+                conn.send_response_head_chunked(&server_head).await?;
                 if available > 0 {
                     let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
                     send_chunk(&mut conn.stream, &first_chunk).await?;
@@ -270,19 +259,9 @@ where
                 {
                     if is_term1 {
                         conn.upstream_read_buf.advance(wire1);
-                        let close =
-                            velda_http1::server::response::send_response_head_chunked_coalesced(
-                                &mut conn.stream,
-                                &mut conn.write_buf,
-                                &server_head,
-                                None,
-                                true,
-                                conn.close_requested,
-                            )
+                        let _close = conn
+                            .send_response_head_chunked_coalesced(&server_head, None, true)
                             .await?;
-                        if close {
-                            conn.close_requested = true;
-                        }
                         return Ok(());
                     }
 
@@ -292,16 +271,16 @@ where
                             _ => (false, wire1),
                         };
 
-                    let close =
-                        velda_http1::server::response::send_response_head_chunked_coalesced(
-                            &mut conn.stream,
-                            &mut conn.write_buf,
-                            &server_head,
-                            Some(payload1),
-                            is_terminated,
-                            conn.close_requested,
-                        )
-                        .await?;
+                    let close = velda_http1::send_head_coalesced(
+                        &mut conn.stream,
+                        &mut conn.write_buf,
+                        &server_head,
+                        Some(payload1),
+                        is_terminated,
+                        conn.close_requested,
+                        conn.current_request_id.as_ref(),
+                    )
+                    .await?;
                     if close {
                         conn.close_requested = true;
                     }
@@ -312,18 +291,7 @@ where
                     }
                 }
 
-                let close = velda_http1::server::response::send_response_head_chunked(
-                    &mut conn.stream,
-                    &mut conn.write_buf,
-                    server_head.version,
-                    server_head.status,
-                    &server_head.headers,
-                    conn.close_requested,
-                )
-                .await?;
-                if close {
-                    conn.close_requested = true;
-                }
+                conn.send_response_head_chunked(&server_head).await?;
                 while let Some(chunk) =
                     read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
                 {

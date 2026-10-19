@@ -365,12 +365,13 @@ where
 
         if is_no_body_status {
             write_buf.clear();
-            velda_http1::encode_response_head(
+            velda_http1::encode_head(
                 http::Version::HTTP_11,
                 resp_stream.status,
                 &resp_stream.headers,
                 Some(0),
                 should_close,
+                req_id.as_ref(),
                 write_buf,
             );
             client_write.write_all(write_buf).await?;
@@ -400,12 +401,13 @@ where
                 }
             }
             write_buf.clear();
-            velda_http1::encode_response_head(
+            velda_http1::encode_head(
                 http::Version::HTTP_11,
                 resp_stream.status,
                 &resp_stream.headers,
                 Some(body_buf.len()),
                 should_close,
+                req_id.as_ref(),
                 write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
@@ -416,13 +418,14 @@ where
 
         // True progressive chunked streaming path
         write_buf.clear();
-        velda_http1::send_response_head_chunked(
+        velda_http1::send_chunked_head(
             &mut client_write,
             write_buf,
             http::Version::HTTP_11,
             resp_stream.status,
             &resp_stream.headers,
             should_close,
+            req_id.as_ref(),
         )
         .await?;
 

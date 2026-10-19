@@ -117,6 +117,8 @@ pub async fn run_http1_loop<IO>(
                     timeout_ms = config.header_read_timeout_ms,
                     "HTTP/1.1 request head read timed out (Slowloris protection)"
                 );
+                let (_req_id, req_id_header) = velda_core::next_request_id();
+                conn.set_request_id(Some(req_id_header));
                 let err_resp = Http1ServerResponse::from_bytes(
                     StatusCode::REQUEST_TIMEOUT,
                     b"408 Request Timeout: header read timeout exceeded\n".to_vec(),
@@ -135,6 +137,8 @@ pub async fn run_http1_loop<IO>(
                     Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
                     _ => StatusCode::BAD_REQUEST,
                 };
+                let (_req_id, req_id_header) = velda_core::next_request_id();
+                conn.set_request_id(Some(req_id_header));
                 let err_resp =
                     Http1ServerResponse::from_bytes(status, format!("{status}\n").into_bytes());
                 conn.mark_close();
@@ -155,6 +159,7 @@ pub async fn run_http1_loop<IO>(
         // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
         // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
         let (_request_id, req_id_header) = velda_core::next_request_id();
+        conn.set_request_id(Some(req_id_header.clone()));
         let mut head = head;
         head.headers.insert(
             http::header::HeaderName::from_static("x-request-id"),

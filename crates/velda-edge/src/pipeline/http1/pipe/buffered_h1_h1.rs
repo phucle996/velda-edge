@@ -15,8 +15,8 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_http1::{
     Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
-    Http1ServerRequestHead, Http1ServerResponse, encode_response_head, is_connection_close,
-    read_response_head, sanitize_headers, send_request,
+    Http1ServerRequestHead, Http1ServerResponse, is_connection_close, read_response_head,
+    sanitize_headers, send_request,
 };
 
 use crate::pipeline::DownstreamMeta;
@@ -235,15 +235,14 @@ where
     let actual_body_len = if is_no_body { 0 } else { body_len };
     let force_close = conn.is_closed() || is_connection_close(&resp_head.headers);
 
-    // 9. Encode response head into downstream write_buf
+    // 9. Encode response head into downstream write_buf with authoritative request ID invariant
     conn.write_buf.clear();
-    encode_response_head(
+    conn.encode_response_head(
         resp_head.version,
         resp_head.status,
         &resp_head.headers,
         Some(actual_body_len),
         force_close,
-        &mut conn.write_buf,
     );
 
     // 10. DROP UPSTREAM LEASE IMMEDIATELY before starting downstream transmission!
