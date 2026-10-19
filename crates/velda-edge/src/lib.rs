@@ -27,7 +27,9 @@ pub mod reload;
 pub mod runtime;
 pub mod upstream;
 
-pub use affinity::{ThreadPinner, get_allowed_cores, pin_current_thread_to_core};
+pub use affinity::{
+    ThreadPinner, get_allowed_cores, pin_current_thread_to_core, set_current_thread_idle_priority,
+};
 pub use banner::{format_startup_banner, print_startup_banner};
 pub use bootstrap::{EdgeSupervisor, bootstrap};
 pub use config::EdgeConfig;

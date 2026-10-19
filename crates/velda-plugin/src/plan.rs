@@ -4,9 +4,9 @@
 //! 1. **Phase Isolation**:
 //!    - Plugins execute in strictly non-overlapping phases:
 //!      `pre_route` -> `Router Match` -> `pre_upstream` -> `Upstream Dispatch` -> `post_response`.
-//! 2. **Hybrid Stable Ordering**:
-//!    - Within each phase, plugins are sorted by descending `priority` (highest priority runs first).
-//!    - Ties are resolved by the 0-based declaration order from configuration (Stable Sort).
+//! 2. **Sequential FIFO Declaration Order**:
+//!    - Within each phase, hooks execute strictly in the sequential order they are declared
+//!      in the route's `plugins` array (First declared, first executed).
 //! 3. **Aggregate Reverse Permissions**:
 //!    - The plan pre-computes aggregate [`AccessLevel`] masks across all attached plugins.
 //!    - If `request_payload_access == None`, the data plane enables Zero-Copy Direct Streaming
@@ -53,97 +53,9 @@ impl RoutePluginPlan {
     }
 }
 
-/// Helper container used during cold-start compilation to sort plugins stably.
-pub struct StablyOrderedPlugin<T: ?Sized> {
-    pub plugin: Arc<T>,
-    pub priority: i32,
-    pub declaration_index: usize,
-}
-
-impl<T: ?Sized> StablyOrderedPlugin<T> {
-    #[inline]
-    pub fn new(plugin: Arc<T>, priority: Option<i32>, declaration_index: usize) -> Self {
-        Self {
-            plugin,
-            priority: priority.unwrap_or(0),
-            declaration_index,
-        }
-    }
-}
-
-/// Sorts a slice of plugins using the Hybrid Stable Sort formula:
-/// 1. Descending priority (higher priority number runs first).
-/// 2. Ascending declaration index in JSON (earlier declared runs first on tie).
-pub fn sort_plugins_stable<T: ?Sized>(plugins: &mut [StablyOrderedPlugin<T>]) {
-    plugins.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then_with(|| a.declaration_index.cmp(&b.declaration_index))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct DummyPlugin {
-        name: &'static str,
-    }
-
-    #[test]
-    fn test_hybrid_stable_sorting() {
-        let mut plugins = vec![
-            StablyOrderedPlugin::new(
-                Arc::new(DummyPlugin {
-                    name: "default_0_idx0",
-                }),
-                None,
-                0,
-            ),
-            StablyOrderedPlugin::new(
-                Arc::new(DummyPlugin {
-                    name: "priority_100_idx1",
-                }),
-                Some(100),
-                1,
-            ),
-            StablyOrderedPlugin::new(
-                Arc::new(DummyPlugin {
-                    name: "priority_50_idx2",
-                }),
-                Some(50),
-                2,
-            ),
-            StablyOrderedPlugin::new(
-                Arc::new(DummyPlugin {
-                    name: "default_0_idx3",
-                }),
-                Some(0),
-                3,
-            ),
-            StablyOrderedPlugin::new(
-                Arc::new(DummyPlugin {
-                    name: "priority_100_idx4",
-                }),
-                Some(100),
-                4,
-            ),
-        ];
-
-        sort_plugins_stable(&mut plugins);
-
-        let names: Vec<&'static str> = plugins.iter().map(|p| p.plugin.name).collect();
-        assert_eq!(
-            names,
-            vec![
-                "priority_100_idx1", // priority 100, idx 1
-                "priority_100_idx4", // priority 100, idx 4
-                "priority_50_idx2",  // priority 50, idx 2
-                "default_0_idx0",    // priority 0, idx 0
-                "default_0_idx3",    // priority 0, idx 3
-            ]
-        );
-    }
 
     #[test]
     fn test_route_plugin_plan_passthrough_defaults() {

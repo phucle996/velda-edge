@@ -87,8 +87,6 @@ Downstream Request
 ```json
 {
   "id": "jwt_auth",
-  "phase": "pre_upstream",
-  "priority": 200,
   "config": {
     "algorithm": "HS256",
     "secret_key": "your-256-bit-secret-key-here",
@@ -112,8 +110,6 @@ Downstream Request
 ```json
 {
   "id": "jwt_auth",
-  "phase": "pre_upstream",
-  "priority": 200,
   "config": {
     "algorithm": "RS256",
     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----",

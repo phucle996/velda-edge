@@ -12,9 +12,11 @@ use velda_core::L7Response;
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
+pub mod access_log;
 pub mod cors;
 pub mod security_headers;
 
+pub use access_log::{AccessLogConfig, AccessLogPlugin, LogFormat, LogRecord};
 pub use cors::CorsResponsePlugin;
 pub use security_headers::SecurityHeadersPlugin;
 
@@ -58,6 +60,7 @@ pub fn instantiate(
     match config.id.as_str() {
         "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),
         "cors" => Ok(Arc::new(CorsResponsePlugin::from_config(config)?)),
+        "access_log" => Ok(Arc::new(AccessLogPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported post_response plugin '{other}' for plugin '{}'",
             config.id

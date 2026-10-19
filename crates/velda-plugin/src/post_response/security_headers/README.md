@@ -10,7 +10,7 @@ Client-side browser hardening and OWASP L7 hygiene plugin for outgoing HTTP resp
 | :--- | :--- |
 | **Plugin ID** | `security_headers` |
 | **Canonical Phase** | `post_response` |
-| **Execution Order** | Stably sorted descending by route `priority` (Evaluated immediately before downstream frame encoding) |
+| **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
 | **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
 | **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
 | **Hot-Path Overhead** | O(1) per header; pre-computed `HeaderValue` atomic ref-count clone; **0 heap allocations** |
@@ -69,7 +69,6 @@ Any unused security header must be explicitly set to `"none"` to omit it from th
 ```json
 {
   "id": "security_headers",
-  "priority": 100,
   "config": {
     "hsts": {
       "enable": true,
@@ -90,7 +89,6 @@ Any unused security header must be explicitly set to `"none"` to omit it from th
 ```json
 {
   "id": "security_headers",
-  "priority": 100,
   "config": {
     "hsts": {
       "enable": true,

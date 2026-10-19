@@ -10,7 +10,7 @@ High-performance L7 ingress gatekeeper enforcing client IP address and CIDR subn
 | :--- | :--- |
 | **Plugin ID** | `ip_filter` |
 | **Canonical Phase** | `pre_route` |
-| **Execution Order** | Stably sorted descending by route `priority` (Recommended `100+` for fail-fast gatekeeping) |
+| **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
 | **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Can generate `Action::Respond` 403) |
 | **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
 | **Hot-Path Overhead** | Single-digit nanoseconds; bitmask integer arithmetic; **0 heap allocations** |
@@ -60,7 +60,6 @@ Unused lists must use the explicit `"none"` sentinel value rather than empty arr
 ```json
 {
   "id": "ip_filter",
-  "priority": 100,
   "config": {
     "mode": "allow",
     "allow_cidrs": [
@@ -78,7 +77,6 @@ Unused lists must use the explicit `"none"` sentinel value rather than empty arr
 ```json
 {
   "id": "ip_filter",
-  "priority": 100,
   "config": {
     "mode": "deny",
     "allow_cidrs": [

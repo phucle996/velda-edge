@@ -728,7 +728,6 @@ mod tests {
         let sync_cfg = velda_sync::post_sync::plugin::PluginConfig {
             id: "full-config-test".into(),
             phase: "pre_upstream".into(),
-            priority: Some(100),
             config: json_cfg,
         };
 

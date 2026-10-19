@@ -1,136 +1,70 @@
 //! Hardware Core Partitioning & Boundary Manager.
 //!
-//! Enforces an impermeable architectural boundary between:
-//! 1. **Data Plane (Traffic Cores)**: High-throughput, zero-allocation network I/O workers.
-//! 2. **Management Plane (Auxiliary Cores)**: Cold-path administration, supervisor IPC,
-//!    overload monitoring, OS signal traps, and Prometheus telemetry exporting.
+//! Provides a unified, zero-waste CPU core allocation architecture for Velda Edge.
 //!
-//! # Strict Subsystem Boundary Invariants
-//! ```text
-//! ========================================================================================
-//!                          HARD CORE BOUNDARY INVARIANTS
-//! ========================================================================================
-//!   [ DATA PLANE: TRAFFIC CORES ]              [ MANAGEMENT PLANE: AUXILIARY CORES ]
-//!   - Owns: TCP/UDP listener sockets           - Owns: Prometheus HTTP/TLS listener (:9090)
-//!   - Owns: SO_REUSEPORT + SO_INCOMING_CPU     - Owns: Unix Domain Socket IPC (velda-sync)
-//!   - Owns: L7 HTTP/1/2/3 & gRPC engines       - Owns: Overload Monitor & OOM protection
-//!   - Owns: Upstream connection pool leasing   - Owns: SIGINT / SIGTERM signal trapping
-//!   - Owns: 36 cacheline-aligned metrics slots - Owns: Healthcheck / readiness probes
+//! # Architectural Rationale: All-Worker Balanced Sharding & Idle CPU Harvesting
 //!
-//!   STRICT INVARIANTS:                         STRICT INVARIANTS:
-//!   x MUST NEVER serve /metrics endpoint       x MUST NEVER poll client traffic sockets
-//!   x MUST NEVER format OpenMetrics text       x MUST NEVER execute proxy route dispatch
-//!   x MUST NEVER poll IPC reload socket        x MUST NEVER allocate memory on traffic hot-path
-//! ========================================================================================
-//! ```
+//! In legacy proxy architectures, systems often arbitrarily reserve one or more dedicated CPU cores
+//! exclusively for background/auxiliary tasks (e.g. Prometheus metrics exporting, health probes,
+//! buffer pool sweeping, and IPC administration). In high-performance edge computing, this approach
+//! introduces severe operational drawbacks:
+//!
+//! 1. **Massive Capacity Waste on Small/Medium Hosts**:
+//!    Reserving 1 core on a 2-core host burns 50% of the server's network throughput.
+//!    Reserving 1 core on a 4-core host burns 25% of the server's network throughput.
+//!    Even on larger servers, background tasks such as Prometheus scraping execute intermittently
+//!    (e.g. once every 5–15 seconds), causing an isolated core to sit idle >99% of the time.
+//!
+//! 2. **Elimination of Arbitrary Mode Thresholds**:
+//!    Earlier designs partitioned core allocation into artificial modes (`Dedicated`, `Balanced`,
+//!    `Cooperative`) with arbitrary core count thresholds (e.g. `< 5` vs `>= 5`). This created
+//!    accidental complexity, inconsistent latency characteristics, and branching overhead.
+//!
+//! 3. **The Velda Unified Model: 100% Cores for Traffic, Auxiliary on Idle Cycles**:
+//!    - **100% Traffic Core Allocation**: Every permitted CPU core is allocated to a dedicated,
+//!      core-pinned Data Plane worker thread running a single-threaded Tokio runtime (`new_current_thread()`).
+//!    - **Floating Auxiliary Tasks**: Auxiliary services (Prometheus Exporter, IPC Server, Buffer Sweeper,
+//!      Overload Monitor, Access Log Flusher) execute cooperatively as floating background tasks.
+//!    - **Zero-Contention Kernel Scheduling (`SCHED_IDLE` / `nice(19)`)**:
+//!      Auxiliary threads operate under the Linux `SCHED_IDLE` scheduling class (or POSIX `nice(19)`).
+//!      The Linux Completely Fair Scheduler (CFS) guarantees that auxiliary tasks ONLY receive CPU slices
+//!      when there are NO runnable normal-priority worker threads (e.g. during network I/O wait).
+//!    - **Lock-Free Cacheline Isolation**:
+//!      Shared metrics structures ([`velda_observability::PipelineSlot`]) are explicitly 64-byte aligned
+//!      (`#[repr(align(64))]`), preventing False Sharing and ensuring auxiliary reads never contend
+//!      with or stall traffic worker cachelines.
 
-/// Operating mode derived for hardware core allocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CorePartitionMode {
-    /// Dedicated Cores (Host has >= 4 cores):
-    /// Traffic workers are assigned strictly to cores `0 .. N-2`.
-    /// Auxiliary tasks (Supervisor, IPC, Exporter, Signals) are isolated strictly on core `N-1`.
-    /// L1/L2 caches of traffic workers remain 100% clean and unpolluted by telemetry formatting.
-    Dedicated,
-
-    /// Balanced Sharding (Host has 2 to 3 cores):
-    /// 100% of available cores are assigned to Traffic Workers to maximize edge network throughput.
-    /// Auxiliary services run on the Supervisor thread unpinned, utilizing idle/I-O wait cycles
-    /// without starving any core or wasting a large fraction of system capacity.
-    Balanced,
-
-    /// Single Core Cooperative (Host has exactly 1 core):
-    /// Traffic workers and Auxiliary services co-exist on Core 0.
-    /// Concurrency is managed cooperatively via async Tokio task yields without thread pinning.
-    Cooperative,
-}
-
-/// Core allocation strategy and physical partition mapping between
-/// Data Plane Traffic Workers and Management Plane Auxiliary services.
+/// Core allocation strategy mapping host hardware cores directly to Data Plane traffic workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePartition {
     /// Full list of logical CPU core IDs permitted by the host OS and container cgroups.
     pub allowed_cores: Vec<usize>,
 
-    /// Logical core IDs dedicated strictly to Data Plane traffic workers.
+    /// Logical core IDs dedicated strictly to Data Plane traffic workers (100% of allowed cores).
     ///
     /// # Invariant
-    /// Worker threads pinned to these cores MUST NEVER bind, poll, or serve auxiliary endpoints.
+    /// Every allowed core is assigned a traffic worker thread affined via `sched_setaffinity`.
+    /// Worker threads execute single-threaded Tokio event loops to maximize network I/O throughput.
     pub traffic_cores: Vec<usize>,
-
-    /// Logical core IDs dedicated to Auxiliary/Management services (Supervisor, Exporter, IPC).
-    ///
-    /// # Invariant
-    /// Auxiliary tasks pinned to these cores MUST NEVER accept or forward client API traffic.
-    pub auxiliary_cores: Vec<usize>,
-
-    /// Operational partitioning mode resolved for the host hardware topology.
-    pub mode: CorePartitionMode,
-
-    /// Whether auxiliary tasks share execution with traffic worker cores.
-    pub is_shared: bool,
 }
 
 impl CorePartition {
-    /// Derives the optimal core partitioning strategy from allowed OS/cgroups core IDs.
+    /// Derives the zero-waste hardware core partitioning plan from allowed OS/cgroups core IDs.
     ///
     /// # Sizing Rules
-    /// - **Empty input**: Defaults safely to `[0]` in [`CorePartitionMode::Cooperative`].
-    /// - **1 Core**: `traffic = [core_0]`, `auxiliary = [core_0]`, `is_shared = true`.
-    /// - **2..3 Cores**: `traffic = [cores]`, `auxiliary = []`, `is_shared = true` (Balanced).
-    /// - **>= 4 Cores**: `traffic = [cores[0..N-1]]`, `auxiliary = [cores[N-1]]`, `is_shared = false` (Dedicated).
+    /// - **Empty input**: Defaults safely to `[0]` (1 traffic worker on Core 0).
+    /// - **N Cores**: Allocates all `N` cores to `traffic_cores` (100% edge capacity).
+    ///   Auxiliary tasks run floating on unpinned supervisor threads utilizing idle CPU cycles.
     pub fn plan(allowed: &[usize]) -> Self {
-        if allowed.is_empty() {
-            return Self {
-                allowed_cores: vec![0],
-                traffic_cores: vec![0],
-                auxiliary_cores: vec![0],
-                mode: CorePartitionMode::Cooperative,
-                is_shared: true,
-            };
-        }
-
-        let total = allowed.len();
-
-        match total {
-            1 => Self {
-                allowed_cores: allowed.to_vec(),
-                traffic_cores: vec![allowed[0]],
-                auxiliary_cores: vec![allowed[0]],
-                mode: CorePartitionMode::Cooperative,
-                is_shared: true,
-            },
-            2..=4 => Self {
-                allowed_cores: allowed.to_vec(),
-                traffic_cores: allowed.to_vec(),
-                auxiliary_cores: Vec::new(),
-                mode: CorePartitionMode::Balanced,
-                is_shared: true,
-            },
-            _ => {
-                // >= 5 Cores: Split strictly. Cores 0..N-2 for Traffic, Core N-1 for Auxiliary.
-                let split_idx = total - 1;
-                let traffic = allowed[..split_idx].to_vec();
-                let auxiliary = vec![allowed[split_idx]];
-
-                Self {
-                    allowed_cores: allowed.to_vec(),
-                    traffic_cores: traffic,
-                    auxiliary_cores: auxiliary,
-                    mode: CorePartitionMode::Dedicated,
-                    is_shared: false,
-                }
-            }
-        }
-    }
-
-    /// Returns the dedicated auxiliary core ID if running in Dedicated mode.
-    #[inline(always)]
-    pub fn dedicated_auxiliary_core(&self) -> Option<usize> {
-        if !self.is_shared && !self.auxiliary_cores.is_empty() {
-            Some(self.auxiliary_cores[0])
+        let cores = if allowed.is_empty() {
+            vec![0]
         } else {
-            None
+            allowed.to_vec()
+        };
+
+        Self {
+            allowed_cores: cores.clone(),
+            traffic_cores: cores,
         }
     }
 }
@@ -142,60 +76,36 @@ mod tests {
     #[test]
     fn test_core_partition_empty_fallback() {
         let p = CorePartition::plan(&[]);
-        assert_eq!(p.mode, CorePartitionMode::Cooperative);
+        assert_eq!(p.allowed_cores, vec![0]);
         assert_eq!(p.traffic_cores, vec![0]);
-        assert_eq!(p.auxiliary_cores, vec![0]);
-        assert!(p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), None);
     }
 
     #[test]
     fn test_core_partition_single_core() {
         let p = CorePartition::plan(&[0]);
-        assert_eq!(p.mode, CorePartitionMode::Cooperative);
+        assert_eq!(p.allowed_cores, vec![0]);
         assert_eq!(p.traffic_cores, vec![0]);
-        assert_eq!(p.auxiliary_cores, vec![0]);
-        assert!(p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), None);
     }
 
     #[test]
-    fn test_core_partition_two_cores_balanced() {
+    fn test_core_partition_two_cores_all_traffic() {
         let p = CorePartition::plan(&[0, 1]);
-        assert_eq!(p.mode, CorePartitionMode::Balanced);
+        assert_eq!(p.allowed_cores, vec![0, 1]);
         assert_eq!(p.traffic_cores, vec![0, 1]);
-        assert!(p.auxiliary_cores.is_empty());
-        assert!(p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), None);
     }
 
     #[test]
-    fn test_core_partition_three_cores_balanced() {
-        let p = CorePartition::plan(&[0, 1, 2]);
-        assert_eq!(p.mode, CorePartitionMode::Balanced);
-        assert_eq!(p.traffic_cores, vec![0, 1, 2]);
-        assert!(p.auxiliary_cores.is_empty());
-        assert!(p.is_shared);
-    }
-
-    #[test]
-    fn test_core_partition_four_cores_balanced() {
+    fn test_core_partition_four_cores_all_traffic() {
         let p = CorePartition::plan(&[0, 1, 2, 3]);
-        assert_eq!(p.mode, CorePartitionMode::Balanced);
+        assert_eq!(p.allowed_cores, vec![0, 1, 2, 3]);
         assert_eq!(p.traffic_cores, vec![0, 1, 2, 3]);
-        assert!(p.auxiliary_cores.is_empty());
-        assert!(p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), None);
     }
 
     #[test]
-    fn test_core_partition_eight_cores_dedicated_with_arbitrary_ids() {
+    fn test_core_partition_eight_cores_all_traffic_with_arbitrary_ids() {
         let allowed = vec![10, 11, 12, 13, 14, 15, 16, 17];
         let p = CorePartition::plan(&allowed);
-        assert_eq!(p.mode, CorePartitionMode::Dedicated);
-        assert_eq!(p.traffic_cores, vec![10, 11, 12, 13, 14, 15, 16]);
-        assert_eq!(p.auxiliary_cores, vec![17]);
-        assert!(!p.is_shared);
-        assert_eq!(p.dedicated_auxiliary_core(), Some(17));
+        assert_eq!(p.allowed_cores, allowed);
+        assert_eq!(p.traffic_cores, allowed);
     }
 }

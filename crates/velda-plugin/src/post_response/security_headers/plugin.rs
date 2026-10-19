@@ -437,7 +437,6 @@ mod tests {
         let plugin_config = PluginConfig {
             id: "sec-json".to_string(),
             phase: "post_response".to_string(),
-            priority: Some(50),
             config: json,
         };
 
@@ -479,7 +478,6 @@ mod tests {
         let plugin_config = PluginConfig {
             id: "sec-none".to_string(),
             phase: "post_response".to_string(),
-            priority: Some(100),
             config: json,
         };
 

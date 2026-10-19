@@ -87,7 +87,7 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
-    AccelerationTier, BusyPollTier, CorePartition, CorePartitionMode, CoreSteeringTier, CpuProfile,
+    AccelerationTier, BusyPollTier, CorePartition, CoreSteeringTier, CpuProfile,
     DeadPeerTeardownTier, HardwareSizing, HardwareTopology, KernelAccelerationLadder,
     KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier, MultiplexPacingTier,
     OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker, UdpEgressTier,

@@ -11,7 +11,7 @@ use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
-use crate::plan::{RoutePluginPlan, StablyOrderedPlugin, sort_plugins_stable};
+use crate::plan::RoutePluginPlan;
 use crate::post_response::PostResponsePlugin;
 use crate::pre_route::PreRoutePlugin;
 use crate::pre_upstream::PreUpstreamPlugin;
@@ -110,27 +110,27 @@ pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginE
     }
 }
 
-/// Pre-computes and compiles an optimized, stably-ordered [`RoutePluginPlan`] for a route.
+/// Pre-computes and compiles an optimized [`RoutePluginPlan`] for a route.
 ///
 /// # Validation and Safety Invariants:
 /// 1. Unknown plugin IDs are rejected fail-fast.
 /// 2. Protocol mismatch between Route and Plugin is rejected fail-fast.
 /// 3. Request plugins needing body buffering on a streaming-upload route (`streaming.client == true`) are rejected.
 /// 4. Response plugins needing body buffering on a streaming-download route (`streaming.server == true`) are rejected.
-/// 5. Within each phase, hooks are stably sorted by descending `priority`, preserving JSON declaration order for ties.
+/// 5. Within each phase, hooks execute strictly in sequential FIFO order matching route declaration.
 pub fn build_route_plugin_plan(
     route_id: &str,
     route_plugin_ids: &[String],
-    available_plugins: &FxHashMap<String, (LoadedPlugin, Option<i32>)>,
+    available_plugins: &FxHashMap<String, LoadedPlugin>,
     route_protocol: ProtocolFamily,
     route_streaming: StreamingMode,
 ) -> Result<RoutePluginPlan, PluginError> {
-    let mut pre_route_list: Vec<StablyOrderedPlugin<dyn PreRoutePlugin>> = Vec::new();
-    let mut pre_upstream_list: Vec<StablyOrderedPlugin<dyn PreUpstreamPlugin>> = Vec::new();
-    let mut post_response_list: Vec<StablyOrderedPlugin<dyn PostResponsePlugin>> = Vec::new();
+    let mut pre_route_list: Vec<Arc<dyn PreRoutePlugin>> = Vec::new();
+    let mut pre_upstream_list: Vec<Arc<dyn PreUpstreamPlugin>> = Vec::new();
+    let mut post_response_list: Vec<Arc<dyn PostResponsePlugin>> = Vec::new();
 
-    for (decl_idx, plugin_id) in route_plugin_ids.iter().enumerate() {
-        let (plugin, priority) = available_plugins
+    for plugin_id in route_plugin_ids {
+        let plugin = available_plugins
             .get(plugin_id)
             .ok_or_else(|| PluginError::NotFound(plugin_id.clone()))?;
 
@@ -145,16 +145,16 @@ pub fn build_route_plugin_plan(
             });
         }
 
-        // 2. Classify by canonical phase
+        // 2. Classify by canonical phase in exact FIFO declaration order
         match plugin {
             LoadedPlugin::PreRoute(p) => {
-                pre_route_list.push(StablyOrderedPlugin::new(p.clone(), *priority, decl_idx));
+                pre_route_list.push(p.clone());
             }
             LoadedPlugin::PreUpstream(p) => {
-                pre_upstream_list.push(StablyOrderedPlugin::new(p.clone(), *priority, decl_idx));
+                pre_upstream_list.push(p.clone());
             }
             LoadedPlugin::PostResponse(p) => {
-                post_response_list.push(StablyOrderedPlugin::new(p.clone(), *priority, decl_idx));
+                post_response_list.push(p.clone());
             }
             LoadedPlugin::Background { .. } => {
                 return Err(PluginError::PhaseMismatch {
@@ -166,23 +166,18 @@ pub fn build_route_plugin_plan(
         }
     }
 
-    // 3. Stable Sort by priority descending + declaration order
-    sort_plugins_stable(&mut pre_route_list);
-    sort_plugins_stable(&mut pre_upstream_list);
-    sort_plugins_stable(&mut post_response_list);
-
-    // 4. Compute aggregate permissions
+    // 3. Compute aggregate permissions
     let mut req_header_access = AccessLevel::None;
     let mut req_payload_access = AccessLevel::None;
 
-    for item in &pre_route_list {
-        let cap = item.plugin.capability();
+    for plugin in &pre_route_list {
+        let cap = plugin.capability();
         req_header_access = req_header_access.union(cap.header);
         req_payload_access = req_payload_access.union(cap.payload);
     }
 
-    for item in &pre_upstream_list {
-        let cap = item.plugin.capability();
+    for plugin in &pre_upstream_list {
+        let cap = plugin.capability();
         req_header_access = req_header_access.union(cap.header);
         req_payload_access = req_payload_access.union(cap.payload);
     }
@@ -190,13 +185,13 @@ pub fn build_route_plugin_plan(
     let mut resp_header_access = AccessLevel::None;
     let mut resp_payload_access = AccessLevel::None;
 
-    for item in &post_response_list {
-        let cap = item.plugin.capability();
+    for plugin in &post_response_list {
+        let cap = plugin.capability();
         resp_header_access = resp_header_access.union(cap.header);
         resp_payload_access = resp_payload_access.union(cap.payload);
     }
 
-    // 5. Enforce orthogonal streaming / pipe compatibility
+    // 4. Enforce orthogonal streaming / pipe compatibility
     if !req_payload_access.is_none() && route_streaming.client {
         return Err(PluginError::StreamingConflict {
             plugin_id: "request_phase".into(),
@@ -217,13 +212,10 @@ pub fn build_route_plugin_plan(
         });
     }
 
-    // 6. Freeze into final Arc slices
-    let pre_route_hooks: Arc<[Arc<dyn PreRoutePlugin>]> =
-        pre_route_list.into_iter().map(|p| p.plugin).collect();
-    let pre_upstream_hooks: Arc<[Arc<dyn PreUpstreamPlugin>]> =
-        pre_upstream_list.into_iter().map(|p| p.plugin).collect();
-    let post_response_hooks: Arc<[Arc<dyn PostResponsePlugin>]> =
-        post_response_list.into_iter().map(|p| p.plugin).collect();
+    // 5. Freeze into final Arc slices
+    let pre_route_hooks: Arc<[Arc<dyn PreRoutePlugin>]> = Arc::from(pre_route_list);
+    let pre_upstream_hooks: Arc<[Arc<dyn PreUpstreamPlugin>]> = Arc::from(pre_upstream_list);
+    let post_response_hooks: Arc<[Arc<dyn PostResponsePlugin>]> = Arc::from(post_response_list);
 
     Ok(RoutePluginPlan {
         pre_route_hooks,
@@ -245,7 +237,6 @@ mod tests {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(100),
             config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
         };
         let p1 = instantiate_plugin(&cfg_jwt).expect("Should instantiate jwt");
@@ -255,7 +246,6 @@ mod tests {
         let cfg_rate = PluginConfig {
             id: "rate_limit".into(),
             phase: "pre_upstream".into(),
-            priority: Some(50),
             config: serde_json::json!({ "rate_per_second": 500 }),
         };
         let p2 = instantiate_plugin(&cfg_rate).expect("Should instantiate rate_limit");
@@ -265,7 +255,6 @@ mod tests {
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            priority: None,
             config: serde_json::json!({ "allow_origin": "https://example.com" }),
         };
         let p3 = instantiate_plugin(&cfg_cors).expect("Should instantiate cors");
@@ -280,35 +269,29 @@ mod tests {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
         };
         available.insert(
             "jwt_auth".to_string(),
-            (instantiate_plugin(&cfg_jwt).unwrap(), Some(200)),
+            instantiate_plugin(&cfg_jwt).unwrap(),
         );
 
         let cfg_ip = PluginConfig {
             id: "ip_filter".into(),
             phase: "pre_route".into(),
-            priority: Some(100),
             config: serde_json::json!({ "mode": "allow", "allow_cidrs": ["127.0.0.1/32"] }),
         };
         available.insert(
             "ip_filter".to_string(),
-            (instantiate_plugin(&cfg_ip).unwrap(), Some(100)),
+            instantiate_plugin(&cfg_ip).unwrap(),
         );
 
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            priority: None,
             config: serde_json::json!({ "allow_origin": "*" }),
         };
-        available.insert(
-            "cors".to_string(),
-            (instantiate_plugin(&cfg_cors).unwrap(), None),
-        );
+        available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
 
         // Declaration order: jwt_auth, ip_filter, cors
         let route_plugins = vec![
@@ -344,6 +327,59 @@ mod tests {
     }
 
     #[test]
+    fn test_build_route_plugin_plan_fifo_declaration_order() {
+        let mut available = FxHashMap::default();
+
+        let cfg_cors_preflight = PluginConfig {
+            id: "cors_preflight".into(),
+            phase: "pre_route".into(),
+            config: serde_json::json!({ "allowed_origins": ["*"] }),
+        };
+        available.insert(
+            "cors_preflight".to_string(),
+            instantiate_plugin(&cfg_cors_preflight).unwrap(),
+        );
+
+        let cfg_ip = PluginConfig {
+            id: "ip_filter".into(),
+            phase: "pre_route".into(),
+            config: serde_json::json!({ "mode": "allow", "allow_cidrs": ["127.0.0.1/32"] }),
+        };
+        available.insert(
+            "ip_filter".to_string(),
+            instantiate_plugin(&cfg_ip).unwrap(),
+        );
+
+        // Order 1: cors_preflight before ip_filter
+        let route_plugins_1 = vec!["cors_preflight".to_string(), "ip_filter".to_string()];
+        let plan_1 = build_route_plugin_plan(
+            "route-1",
+            &route_plugins_1,
+            &available,
+            ProtocolFamily::Http,
+            StreamingMode::DISABLED,
+        )
+        .expect("Should build plan");
+        assert_eq!(plan_1.pre_route_hooks.len(), 2);
+        assert_eq!(plan_1.pre_route_hooks[0].id(), "cors_preflight");
+        assert_eq!(plan_1.pre_route_hooks[1].id(), "ip_filter");
+
+        // Order 2: ip_filter before cors_preflight (strictly follows route array FIFO)
+        let route_plugins_2 = vec!["ip_filter".to_string(), "cors_preflight".to_string()];
+        let plan_2 = build_route_plugin_plan(
+            "route-2",
+            &route_plugins_2,
+            &available,
+            ProtocolFamily::Http,
+            StreamingMode::DISABLED,
+        )
+        .expect("Should build plan");
+        assert_eq!(plan_2.pre_route_hooks.len(), 2);
+        assert_eq!(plan_2.pre_route_hooks[0].id(), "ip_filter");
+        assert_eq!(plan_2.pre_route_hooks[1].id(), "cors_preflight");
+    }
+
+    #[test]
     fn test_build_route_plugin_plan_rejects_missing_plugin() {
         let available = FxHashMap::default();
         let route_plugins = vec!["unknown-plugin".to_string()];
@@ -366,13 +402,9 @@ mod tests {
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            priority: None,
             config: serde_json::json!({ "allow_origin": "*" }),
         };
-        available.insert(
-            "cors".to_string(),
-            (instantiate_plugin(&cfg_cors).unwrap(), None),
-        );
+        available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
 
         // Attempting to attach HTTP-only CORS plugin to gRPC route!
         let route_plugins = vec!["cors".to_string()];

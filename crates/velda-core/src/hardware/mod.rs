@@ -31,7 +31,7 @@ pub use kernel::{
 };
 pub use memory::{MemoryProfile, probe_memory};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
-pub use partition::{CorePartition, CorePartitionMode};
+pub use partition::CorePartition;
 pub use sizing::{AdaptiveBufferDimensions, HardwareSizing};
 
 /// Hardware topology profile probed once and cached in RAM.

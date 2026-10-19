@@ -405,7 +405,6 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({
                 "secret_key": "my-secret-key"
             }),
@@ -439,7 +438,6 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({
                 "secret_key": secret,
                 "claims_to_headers": {
@@ -499,7 +497,6 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({
                 "secret_key": secret
             }),
@@ -542,7 +539,6 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({
                 "secret_key": secret,
                 "token_sources": [
@@ -594,7 +590,6 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(200),
             config: serde_json::json!({
                 "secret_key": "my-secret-key"
             }),

@@ -5,7 +5,9 @@ use tokio::sync::watch;
 use velda_core::hardware::{CorePartition, HardwareTopology};
 use velda_transport::TrafficEngine;
 
-use crate::affinity::{get_allowed_cores, pin_current_thread_to_core};
+use crate::affinity::{
+    get_allowed_cores, pin_current_thread_to_core, set_current_thread_idle_priority,
+};
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
 use crate::lifecycle::ipc::run_ipc_server;
@@ -15,10 +17,10 @@ use crate::profile::RuntimeProfile;
 use crate::runtime::SharedRuntime;
 
 /// Coordinates the end-to-end Thread-Per-Core gateway execution:
-/// 1. Partitions CPU topology into Data Plane traffic cores and Auxiliary cores.
-/// 2. Spawns background UDS IPC listener for live config updates.
-/// 3. Spawns background Resource Overload Monitor for OOM protection.
-/// 4. Spawns background Auxiliary Prometheus Exporter if declared in plugins.
+/// 1. Allocates 100% of allowed CPU cores to Data Plane traffic workers (zero core waste).
+/// 2. Spawns background UDS IPC listener for live config updates (operating on idle CPU).
+/// 3. Spawns background Resource Overload Monitor for OOM protection (operating on idle CPU).
+/// 4. Spawns background Auxiliary Prometheus Exporter if declared in plugins (operating on idle CPU).
 /// 5. Spawns N dedicated worker OS threads, each pinned 1:1 to a CPU traffic core.
 /// 6. Each worker thread runs its own single-threaded Tokio current_thread runtime,
 ///    owning its dedicated shard of all TCP and UDP listener sockets with SO_REUSEPORT + SO_INCOMING_CPU.
@@ -38,23 +40,23 @@ pub async fn run_gateway(
     let cpu_pinning = runtime_profile.transport.cpu_pinning;
     let allowed_cores = get_allowed_cores();
 
-    // 1. Establish hardware partition between Traffic Cores and Auxiliary Cores
+    // 1. Establish hardware partition: 100% of allowed cores allocated to Traffic Workers
     let partition = CorePartition::plan(&allowed_cores);
     tracing::info!(
-        mode = ?partition.mode,
         traffic_cores = ?partition.traffic_cores,
-        auxiliary_cores = ?partition.auxiliary_cores,
-        "Established hardware core partition"
+        total_cores = partition.traffic_cores.len(),
+        "Established zero-waste hardware core partition (all-worker balanced sharding)"
     );
 
     // 2. Partition TrafficEngine into N dedicated WorkerEngines
     let (workers, initial_bindings, engine_handle) = engine.into_workers(worker_count);
 
-    // 2. Spawn background UDS IPC server task
+    // 2. Spawn background UDS IPC server task (runs on idle cycles via SCHED_IDLE)
     let ipc_shutdown = shutdown.clone();
     let ipc_shared = shared_runtime.clone();
     let ipc_handle = engine_handle.clone();
     let ipc_task = tokio::spawn(async move {
+        set_current_thread_idle_priority();
         if let Err(e) = run_ipc_server(
             socket_path,
             runtime_dir,
@@ -80,6 +82,7 @@ pub async fn run_gateway(
     let sweeper_pool = shared_runtime.load().buffer_pool.clone();
     let mut sweeper_shutdown = shutdown.clone();
     let _sweeper_task = tokio::spawn(async move {
+        set_current_thread_idle_priority();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
@@ -109,17 +112,10 @@ pub async fn run_gateway(
                     {
                         Ok(exporter) => {
                             let exp_shutdown = shutdown.clone();
-                            let dedicated_aux_core = partition.dedicated_auxiliary_core();
 
                             let handle = tokio::spawn(async move {
-                                if let Some(core_id) = dedicated_aux_core
-                                    && pin_current_thread_to_core(core_id)
-                                {
-                                    tracing::info!(
-                                        core = core_id,
-                                        "Prometheus exporter task pinned to dedicated auxiliary core"
-                                    );
-                                }
+                                // Set thread scheduling to SCHED_IDLE / low priority so it only uses idle cycles
+                                set_current_thread_idle_priority();
                                 if let Err(e) = exporter.run(exp_shutdown).await {
                                     tracing::error!(error = %e, "Prometheus exporter exited with error");
                                 }

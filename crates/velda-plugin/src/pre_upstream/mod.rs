@@ -12,10 +12,12 @@ use velda_core::{Action, L7Request};
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
+pub mod api_key_auth;
 pub mod header_mutation;
 pub mod jwt_auth;
 pub mod rate_limit;
 
+pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use header_mutation::HeaderMutationPlugin;
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use rate_limit::{
@@ -70,6 +72,7 @@ pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
     match config.id.as_str() {
+        "api_key_auth" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),
         "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),

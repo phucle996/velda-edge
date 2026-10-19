@@ -516,7 +516,6 @@ mod tests {
         let config = PluginConfig {
             id: "ip-none-test".to_string(),
             phase: "pre_route".to_string(),
-            priority: Some(100),
             config: json,
         };
 

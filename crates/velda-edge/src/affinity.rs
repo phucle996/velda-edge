@@ -54,6 +54,38 @@ pub fn pin_current_thread_to_core(core_id: usize) -> bool {
     }
 }
 
+/// Configures the calling OS thread to run at the lowest possible scheduling priority (Idle CPU).
+///
+/// Under Linux, this applies the `SCHED_IDLE` scheduling class (with fallback to POSIX `nice(19)`).
+/// The Linux Completely Fair Scheduler (CFS) guarantees that threads configured with `SCHED_IDLE`
+/// will only receive CPU cycles when there are no runnable normal-priority threads (such as
+/// traffic network I/O workers).
+///
+/// This ensures background telemetry (Prometheus), buffer sweepers, IPC reload, and access log
+/// flusher tasks NEVER contend for CPU with core-pinned request processing workers.
+pub fn set_current_thread_idle_priority() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            // First attempt: SCHED_IDLE scheduling class
+            let param = libc::sched_param { sched_priority: 0 };
+            let ret = libc::sched_setscheduler(0, libc::SCHED_IDLE, &param);
+            if ret == 0 {
+                return true;
+            }
+
+            // Fallback: POSIX nice(19) - lowest relative CPU share
+            libc::nice(19);
+            true
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 /// Thread affinity pinner distributing worker threads across allowed CPU cores.
 #[derive(Debug)]
 pub struct ThreadPinner {

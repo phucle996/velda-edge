@@ -20,8 +20,7 @@ Legacy API gateways (Kong, APISIX, Spring Cloud Gateway) rely on generic, dynami
 - **Protocol-Bound Plugins**: Plugins explicitly declare supported protocols via bitflags ([`SupportedProtocols`](src/capability.rs)). Mismatches fail fast at sync/compilation time, never in runtime traffic serving.
 - **Reverse Permission Granting ([`PluginCapability`](src/capability.rs))**: Plugins declare their exact authority level ([`AccessLevel`](src/capability.rs)) separately for Headers and Payloads (`None < Read < Write`).
 - **Orthogonal Streaming Pipe Decoupling**: Plugins requiring body write/buffering cannot be attached to streaming pipelines (`streaming.client` or `streaming.server`), preventing deadlocks and memory bloat.
-- **Hybrid Deterministic Stable Sort**: Execution order within each phase is resolved strictly via:
-  $$\text{Phase Isolation} \implies \text{Priority (Descending: } 1000 \to 1) \implies \text{JSON Declaration Index (Ascending)}$$
+- **Deterministic Declaration Order**: Execution order within each phase is resolved strictly by declaration order in the route's `plugins` array (FIFO: first declared, first executed).
 - **Zero-IO in Serving**: All plugins are instantiated and compiled ahead of time into a static execution plan ([`RoutePluginPlan`](src/plan.rs)). Zero allocations, zero JSON parsing, and zero lock contention on the serving hot path.
 
 ---
@@ -126,11 +125,16 @@ To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factor
 
 | Plugin Name | Phase | Default Protocols | Description |
 | :--- | :---: | :---: | :--- |
+| [`cors_preflight`](src/pre_route/cors_preflight/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Short-circuits browser CORS `OPTIONS` preflight requests directly at the edge with 204 No Content. |
+| [`resource_limit`](src/pre_route/resource_limit/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Ingress boundary protection against URI overflow, header bombing, and Slowloris DoS (414/431). |
+| [`waf_lite`](src/pre_route/waf_lite/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Ultra-low latency L7 WAF scanning for SQLi, XSS, Path Traversal, and scanners before routing. |
 | [`jwt_auth`](src/pre_upstream/jwt_auth/) | `pre_upstream` | HTTP/1.1, HTTP/2, HTTP/3 | Route-scoped JWT validation, dual caching, flexible claim extraction. |
+| [`api_key_auth`](src/pre_upstream/api_key_auth/) | `pre_upstream` | HTTP/1.1, HTTP/2, HTTP/3 | Fast L7 API key verification, dual positive/negative caching, and consumer header injection. |
 | [`ip_filter`](src/pre_route/ip_filter/) | `pre_route` | All Protocols (L4/L7) | Client IP allowlist / denylist filtering with `X-Forwarded-For` support. |
 | [`rate_limit`](src/pre_upstream/rate_limit/) | `pre_upstream` | All Protocols | In-memory token bucket rate limiting with `Retry-After` header generation. |
 | [`header_mutation`](src/pre_upstream/header_mutation.rs) | `pre_upstream` | All L7 | Sets or strips HTTP headers before upstream backend forwarding. |
 | [`security_headers`](src/post_response/security_headers/) | `post_response` | All L7 | Injects browser security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`). |
+| [`access_log`](src/post_response/access_log/) | `post_response` | All L7 | Lock-free, non-blocking request access logging with bounded channel draining. |
 | [`cors`](src/post_response/cors.rs) | `post_response` | All L7 | Injects CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`). |
 | [`prometheus_exporter`](src/background/prometheus/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Auxiliary Core. |
 | [`health_probe`](src/background/health_probe.rs) | `background` | Management (:8081) | Kubernetes liveness and readiness probe HTTP endpoint. |

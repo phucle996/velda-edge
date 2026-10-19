@@ -22,10 +22,12 @@
       }
     },
     {
-      "id": "waf",
+      "id": "waf_lite",
       "config": {
         "mode": "block",
-        "ruleset": "owasp_core"
+        "check_path": true,
+        "check_query": true,
+        "check_user_agent": true
       }
     },
     {

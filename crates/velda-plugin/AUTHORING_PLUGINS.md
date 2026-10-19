@@ -192,7 +192,7 @@ pub fn instantiate(
     match config.id.as_str() {
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
         // Add your plugin here:
-        "waf" => Ok(Arc::new(WafPlugin::from_config(config)?)),
+        "waf_lite" => Ok(Arc::new(WafLitePlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
@@ -207,7 +207,7 @@ Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](../velda-sync/src/post_sy
 ```rust
 pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
-        "ip_filter" | "resource_limit" | "waf" => Some("pre_route"),
+        "ip_filter" | "resource_limit" | "waf_lite" => Some("pre_route"),
         "jwt_auth" | "rate_limit" | "header_mutation" => Some("pre_upstream"),
         "security_headers" | "cors" | "access_log" => Some("post_response"),
         "health_probe" | "prometheus_exporter" => Some("background"),
@@ -270,7 +270,6 @@ mod tests {
         let config = PluginConfig {
             id: "api_key".into(),
             phase: "pre_route".into(),
-            priority: Some(500),
             config: json!({
                 "header_name": "x-custom-key",
                 "keys": ["key-alpha", "key-beta"]

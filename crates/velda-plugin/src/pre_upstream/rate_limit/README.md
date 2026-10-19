@@ -81,7 +81,6 @@ All unused or optional string/TLS fields must use the explicit `"none"` sentinel
 ```json
 {
   "id": "rate_limit",
-  "priority": 50,
   "config": {
     "algorithm": "token_bucket",
     "backend": "redis",

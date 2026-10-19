@@ -63,8 +63,6 @@ pub struct PluginConfig {
     pub id: String,
     #[serde(default)]
     pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
-    #[serde(default)]
-    pub priority: Option<i32>,
     #[serde(with = "json_value_bincode")]
     pub config: serde_json::Value,
 }
@@ -72,10 +70,12 @@ pub struct PluginConfig {
 /// Returns the canonical execution phase for a known plugin identifier.
 pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
+        "api_key_auth" => Some("pre_upstream"),
         "jwt_auth" => Some("pre_upstream"),
         "ip_filter" => Some("pre_route"),
+        "cors_preflight" => Some("pre_route"),
         "resource_limit" => Some("pre_route"),
-        "waf" => Some("pre_route"),
+        "waf_lite" => Some("pre_route"),
         "rate_limit" => Some("pre_upstream"),
         "header_mutation" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
@@ -392,7 +392,6 @@ mod tests {
         let mut plugins = vec![PluginConfig {
             id: "rate_limit".into(),
             phase: "invalid_phase".into(),
-            priority: None,
             config: serde_json::json!({}),
         }];
 
@@ -408,7 +407,6 @@ mod tests {
         let plugins = vec![PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            priority: Some(100),
             config: serde_json::json!({ "issuer": "auth.example.com", "max_age": 3600 }),
         }];
 
@@ -420,7 +418,6 @@ mod tests {
             unpack_plugins_from_binary(&binary).expect("Should unpack plugins");
         assert_eq!(header.revision, 15);
         assert_eq!(restored, plugins);
-        assert_eq!(restored[0].priority, Some(100));
 
         persist_plugins(tmp.path(), json_bytes, &binary).expect("Should persist plugins");
         assert!(tmp.path().join("config/plugins.json").exists());
@@ -435,7 +432,6 @@ mod tests {
                 {
                     "id": "prometheus_exporter",
                     "phase": "background",
-                    "priority": 50,
                     "config": {
                         "listen": "0.0.0.0:9090",
                         "path": "/metrics",
@@ -463,7 +459,6 @@ mod tests {
         }"#;
 
         let mut plugins = parse_plugins(json.as_bytes()).expect("parse should succeed");
-        assert_eq!(plugins[0].priority, Some(50));
         validate_plugins(&mut plugins).expect("validation should succeed");
     }
 
@@ -472,7 +467,6 @@ mod tests {
         let mut plugins = vec![PluginConfig {
             id: "prometheus_exporter".into(),
             phase: "pre_route".into(),
-            priority: None,
             config: serde_json::json!({
                 "listen": "0.0.0.0:9090",
                 "path": "/metrics",

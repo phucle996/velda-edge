@@ -23,12 +23,17 @@ pub use background::{BackgroundPlugin, HealthProbePlugin};
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
-pub use plan::{RoutePluginPlan, StablyOrderedPlugin, sort_plugins_stable};
+pub use plan::RoutePluginPlan;
 pub use post_response::{
-    CorsResponsePlugin, PostResponsePlugin, SecurityHeadersPlugin, run_post_response_plugins,
+    AccessLogConfig, AccessLogPlugin, CorsResponsePlugin, LogFormat, LogRecord, PostResponsePlugin,
+    SecurityHeadersPlugin, run_post_response_plugins,
 };
-pub use pre_route::{IpFilterMode, IpFilterPlugin, PreRoutePlugin, run_pre_route_plugins};
+pub use pre_route::{
+    CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,
+    ResourceLimitPlugin, ResourceLimits, ThreatVector, WafLitePlugin, WafMode, WafScope,
+    run_pre_route_plugins,
+};
 pub use pre_upstream::{
-    HeaderMutationPlugin, JwtAlgorithm, JwtAuthPlugin, PreUpstreamPlugin, RateLimitPlugin,
-    TokenSource, run_pre_upstream_plugins,
+    ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, HeaderMutationPlugin, JwtAlgorithm, JwtAuthPlugin,
+    KeySource, PreUpstreamPlugin, RateLimitPlugin, TokenSource, run_pre_upstream_plugins,
 };

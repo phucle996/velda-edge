@@ -13,9 +13,15 @@ use velda_core::{Action, L7Request};
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
+pub mod cors_preflight;
 pub mod ip_filter;
+pub mod resource_limit;
+pub mod waf_lite;
 
+pub use cors_preflight::{CorsPreflightPlugin, OriginPattern};
 pub use ip_filter::{IpFilterMode, IpFilterPlugin};
+pub use resource_limit::{ResourceLimitPlugin, ResourceLimits};
+pub use waf_lite::{ThreatVector, WafLitePlugin, WafMode, WafScope};
 
 /// Contract for plugins evaluated prior to route matching.
 pub trait PreRoutePlugin: Send + Sync {
@@ -62,6 +68,9 @@ pub fn instantiate(
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
     match config.id.as_str() {
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
+        "cors_preflight" => Ok(Arc::new(CorsPreflightPlugin::from_config(config)?)),
+        "resource_limit" => Ok(Arc::new(ResourceLimitPlugin::from_config(config)?)),
+        "waf_lite" => Ok(Arc::new(WafLitePlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
@@ -80,7 +89,6 @@ mod tests {
         let config = velda_sync::post_sync::plugin::PluginConfig {
             id: "ip_filter".into(),
             phase: "pre_route".into(),
-            priority: Some(100),
             config: serde_json::json!({
                 "mode": "deny",
                 "deny_cidrs": ["192.168.1.100/32"],
