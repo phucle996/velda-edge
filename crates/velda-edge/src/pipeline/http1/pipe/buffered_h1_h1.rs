@@ -166,11 +166,10 @@ where
     };
 
     sanitize_headers(&mut resp_head.headers);
-    if let Some(req_id) = req.headers.get("x-request-id") {
-        resp_head.headers.insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            req_id.clone(),
-        );
+    if let Some(req_id) = req.headers.get(&crate::pipeline::X_REQUEST_ID) {
+        resp_head
+            .headers
+            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
     // 6. Validate that upstream does not violate buffered mode invariant

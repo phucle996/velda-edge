@@ -24,7 +24,7 @@ pub use client::{
 };
 pub use config::Http2Config;
 pub use error::Http2Error;
-pub use headers::{filter_h2_headers, is_disallowed_h2_header, sanitize_h2_headers};
+pub use headers::{X_REQUEST_ID, filter_h2_headers, is_disallowed_h2_header, sanitize_h2_headers};
 pub use server::{
     Http2FloodTracker, Http2Priority, Http2Responder, Http2ServerConnection, Http2ServerRequest,
     Http2ServerRequestHead, Http2ServerResponse, Http2ServerResponseHead, Http2StreamReceiver,

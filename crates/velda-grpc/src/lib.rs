@@ -32,4 +32,4 @@ pub use udp::{
     GrpcUdpResponder, GrpcUdpServerRequest, GrpcUdpServerRequestHead, GrpcUdpServerResponse,
     GrpcUdpServerResponseHead, GrpcUdpServerStream,
 };
-pub use wire::GrpcWire;
+pub use wire::{GrpcWire, X_REQUEST_ID};

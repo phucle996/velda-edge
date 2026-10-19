@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::header::{X_REQUEST_ID, X_ROUTE_ID, X_UPSTREAM_ADDR};
+use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 use bytes::Bytes;
 use http::header::HeaderName;
 use http::{HeaderMap, Method, StatusCode};
@@ -409,17 +411,16 @@ impl HttpCacheZoneRegistry {
 pub fn filter_cacheable_headers(headers: &HeaderMap) -> HeaderMap {
     let mut clean = HeaderMap::with_capacity(headers.len());
     for (name, val) in headers {
-        let name_str = name.as_str();
-        if name_str.eq_ignore_ascii_case("set-cookie")
-            || name_str.eq_ignore_ascii_case("age")
-            || name_str.eq_ignore_ascii_case("x-cache")
-            || name_str.eq_ignore_ascii_case("x-velda-cache-key")
-            || name_str.eq_ignore_ascii_case("x-velda-cache-hash")
-            || name_str.eq_ignore_ascii_case("connection")
-            || name_str.eq_ignore_ascii_case("transfer-encoding")
-            || name_str.eq_ignore_ascii_case("x-request-id")
-            || name_str.eq_ignore_ascii_case("x-route-id")
-            || name_str.eq_ignore_ascii_case("x-upstream-addr")
+        if name == http::header::SET_COOKIE
+            || name == http::header::AGE
+            || name == http::header::CONNECTION
+            || name == http::header::TRANSFER_ENCODING
+            || name == X_CACHE
+            || name == X_VELDA_CACHE_KEY
+            || name == X_VELDA_CACHE_HASH
+            || name == X_REQUEST_ID
+            || name == X_ROUTE_ID
+            || name == X_UPSTREAM_ADDR
         {
             continue;
         }

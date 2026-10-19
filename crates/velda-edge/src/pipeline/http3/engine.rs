@@ -111,12 +111,11 @@ impl Http3Responder {
         if let Some(ref req_id) = self.request_id
             && !response
                 .headers
-                .contains_key(http::header::HeaderName::from_static("x-request-id"))
+                .contains_key(&crate::pipeline::X_REQUEST_ID)
         {
-            response.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+            response
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
         self.response_tx
             .send(Http3ResponseMsg::Full {
@@ -137,12 +136,9 @@ impl Http3Responder {
     ) -> Result<Http3StreamSender, EdgeError> {
         let mut final_headers = headers.clone();
         if let Some(ref req_id) = self.request_id
-            && !final_headers.contains_key(http::header::HeaderName::from_static("x-request-id"))
+            && !final_headers.contains_key(&crate::pipeline::X_REQUEST_ID)
         {
-            final_headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+            final_headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
         self.response_tx
             .send(Http3ResponseMsg::Head {

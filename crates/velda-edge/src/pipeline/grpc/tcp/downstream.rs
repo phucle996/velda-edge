@@ -142,10 +142,10 @@ async fn dispatch_grpc_tcp_request_stream(
     // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
     // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
     let (_request_id, req_id_header) = velda_core::next_request_id();
-    server_stream.parts.headers.insert(
-        http::header::HeaderName::from_static("x-request-id"),
-        req_id_header.clone(),
-    );
+    server_stream
+        .parts
+        .headers
+        .insert(crate::pipeline::X_REQUEST_ID, req_id_header.clone());
     server_stream.respond = server_stream.respond.with_request_id(Some(req_id_header));
 
     server_stream.enrich_forwarded_headers(meta.peer, meta.local_addr, meta.is_tls);

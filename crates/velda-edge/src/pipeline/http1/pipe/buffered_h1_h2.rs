@@ -147,11 +147,9 @@ where
 
     match pipe_res {
         Ok(mut resp) => {
-            if let Some(req_id) = head.headers.get("x-request-id") {
-                resp.headers.insert(
-                    http::header::HeaderName::from_static("x-request-id"),
-                    req_id.clone(),
-                );
+            if let Some(req_id) = head.headers.get(&crate::pipeline::X_REQUEST_ID) {
+                resp.headers
+                    .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
             }
             conn.send_response(&resp).await?;
             Ok(())

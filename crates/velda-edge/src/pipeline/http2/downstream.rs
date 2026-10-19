@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -145,10 +146,7 @@ pub async fn run_http2_loop<IO>(
                     }
 
                     let (_request_id, req_id_header) = velda_core::next_request_id();
-                    head.headers.insert(
-                        http::header::HeaderName::from_static("x-request-id"),
-                        req_id_header.clone(),
-                    );
+                    head.headers.insert(X_REQUEST_ID, req_id_header.clone());
                     responder = responder.with_request_id(Some(req_id_header.clone()));
 
                     if let Err(e) = velda_http2::server::path::normalize_path(&mut head.uri) {
@@ -166,10 +164,7 @@ pub async fn run_http2_loop<IO>(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
-                        .with_header(
-                            http::header::HeaderName::from_static("x-request-id"),
-                            req_id_header.clone(),
-                        );
+                        .with_header(X_REQUEST_ID, req_id_header.clone());
                         let _ = responder.send_response(&bad_req);
                         continue;
                     }
@@ -215,10 +210,7 @@ pub async fn run_http2_loop<IO>(
                                     CONTENT_TYPE,
                                     HeaderValue::from_static("text/plain; charset=utf-8"),
                                 )
-                                .with_header(
-                                    http::header::HeaderName::from_static("x-request-id"),
-                                    req_id_header.clone(),
-                                );
+                                .with_header(X_REQUEST_ID, req_id_header.clone());
 
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&not_found);
@@ -247,10 +239,7 @@ pub async fn run_http2_loop<IO>(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
-                        .with_header(
-                            http::header::HeaderName::from_static("x-request-id"),
-                            req_id_header.clone(),
-                        );
+                        .with_header(X_REQUEST_ID, req_id_header.clone());
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&no_backend);
                         } else {
@@ -277,10 +266,7 @@ pub async fn run_http2_loop<IO>(
                             CONTENT_TYPE,
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
-                        .with_header(
-                            http::header::HeaderName::from_static("x-request-id"),
-                            req_id_header.clone(),
-                        );
+                        .with_header(X_REQUEST_ID, req_id_header.clone());
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&shed_resp);
                         } else {

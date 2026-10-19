@@ -23,6 +23,9 @@ static H2_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
+/// Standard correlation ID header propagated across HTTP/2 streams.
+pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+
 /// Returns true if a header field is prohibited under RFC 9113 Section 8.2.2.
 ///
 /// Invariants:

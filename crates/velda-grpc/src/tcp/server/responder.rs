@@ -11,7 +11,7 @@ use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
 use crate::status::GrpcStatus;
-use crate::wire::GrpcWire;
+use crate::wire::{GrpcWire, X_REQUEST_ID};
 
 /// Downstream gRPC server response head metadata over TCP.
 #[derive(Debug, Clone)]
@@ -219,12 +219,9 @@ impl GrpcResponder {
         end_of_stream: bool,
     ) -> Result<h2::SendStream<Bytes>, h2::Error> {
         if let Some(ref req_id) = self.request_id
-            && !response.headers().contains_key("x-request-id")
+            && !response.headers().contains_key(&X_REQUEST_ID)
         {
-            response.headers_mut().insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+            response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
         }
         self.respond.send_response(response, end_of_stream)
     }

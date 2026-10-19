@@ -183,10 +183,8 @@ pub async fn handle_http3_udp(
             // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
             let (_request_id, req_id_header) = velda_core::next_request_id();
             let mut req = req_event.request;
-            req.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            req.headers
+                .insert(crate::pipeline::X_REQUEST_ID, req_id_header.clone());
 
             let responder = super::engine::Http3Responder::new(
                 req_event.handle,

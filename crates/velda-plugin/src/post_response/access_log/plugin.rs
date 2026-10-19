@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use crate::header::{X_REQUEST_ID, X_RESPONSE_TIME, X_ROUTE_ID, X_UPSTREAM_ADDR};
+
 use super::record::{LogFormat, LogRecord};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -19,13 +21,13 @@ use crate::post_response::PostResponsePlugin;
 /// Configuration settings for the `access_log` plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessLogConfig {
-    /// Extracts and records the `x-request-id` header if present.
+    /// Extracts and records the canonical `x-request-id` header from incoming request workspace.
     pub include_request_id: bool,
-    /// Extracts and records the `x-route-id` or `x-velda-route` header if present.
+    /// Extracts and records the canonical `x-route-id` header from response.
     pub include_route_id: bool,
-    /// Extracts and records the `x-upstream-addr` or `x-upstream-id` header if present.
+    /// Extracts and records the canonical `x-upstream-addr` header from response.
     pub include_upstream: bool,
-    /// Extracts and records the `x-response-time` or `x-upstream-response-time` header if present.
+    /// Extracts and records the canonical `x-response-time` header from response.
     pub include_latency: bool,
     /// Output serialization format (JSON or Text).
     pub format: LogFormat,
@@ -190,7 +192,7 @@ impl PostResponsePlugin for AccessLogPlugin {
 
         let request_id = if self.config.include_request_id {
             req_headers
-                .get("x-request-id")
+                .get(&X_REQUEST_ID)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -199,7 +201,7 @@ impl PostResponsePlugin for AccessLogPlugin {
 
         let route_id = if self.config.include_route_id {
             resp.headers
-                .get("x-route-id")
+                .get(&X_ROUTE_ID)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -208,7 +210,7 @@ impl PostResponsePlugin for AccessLogPlugin {
 
         let upstream = if self.config.include_upstream {
             resp.headers
-                .get("x-upstream-addr")
+                .get(&X_UPSTREAM_ADDR)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -217,7 +219,7 @@ impl PostResponsePlugin for AccessLogPlugin {
 
         let latency_ms = if self.config.include_latency {
             resp.headers
-                .get("x-response-time")
+                .get(&X_RESPONSE_TIME)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.trim_end_matches("ms").trim().parse::<f64>().ok())
         } else {

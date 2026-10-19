@@ -12,6 +12,7 @@ use http::{HeaderMap, Response, StatusCode, Version};
 use velda_core::{Body, L7Response};
 
 use crate::error::Http2Error;
+use crate::headers::X_REQUEST_ID;
 
 #[cold]
 #[inline(never)]
@@ -149,14 +150,9 @@ impl Http2Responder {
                 .insert(http::header::ALT_SVC, alt_svc.clone());
         }
         if let Some(ref req_id) = self.request_id
-            && !response
-                .headers()
-                .contains_key(http::header::HeaderName::from_static("x-request-id"))
+            && !response.headers().contains_key(&X_REQUEST_ID)
         {
-            response.headers_mut().insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+            response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
         }
         Ok(response)
     }

@@ -12,6 +12,9 @@ use http::header::HeaderValue;
 use velda_core::{Body, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use crate::header::X_REQUEST_ID;
+use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
+
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::http_cache::{
@@ -178,37 +181,29 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
         &self.id
     }
 
-    fn on_response(&self, _req_headers: &http::HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
         // 1. If already served from cache (HIT), skip storing
-        if let Some(val) = resp.headers.get("x-cache")
+        if let Some(val) = resp.headers.get(&X_CACHE)
             && val == "HIT"
         {
             return;
         }
 
-        // 2. Extract cache key: prioritize transient headers injected by http_cache_lookup
+        // 2. Extract cache key: prioritize transient header injected by http_cache_lookup
         let key_str = resp
             .headers
-            .remove("x-velda-cache-key")
-            .or_else(|| resp.headers.remove("x-cache-key"))
+            .remove(&X_VELDA_CACHE_KEY)
             .and_then(|v| v.to_str().ok().map(|s| s.to_string()))
             .or_else(|| {
-                // Secondary fallback: lookup via request-id in pending table
-                resp.headers
-                    .get("x-request-id")
+                // Secondary fallback: lookup via authoritative request-id from request workspace
+                req_headers
+                    .get(&X_REQUEST_ID)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|req_id| self.zone.take_pending_key(req_id))
-            })
-            .or_else(|| {
-                // Tertiary fallback: check x-request-uri or x-original-uri
-                resp.headers
-                    .get("x-request-uri")
-                    .or_else(|| resp.headers.get("x-original-uri"))
-                    .and_then(|v| v.to_str().ok().map(|s| format!("GET::{s}")))
             });
 
         // Strip internal cache metadata from downstream response
-        resp.headers.remove("x-velda-cache-hash");
+        resp.headers.remove(&X_VELDA_CACHE_HASH);
 
         let Some(cache_key) = key_str else {
             // Cannot associate response with request key, cleanly bypass
@@ -218,7 +213,7 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
         // 3. Status eligibility check
         if !self.config.cacheable_status.contains(&resp.status) {
             resp.headers
-                .insert("x-cache", HeaderValue::from_static("BYPASS"));
+                .insert(X_CACHE, HeaderValue::from_static("BYPASS"));
             return;
         }
 
@@ -234,14 +229,14 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
             // Must not cache if no-store or private is present
             if cc.contains("no-store") || cc.contains("private") {
                 resp.headers
-                    .insert("x-cache", HeaderValue::from_static("BYPASS"));
+                    .insert(X_CACHE, HeaderValue::from_static("BYPASS"));
                 return;
             }
 
             if let Some(parsed_ttl) = parse_cache_control_ttl(cc) {
                 if parsed_ttl.is_zero() {
                     resp.headers
-                        .insert("x-cache", HeaderValue::from_static("BYPASS"));
+                        .insert(X_CACHE, HeaderValue::from_static("BYPASS"));
                     return;
                 }
                 computed_ttl = parsed_ttl;
@@ -253,7 +248,7 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
             Body::Bytes(b) => {
                 if b.len() > self.config.max_payload_bytes {
                     resp.headers
-                        .insert("x-cache", HeaderValue::from_static("BYPASS"));
+                        .insert(X_CACHE, HeaderValue::from_static("BYPASS"));
                     return;
                 }
                 b.clone()
@@ -280,7 +275,7 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
 
         // 8. Inject response diagnostic headers
         resp.headers
-            .insert("x-cache", HeaderValue::from_static("MISS"));
+            .insert(X_CACHE, HeaderValue::from_static("MISS"));
         resp.headers.insert("age", HeaderValue::from_static("0"));
     }
 

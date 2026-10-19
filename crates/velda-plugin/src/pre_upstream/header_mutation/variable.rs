@@ -6,6 +6,8 @@
 use http::header::HeaderValue;
 use velda_core::L7Request;
 
+use crate::header::{X_REQUEST_ID, X_ROUTE_ID, X_UPSTREAM_ID};
+
 use crate::error::PluginError;
 
 /// Dynamic variables that can be evaluated and interpolated into headers at runtime.
@@ -91,7 +93,7 @@ impl HeaderValueSpec {
                     HeaderValue::from_str(ip_str).ok()
                 }
                 DynamicVar::RequestId => {
-                    if let Some(val) = req.headers.get("x-request-id") {
+                    if let Some(val) = req.headers.get(&X_REQUEST_ID) {
                         Some(val.clone())
                     } else {
                         Some(velda_core::next_request_id().1)
@@ -100,7 +102,7 @@ impl HeaderValueSpec {
                 DynamicVar::RouteId => {
                     let route = req
                         .headers
-                        .get("x-route-id")
+                        .get(&X_ROUTE_ID)
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("unknown-route");
                     HeaderValue::from_str(route).ok()
@@ -108,7 +110,7 @@ impl HeaderValueSpec {
                 DynamicVar::UpstreamId => {
                     let upstream = req
                         .headers
-                        .get("x-upstream-id")
+                        .get(&X_UPSTREAM_ID)
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("default-upstream");
                     HeaderValue::from_str(upstream).ok()

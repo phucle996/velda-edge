@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -161,10 +162,7 @@ pub async fn run_http1_loop<IO>(
         let (_request_id, req_id_header) = velda_core::next_request_id();
         conn.set_request_id(Some(req_id_header.clone()));
         let mut head = head;
-        head.headers.insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            req_id_header.clone(),
-        );
+        head.headers.insert(X_REQUEST_ID, req_id_header.clone());
 
         // Enforce Ingress Streaming Policy:
         // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
@@ -181,10 +179,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&rejected).await;
             conn.lingering_close().await;
@@ -206,10 +201,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&bad_req).await;
             conn.lingering_close().await;
@@ -246,10 +238,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&not_found).await;
             conn.lingering_close().await;
@@ -271,10 +260,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&no_backend).await;
             conn.lingering_close().await;
@@ -299,10 +285,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&shed_resp).await;
             conn.lingering_close().await;
@@ -377,10 +360,7 @@ pub async fn run_http1_loop<IO>(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
-            .with_header(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id_header.clone(),
-            );
+            .with_header(X_REQUEST_ID, req_id_header.clone());
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
             conn.lingering_close().await;

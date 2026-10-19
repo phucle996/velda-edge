@@ -4,8 +4,10 @@
 //! key hashing, query normalization, and zone registration for [`http_cache_lookup`]
 //! and [`http_cache_store`] plugins.
 
+pub mod constants;
 pub mod zone;
 
+pub use constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 pub use zone::{
     CacheEntry, CacheShard, HttpCacheZone, HttpCacheZoneRegistry, NUM_SHARDS,
     filter_cacheable_headers, normalize_query, parse_cache_control_ttl,

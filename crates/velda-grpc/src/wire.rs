@@ -63,6 +63,12 @@ impl GrpcWire {
     /// Static `HeaderValue` for `te: trailers`.
     pub const TE_TRAILERS_VALUE: HeaderValue = HeaderValue::from_static(Self::TE_TRAILERS);
 
+    /// Correlation ID header propagated across gRPC HTTP/2 streams ("x-request-id").
+    pub const REQUEST_ID_HEADER: &'static str = "x-request-id";
+
+    /// Static `HeaderName` for `x-request-id`.
+    pub const REQUEST_ID_NAME: HeaderName = HeaderName::from_static(Self::REQUEST_ID_HEADER);
+
     /// Parses a `grpc-timeout` header value into a standard [`std::time::Duration`].
     ///
     /// Adheres to the official [gRPC over HTTP/2 Specification](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md):
@@ -116,6 +122,9 @@ impl GrpcWire {
         }
     }
 }
+
+/// Standard correlation ID header propagated across gRPC HTTP/2 streams.
+pub const X_REQUEST_ID: HeaderName = GrpcWire::REQUEST_ID_NAME;
 
 #[cfg(test)]
 mod tests {

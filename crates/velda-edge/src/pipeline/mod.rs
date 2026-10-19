@@ -8,6 +8,10 @@ pub mod l4;
 
 pub use l4::{tcp, udp};
 
+/// Canonical request correlation ID header propagated across downstream pipelines.
+pub const X_REQUEST_ID: http::header::HeaderName =
+    http::header::HeaderName::from_static("x-request-id");
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;

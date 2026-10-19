@@ -13,6 +13,9 @@ use http::{Method, Version};
 use velda_core::{Action, Body, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use crate::header::X_REQUEST_ID;
+use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
+
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::http_cache::{HttpCacheZone, HttpCacheZoneRegistry};
@@ -211,7 +214,7 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
             // CACHE HIT: Construct response directly from in-memory zero-copy bytes
             let mut resp_headers = entry.headers.clone();
             resp_headers.insert("age", HeaderValue::from(entry.age_secs()));
-            resp_headers.insert("x-cache", HeaderValue::from_static("HIT"));
+            resp_headers.insert(X_CACHE, HeaderValue::from_static("HIT"));
 
             let resp = L7Response {
                 status: entry.status,
@@ -225,17 +228,13 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
 
         // 5. CACHE MISS: Enrich request headers with transient key metadata for post-response store
         if let Ok(val) = HeaderValue::from_str(&key_str) {
-            req.headers.insert("x-velda-cache-key", val);
+            req.headers.insert(X_VELDA_CACHE_KEY, val);
         }
         req.headers
-            .insert("x-velda-cache-hash", HeaderValue::from(key_hash));
+            .insert(X_VELDA_CACHE_HASH, HeaderValue::from(key_hash));
 
         // If request ID is present, associate it in the zone's pending table
-        if let Some(req_id) = req
-            .headers
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(req_id) = req.headers.get(&X_REQUEST_ID).and_then(|v| v.to_str().ok()) {
             self.zone.record_pending_key(req_id, key_str);
         }
 

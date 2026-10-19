@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use http::header::HeaderValue;
 use velda_core::L7Response;
 
+use crate::header::{X_REQUEST_ID, X_ROUTE_ID, X_UPSTREAM_ADDR};
+
 use crate::error::PluginError;
 
 /// Dynamic variables evaluated at runtime against the outgoing [`L7Response`].
@@ -69,11 +71,11 @@ impl ResponseHeaderValueSpec {
             Self::Variable(var) => match var {
                 ResponseDynamicVar::RequestId => resp
                     .headers
-                    .get("x-request-id")
+                    .get(&X_REQUEST_ID)
                     .cloned()
                     .or_else(|| Some(velda_core::next_request_id().1)),
-                ResponseDynamicVar::RouteId => resp.headers.get("x-route-id").cloned(),
-                ResponseDynamicVar::UpstreamAddr => resp.headers.get("x-upstream-addr").cloned(),
+                ResponseDynamicVar::RouteId => resp.headers.get(&X_ROUTE_ID).cloned(),
+                ResponseDynamicVar::UpstreamAddr => resp.headers.get(&X_UPSTREAM_ADDR).cloned(),
                 ResponseDynamicVar::Status => HeaderValue::from_str(resp.status.as_str()).ok(),
                 ResponseDynamicVar::TimestampEpoch => {
                     let now = SystemTime::now()

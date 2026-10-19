@@ -21,6 +21,7 @@ use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
+use crate::header::X_REQUEST_ID;
 use crate::pre_upstream::PreUpstreamPlugin;
 
 /// Returns the canonical static plain-text body for standard HTTP status codes.
@@ -272,9 +273,8 @@ impl PreUpstreamPlugin for RequestTerminationPlugin {
     /// 3. Returns [`Action::Respond`] directly to bypass upstream dispatch.
     fn on_upstream_request(&self, req: &mut L7Request) -> Action {
         let mut resp = self.base_response.clone();
-        if let Some(req_id) = req.headers.get("x-request-id") {
-            resp.headers
-                .insert(HeaderName::from_static("x-request-id"), req_id.clone());
+        if let Some(req_id) = req.headers.get(&X_REQUEST_ID) {
+            resp.headers.insert(X_REQUEST_ID, req_id.clone());
         }
         Action::Respond(resp)
     }

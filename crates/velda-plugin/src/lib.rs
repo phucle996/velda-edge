@@ -13,6 +13,7 @@ pub mod background;
 pub mod capability;
 pub mod error;
 pub mod factory;
+pub mod header;
 pub mod http_cache;
 pub mod plan;
 pub mod post_response;
@@ -24,6 +25,7 @@ pub use background::{BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, Hea
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
+pub use header::*;
 pub use http_cache::{
     CacheEntry, HttpCacheZone, HttpCacheZoneRegistry, filter_cacheable_headers, normalize_query,
 };
