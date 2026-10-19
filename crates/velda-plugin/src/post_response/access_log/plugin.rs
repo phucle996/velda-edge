@@ -164,7 +164,7 @@ impl PostResponsePlugin for AccessLogPlugin {
         &self.id
     }
 
-    fn on_response(&self, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
         let status = resp.status.as_u16();
 
         let version = match resp.version {
@@ -191,6 +191,7 @@ impl PostResponsePlugin for AccessLogPlugin {
         let request_id = if self.config.include_request_id {
             resp.headers
                 .get("x-request-id")
+                .or_else(|| req_headers.get("x-request-id"))
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         } else {
@@ -297,8 +298,9 @@ mod tests {
             headers,
             Body::Bytes(bytes::Bytes::from_static(b"response-body")),
         );
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 0);
@@ -322,14 +324,15 @@ mod tests {
         let (plugin, _rx) = AccessLogPlugin::new_with_receiver("access_log", config);
 
         let mut resp = L7Response::empty(StatusCode::OK);
+        let req_headers = HeaderMap::new();
 
         // First record fills capacity
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 0);
 
         // Second record immediately drops without blocking
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 1);
     }

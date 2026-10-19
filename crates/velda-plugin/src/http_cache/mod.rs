@@ -81,7 +81,7 @@ mod tests {
         let mut resp1 = L7Response::from_bytes(StatusCode::OK, b"{\"items\":[1,2,3]}".to_vec());
         resp1.headers = resp_headers;
 
-        store_plugin.on_response(&mut resp1);
+        store_plugin.on_response(&req1.headers, &mut resp1);
 
         // Store plugin sets diagnostic headers and removes internal transit keys
         assert_eq!(resp1.headers.get("x-cache").unwrap(), "MISS");
@@ -128,8 +128,9 @@ mod tests {
 
         let mut bypass_resp = L7Response::from_bytes(StatusCode::OK, b"{\"order\":42}".to_vec());
         bypass_resp.headers = bypass_headers;
+        let empty_req_headers = HeaderMap::new();
 
-        store_plugin.on_response(&mut bypass_resp);
+        store_plugin.on_response(&empty_req_headers, &mut bypass_resp);
         assert_eq!(bypass_resp.headers.get("x-cache").unwrap(), "BYPASS");
 
         let hash_bypass = HttpCacheZone::hash_key("GET:api.example.com:/v1/checkout");

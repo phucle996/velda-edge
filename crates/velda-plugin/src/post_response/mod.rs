@@ -7,6 +7,7 @@
 //! - **Response Mutability**: Plugins in this phase operate directly on outgoing [`L7Response`] headers and status.
 //! - **Non-failing**: At this phase, the upstream interaction has completed. Plugins mutate headers or status in-place.
 
+use http::HeaderMap;
 use std::sync::Arc;
 use velda_core::L7Response;
 
@@ -15,12 +16,16 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod access_log;
 pub mod cors;
 pub mod http_cache_store;
+pub mod response_compression;
 pub mod response_header_mutation;
 pub mod security_headers;
 
 pub use access_log::{AccessLogConfig, AccessLogPlugin, LogFormat, LogRecord};
 pub use cors::{CorsConfig, CorsResponsePlugin};
 pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
+pub use response_compression::{
+    CompressionAlgorithm, ResponseCompressionConfig, ResponseCompressionPlugin,
+};
 pub use response_header_mutation::{
     ResponseDynamicVar, ResponseHeaderMutationConfig, ResponseHeaderMutationPlugin,
     ResponseHeaderValueSpec,
@@ -33,7 +38,10 @@ pub trait PostResponsePlugin: Send + Sync {
     fn id(&self) -> &str;
 
     /// Evaluated on outgoing response before downstream encoding.
-    fn on_response(&self, resp: &mut L7Response);
+    ///
+    /// The borrowed `req_headers` workspace strictly belongs to THIS specific in-flight
+    /// request (enforcing zero cross-request contamination in pipelined/multiplexed streams).
+    fn on_response(&self, req_headers: &HeaderMap, resp: &mut L7Response);
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -50,9 +58,13 @@ pub trait PostResponsePlugin: Send + Sync {
 
 /// Executes a linear chain of post-response plugins on the outgoing response.
 #[inline]
-pub fn run_post_response_plugins(chain: &[Arc<dyn PostResponsePlugin>], resp: &mut L7Response) {
+pub fn run_post_response_plugins(
+    chain: &[Arc<dyn PostResponsePlugin>],
+    req_headers: &HeaderMap,
+    resp: &mut L7Response,
+) {
     for plugin in chain {
-        plugin.on_response(resp);
+        plugin.on_response(req_headers, resp);
     }
 }
 
@@ -72,6 +84,7 @@ pub fn instantiate(
         "response_header_mutation" => {
             Ok(Arc::new(ResponseHeaderMutationPlugin::from_config(config)?))
         }
+        "response_compression" => Ok(Arc::new(ResponseCompressionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported post_response plugin '{other}' for plugin '{}'",
             config.id
@@ -90,8 +103,9 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
+        let req_headers = HeaderMap::new();
 
-        run_post_response_plugins(&chain, &mut resp);
+        run_post_response_plugins(&chain, &req_headers, &mut resp);
 
         assert!(resp.headers.contains_key("strict-transport-security"));
         assert_eq!(
@@ -115,8 +129,13 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(
+            "origin",
+            http::HeaderValue::from_static("https://app.example.com"),
+        );
 
-        run_post_response_plugins(&chain, &mut resp);
+        run_post_response_plugins(&chain, &req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),

@@ -314,7 +314,7 @@ impl PostResponsePlugin for SecurityHeadersPlugin {
     /// Executes purely by cloning pre-computed `HeaderValue` handles (O(1) atomic ref-count
     /// increments). **Zero heap allocations** are performed on this hot path.
     #[inline(always)]
-    fn on_response(&self, resp: &mut L7Response) {
+    fn on_response(&self, _req_headers: &http::HeaderMap, resp: &mut L7Response) {
         for (name, val) in &self.precomputed_headers {
             resp.headers.insert(name.clone(), val.clone());
         }
@@ -340,8 +340,9 @@ mod tests {
     fn test_default_security_headers_injection() {
         let plugin = SecurityHeadersPlugin::new("sec-default");
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
+        let req_headers = http::HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("strict-transport-security").unwrap(),
@@ -378,8 +379,9 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::with_config("sec-custom", config);
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
+        let req_headers = http::HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("strict-transport-security").unwrap(),
@@ -413,8 +415,9 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::with_config("sec-none", config);
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
+        let req_headers = http::HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert!(resp.headers.is_empty());
     }
@@ -442,7 +445,8 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::from_config(&plugin_config).unwrap();
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        plugin.on_response(&mut resp);
+        let req_headers = http::HeaderMap::new();
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("strict-transport-security").unwrap(),
@@ -483,7 +487,8 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::from_config(&plugin_config).unwrap();
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        plugin.on_response(&mut resp);
+        let req_headers = http::HeaderMap::new();
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("strict-transport-security").unwrap(),

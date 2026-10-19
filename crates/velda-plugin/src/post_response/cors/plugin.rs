@@ -173,12 +173,13 @@ impl PostResponsePlugin for CorsResponsePlugin {
         &self.id
     }
 
-    fn on_response(&self, resp: &mut L7Response) {
-        // 1. Resolve Origin: If client request Origin is recorded on headers (e.g. Origin, X-Origin),
-        // test it against allow_origins patterns to reflect the matching origin.
-        let origin_header = resp
-            .headers
+    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
+        // 1. Resolve Origin: Check borrowed request headers from client workspace,
+        // falling back to response headers if forwarded.
+        let origin_header = req_headers
             .get("origin")
+            .or_else(|| req_headers.get("x-origin"))
+            .or_else(|| resp.headers.get("origin"))
             .or_else(|| resp.headers.get("x-origin"))
             .and_then(|v| v.to_str().ok());
 
@@ -240,8 +241,9 @@ mod tests {
     fn test_cors_default_wildcard() {
         let plugin = CorsResponsePlugin::new("cors", "*", false);
         let mut resp = L7Response::empty(StatusCode::OK);
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),
@@ -259,8 +261,9 @@ mod tests {
     fn test_cors_exact_origin_with_credentials_and_vary() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.example.com", true);
         let mut resp = L7Response::empty(StatusCode::OK);
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),
@@ -285,8 +288,9 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
         let mut resp = L7Response::empty(StatusCode::OK);
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-expose-headers").unwrap(),
@@ -308,17 +312,12 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
 
-        // Request with Origin matching subdomain
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "https://portal.partner.io".parse().unwrap());
-        let mut resp = L7Response::new(
-            StatusCode::OK,
-            http::Version::HTTP_11,
-            headers,
-            velda_core::Body::Empty,
-        );
+        // Request with Origin matching subdomain in client request headers workspace
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert("origin", "https://portal.partner.io".parse().unwrap());
+        let mut resp = L7Response::empty(StatusCode::OK);
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),
@@ -354,7 +353,8 @@ mod tests {
         assert_eq!(plugin.config.expose_headers, vec!["x-request-id"]);
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        plugin.on_response(&mut resp);
+        let req_headers = HeaderMap::new();
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),

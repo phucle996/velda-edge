@@ -178,7 +178,7 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
         &self.id
     }
 
-    fn on_response(&self, resp: &mut L7Response) {
+    fn on_response(&self, _req_headers: &http::HeaderMap, resp: &mut L7Response) {
         // 1. If already served from cache (HIT), skip storing
         if let Some(val) = resp.headers.get("x-cache")
             && val == "HIT"
@@ -323,8 +323,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"data\":[1,2,3]}".to_vec());
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         // Header check: internal key removed, x-cache and age injected
         assert!(!resp.headers.contains_key("x-velda-cache-key"));
@@ -366,8 +367,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"secret\":true}".to_vec());
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(resp.headers.get("x-cache").unwrap(), "BYPASS");
         let hash = HttpCacheZone::hash_key("GET:api.example.com:/secret");
@@ -397,8 +399,9 @@ mod tests {
         let large_payload = vec![b'x'; 200];
         let mut resp = L7Response::from_bytes(StatusCode::OK, large_payload);
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(resp.headers.get("x-cache").unwrap(), "BYPASS");
         let hash = HttpCacheZone::hash_key("GET:api.example.com:/large");

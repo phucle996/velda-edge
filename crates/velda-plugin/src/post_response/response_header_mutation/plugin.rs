@@ -163,7 +163,7 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
         &self.id
     }
 
-    fn on_response(&self, resp: &mut L7Response) {
+    fn on_response(&self, _req_headers: &http::HeaderMap, resp: &mut L7Response) {
         // 1. Remove explicitly requested headers
         for name in &self.config.remove {
             resp.headers.remove(name);
@@ -223,8 +223,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert!(!resp.headers.contains_key("x-powered-by"));
         assert!(!resp.headers.contains_key("server"));
@@ -254,8 +255,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::CREATED, "{}");
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(resp.headers.get("server").unwrap(), "velda-edge");
         assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-999");
@@ -281,8 +283,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         // x-content-type-options was missing -> inserted
         assert_eq!(
@@ -308,8 +311,9 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
         resp.headers = headers;
+        let req_headers = HeaderMap::new();
 
-        plugin.on_response(&mut resp);
+        plugin.on_response(&req_headers, &mut resp);
 
         let vary_values: Vec<&str> = resp
             .headers
