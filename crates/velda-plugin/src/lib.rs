@@ -19,14 +19,14 @@ pub mod pre_route;
 pub mod pre_upstream;
 
 pub use background::prometheus::{PrometheusExporter, format_snapshot};
-pub use background::{BackgroundPlugin, HealthProbePlugin};
+pub use background::{BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
 pub use plan::RoutePluginPlan;
 pub use post_response::{
-    AccessLogConfig, AccessLogPlugin, CorsResponsePlugin, LogFormat, LogRecord, PostResponsePlugin,
-    SecurityHeadersPlugin, run_post_response_plugins,
+    AccessLogConfig, AccessLogPlugin, CorsConfig, CorsResponsePlugin, LogFormat, LogRecord,
+    PostResponsePlugin, SecurityHeadersPlugin, run_post_response_plugins,
 };
 pub use pre_route::{
     CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,
@@ -34,6 +34,8 @@ pub use pre_route::{
     run_pre_route_plugins,
 };
 pub use pre_upstream::{
-    ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, HeaderMutationPlugin, JwtAlgorithm, JwtAuthPlugin,
-    KeySource, PreUpstreamPlugin, RateLimitPlugin, TokenSource, run_pre_upstream_plugins,
+    ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, CanaryConfig, CanaryPlugin, HashSource,
+    HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, JwtAlgorithm, JwtAuthPlugin, KeySource,
+    MirroredRequest, PreUpstreamPlugin, RateLimitPlugin, RequestMirrorConfig, RequestMirrorPlugin,
+    TokenSource, run_pre_upstream_plugins,
 };

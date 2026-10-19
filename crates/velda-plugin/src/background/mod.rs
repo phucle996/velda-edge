@@ -18,7 +18,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod health_probe;
 pub mod prometheus;
 
-pub use health_probe::HealthProbePlugin;
+pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use prometheus::{PrometheusExporter, format_snapshot};
 
 /// Contract for plugins operating as background auxiliary services.

@@ -13,17 +13,23 @@ use velda_core::{Action, L7Request};
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod api_key_auth;
+pub mod canary;
 pub mod header_mutation;
 pub mod jwt_auth;
 pub mod rate_limit;
+pub mod request_mirror;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
-pub use header_mutation::HeaderMutationPlugin;
+pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
+pub use header_mutation::{
+    DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
+};
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use rate_limit::{
     FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
     RateLimitPlugin, TlsSource,
 };
+pub use request_mirror::{MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -76,6 +82,8 @@ pub fn instantiate(
         "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
+        "canary" => Ok(Arc::new(CanaryPlugin::from_config(config)?)),
+        "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id

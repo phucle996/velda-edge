@@ -17,7 +17,7 @@ pub mod cors;
 pub mod security_headers;
 
 pub use access_log::{AccessLogConfig, AccessLogPlugin, LogFormat, LogRecord};
-pub use cors::CorsResponsePlugin;
+pub use cors::{CorsConfig, CorsResponsePlugin};
 pub use security_headers::SecurityHeadersPlugin;
 
 /// Contract for plugins evaluated on outgoing upstream responses.
