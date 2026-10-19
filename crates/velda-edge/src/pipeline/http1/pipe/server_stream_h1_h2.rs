@@ -207,8 +207,14 @@ where
     let (parts, mut body_stream) = response.into_parts();
 
     // 7. Send chunked response head downstream with opportunistic chunk coalescing
-    let resp_head =
-        Http1ServerResponseHead::new(parts.status, http::Version::HTTP_11, parts.headers);
+    let mut headers = parts.headers;
+    if let Some(req_id) = head.headers.get("x-request-id") {
+        headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
+    let resp_head = Http1ServerResponseHead::new(parts.status, http::Version::HTTP_11, headers);
 
     let first_chunk_opt = match body_stream.data().await {
         Some(Ok(c)) => Some(c),

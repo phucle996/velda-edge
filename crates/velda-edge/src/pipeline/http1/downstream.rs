@@ -151,6 +151,16 @@ pub async fn run_http1_loop<IO>(
         }
         let rt = runtime.load();
 
+        // [INGRESS W3C REQUEST ID GENERATION]
+        // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
+        // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
+        let (_request_id, req_id_header) = velda_core::next_request_id();
+        let mut head = head;
+        head.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id_header.clone(),
+        );
+
         // Enforce Ingress Streaming Policy:
         // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
         if framing == Http1BodyFraming::Chunked && !streaming.client {
@@ -165,6 +175,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&rejected).await;
@@ -172,7 +186,6 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        let mut head = head;
         if let Err(e) = velda_http1::server::path::normalize_path(&mut head.uri) {
             tracing::warn!(
                 listener = %meta.listener_id,
@@ -187,6 +200,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&bad_req).await;
@@ -223,6 +240,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&not_found).await;
@@ -244,6 +265,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&no_backend).await;
@@ -268,6 +293,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&shed_resp).await;
@@ -342,6 +371,10 @@ pub async fn run_http1_loop<IO>(
             .with_header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
+            )
+            .with_header(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;

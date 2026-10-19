@@ -83,6 +83,7 @@ where
 
     // 4. Sanitize connection-specific headers forbidden by RFC 9114 §4.2 before H3 encoding
     sanitize_headers(&mut head.headers);
+    let req_id = head.headers.get("x-request-id").cloned();
 
     // 5. Construct canonical L7Request
     let l7_req = L7Request::new(
@@ -151,6 +152,13 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+
+    if let Some(ref req_id) = req_id {
+        h3_resp.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
 
     // 7. Check if response has no body (RFC 9110: HEAD, 1xx, 204, 304)
     let is_head = req_method == http::Method::HEAD;

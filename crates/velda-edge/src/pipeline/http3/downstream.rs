@@ -178,9 +178,26 @@ pub async fn handle_http3_udp(
         let runtime = runtime.clone();
 
         tokio::spawn(async move {
+            // [INGRESS W3C REQUEST ID GENERATION]
+            // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
+            // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
+            let (_request_id, req_id_header) = velda_core::next_request_id();
+            let mut req = req_event.request;
+            req.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
+            );
+
+            let responder = super::engine::Http3Responder::new(
+                req_event.handle,
+                req_event.stream_id,
+                worker.response_tx.clone(),
+            )
+            .with_request_id(Some(req_id_header.clone()));
+
             tracing::debug!(
-                method = %req_event.request.method,
-                path = %req_event.request.path(),
+                method = %req.method,
+                path = %req.path(),
                 peer = %peer,
                 early_data = req_event.is_early_data,
                 "Decoded HTTP/3 request from UDP"
@@ -189,32 +206,19 @@ pub async fn handle_http3_udp(
             // Fast-Fail: 0-RTT Replay Attack Defense (RFC 8470)
             // Non-idempotent methods (POST, PUT, DELETE, PATCH) MUST NOT be processed in 0-RTT early data.
             let is_mutation = matches!(
-                req_event.request.method,
+                req.method,
                 http::Method::POST | http::Method::PUT | http::Method::DELETE | http::Method::PATCH
             );
             if req_event.is_early_data && is_mutation {
                 tracing::warn!(
                     listener = %lid,
-                    method = %req_event.request.method,
-                    path = %req_event.request.path(),
+                    method = %req.method,
+                    path = %req.path(),
                     "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
-                );
-                let responder = super::engine::Http3Responder::new(
-                    req_event.handle,
-                    req_event.stream_id,
-                    worker.response_tx.clone(),
                 );
                 let _ = responder.send_response(make_too_early_response()).await;
                 return;
             }
-
-            let responder = super::engine::Http3Responder::new(
-                req_event.handle,
-                req_event.stream_id,
-                worker.response_tx.clone(),
-            );
-
-            let mut req = req_event.request;
             if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {
                 tracing::warn!(
                     listener = %lid,

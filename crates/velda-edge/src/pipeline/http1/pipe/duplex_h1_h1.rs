@@ -148,8 +148,15 @@ where
         upstream_lease.write_all(&conn.upstream_write_buf).await?;
         conn.upstream_write_buf.clear();
 
-        let (resp_head, resp_framing) =
+        let (mut resp_head, resp_framing) =
             read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await?;
+        sanitize_headers(&mut resp_head.headers);
+        if let Some(req_id) = head.headers.get("x-request-id") {
+            resp_head.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
 
         let is_head = head_method == http::Method::HEAD;
         let is_no_body = is_head
@@ -357,6 +364,7 @@ where
     // Asymmetric coordination channel: Signals upload task when upstream response is fully received
     let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
     let upload_finished = std::sync::atomic::AtomicBool::new(framing == Http1BodyFraming::Empty);
+    let req_id = head.headers.get("x-request-id").cloned();
 
     // Concurrently pump client upload to upstream and upstream response downstream.
     let upload_task = async {
@@ -612,6 +620,12 @@ where
         let (mut resp_head, resp_framing) =
             read_response_head(&mut up_read, upstream_read_buf, &cfg).await?;
         sanitize_headers(&mut resp_head.headers);
+        if let Some(ref rid) = req_id {
+            resp_head.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                rid.clone(),
+            );
+        }
 
         let is_head = head_method == http::Method::HEAD;
         let is_no_body_status = resp_head.status.is_informational()

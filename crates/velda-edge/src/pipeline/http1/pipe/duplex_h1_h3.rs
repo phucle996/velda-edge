@@ -228,6 +228,7 @@ where
     let read_buf = &mut conn.read_buf;
     let write_buf = &mut conn.write_buf;
     let should_close = conn.close_requested;
+    let req_id = head.headers.get("x-request-id").cloned();
 
     let upload_finished = AtomicBool::new(initial_is_fin);
 
@@ -350,6 +351,13 @@ where
             }
             Err(_) => return Err(Http1Error::ConnectionClosed),
         };
+
+        if let Some(ref rid) = req_id {
+            resp_stream.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                rid.clone(),
+            );
+        }
 
         let is_no_body_status = resp_stream.status.is_informational()
             || resp_stream.status == http::StatusCode::NO_CONTENT

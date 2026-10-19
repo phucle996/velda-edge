@@ -166,6 +166,12 @@ where
     };
 
     sanitize_headers(&mut resp_head.headers);
+    if let Some(req_id) = req.headers.get("x-request-id") {
+        resp_head.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
 
     // 6. Validate that upstream does not violate buffered mode invariant
     if resp_framing == Http1BodyFraming::Chunked {

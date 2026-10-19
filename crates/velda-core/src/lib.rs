@@ -28,6 +28,7 @@ pub mod l7;
 pub mod lifecycle;
 pub mod protocol;
 pub mod provenance;
+pub mod request_id;
 pub mod streaming;
 pub mod types;
 
@@ -96,4 +97,5 @@ pub use hardware::{
     probe_memory_usage,
 };
 pub use provenance::Provenance;
+pub use request_id::{ID_POOL_CAPACITY, ID_POOL_LOW_WATERMARK, RequestIdPool, next_request_id};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};

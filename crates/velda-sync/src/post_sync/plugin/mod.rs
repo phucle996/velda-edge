@@ -607,8 +607,7 @@ mod tests {
             id: "request_termination".into(),
             phase: "".into(),
             config: serde_json::json!({
-                "status_code": 503,
-                "body": "Under maintenance"
+                "status_code": 503
             }),
         }];
 

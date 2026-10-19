@@ -146,7 +146,13 @@ where
     }
 
     match pipe_res {
-        Ok(resp) => {
+        Ok(mut resp) => {
+            if let Some(req_id) = head.headers.get("x-request-id") {
+                resp.headers.insert(
+                    http::header::HeaderName::from_static("x-request-id"),
+                    req_id.clone(),
+                );
+            }
             conn.send_response(&resp).await?;
             Ok(())
         }

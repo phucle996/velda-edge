@@ -226,10 +226,17 @@ where
         resp_body.extend_from_slice(&chunk);
     }
 
+    let mut headers = parts.headers;
+    if let Some(req_id) = head.headers.get("x-request-id") {
+        headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
     let server_resp = Http1ServerResponse::new(
         parts.status,
         http::Version::HTTP_11,
-        parts.headers,
+        headers,
         velda_core::Body::Bytes(resp_body.freeze()),
     );
     conn.send_response(&server_resp).await?;

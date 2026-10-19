@@ -3,21 +3,17 @@
 //! Provides variable parsing and runtime evaluation for dynamic headers:
 //! `$client_ip`, `$request_id`, `$route_id`, `$upstream_id`, `$scheme`, `$host`, `$method`, `$path`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use http::header::HeaderValue;
 use velda_core::L7Request;
 
 use crate::error::PluginError;
-
-static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Dynamic variables that can be evaluated and interpolated into headers at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicVar {
     /// Client IP address (resolved from `x-forwarded-for`, `x-real-ip`, or `"127.0.0.1"`).
     ClientIp,
-    /// Unique request identifier (from existing `x-request-id` or generated monotonic hex ID).
+    /// Unique request identifier (from authoritative `x-request-id` header or W3C pool fallback).
     RequestId,
     /// Logical route identifier (from `x-route-id` or `x-velda-route`).
     RouteId,
@@ -98,8 +94,7 @@ impl HeaderValueSpec {
                     if let Some(val) = req.headers.get("x-request-id") {
                         Some(val.clone())
                     } else {
-                        let id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        HeaderValue::from_str(&format!("req-{id:016x}")).ok()
+                        Some(velda_core::next_request_id().1)
                     }
                 }
                 DynamicVar::RouteId => {

@@ -79,6 +79,7 @@ where
 
     let cfg = *conn.config();
     sanitize_headers(&mut head.headers);
+    let req_id = head.headers.get("x-request-id").cloned();
 
     // 4. If request has no body (e.g. GET, HEAD), forward directly without chunked stream
     if framing == Http1BodyFraming::Empty {
@@ -99,6 +100,12 @@ where
             )
             .await?;
             sanitize_headers(&mut resp_head.headers);
+            if let Some(ref req_id) = req_id {
+                resp_head.headers.insert(
+                    http::header::HeaderName::from_static("x-request-id"),
+                    req_id.clone(),
+                );
+            }
 
             let is_head = req.method == http::Method::HEAD;
             let is_no_body_status = resp_head.status.is_informational()
@@ -298,6 +305,12 @@ where
         )
         .await?;
         sanitize_headers(&mut resp_head.headers);
+        if let Some(ref req_id) = req_id {
+            resp_head.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
 
         // Validate response framing (client streaming expects non-streaming response)
         if resp_framing == Http1BodyFraming::Chunked {

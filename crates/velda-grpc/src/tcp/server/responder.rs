@@ -6,7 +6,7 @@
 use bytes::{Bytes, BytesMut};
 use h2::server::SendResponse;
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, HeaderValue, Response, StatusCode};
 
 use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
@@ -102,12 +102,23 @@ impl GrpcServerResponse {
 /// and HTTP/2 trailers over the underlying H2 send stream.
 pub struct GrpcResponder {
     pub respond: SendResponse<Bytes>,
+    pub request_id: Option<HeaderValue>,
 }
 
 impl GrpcResponder {
     /// Creates a new [`GrpcResponder`] wrapping an active H2 send handle.
     pub fn new(respond: SendResponse<Bytes>) -> Self {
-        Self { respond }
+        Self {
+            respond,
+            request_id: None,
+        }
+    }
+
+    /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
+    #[inline]
+    pub fn with_request_id(mut self, request_id: Option<HeaderValue>) -> Self {
+        self.request_id = request_id;
+        self
     }
 
     /// Sends a standard Unary response: HTTP 200 + 1 LPM frame + trailers with `grpc-status`.
@@ -121,6 +132,10 @@ impl GrpcResponder {
             .status(StatusCode::OK)
             .version(http::Version::HTTP_2)
             .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+
+        if let Some(ref req_id) = self.request_id {
+            resp_builder = resp_builder.header("x-request-id", req_id.clone());
+        }
 
         if let Some(headers) = extra_headers {
             for (name, val) in headers {
@@ -179,6 +194,10 @@ impl GrpcResponder {
             .version(http::Version::HTTP_2)
             .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
 
+        if let Some(ref req_id) = self.request_id {
+            builder = builder.header("x-request-id", req_id.clone());
+        }
+
         let trailers = status.to_trailers(message);
         for (name, val) in trailers {
             if let Some(name) = name {
@@ -196,9 +215,17 @@ impl GrpcResponder {
     /// Sends an HTTP/2 response header frame on the underlying H2 send stream.
     pub fn send_response(
         &mut self,
-        response: Response<()>,
+        mut response: Response<()>,
         end_of_stream: bool,
     ) -> Result<h2::SendStream<Bytes>, h2::Error> {
+        if let Some(ref req_id) = self.request_id
+            && !response.headers().contains_key("x-request-id")
+        {
+            response.headers_mut().insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
         self.respond.send_response(response, end_of_stream)
     }
 }

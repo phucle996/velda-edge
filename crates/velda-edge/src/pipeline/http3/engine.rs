@@ -79,6 +79,7 @@ pub struct Http3Responder {
     pub handle: ConnectionHandle,
     pub stream_id: StreamId,
     pub response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
+    pub request_id: Option<http::HeaderValue>,
 }
 
 impl Http3Responder {
@@ -93,12 +94,30 @@ impl Http3Responder {
             handle,
             stream_id,
             response_tx,
+            request_id: None,
         }
+    }
+
+    /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
+    #[inline]
+    pub fn with_request_id(mut self, request_id: Option<http::HeaderValue>) -> Self {
+        self.request_id = request_id;
+        self
     }
 
     /// Sends a 1-shot full response (buffered).
     #[inline]
-    pub async fn send_response(self, response: L7Response) -> Result<(), EdgeError> {
+    pub async fn send_response(self, mut response: L7Response) -> Result<(), EdgeError> {
+        if let Some(ref req_id) = self.request_id
+            && !response
+                .headers
+                .contains_key(http::header::HeaderName::from_static("x-request-id"))
+        {
+            response.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
         self.response_tx
             .send(Http3ResponseMsg::Full {
                 handle: self.handle,
@@ -116,12 +135,21 @@ impl Http3Responder {
         status: http::StatusCode,
         headers: &http::HeaderMap,
     ) -> Result<Http3StreamSender, EdgeError> {
+        let mut final_headers = headers.clone();
+        if let Some(ref req_id) = self.request_id
+            && !final_headers.contains_key(http::header::HeaderName::from_static("x-request-id"))
+        {
+            final_headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
         self.response_tx
             .send(Http3ResponseMsg::Head {
                 handle: self.handle,
                 stream_id: self.stream_id,
                 status,
-                headers: headers.clone(),
+                headers: final_headers,
             })
             .await
             .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))?;

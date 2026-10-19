@@ -241,12 +241,10 @@ mod tests {
                 "termination-1",
                 RequestTerminationConfig {
                     status_code: 503,
-                    body: "Under maintenance\n".into(),
                     headers: vec![(
                         HeaderName::from_static("retry-after"),
                         HeaderValue::from_static("60"),
                     )],
-                    echo_request_id: true,
                 },
             )
             .unwrap(),

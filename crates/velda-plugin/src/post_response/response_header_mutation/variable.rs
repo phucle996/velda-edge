@@ -71,7 +71,7 @@ impl ResponseHeaderValueSpec {
                     .headers
                     .get("x-request-id")
                     .cloned()
-                    .or_else(|| HeaderValue::from_str("req-unknown").ok()),
+                    .or_else(|| Some(velda_core::next_request_id().1)),
                 ResponseDynamicVar::RouteId => resp
                     .headers
                     .get("x-route-id")

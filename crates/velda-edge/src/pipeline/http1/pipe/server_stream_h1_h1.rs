@@ -178,6 +178,12 @@ where
     };
 
     sanitize_headers(&mut resp_head.headers);
+    if let Some(req_id) = req.headers.get("x-request-id") {
+        resp_head.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
 
     // 6. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
     let is_head = req.method == http::Method::HEAD;

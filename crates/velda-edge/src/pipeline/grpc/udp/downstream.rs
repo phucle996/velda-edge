@@ -72,15 +72,31 @@ pub async fn handle_grpc_udp(
                 "Decoded gRPC request from UDP"
             );
 
-            let mut stream = GrpcUdpServerStream::new(
-                req_event.handle,
-                req_event.stream_id,
-                req_event.request,
-                peer,
+            // [INGRESS W3C REQUEST ID GENERATION]
+            // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
+            // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
+            let (_request_id, req_id_header) = velda_core::next_request_id();
+            let mut req = req_event.request;
+            req.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id_header.clone(),
             );
+
+            let mut stream =
+                GrpcUdpServerStream::new(req_event.handle, req_event.stream_id, req, peer);
             stream.enrich_forwarded_headers(local_addr);
 
-            let response = process_grpc_udp_request(&stream.request, &lid, &cfg, &runtime).await;
+            let mut response =
+                process_grpc_udp_request(&stream.request, &lid, &cfg, &runtime).await;
+            if !response
+                .headers
+                .contains_key(http::header::HeaderName::from_static("x-request-id"))
+            {
+                response.headers.insert(
+                    http::header::HeaderName::from_static("x-request-id"),
+                    req_id_header,
+                );
+            }
 
             let resp_now = std::time::Instant::now();
             let resp_pkts = {

@@ -237,7 +237,13 @@ where
         let response = response_future
             .await
             .map_err(|_| Http1Error::ConnectionClosed)?;
-        let (parts, mut body_stream) = response.into_parts();
+        let (mut parts, mut body_stream) = response.into_parts();
+        if let Some(req_id) = head.headers.get("x-request-id") {
+            parts.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
+        }
 
         let should_close = conn.close_requested;
 

@@ -81,6 +81,7 @@ where
 
     // 4. Sanitize connection-specific headers forbidden by RFC 9114 §4.2 before H3 encoding
     sanitize_headers(&mut head.headers);
+    let req_id = head.headers.get("x-request-id").cloned();
 
     // 5. Construct canonical L7Request
     let l7_req = L7Request::new(
@@ -140,7 +141,13 @@ where
     }
 
     match pipe_res {
-        Ok(l7_resp) => {
+        Ok(mut l7_resp) => {
+            if let Some(ref req_id) = req_id {
+                l7_resp.headers.insert(
+                    http::header::HeaderName::from_static("x-request-id"),
+                    req_id.clone(),
+                );
+            }
             let server_resp = Http1ServerResponse::new(
                 l7_resp.status,
                 http::Version::HTTP_11,

@@ -278,6 +278,12 @@ where
         .map_err(|_| Http1Error::ConnectionClosed)?
         .map_err(|_| Http1Error::ConnectionClosed)?;
     let should_close = conn.close_requested;
+    if let Some(req_id) = head.headers.get("x-request-id") {
+        resp_stream.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            req_id.clone(),
+        );
+    }
 
     // 8. Deliver response downstream
     let is_no_body_status = resp_stream.status.is_informational()

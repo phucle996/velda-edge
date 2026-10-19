@@ -106,6 +106,7 @@ impl Http2ServerResponse {
 pub struct Http2Responder {
     respond: SendResponse<Bytes>,
     alt_svc: Option<HeaderValue>,
+    request_id: Option<HeaderValue>,
 }
 
 impl Http2Responder {
@@ -115,6 +116,7 @@ impl Http2Responder {
         Self {
             respond,
             alt_svc: None,
+            request_id: None,
         }
     }
 
@@ -122,6 +124,13 @@ impl Http2Responder {
     #[inline]
     pub fn with_alt_svc(mut self, alt_svc: Option<HeaderValue>) -> Self {
         self.alt_svc = alt_svc;
+        self
+    }
+
+    /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
+    #[inline]
+    pub fn with_request_id(mut self, request_id: Option<HeaderValue>) -> Self {
+        self.request_id = request_id;
         self
     }
 
@@ -138,6 +147,16 @@ impl Http2Responder {
             response
                 .headers_mut()
                 .insert(http::header::ALT_SVC, alt_svc.clone());
+        }
+        if let Some(ref req_id) = self.request_id
+            && !response
+                .headers()
+                .contains_key(http::header::HeaderName::from_static("x-request-id"))
+        {
+            response.headers_mut().insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                req_id.clone(),
+            );
         }
         Ok(response)
     }
