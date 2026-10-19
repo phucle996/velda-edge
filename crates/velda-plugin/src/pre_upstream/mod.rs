@@ -21,6 +21,7 @@ pub mod http_fault_injection;
 pub mod jwt_auth;
 pub mod rate_limit;
 pub mod request_mirror;
+pub mod request_termination;
 pub mod url_rewrite;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
@@ -43,6 +44,7 @@ pub use rate_limit::{
     RateLimitPlugin, TlsSource,
 };
 pub use request_mirror::{MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin};
+pub use request_termination::{RequestTerminationConfig, RequestTerminationPlugin};
 pub use url_rewrite::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
     UrlRewritePlugin,
@@ -113,6 +115,7 @@ pub fn instantiate(
         "http_cache_lookup" => Ok(Arc::new(HttpCacheLookupPlugin::from_config(config)?)),
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
+        "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
@@ -229,5 +232,53 @@ mod tests {
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/customers/100");
         assert_eq!(req.uri.query(), Some("tab=overview&cluster=primary"));
+    }
+
+    #[test]
+    fn test_pre_upstream_request_termination() {
+        let plugin = Arc::new(
+            RequestTerminationPlugin::new(
+                "termination-1",
+                RequestTerminationConfig {
+                    status_code: 503,
+                    body: "Under maintenance\n".into(),
+                    headers: vec![(
+                        HeaderName::from_static("retry-after"),
+                        HeaderValue::from_static("60"),
+                    )],
+                    echo_request_id: true,
+                },
+            )
+            .unwrap(),
+        );
+        let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-request-id"),
+            HeaderValue::from_static("req-term-999"),
+        );
+
+        let mut req = L7Request::new(
+            Method::POST,
+            Uri::from_static("/api/v1/checkout"),
+            Version::HTTP_11,
+            headers,
+            Body::Empty,
+        );
+
+        let action = run_pre_upstream_plugins(&chain, &mut req);
+        match action {
+            Action::Respond(resp) => {
+                assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(resp.headers.get("retry-after").unwrap(), "60");
+                assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-term-999");
+                assert_eq!(
+                    resp.headers.get("content-type").unwrap(),
+                    "text/plain; charset=utf-8"
+                );
+            }
+            _ => panic!("Expected Action::Respond(503)"),
+        }
     }
 }

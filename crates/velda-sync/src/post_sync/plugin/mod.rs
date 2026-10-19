@@ -84,6 +84,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_cache_lookup" => Some("pre_upstream"),
         "http_fault_injection" => Some("pre_upstream"),
         "grpc_fault_injection" => Some("pre_upstream"),
+        "request_termination" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),
@@ -107,6 +108,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "http_cache_lookup" => Some("http"),
         "http_cache_store" => Some("http"),
         "response_header_mutation" => Some("http"),
+        "request_termination" => Some("http"),
         _ => None,
     }
 }
@@ -306,6 +308,25 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     domain: "plugins".into(),
                     reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
                 });
+            }
+            "request_termination" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                if let Some(status) = plugin.config.get("status_code").and_then(|s| s.as_u64())
+                    && !(200..=599).contains(&status)
+                {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}': status_code must be between 200 and 599, got {status}",
+                            plugin.id
+                        ),
+                    });
+                }
             }
             _ => {
                 // Future plugins will dispatch to their respective validation modules
@@ -577,5 +598,44 @@ mod tests {
                 .to_string()
                 .contains("must specify phase 'background'")
         );
+    }
+
+    #[test]
+    fn test_request_termination_validation_and_phase_inference() {
+        // 1. Empty phase should be auto-inferred to pre_upstream
+        let mut plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            phase: "".into(),
+            config: serde_json::json!({
+                "status_code": 503,
+                "body": "Under maintenance"
+            }),
+        }];
+
+        assert!(validate_plugins(&mut plugins).is_ok());
+        assert_eq!(plugins[0].phase, "pre_upstream");
+
+        // 2. Mismatched phase should fail
+        let mut invalid_phase_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            phase: "post_response".into(),
+            config: serde_json::json!({ "status_code": 200 }),
+        }];
+        assert!(validate_plugins(&mut invalid_phase_plugins).is_err());
+
+        // 3. Status code out of range (< 200 or > 599) should fail
+        let mut invalid_status_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            phase: "pre_upstream".into(),
+            config: serde_json::json!({ "status_code": 199 }),
+        }];
+        assert!(validate_plugins(&mut invalid_status_plugins).is_err());
+
+        let mut invalid_status_high = vec![PluginConfig {
+            id: "request_termination".into(),
+            phase: "pre_upstream".into(),
+            config: serde_json::json!({ "status_code": 600 }),
+        }];
+        assert!(validate_plugins(&mut invalid_status_high).is_err());
     }
 }

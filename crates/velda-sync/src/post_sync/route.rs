@@ -791,7 +791,7 @@ mod tests {
                 .contains("strictly restricted to 'http'")
         );
 
-        // 4. Invalid: http_cache_lookup and http_cache_store on a gRPC listener -> MUST FAIL!
+        // 4. Invalid: http_cache_lookup, http_cache_store, response_header_mutation on a gRPC listener -> MUST FAIL!
         let invalid_cache_routes = vec![RouteConfig {
             id: "bad-grpc-cache-route".into(),
             kind: "l7".into(),
@@ -812,6 +812,27 @@ mod tests {
         assert!(err3.is_err());
         assert!(
             err3.unwrap_err()
+                .to_string()
+                .contains("strictly restricted to 'http'")
+        );
+
+        // 5. Invalid: request_termination on a gRPC listener -> MUST FAIL!
+        let invalid_term_routes = vec![RouteConfig {
+            id: "bad-grpc-term-route".into(),
+            kind: "l7".into(),
+            listener: "grpc-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/order.v1.OrderService".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "order-grpc".into(),
+            plugins: vec!["request_termination".into()],
+        }];
+        let err4 = validate_routes_with_listeners(&invalid_term_routes, &listeners);
+        assert!(err4.is_err());
+        assert!(
+            err4.unwrap_err()
                 .to_string()
                 .contains("strictly restricted to 'http'")
         );

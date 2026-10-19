@@ -45,6 +45,6 @@ pub use pre_upstream::{
     HttpCacheLookupConfig, HttpCacheLookupPlugin, HttpDelayConfig, HttpFaultCondition,
     HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm, JwtAuthPlugin, KeySource,
     MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, RateLimitPlugin,
-    RequestMirrorConfig, RequestMirrorPlugin, TokenSource, UrlRewriteConfig, UrlRewritePlugin,
-    run_pre_upstream_plugins,
+    RequestMirrorConfig, RequestMirrorPlugin, RequestTerminationConfig, RequestTerminationPlugin,
+    TokenSource, UrlRewriteConfig, UrlRewritePlugin, run_pre_upstream_plugins,
 };
