@@ -2172,6 +2172,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "velda-core",
+ "velda-grpc",
  "velda-observability",
  "velda-sync",
  "velda-tls",

@@ -34,7 +34,8 @@ pub use pre_route::{
     run_pre_route_plugins,
 };
 pub use pre_upstream::{
-    ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, CanaryConfig, CanaryPlugin, HashSource,
+    ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, CanaryConfig, CanaryPlugin, GrpcAbortConfig,
+    GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin, GrpcTargetMatcher, HashSource,
     HeaderMatchRule, HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, HttpAbortConfig,
     HttpDelayConfig, HttpFaultCondition, HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm,
     JwtAuthPlugin, KeySource, MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin,

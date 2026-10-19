@@ -14,6 +14,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod api_key_auth;
 pub mod canary;
+pub mod grpc_fault_injection;
 pub mod header_mutation;
 pub mod http_fault_injection;
 pub mod jwt_auth;
@@ -23,6 +24,10 @@ pub mod url_rewrite;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
+pub use grpc_fault_injection::{
+    GrpcAbortConfig, GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin,
+    GrpcTargetMatcher,
+};
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
 };
@@ -104,6 +109,7 @@ pub fn instantiate(
         "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
+        "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
