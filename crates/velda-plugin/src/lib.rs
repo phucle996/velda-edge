@@ -30,8 +30,8 @@ pub use http_cache::{
 pub use plan::RoutePluginPlan;
 pub use post_response::{
     AccessLogConfig, AccessLogPlugin, CorsConfig, CorsResponsePlugin, HttpCacheStoreConfig,
-    HttpCacheStorePlugin, LogFormat, LogRecord, PostResponsePlugin, SecurityHeadersPlugin,
-    run_post_response_plugins,
+    HttpCacheStorePlugin, LogFormat, LogRecord, PostResponsePlugin, ResponseHeaderMutationConfig,
+    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, run_post_response_plugins,
 };
 pub use pre_route::{
     CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,

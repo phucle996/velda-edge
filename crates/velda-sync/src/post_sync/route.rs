@@ -802,7 +802,11 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "order-grpc".into(),
-            plugins: vec!["http_cache_lookup".into(), "http_cache_store".into()],
+            plugins: vec![
+                "http_cache_lookup".into(),
+                "http_cache_store".into(),
+                "response_header_mutation".into(),
+            ],
         }];
         let err3 = validate_routes_with_listeners(&invalid_cache_routes, &listeners);
         assert!(err3.is_err());

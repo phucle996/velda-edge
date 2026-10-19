@@ -87,6 +87,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),
+        "response_header_mutation" => Some("post_response"),
         "access_log" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
@@ -105,6 +106,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "cors" => Some("http"),
         "http_cache_lookup" => Some("http"),
         "http_cache_store" => Some("http"),
+        "response_header_mutation" => Some("http"),
         _ => None,
     }
 }
@@ -294,6 +296,12 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                 });
             }
             "http_cache_store" if plugin.phase != "post_response" => {
+                return Err(SyncError::Validation {
+                    domain: "plugins".into(),
+                    reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
+                });
+            }
+            "response_header_mutation" if plugin.phase != "post_response" => {
                 return Err(SyncError::Validation {
                     domain: "plugins".into(),
                     reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
