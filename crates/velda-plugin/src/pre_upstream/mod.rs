@@ -16,6 +16,7 @@ pub mod api_key_auth;
 pub mod canary;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
+pub mod http_cache_lookup;
 pub mod http_fault_injection;
 pub mod jwt_auth;
 pub mod rate_limit;
@@ -31,6 +32,7 @@ pub use grpc_fault_injection::{
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
 };
+pub use http_cache_lookup::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
 pub use http_fault_injection::{
     HeaderMatchRule, HttpAbortConfig, HttpDelayConfig, HttpFaultCondition,
     HttpFaultInjectionPlugin, IpRangeMatcher,
@@ -108,6 +110,7 @@ pub fn instantiate(
         "canary" => Ok(Arc::new(CanaryPlugin::from_config(config)?)),
         "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
+        "http_cache_lookup" => Ok(Arc::new(HttpCacheLookupPlugin::from_config(config)?)),
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(

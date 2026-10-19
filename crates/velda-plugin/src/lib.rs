@@ -13,6 +13,7 @@ pub mod background;
 pub mod capability;
 pub mod error;
 pub mod factory;
+pub mod http_cache;
 pub mod plan;
 pub mod post_response;
 pub mod pre_route;
@@ -23,10 +24,14 @@ pub use background::{BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, Hea
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
+pub use http_cache::{
+    CacheEntry, HttpCacheZone, HttpCacheZoneRegistry, filter_cacheable_headers, normalize_query,
+};
 pub use plan::RoutePluginPlan;
 pub use post_response::{
-    AccessLogConfig, AccessLogPlugin, CorsConfig, CorsResponsePlugin, LogFormat, LogRecord,
-    PostResponsePlugin, SecurityHeadersPlugin, run_post_response_plugins,
+    AccessLogConfig, AccessLogPlugin, CorsConfig, CorsResponsePlugin, HttpCacheStoreConfig,
+    HttpCacheStorePlugin, LogFormat, LogRecord, PostResponsePlugin, SecurityHeadersPlugin,
+    run_post_response_plugins,
 };
 pub use pre_route::{
     CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,
@@ -37,8 +42,9 @@ pub use pre_upstream::{
     ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, CanaryConfig, CanaryPlugin, GrpcAbortConfig,
     GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin, GrpcTargetMatcher, HashSource,
     HeaderMatchRule, HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, HttpAbortConfig,
-    HttpDelayConfig, HttpFaultCondition, HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm,
-    JwtAuthPlugin, KeySource, MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin,
-    QueryStrategy, RateLimitPlugin, RequestMirrorConfig, RequestMirrorPlugin, TokenSource,
-    UrlRewriteConfig, UrlRewritePlugin, run_pre_upstream_plugins,
+    HttpCacheLookupConfig, HttpCacheLookupPlugin, HttpDelayConfig, HttpFaultCondition,
+    HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm, JwtAuthPlugin, KeySource,
+    MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, RateLimitPlugin,
+    RequestMirrorConfig, RequestMirrorPlugin, TokenSource, UrlRewriteConfig, UrlRewritePlugin,
+    run_pre_upstream_plugins,
 };

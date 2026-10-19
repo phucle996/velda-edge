@@ -324,28 +324,32 @@ pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
         if let Some(proto) = &route.match_rule.protocol {
             let proto_lower = proto.to_ascii_lowercase();
             for plugin_id in &route.plugins {
-                if plugin_id == "grpc_fault_injection" && proto_lower != "grpc" {
-                    return Err(SyncError::Validation {
-                        domain: "routes".into(),
-                        reason: format!(
-                            "Route '{}': plugin 'grpc_fault_injection' can only be applied to 'grpc' routes, found protocol '{}'",
-                            route.id, proto
-                        ),
-                    });
-                }
-                if plugin_id == "http_fault_injection"
-                    && (proto_lower == "grpc"
-                        || proto_lower == "raw"
-                        || proto_lower == "tcp"
-                        || proto_lower == "udp")
+                if let Some(expected_proto) =
+                    super::plugin::canonical_protocol_family_for_id(plugin_id)
                 {
-                    return Err(SyncError::Validation {
-                        domain: "routes".into(),
-                        reason: format!(
-                            "Route '{}': plugin 'http_fault_injection' cannot be applied to '{}' routes; only HTTP family is supported",
-                            route.id, proto
-                        ),
-                    });
+                    if expected_proto == "grpc" && proto_lower != "grpc" {
+                        return Err(SyncError::Validation {
+                            domain: "routes".into(),
+                            reason: format!(
+                                "Route '{}': plugin '{}' can only be applied to 'grpc' routes, found protocol '{}'",
+                                route.id, plugin_id, proto
+                            ),
+                        });
+                    }
+                    if expected_proto == "http"
+                        && (proto_lower == "grpc"
+                            || proto_lower == "raw"
+                            || proto_lower == "tcp"
+                            || proto_lower == "udp")
+                    {
+                        return Err(SyncError::Validation {
+                            domain: "routes".into(),
+                            reason: format!(
+                                "Route '{}': plugin '{}' cannot be applied to '{}' routes; only HTTP family is supported",
+                                route.id, plugin_id, proto
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -357,7 +361,7 @@ pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
 /// Validates cross-domain protocol compatibility between routes and listeners.
 ///
 /// Enforces that protocol-exclusive plugins (e.g. `grpc_fault_injection` strictly for gRPC,
-/// `http_fault_injection` strictly for HTTP) are never attached to mismatched listeners.
+/// `http_fault_injection`, `http_cache_lookup`, `http_cache_store` strictly for HTTP) are never attached to mismatched listeners.
 pub fn validate_routes_with_listeners(
     routes: &[RouteConfig],
     listeners: &[super::listener::ListenerConfig],
@@ -371,21 +375,15 @@ pub fn validate_routes_with_listeners(
     for route in routes {
         if let Some(&listener_proto) = listener_map.get(route.listener.as_str()) {
             for plugin_id in &route.plugins {
-                if plugin_id == "grpc_fault_injection" && listener_proto != "grpc" {
+                if let Some(expected_proto) =
+                    super::plugin::canonical_protocol_family_for_id(plugin_id)
+                    && listener_proto != expected_proto
+                {
                     return Err(SyncError::Validation {
                         domain: "routes".into(),
                         reason: format!(
-                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin 'grpc_fault_injection' which is strictly restricted to 'grpc'",
-                            route.id, route.listener, listener_proto
-                        ),
-                    });
-                }
-                if plugin_id == "http_fault_injection" && listener_proto != "http" {
-                    return Err(SyncError::Validation {
-                        domain: "routes".into(),
-                        reason: format!(
-                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin 'http_fault_injection' which is strictly restricted to 'http'",
-                            route.id, route.listener, listener_proto
+                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin '{}' which is strictly restricted to '{}'",
+                            route.id, route.listener, listener_proto, plugin_id, expected_proto
                         ),
                     });
                 }
@@ -789,6 +787,27 @@ mod tests {
         assert!(err2.is_err());
         assert!(
             err2.unwrap_err()
+                .to_string()
+                .contains("strictly restricted to 'http'")
+        );
+
+        // 4. Invalid: http_cache_lookup and http_cache_store on a gRPC listener -> MUST FAIL!
+        let invalid_cache_routes = vec![RouteConfig {
+            id: "bad-grpc-cache-route".into(),
+            kind: "l7".into(),
+            listener: "grpc-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/order.v1.OrderService".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "order-grpc".into(),
+            plugins: vec!["http_cache_lookup".into(), "http_cache_store".into()],
+        }];
+        let err3 = validate_routes_with_listeners(&invalid_cache_routes, &listeners);
+        assert!(err3.is_err());
+        assert!(
+            err3.unwrap_err()
                 .to_string()
                 .contains("strictly restricted to 'http'")
         );

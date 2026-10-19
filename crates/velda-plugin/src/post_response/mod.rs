@@ -14,10 +14,12 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod access_log;
 pub mod cors;
+pub mod http_cache_store;
 pub mod security_headers;
 
 pub use access_log::{AccessLogConfig, AccessLogPlugin, LogFormat, LogRecord};
 pub use cors::{CorsConfig, CorsResponsePlugin};
+pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
 pub use security_headers::SecurityHeadersPlugin;
 
 /// Contract for plugins evaluated on outgoing upstream responses.
@@ -61,6 +63,7 @@ pub fn instantiate(
         "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),
         "cors" => Ok(Arc::new(CorsResponsePlugin::from_config(config)?)),
         "access_log" => Ok(Arc::new(AccessLogPlugin::from_config(config)?)),
+        "http_cache_store" => Ok(Arc::new(HttpCacheStorePlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported post_response plugin '{other}' for plugin '{}'",
             config.id
