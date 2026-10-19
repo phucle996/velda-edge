@@ -17,7 +17,7 @@ use crate::upstream::Http1Upstream;
 
 /// Serves a server-streaming HTTP/2 downstream stream bridged to an HTTP/1.1 backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -41,17 +41,18 @@ pub async fn serve(
     };
 
     // 2. Ensure mandatory Host header (RFC 9112 §7.1)
-    if !head.headers.contains_key(http::header::HOST)
-        && let Some(host) = velda_http2::server::header::extract_host(&head.headers, &head.uri)
+    if !req_head.headers.contains_key(http::header::HOST)
+        && let Some(host) =
+            velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
         && let Ok(hv) = HeaderValue::from_str(host)
     {
-        head.headers.insert(http::header::HOST, hv);
+        req_head.headers.insert(http::header::HOST, hv);
     }
 
     // 3. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
@@ -82,9 +83,9 @@ pub async fn serve(
     // 5. Send HTTP/1.1 request head and body using pre-allocated pooled write_buf
     let (stream, write_buf) = lease.split_write();
     let send_res = velda_http1::client::send_request_parts(
-        &head.method,
-        &head.uri,
-        &head.headers,
+        &req_head.method,
+        &req_head.uri,
+        &req_head.headers,
         &body,
         stream,
         write_buf,

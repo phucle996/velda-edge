@@ -28,7 +28,7 @@ use crate::upstream::Http1Upstream;
 /// Serves a client-streaming HTTP/1.1 transaction forwarded to an HTTP/1.1 backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
@@ -38,20 +38,20 @@ where
 {
     // 1. Enrich proxy forwarding headers using pre-computed connection metadata
     velda_http1::server::header::enrich_headers_cached(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Acquire upstream connection before streaming upload begins
@@ -78,16 +78,19 @@ where
     };
 
     let cfg = *conn.config();
-    sanitize_headers(&mut head.headers);
-    let req_id = head.headers.get("x-request-id").cloned();
+    sanitize_headers(&mut req_head.headers);
+    let req_id = req_head
+        .headers
+        .get(&crate::pipeline::X_REQUEST_ID)
+        .cloned();
 
     // 4. If request has no body (e.g. GET, HEAD), forward directly without chunked stream
     if framing == Http1BodyFraming::Empty {
         let req = velda_http1::Http1ServerRequest::new(
-            head.method,
-            head.uri,
-            head.version,
-            head.headers,
+            req_head.method,
+            req_head.uri,
+            req_head.version,
+            req_head.headers,
             Body::Empty,
         );
 
@@ -101,10 +104,9 @@ where
             .await?;
             sanitize_headers(&mut resp_head.headers);
             if let Some(ref req_id) = req_id {
-                resp_head.headers.insert(
-                    http::header::HeaderName::from_static("x-request-id"),
-                    req_id.clone(),
-                );
+                resp_head
+                    .headers
+                    .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
             }
 
             let is_head = req.method == http::Method::HEAD;
@@ -212,7 +214,7 @@ where
     // 5. Pipe streaming upload chunks to upstream
     let pipe_res = async {
         // Encode chunked request head into upstream_write_buf
-        velda_http1::encode_request_head_chunked(&head, &mut conn.upstream_write_buf);
+        velda_http1::encode_request_head_chunked(&req_head, &mut conn.upstream_write_buf);
 
         let mut total_body_bytes = 0usize;
         let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
@@ -303,10 +305,9 @@ where
         .await?;
         sanitize_headers(&mut resp_head.headers);
         if let Some(ref req_id) = req_id {
-            resp_head.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+            resp_head
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
 
         // Validate response framing (client streaming expects non-streaming response)
@@ -316,7 +317,7 @@ where
             ));
         }
 
-        let is_head = head.method == http::Method::HEAD;
+        let is_head = req_head.method == http::Method::HEAD;
         let is_no_body_status = resp_head.status.is_informational()
             || resp_head.status == StatusCode::NO_CONTENT
             || resp_head.status == StatusCode::NOT_MODIFIED;

@@ -21,7 +21,7 @@ use crate::upstream::Http3Upstream;
 /// Serves a full-duplex bidirectional streaming HTTP/1.1 downstream request bridged to an HTTP/3 QUIC backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http3Upstream>,
     meta: &DownstreamMeta,
@@ -31,24 +31,24 @@ where
 {
     // 1. Enrich proxy forwarding headers
     velda_http1::server::header::enrich_headers(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         meta.peer,
         meta.local_addr,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
-    sanitize_headers(&mut head.headers);
+    sanitize_headers(&mut req_head.headers);
 
     let h3_config = Http3Config::auto();
 
@@ -145,9 +145,9 @@ where
     let mut _lease_guard = Some(lease);
     let (sender, response_rx) = match client
         .open_stream(
-            head.method.clone(),
-            head.uri.clone(),
-            head.headers.clone(),
+            req_head.method.clone(),
+            req_head.uri.clone(),
+            req_head.headers.clone(),
             initial_chunk.clone(),
             initial_is_fin,
         )
@@ -182,9 +182,9 @@ where
             _lease_guard = Some(fresh_lease);
             match fresh_client
                 .open_stream(
-                    head.method.clone(),
-                    head.uri.clone(),
-                    head.headers.clone(),
+                    req_head.method.clone(),
+                    req_head.uri.clone(),
+                    req_head.headers.clone(),
                     initial_chunk.clone(),
                     initial_is_fin,
                 )
@@ -228,7 +228,10 @@ where
     let read_buf = &mut conn.read_buf;
     let write_buf = &mut conn.write_buf;
     let should_close = conn.close_requested;
-    let req_id = head.headers.get("x-request-id").cloned();
+    let req_id = req_head
+        .headers
+        .get(&crate::pipeline::X_REQUEST_ID)
+        .cloned();
 
     let upload_finished = AtomicBool::new(initial_is_fin);
 
@@ -353,10 +356,9 @@ where
         };
 
         if let Some(ref rid) = req_id {
-            resp_stream.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                rid.clone(),
-            );
+            resp_stream
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, rid.clone());
         }
 
         let is_no_body_status = resp_stream.status.is_informational()

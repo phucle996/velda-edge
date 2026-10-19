@@ -22,7 +22,7 @@ use crate::upstream::Http3Upstream;
 /// Serves a server-streaming HTTP/1.1 downstream request bridged to an HTTP/3 QUIC backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http3Upstream>,
     meta: &DownstreamMeta,
@@ -32,20 +32,20 @@ where
 {
     // 1. Enrich proxy forwarding headers
     velda_http1::server::header::enrich_headers(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         meta.peer,
         meta.local_addr,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Read entire downstream body into RAM
@@ -79,18 +79,21 @@ where
         }
     };
 
-    let req_method = head.method.clone();
+    let req_method = req_head.method.clone();
 
     // 4. Sanitize connection-specific headers forbidden by RFC 9114 §4.2 before H3 encoding
-    sanitize_headers(&mut head.headers);
-    let req_id = head.headers.get("x-request-id").cloned();
+    sanitize_headers(&mut req_head.headers);
+    let req_id = req_head
+        .headers
+        .get(&crate::pipeline::X_REQUEST_ID)
+        .cloned();
 
     // 5. Construct canonical L7Request
     let l7_req = L7Request::new(
-        head.method,
-        head.uri,
+        req_head.method,
+        req_head.uri,
         http::Version::HTTP_3,
-        head.headers,
+        req_head.headers,
         body,
     );
 
@@ -154,10 +157,9 @@ where
     };
 
     if let Some(ref req_id) = req_id {
-        h3_resp.headers.insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            req_id.clone(),
-        );
+        h3_resp
+            .headers
+            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
     // 7. Check if response has no body (RFC 9110: HEAD, 1xx, 204, 304)

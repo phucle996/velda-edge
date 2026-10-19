@@ -28,7 +28,7 @@ use crate::upstream::Http1Upstream;
 /// Serves a server-streaming HTTP/1.1 transaction forwarded to an HTTP/1.1 backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
@@ -38,20 +38,20 @@ where
 {
     // 1. Enrich proxy forwarding headers using pre-computed connection metadata
     velda_http1::server::header::enrich_headers_cached(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Read entire downstream body into RAM
@@ -109,7 +109,7 @@ where
     };
 
     let cfg = *conn.config();
-    let mut req = Http1ServerRequest::from_parts(head, body);
+    let mut req = Http1ServerRequest::from_parts(req_head, body);
     sanitize_headers(&mut req.headers);
 
     // 5. Send request and read response head with self-healing retry on stale pooled connection
@@ -178,11 +178,10 @@ where
     };
 
     sanitize_headers(&mut resp_head.headers);
-    if let Some(req_id) = req.headers.get("x-request-id") {
-        resp_head.headers.insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            req_id.clone(),
-        );
+    if let Some(req_id) = req.headers.get(&crate::pipeline::X_REQUEST_ID) {
+        resp_head
+            .headers
+            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
     // 6. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body

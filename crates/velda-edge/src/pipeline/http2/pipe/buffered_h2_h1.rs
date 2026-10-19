@@ -17,7 +17,7 @@ use crate::upstream::Http1Upstream;
 
 /// Serves a buffered HTTP/2 downstream stream forwarded to an HTTP/1.1 upstream backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -41,17 +41,18 @@ pub async fn serve(
     };
 
     // 2. Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
-    if !head.headers.contains_key(http::header::HOST)
-        && let Some(host) = velda_http2::server::header::extract_host(&head.headers, &head.uri)
+    if !req_head.headers.contains_key(http::header::HOST)
+        && let Some(host) =
+            velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
         && let Ok(hv) = HeaderValue::from_str(host)
     {
-        head.headers.insert(http::header::HOST, hv);
+        req_head.headers.insert(http::header::HOST, hv);
     }
 
     // 3. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
@@ -82,9 +83,9 @@ pub async fn serve(
     // 5. Serialize & send HTTP/1.1 request using pre-allocated pooled lease.write_buf
     let (stream, write_buf) = lease.split_write();
     let send_res = velda_http1::client::send_request_parts(
-        &head.method,
-        &head.uri,
-        &head.headers,
+        &req_head.method,
+        &req_head.uri,
+        &req_head.headers,
         &body,
         stream,
         write_buf,
@@ -112,7 +113,7 @@ pub async fn serve(
 
     // 6. Read and decode HTTP/1.1 response using pre-allocated pooled lease.read_buf (zero heap allocations)
     let (stream, read_buf) = lease.split_read();
-    let (head, framing) =
+    let (resp_head, framing) =
         match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
             Ok(res) => res,
             Err(e) => {
@@ -131,7 +132,7 @@ pub async fn serve(
             }
         };
 
-    let conn_close = check_connection_close(&head.headers);
+    let conn_close = check_connection_close(&resp_head.headers);
 
     let body = match framing {
         velda_http1::server::request::Http1BodyFraming::Empty => velda_core::Body::Empty,
@@ -221,9 +222,9 @@ pub async fn serve(
     drop(lease);
 
     // 8. Send HTTP/2 response downstream
-    let mut clean_headers = head.headers;
+    let mut clean_headers = resp_head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
-    let l7_resp = L7Response::new(head.status, http::Version::HTTP_2, clean_headers, body);
+    let l7_resp = L7Response::new(resp_head.status, http::Version::HTTP_2, clean_headers, body);
     let _ = responder.send_response_owned(l7_resp);
 }
 

@@ -22,7 +22,7 @@ use crate::upstream::Http2Upstream;
 
 /// Serves a full-duplex bidirectional HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -31,8 +31,8 @@ pub async fn serve(
 ) {
     // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
@@ -67,9 +67,9 @@ pub async fn serve(
 
     // 3. Pipe duplex frames concurrently
     let duplex_res = async {
-        let is_head = head.method == http::Method::HEAD;
-        velda_http2::headers::sanitize_h2_headers(&mut head.headers);
-        let http_req = head.into_http_request();
+        let is_head = req_head.method == http::Method::HEAD;
+        velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
+        let http_req = req_head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
 
         let upload_reserve = config.initial_stream_window_size as usize;

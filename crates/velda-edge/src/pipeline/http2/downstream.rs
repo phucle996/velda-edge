@@ -119,7 +119,7 @@ pub async fn run_http2_loop<IO>(
                 tokio::time::timeout(timeout_duration, conn.accept_streaming_request()).await
             };
             match accept_result {
-                Ok(Ok(Some((mut head, receiver, mut responder)))) => {
+                Ok(Ok(Some((mut req_head, receiver, mut responder)))) => {
                     requests_served = requests_served.saturating_add(1);
 
                     // Graceful Connection Drain Check (keepalive requests & max connection duration)
@@ -146,14 +146,14 @@ pub async fn run_http2_loop<IO>(
                     }
 
                     let (_request_id, req_id_header) = velda_core::next_request_id();
-                    head.headers.insert(X_REQUEST_ID, req_id_header.clone());
+                    req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
                     responder = responder.with_request_id(Some(req_id_header.clone()));
 
-                    if let Err(e) = velda_http2::server::path::normalize_path(&mut head.uri) {
+                    if let Err(e) = velda_http2::server::path::normalize_path(&mut req_head.uri) {
                         tracing::warn!(
                             listener = %meta.listener_id,
                             error = %e,
-                            path = %head.uri.path(),
+                            path = %req_head.uri.path(),
                             "Rejecting HTTP/2 request with unsafe URI path"
                         );
                         let bad_req = L7Response::from_bytes(
@@ -170,13 +170,13 @@ pub async fn run_http2_loop<IO>(
                     }
 
                     // Route matching
-                    let mut http_req = Http2RouteRequest::new(head.uri.path());
+                    let mut http_req = Http2RouteRequest::new(req_head.uri.path());
                     if let Some(h) =
-                        velda_http2::server::header::extract_host(&head.headers, &head.uri)
+                        velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
                     {
                         http_req = http_req.with_host(h);
                     }
-                    http_req = http_req.with_method(head.method.as_str());
+                    http_req = http_req.with_method(req_head.method.as_str());
 
                     let rt = runtime.load();
                     let matched_route = rt.router.route_http2(&meta.listener_id, &http_req);
@@ -193,7 +193,7 @@ pub async fn run_http2_loop<IO>(
                             break;
                         }
 
-                        let is_grpc = head
+                        let is_grpc = req_head
                             .headers
                             .get(CONTENT_TYPE)
                             .is_some_and(|ct| ct.as_bytes().starts_with(b"application/grpc"));
@@ -282,7 +282,7 @@ pub async fn run_http2_loop<IO>(
                     let meta_clone = Arc::clone(&meta);
                     tokio::spawn(async move {
                         serve_http2_stream(
-                            head,
+                            req_head,
                             receiver,
                             responder,
                             meta_clone,
@@ -328,7 +328,7 @@ pub async fn run_http2_loop<IO>(
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
 async fn serve_http2_stream(
-    head: Http2ServerRequestHead,
+    req_head: Http2ServerRequestHead,
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -338,47 +338,56 @@ async fn serve_http2_stream(
     match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => match upstream.strategy {
             Http2PipeStrategy::Buffered => {
-                pipe::buffered_h2_h2::serve(head, receiver, responder, meta, config, upstream)
+                pipe::buffered_h2_h2::serve(req_head, receiver, responder, meta, config, upstream)
                     .await;
             }
             Http2PipeStrategy::ServerStream => {
-                pipe::server_stream_h2_h2::serve(head, receiver, responder, meta, config, upstream)
-                    .await;
+                pipe::server_stream_h2_h2::serve(
+                    req_head, receiver, responder, meta, config, upstream,
+                )
+                .await;
             }
             Http2PipeStrategy::ClientStream => {
-                pipe::client_stream_h2_h2::serve(head, receiver, responder, meta, config, upstream)
-                    .await;
+                pipe::client_stream_h2_h2::serve(
+                    req_head, receiver, responder, meta, config, upstream,
+                )
+                .await;
             }
             Http2PipeStrategy::Duplex => {
-                pipe::duplex_h2_h2::serve(head, receiver, responder, meta, config, upstream).await;
+                pipe::duplex_h2_h2::serve(req_head, receiver, responder, meta, config, upstream)
+                    .await;
             }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy {
             Http1PipeStrategy::Buffered => {
-                pipe::buffered_h2_h1::serve(head, receiver, responder, meta, upstream).await;
+                pipe::buffered_h2_h1::serve(req_head, receiver, responder, meta, upstream).await;
             }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h2_h1::serve(head, receiver, responder, meta, upstream).await;
+                pipe::server_stream_h2_h1::serve(req_head, receiver, responder, meta, upstream)
+                    .await;
             }
             Http1PipeStrategy::ClientStream => {
-                pipe::client_stream_h2_h1::serve(head, receiver, responder, meta, upstream).await;
+                pipe::client_stream_h2_h1::serve(req_head, receiver, responder, meta, upstream)
+                    .await;
             }
             Http1PipeStrategy::Duplex => {
-                pipe::duplex_h2_h1::serve(head, receiver, responder, meta, upstream).await;
+                pipe::duplex_h2_h1::serve(req_head, receiver, responder, meta, upstream).await;
             }
         },
         HttpUpstream::Http3(upstream) => match upstream.strategy {
             Http3PipeStrategy::Buffered => {
-                pipe::buffered_h2_h3::serve(head, receiver, responder, meta, upstream).await;
+                pipe::buffered_h2_h3::serve(req_head, receiver, responder, meta, upstream).await;
             }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h2_h3::serve(head, receiver, responder, meta, upstream).await;
+                pipe::server_stream_h2_h3::serve(req_head, receiver, responder, meta, upstream)
+                    .await;
             }
             Http3PipeStrategy::ClientStream => {
-                pipe::client_stream_h2_h3::serve(head, receiver, responder, meta, upstream).await;
+                pipe::client_stream_h2_h3::serve(req_head, receiver, responder, meta, upstream)
+                    .await;
             }
             Http3PipeStrategy::Duplex => {
-                pipe::duplex_h2_h3::serve(head, receiver, responder, meta, upstream).await;
+                pipe::duplex_h2_h3::serve(req_head, receiver, responder, meta, upstream).await;
             }
         },
     }

@@ -23,18 +23,18 @@ use crate::upstream::Http2Upstream;
 
 /// Forward a request over active H2 client and stream response chunks downstream.
 async fn forward_server_stream(
-    head: &Http2ServerRequestHead,
+    req_head: &Http2ServerRequestHead,
     body: &Body,
     responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,
     config: &Http2Config,
 ) -> Result<(), Http2Error> {
-    let is_head = head.method == http::Method::HEAD;
+    let is_head = req_head.method == http::Method::HEAD;
     let mut http_req = http::Request::new(());
-    *http_req.method_mut() = head.method.clone();
-    *http_req.uri_mut() = head.uri.clone();
+    *http_req.method_mut() = req_head.method.clone();
+    *http_req.uri_mut() = req_head.uri.clone();
     *http_req.version_mut() = Version::HTTP_2;
-    *http_req.headers_mut() = head.headers.clone();
+    *http_req.headers_mut() = req_head.headers.clone();
 
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
@@ -132,7 +132,7 @@ async fn forward_server_stream(
 
 /// Serves a server-streaming HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -158,8 +158,8 @@ pub async fn serve(
 
     // 2. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
@@ -188,7 +188,8 @@ pub async fn serve(
     };
 
     // 4. Pipe server-streaming response with automatic self-healing retry
-    let mut res = forward_server_stream(&head, &body, &mut responder, &mut client, &config).await;
+    let mut res =
+        forward_server_stream(&req_head, &body, &mut responder, &mut client, &config).await;
     if let Err(ref e) = res
         && e.is_refused_or_goaway()
     {
@@ -198,8 +199,9 @@ pub async fn serve(
             "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await {
-            res = forward_server_stream(&head, &body, &mut responder, &mut fresh_client, &config)
-                .await;
+            res =
+                forward_server_stream(&req_head, &body, &mut responder, &mut fresh_client, &config)
+                    .await;
         }
     }
 

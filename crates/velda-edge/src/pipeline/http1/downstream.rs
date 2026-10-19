@@ -109,7 +109,7 @@ pub async fn run_http1_loop<IO>(
 
     loop {
         // Phase 1: decode request head (fail-fast, header inspection, Slowloris protection)
-        let (head, framing) = match conn.next_request_head().await {
+        let (req_head, framing) = match conn.next_request_head().await {
             Ok(Some(parts)) => parts,
             Ok(None) => break,
             Err(Http1Error::Timeout) => {
@@ -161,8 +161,8 @@ pub async fn run_http1_loop<IO>(
         // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
         let (_request_id, req_id_header) = velda_core::next_request_id();
         conn.set_request_id(Some(req_id_header.clone()));
-        let mut head = head;
-        head.headers.insert(X_REQUEST_ID, req_id_header.clone());
+        let mut req_head = req_head;
+        req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
 
         // Enforce Ingress Streaming Policy:
         // If client sends chunked upload but listener has streaming.client disabled, reject immediately!
@@ -186,11 +186,11 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        if let Err(e) = velda_http1::server::path::normalize_path(&mut head.uri) {
+        if let Err(e) = velda_http1::server::path::normalize_path(&mut req_head.uri) {
             tracing::warn!(
                 listener = %meta.listener_id,
                 error = %e,
-                path = %head.uri.path(),
+                path = %req_head.uri.path(),
                 "Rejecting HTTP/1.1 request with unsafe URI path"
             );
             let bad_req = Http1ServerResponse::from_bytes(
@@ -212,11 +212,12 @@ pub async fn run_http1_loop<IO>(
         // [PHASE 3: Narrow Waist Router Lookup]
         // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
         // ========================================================================
-        let mut http_req = Http1RouteRequest::new(head.uri.path());
-        if let Some(h) = velda_http1::server::header::extract_host(&head.headers, &head.uri) {
+        let mut http_req = Http1RouteRequest::new(req_head.uri.path());
+        if let Some(h) = velda_http1::server::header::extract_host(&req_head.headers, &req_head.uri)
+        {
             http_req = http_req.with_host(h);
         }
-        http_req = http_req.with_method(head.method.as_str());
+        http_req = http_req.with_method(req_head.method.as_str());
 
         let route = rt
             .router
@@ -225,9 +226,9 @@ pub async fn run_http1_loop<IO>(
         let Some(route) = route else {
             tracing::debug!(
                 listener = %meta.listener_id,
-                path = %head.uri.path(),
-                host = ?velda_http1::server::header::extract_host(&head.headers, &head.uri),
-                method = %head.method,
+                path = %req_head.uri.path(),
+                host = ?velda_http1::server::header::extract_host(&req_head.headers, &req_head.uri),
+                method = %req_head.method,
                 "No HTTP/1.1 route matched"
             );
             let not_found = Http1ServerResponse::from_bytes(
@@ -298,50 +299,50 @@ pub async fn run_http1_loop<IO>(
         let pipe_result = match upstream_target.as_ref() {
             HttpUpstream::Http1(upstream) => match upstream.strategy {
                 Http1PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h1::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
                 Http1PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h1::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::server_stream_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http1PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h1::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::client_stream_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http1PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h1::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
             },
             HttpUpstream::Http2(upstream) => match upstream.strategy {
                 Http2PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h2::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
                 Http2PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h2::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::server_stream_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http2PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h2::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::client_stream_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http2PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h2::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
             },
             HttpUpstream::Http3(upstream) => match upstream.strategy {
                 Http3PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h3::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
                 Http3PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h3::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::server_stream_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http3PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h3::serve(&mut conn, head, framing, upstream, &meta)
+                    pipe::client_stream_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta)
                         .await
                 }
                 Http3PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h3::serve(&mut conn, head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta).await
                 }
             },
         };

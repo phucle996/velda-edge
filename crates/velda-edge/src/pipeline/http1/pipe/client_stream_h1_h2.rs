@@ -22,7 +22,7 @@ use crate::upstream::Http2Upstream;
 /// Serves a client-streaming HTTP/1.1 downstream request bridged to an HTTP/2 backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
@@ -32,24 +32,24 @@ where
 {
     // 1. Enrich proxy forwarding headers
     velda_http1::server::header::enrich_headers(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         meta.peer,
         meta.local_addr,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut head.headers);
+    velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
 
     let h2_config = Http2Config::auto();
 
@@ -78,13 +78,13 @@ where
 
     // 5. Initiate HTTP/2 stream
     let scheme = if upstream.is_tls() { "https" } else { "http" };
-    let authority = head
+    let authority = req_head
         .headers
         .get(http::header::HOST)
         .and_then(|h| h.to_str().ok())
-        .or_else(|| head.uri.host())
+        .or_else(|| req_head.uri.host())
         .unwrap_or(upstream.target_host());
-    let path_and_query = head
+    let path_and_query = req_head
         .uri
         .path_and_query()
         .map(|pq| pq.as_str())
@@ -94,13 +94,13 @@ where
         .authority(authority)
         .path_and_query(path_and_query)
         .build()
-        .unwrap_or_else(|_| head.uri.clone());
+        .unwrap_or_else(|_| req_head.uri.clone());
 
     let mut req = http::Request::builder()
-        .method(head.method.clone())
+        .method(req_head.method.clone())
         .uri(uri)
         .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = head.headers.clone();
+    *req.headers_mut().unwrap() = req_head.headers.clone();
     let req = req.body(()).unwrap();
 
     let (response_future, mut send_stream) = match client.send_request(req, false) {
@@ -227,11 +227,8 @@ where
     }
 
     let mut headers = parts.headers;
-    if let Some(req_id) = head.headers.get("x-request-id") {
-        headers.insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            req_id.clone(),
-        );
+    if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
+        headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
     let server_resp = Http1ServerResponse::new(
         parts.status,

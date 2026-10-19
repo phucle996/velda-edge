@@ -17,24 +17,25 @@ use crate::upstream::Http1Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream bridged to an HTTP/1.1 backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
 ) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
-    if !head.headers.contains_key(http::header::HOST)
-        && let Some(host) = velda_http2::server::header::extract_host(&head.headers, &head.uri)
+    if !req_head.headers.contains_key(http::header::HOST)
+        && let Some(host) =
+            velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
         && let Ok(hv) = HeaderValue::from_str(host)
     {
-        head.headers.insert(http::header::HOST, hv);
+        req_head.headers.insert(http::header::HOST, hv);
     }
 
     // 2. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
@@ -59,18 +60,21 @@ pub async fn serve(
     };
 
     // 4. Decide framing mode towards HTTP/1.1: Content-Length vs Chunked
-    let is_chunked = if head.headers.contains_key(CONTENT_LENGTH) {
-        head.headers.remove(TRANSFER_ENCODING);
+    let is_chunked = if req_head.headers.contains_key(CONTENT_LENGTH) {
+        req_head.headers.remove(TRANSFER_ENCODING);
         false
     } else if is_fin {
         let len = first_chunk.as_ref().map_or(0, |c| c.len());
-        head.headers.insert(CONTENT_LENGTH, HeaderValue::from(len));
-        head.headers.remove(TRANSFER_ENCODING);
+        req_head
+            .headers
+            .insert(CONTENT_LENGTH, HeaderValue::from(len));
+        req_head.headers.remove(TRANSFER_ENCODING);
         false
     } else {
-        head.headers
+        req_head
+            .headers
             .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-        head.headers.remove(CONTENT_LENGTH);
+        req_head.headers.remove(CONTENT_LENGTH);
         true
     };
 
@@ -109,9 +113,9 @@ pub async fn serve(
         write_buf.reserve(initial_cap - write_buf.capacity());
     }
     velda_http1::client::encode_request_head(
-        &head.method,
-        &head.uri,
-        &head.headers,
+        &req_head.method,
+        &req_head.uri,
+        &req_head.headers,
         None,
         write_buf,
     );

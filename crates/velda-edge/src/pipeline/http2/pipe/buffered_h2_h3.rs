@@ -17,7 +17,7 @@ use crate::upstream::Http3Upstream;
 
 /// Serves a buffered HTTP/2 downstream stream forwarded to an HTTP/3 QUIC upstream backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -42,22 +42,22 @@ pub async fn serve(
 
     // 2. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
     );
 
     // 3. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
-    sanitize_headers(&mut head.headers);
+    sanitize_headers(&mut req_head.headers);
 
     // 4. Construct canonical L7Request
     let l7_req = L7Request::new(
-        head.method,
-        head.uri,
+        req_head.method,
+        req_head.uri,
         http::Version::HTTP_3,
-        head.headers,
+        req_head.headers,
         body,
     );
 

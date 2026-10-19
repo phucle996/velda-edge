@@ -22,7 +22,7 @@ use crate::upstream::Http2Upstream;
 /// Serves a buffered HTTP/1.1 downstream request bridged to an HTTP/2 upstream multiplexed backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
@@ -32,20 +32,20 @@ where
 {
     // 1. Enrich proxy forwarding headers
     velda_http1::server::header::enrich_headers(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         meta.peer,
         meta.local_addr,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Read entire downstream body into RAM
@@ -85,7 +85,7 @@ where
     };
 
     // 4. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut head.headers);
+    velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
 
     let h2_config = Http2Config::auto();
 
@@ -118,7 +118,7 @@ where
     let max_body_size = h2_config.max_body_size.min(conn.config().max_body_size);
     let mut pipe_res = send_h2_buffered(
         &mut client,
-        &head,
+        &req_head,
         &body_bytes,
         is_tls,
         upstream_host,
@@ -135,7 +135,7 @@ where
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
             pipe_res = send_h2_buffered(
                 &mut fresh_client,
-                &head,
+                &req_head,
                 &body_bytes,
                 is_tls,
                 upstream_host,
@@ -147,7 +147,7 @@ where
 
     match pipe_res {
         Ok(mut resp) => {
-            if let Some(req_id) = head.headers.get(&crate::pipeline::X_REQUEST_ID) {
+            if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
                 resp.headers
                     .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
             }
@@ -177,20 +177,20 @@ where
 
 async fn send_h2_buffered(
     client: &mut h2::client::SendRequest<bytes::Bytes>,
-    head: &Http1ServerRequestHead,
+    req_head: &Http1ServerRequestHead,
     body: &bytes::Bytes,
     is_tls: bool,
     upstream_host: &str,
     max_body_size: usize,
 ) -> Result<Http1ServerResponse, h2::Error> {
     let scheme = if is_tls { "https" } else { "http" };
-    let authority = head
+    let authority = req_head
         .headers
         .get(http::header::HOST)
         .and_then(|h| h.to_str().ok())
-        .or_else(|| head.uri.host())
+        .or_else(|| req_head.uri.host())
         .unwrap_or(upstream_host);
-    let path_and_query = head
+    let path_and_query = req_head
         .uri
         .path_and_query()
         .map(|pq| pq.as_str())
@@ -200,13 +200,13 @@ async fn send_h2_buffered(
         .authority(authority)
         .path_and_query(path_and_query)
         .build()
-        .unwrap_or_else(|_| head.uri.clone());
+        .unwrap_or_else(|_| req_head.uri.clone());
 
     let mut req = http::Request::builder()
-        .method(head.method.clone())
+        .method(req_head.method.clone())
         .uri(uri)
         .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = head.headers.clone();
+    *req.headers_mut().unwrap() = req_head.headers.clone();
     let req = req.body(()).unwrap();
 
     let has_body = !body.is_empty();

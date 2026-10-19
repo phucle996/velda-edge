@@ -18,7 +18,7 @@ use crate::upstream::Http3Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream bridged to an HTTP/3 QUIC backend.
 pub async fn serve(
-    mut head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -26,15 +26,15 @@ pub async fn serve(
 ) {
     // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
     );
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
-    sanitize_headers(&mut head.headers);
+    sanitize_headers(&mut req_head.headers);
 
     // 3. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&upstream.config).await {
@@ -80,7 +80,13 @@ pub async fn serve(
 
     // Open progressive HTTP/3 stream with fused initial chunk and optional FIN
     let (sender, response_rx) = match client
-        .open_stream(head.method, head.uri, head.headers, first_chunk, is_fin)
+        .open_stream(
+            req_head.method,
+            req_head.uri,
+            req_head.headers,
+            first_chunk,
+            is_fin,
+        )
         .await
     {
         Ok(parts) => parts,

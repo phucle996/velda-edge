@@ -27,7 +27,7 @@ use crate::upstream::Http1Upstream;
 /// Serves a full-duplex HTTP/1.1 transaction forwarded to an HTTP/1.1 backend.
 pub async fn serve<IO>(
     conn: &mut Http1ServerConnection<IO>,
-    mut head: Http1ServerRequestHead,
+    mut req_head: Http1ServerRequestHead,
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
@@ -37,20 +37,20 @@ where
 {
     // 1. Enrich proxy forwarding headers using pre-computed connection metadata
     velda_http1::server::header::enrich_headers_cached(
-        &mut head.headers,
-        &head.uri,
+        &mut req_head.headers,
+        &req_head.uri,
         &meta.client_ip_header,
         &meta.client_port_header,
         meta.is_tls,
     );
 
     // 2. Handle Expect: 100-continue unblocking
-    if head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
+    if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
             return Err(e);
         }
-        head.headers.remove(http::header::EXPECT);
+        req_head.headers.remove(http::header::EXPECT);
     }
 
     // 3. Acquire upstream connection before duplex streaming begins
@@ -77,8 +77,8 @@ where
     };
 
     let cfg = *conn.config();
-    sanitize_headers(&mut head.headers);
-    let head_method = head.method.clone();
+    sanitize_headers(&mut req_head.headers);
+    let req_method = req_head.method.clone();
 
     let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
     let target_reserve = cfg.client_body_buffer_size.max(262144);
@@ -114,18 +114,18 @@ where
         match framing {
             Http1BodyFraming::Empty => {
                 velda_http1::encode_request_head(
-                    &head.method,
-                    &head.uri,
-                    &head.headers,
+                    &req_head.method,
+                    &req_head.uri,
+                    &req_head.headers,
                     Some(0),
                     &mut conn.upstream_write_buf,
                 );
             }
             Http1BodyFraming::ContentLength(total_len) => {
                 velda_http1::encode_request_head(
-                    &head.method,
-                    &head.uri,
-                    &head.headers,
+                    &req_head.method,
+                    &req_head.uri,
+                    &req_head.headers,
                     Some(total_len),
                     &mut conn.upstream_write_buf,
                 );
@@ -136,7 +136,7 @@ where
                 }
             }
             Http1BodyFraming::Chunked => {
-                velda_http1::encode_request_head_chunked(&head, &mut conn.upstream_write_buf);
+                velda_http1::encode_request_head_chunked(&req_head, &mut conn.upstream_write_buf);
                 if chunked_coalesced_wire_len > 0 {
                     conn.upstream_write_buf
                         .extend_from_slice(&conn.read_buf[..chunked_coalesced_wire_len]);
@@ -151,14 +151,13 @@ where
         let (mut resp_head, resp_framing) =
             read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await?;
         sanitize_headers(&mut resp_head.headers);
-        if let Some(req_id) = head.headers.get("x-request-id") {
-            resp_head.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                req_id.clone(),
-            );
+        if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
+            resp_head
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
 
-        let is_head = head_method == http::Method::HEAD;
+        let is_head = req_method == http::Method::HEAD;
         let is_no_body = is_head
             || resp_head.status.is_informational()
             || resp_head.status == StatusCode::NO_CONTENT
@@ -332,7 +331,10 @@ where
     // Asymmetric coordination channel: Signals upload task when upstream response is fully received
     let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
     let upload_finished = std::sync::atomic::AtomicBool::new(framing == Http1BodyFraming::Empty);
-    let req_id = head.headers.get("x-request-id").cloned();
+    let req_id = req_head
+        .headers
+        .get(&crate::pipeline::X_REQUEST_ID)
+        .cloned();
 
     // Concurrently pump client upload to upstream and upstream response downstream.
     let upload_task = async {
@@ -341,7 +343,7 @@ where
         match framing {
             Http1BodyFraming::Chunked => {
                 // Encode chunked request head into upstream_write_buf
-                velda_http1::encode_request_head_chunked(&head, upstream_write_buf);
+                velda_http1::encode_request_head_chunked(&req_head, upstream_write_buf);
 
                 let mut total_req_bytes = 0usize;
                 let mut sent_terminal = false;
@@ -488,9 +490,9 @@ where
             }
             Http1BodyFraming::ContentLength(total_len) => {
                 velda_http1::encode_request_head(
-                    &head.method,
-                    &head.uri,
-                    &head.headers,
+                    &req_head.method,
+                    &req_head.uri,
+                    &req_head.headers,
                     Some(total_len),
                     upstream_write_buf,
                 );
@@ -568,9 +570,9 @@ where
             }
             Http1BodyFraming::Empty => {
                 velda_http1::encode_request_head(
-                    &head.method,
-                    &head.uri,
-                    &head.headers,
+                    &req_head.method,
+                    &req_head.uri,
+                    &req_head.headers,
                     Some(0),
                     upstream_write_buf,
                 );
@@ -589,13 +591,12 @@ where
             read_response_head(&mut up_read, upstream_read_buf, &cfg).await?;
         sanitize_headers(&mut resp_head.headers);
         if let Some(ref rid) = req_id {
-            resp_head.headers.insert(
-                http::header::HeaderName::from_static("x-request-id"),
-                rid.clone(),
-            );
+            resp_head
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, rid.clone());
         }
 
-        let is_head = head_method == http::Method::HEAD;
+        let is_head = req_method == http::Method::HEAD;
         let is_no_body_status = resp_head.status.is_informational()
             || resp_head.status == StatusCode::NO_CONTENT
             || resp_head.status == StatusCode::NOT_MODIFIED;
