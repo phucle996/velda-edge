@@ -23,6 +23,7 @@ http = "1.2"
 bitflags = "2.8"
 rustc-hash = "2.1"
 ring = "0.17"
+regex = "1.13"
 
 [dev-dependencies]
 tempfile = "3"

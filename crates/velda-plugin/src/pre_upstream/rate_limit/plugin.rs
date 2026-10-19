@@ -7,14 +7,12 @@
 //! Full schema specification, allowed values, and configuration examples:
 //! See [`README.md`](./README.md).
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::IpAddr;
-
 use http::header::RETRY_AFTER;
 use http::{HeaderName, HeaderValue, StatusCode};
 use velda_core::{Action, L7Request, L7Response};
 
 use super::algorithm::{RateLimitAlgorithm, ShardedState};
+use super::key::{KeyStrategy, hash_key};
 use super::redis::{RedisConfig, RedisConnectionPool, TlsSource};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -36,26 +34,6 @@ impl RateLimitBackend {
         match s.trim().to_ascii_lowercase().as_str() {
             "redis" => Self::Redis,
             _ => Self::Memory,
-        }
-    }
-}
-
-/// Key resolution strategy for client identification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeyStrategy {
-    /// Evaluates `key_headers` in priority order; first non-empty header/IP is selected (Default).
-    #[default]
-    Priority,
-    /// Concatenates all specified headers and client IP into a multi-dimensional compound key.
-    Composite,
-}
-
-impl KeyStrategy {
-    /// Parses a key strategy identifier from configuration string.
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "composite" | "combine" => Self::Composite,
-            _ => Self::Priority,
         }
     }
 }
@@ -352,83 +330,12 @@ impl RateLimitPlugin {
         Ok(Self::with_config(&config.id, parsed_cfg))
     }
 
-    /// Resolves client IP address from standard forwarding headers.
-    #[inline]
-    fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
-        if let Some(val) = req.headers.get("x-forwarded-for")
-            && let Ok(raw) = val.to_str()
-        {
-            let first = raw.split(',').next().unwrap_or("").trim();
-            if let Ok(ip) = first.parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-
-        req.headers
-            .get("x-real-ip")
-            .and_then(|val| val.to_str().ok())
-            .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
-    }
-
     /// Resolves rate-limiting client identifier key based on [`KeyStrategy`].
     #[inline]
-    fn resolve_key(&self, req: &L7Request) -> String {
-        match self.config.key_strategy {
-            KeyStrategy::Priority => {
-                for hdr_name in &self.config.key_headers {
-                    if hdr_name == "client_ip" || hdr_name == "ip" {
-                        if let Some(ip) = Self::extract_client_ip(req) {
-                            return format!("ip:{ip}");
-                        }
-                    } else if let Some(val) = req.headers.get(hdr_name)
-                        && let Ok(s) = val.to_str()
-                    {
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            return format!("{hdr_name}:{trimmed}");
-                        }
-                    }
-                }
-                // Fallback if none matched
-                if let Some(ip) = Self::extract_client_ip(req) {
-                    format!("ip:{ip}")
-                } else {
-                    "global:default".to_string()
-                }
-            }
-            KeyStrategy::Composite => {
-                let mut parts = Vec::with_capacity(self.config.key_headers.len());
-                for hdr_name in &self.config.key_headers {
-                    if hdr_name == "client_ip" || hdr_name == "ip" {
-                        if let Some(ip) = Self::extract_client_ip(req) {
-                            parts.push(ip.to_string());
-                        } else {
-                            parts.push("unknown".to_string());
-                        }
-                    } else if let Some(val) = req.headers.get(hdr_name)
-                        && let Ok(s) = val.to_str()
-                    {
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            parts.push(trimmed.to_string());
-                        } else {
-                            parts.push("none".to_string());
-                        }
-                    } else {
-                        parts.push("none".to_string());
-                    }
-                }
-                parts.join(":")
-            }
-        }
-    }
-
-    /// Hashes the key string into a 64-bit integer for zero-alloc sharded table lookup.
-    #[inline(always)]
-    fn hash_key(key: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+    pub fn resolve_key(&self, req: &L7Request) -> String {
+        self.config
+            .key_strategy
+            .resolve_key(&self.config.key_headers, req)
     }
 }
 
@@ -444,7 +351,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
     /// Executes 100% in-memory with lock-striped sharding. Zero Network I/O.
     fn on_upstream_request(&self, req: &mut L7Request) -> Action {
         let key = self.resolve_key(req);
-        let key_hash = Self::hash_key(&key);
+        let key_hash = hash_key(&key);
 
         // Check backend execution mode
         let (allowed, retry_after) = match self.config.backend {

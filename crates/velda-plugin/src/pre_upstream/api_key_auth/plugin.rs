@@ -14,23 +14,10 @@ use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::ApiKeyCache;
+use super::source::{ApiKeyEntry, KeySource, extract_token};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
-
-/// Method and location to extract the API key token from incoming requests.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KeySource {
-    Header { name: HeaderName, prefix: String },
-    Query { param: String },
-}
-
-/// Pre-compiled metadata and headers to inject for an authorized consumer.
-#[derive(Clone, Debug)]
-pub struct ApiKeyEntry {
-    pub consumer_id: String,
-    pub injected_headers: Vec<(HeaderName, HeaderValue)>,
-}
 
 /// Pre-Upstream API Key Authentication Plugin.
 pub struct ApiKeyAuthPlugin {
@@ -261,49 +248,6 @@ impl ApiKeyAuthPlugin {
             cache,
         ))
     }
-
-    /// Extracts the raw token string from the request and returns its source if found.
-    fn extract_token<'a>(&self, req: &'a L7Request) -> Option<(&'a str, Option<&HeaderName>)> {
-        for source in &self.sources {
-            match source {
-                KeySource::Header { name, prefix } => {
-                    if let Some(val) = req.headers.get(name)
-                        && let Ok(s) = val.to_str()
-                    {
-                        let trimmed = s.trim();
-                        if prefix.is_empty() {
-                            if !trimmed.is_empty() {
-                                return Some((trimmed, Some(name)));
-                            }
-                        } else if trimmed.len() > prefix.len()
-                            && trimmed.is_char_boundary(prefix.len())
-                            && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
-                        {
-                            let token = trimmed[prefix.len()..].trim();
-                            if !token.is_empty() {
-                                return Some((token, Some(name)));
-                            }
-                        }
-                    }
-                }
-                KeySource::Query { param } => {
-                    if let Some(query) = req.uri.query() {
-                        for pair in query.split('&') {
-                            if let Some((k, v)) = pair.split_once('=')
-                                && k == param
-                            {
-                                let token = v.trim();
-                                if !token.is_empty() {
-                                    return Some((token, None));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 impl PreUpstreamPlugin for ApiKeyAuthPlugin {
@@ -313,7 +257,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request) -> Action {
-        let (token_str, matched_header) = match self.extract_token(req) {
+        let (token_str, matched_header) = match extract_token(&self.sources, req) {
             Some(res) => res,
             None => {
                 return Action::Respond(self.unauthorized_missing.clone());
@@ -331,7 +275,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
         // 2. Positive Cache check: ultra-fast (~15ns) instant injection
         if let Some((_consumer_id, injected_headers)) = self.cache.get_valid(key_hash, now) {
             if self.hide_credentials
-                && let Some(hdr) = matched_header
+                && let Some(ref hdr) = matched_header
             {
                 req.headers.remove(hdr);
             }
@@ -352,7 +296,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
                 );
 
                 if self.hide_credentials
-                    && let Some(hdr) = matched_header
+                    && let Some(ref hdr) = matched_header
                 {
                     req.headers.remove(hdr);
                 }

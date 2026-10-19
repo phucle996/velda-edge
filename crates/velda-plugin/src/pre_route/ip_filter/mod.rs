@@ -1,7 +1,7 @@
-//! IP Whitelist / Blacklist Pre-Route Plugin Module (`phase: "pre_route"`).
-//!
-//! Provides zero-allocation IP address and CIDR subnet access control for edge traffic.
+//! IP Access Control Plugin Module (`ip_filter`).
 
+pub mod network;
 pub mod plugin;
 
-pub use plugin::{ClientIpSource, IpFilterConfig, IpFilterMode, IpFilterPlugin, IpNetwork};
+pub use network::{ClientIpSource, IpNetwork};
+pub use plugin::{IpFilterConfig, IpFilterMode, IpFilterPlugin};

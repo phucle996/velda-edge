@@ -18,6 +18,7 @@ pub mod header_mutation;
 pub mod jwt_auth;
 pub mod rate_limit;
 pub mod request_mirror;
+pub mod url_rewrite;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
@@ -30,6 +31,10 @@ pub use rate_limit::{
     RateLimitPlugin, TlsSource,
 };
 pub use request_mirror::{MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin};
+pub use url_rewrite::{
+    CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
+    UrlRewritePlugin,
+};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -84,6 +89,7 @@ pub fn instantiate(
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
         "canary" => Ok(Arc::new(CanaryPlugin::from_config(config)?)),
         "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
+        "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
@@ -167,5 +173,38 @@ mod tests {
             }
             _ => panic!("Expected Action::Respond(429)"),
         }
+    }
+
+    #[test]
+    fn test_pre_upstream_url_rewrite() {
+        let plugin = Arc::new(
+            UrlRewritePlugin::new(
+                "rewrite-chain",
+                UrlRewriteConfig {
+                    path: Some(PathRewriteStrategy::StripPrefix {
+                        prefix: "/api/v1".into(),
+                    }),
+                    query: QueryStrategy::Append {
+                        query: "cluster=primary".into(),
+                    },
+                    sanitize_path: true,
+                },
+            )
+            .unwrap(),
+        );
+        let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
+
+        let mut req = L7Request::new(
+            Method::GET,
+            Uri::from_static("/api/v1/customers/100?tab=overview"),
+            Version::HTTP_11,
+            HeaderMap::new(),
+            Body::Empty,
+        );
+
+        let action = run_pre_upstream_plugins(&chain, &mut req);
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(req.uri.path(), "/customers/100");
+        assert_eq!(req.uri.query(), Some("tab=overview&cluster=primary"));
     }
 }

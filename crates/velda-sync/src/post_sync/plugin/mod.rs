@@ -80,6 +80,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "header_mutation" => Some("pre_upstream"),
         "canary" => Some("pre_upstream"),
         "request_mirror" => Some("pre_upstream"),
+        "url_rewrite" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "access_log" => Some("post_response"),

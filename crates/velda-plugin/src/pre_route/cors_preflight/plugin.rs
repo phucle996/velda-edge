@@ -20,47 +20,7 @@ use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProto
 use crate::error::PluginError;
 use crate::pre_route::PreRoutePlugin;
 
-/// Origin matching pattern supporting exact domain and wildcard subdomain matching.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OriginPattern {
-    /// Wildcard matching all origins (`*`).
-    Any,
-    /// Exact match (e.g. `https://app.velda.io`).
-    Exact(String),
-    /// Subdomain wildcard (e.g. `https://*.velda.io`).
-    Subdomain { prefix: String, suffix: String },
-}
-
-impl OriginPattern {
-    /// Parses an origin string into an [`OriginPattern`].
-    pub fn parse(s: &str) -> Self {
-        let s = s.trim();
-        if s == "*" {
-            Self::Any
-        } else if let Some((prefix, suffix)) = s.split_once('*') {
-            Self::Subdomain {
-                prefix: prefix.to_string(),
-                suffix: suffix.to_string(),
-            }
-        } else {
-            Self::Exact(s.to_string())
-        }
-    }
-
-    /// Evaluates if an incoming `Origin` matches this pattern.
-    #[inline]
-    pub fn matches(&self, origin: &str) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Exact(expected) => expected.eq_ignore_ascii_case(origin),
-            Self::Subdomain { prefix, suffix } => {
-                origin.len() >= prefix.len() + suffix.len()
-                    && origin.starts_with(prefix)
-                    && origin.ends_with(suffix)
-            }
-        }
-    }
-}
+use super::origin::OriginPattern;
 
 /// Pre-Route CORS Preflight Interceptor Plugin.
 #[derive(Debug, Clone)]

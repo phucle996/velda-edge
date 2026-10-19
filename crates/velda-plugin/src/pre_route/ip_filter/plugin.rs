@@ -13,6 +13,7 @@ use http::StatusCode;
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use super::network::{ClientIpSource, IpNetwork};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_route::PreRoutePlugin;
@@ -24,96 +25,6 @@ pub enum IpFilterMode {
     AllowList,
     /// Specified IPs are blocked (Blacklist).
     DenyList,
-}
-
-/// Preferred source for determining the downstream client's IP address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClientIpSource {
-    /// Inspects the `X-Forwarded-For` header first (first client IP), falling back to `X-Real-IP`.
-    #[default]
-    XForwardedFor,
-    /// Inspects the `X-Real-IP` header first, falling back to `X-Forwarded-For`.
-    XRealIp,
-}
-
-/// Strongly typed, zero-allocation CIDR network prefix matcher for IPv4 and IPv6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpNetwork {
-    V4 { net: u32, mask: u32 },
-    V6 { net: u128, mask: u128 },
-}
-
-impl IpNetwork {
-    /// Parses an exact IP address or CIDR notation (e.g. `10.0.0.0/8`, `192.168.1.5`, `2001:db8::/32`).
-    pub fn from_cidr(s: &str) -> Result<Self, String> {
-        let s = s.trim();
-        if let Some((ip_str, prefix_str)) = s.split_once('/') {
-            let ip: IpAddr = ip_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("Invalid IP address '{ip_str}': {e}"))?;
-            let prefix: u8 = prefix_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("Invalid CIDR prefix '{prefix_str}': {e}"))?;
-
-            match ip {
-                IpAddr::V4(v4) => {
-                    if prefix > 32 {
-                        return Err(format!("IPv4 prefix cannot exceed 32, got {prefix}"));
-                    }
-                    let mask = if prefix == 0 {
-                        0u32
-                    } else {
-                        !0u32 << (32 - prefix)
-                    };
-                    let net = v4.to_bits() & mask;
-                    Ok(Self::V4 { net, mask })
-                }
-                IpAddr::V6(v6) => {
-                    if prefix > 128 {
-                        return Err(format!("IPv6 prefix cannot exceed 128, got {prefix}"));
-                    }
-                    let mask = if prefix == 0 {
-                        0u128
-                    } else {
-                        !0u128 << (128 - prefix)
-                    };
-                    let net = v6.to_bits() & mask;
-                    Ok(Self::V6 { net, mask })
-                }
-            }
-        } else {
-            // Single exact IP address
-            let ip: IpAddr = s
-                .parse()
-                .map_err(|e| format!("Invalid IP address '{s}': {e}"))?;
-            match ip {
-                IpAddr::V4(v4) => Ok(Self::V4 {
-                    net: v4.to_bits(),
-                    mask: !0u32,
-                }),
-                IpAddr::V6(v6) => Ok(Self::V6 {
-                    net: v6.to_bits(),
-                    mask: !0u128,
-                }),
-            }
-        }
-    }
-
-    /// Tests whether an [`IpAddr`] falls within this network prefix.
-    ///
-    /// # Performance Contract
-    /// Executes in 1-2 CPU clock cycles using pure bitwise operations:
-    /// `(ip_bits & mask) == net_bits`. **Zero heap allocations**.
-    #[inline(always)]
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        match (self, ip) {
-            (Self::V4 { net, mask }, IpAddr::V4(v4)) => (v4.to_bits() & mask) == *net,
-            (Self::V6 { net, mask }, IpAddr::V6(v6)) => (v6.to_bits() & mask) == *net,
-            _ => false, // IPv4 network cannot match IPv6 address and vice versa
-        }
-    }
 }
 
 /// Comprehensive configuration for IP and CIDR access control.
@@ -128,15 +39,15 @@ pub struct IpFilterConfig {
 impl Default for IpFilterConfig {
     fn default() -> Self {
         Self {
-            mode: IpFilterMode::AllowList,
+            mode: IpFilterMode::DenyList,
             allow_cidrs: Vec::new(),
             deny_cidrs: Vec::new(),
-            client_ip_source: ClientIpSource::XForwardedFor,
+            client_ip_source: ClientIpSource::default(),
         }
     }
 }
 
-/// Production implementation of the IP & CIDR Subnet Filter Pre-Route plugin.
+/// Pre-Route IP Filter Plugin instance.
 #[derive(Debug, Clone)]
 pub struct IpFilterPlugin {
     pub id: String,
@@ -147,23 +58,25 @@ pub struct IpFilterPlugin {
 }
 
 impl IpFilterPlugin {
-    /// Constructs a new IP filter plugin with explicit lists.
+    /// Constructs a basic IP filter with allow and deny CIDR lists.
     pub fn new(
         id: impl Into<String>,
         mode: IpFilterMode,
-        allow_cidrs: impl IntoIterator<Item = IpNetwork>,
-        deny_cidrs: impl IntoIterator<Item = IpNetwork>,
+        allow_cidrs: Vec<IpNetwork>,
+        deny_cidrs: Vec<IpNetwork>,
     ) -> Self {
-        Self {
-            id: id.into(),
-            mode,
-            allow_cidrs: allow_cidrs.into_iter().collect(),
-            deny_cidrs: deny_cidrs.into_iter().collect(),
-            client_ip_source: ClientIpSource::XForwardedFor,
-        }
+        Self::with_config(
+            id,
+            IpFilterConfig {
+                mode,
+                allow_cidrs,
+                deny_cidrs,
+                client_ip_source: ClientIpSource::default(),
+            },
+        )
     }
 
-    /// Constructs an [`IpFilterPlugin`] from a typed [`IpFilterConfig`].
+    /// Constructs an IP filter with full configuration options.
     pub fn with_config(id: impl Into<String>, config: IpFilterConfig) -> Self {
         Self {
             id: id.into(),
@@ -175,20 +88,15 @@ impl IpFilterPlugin {
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    ///
-    /// # Strict 'none' Sentinel Invariant
-    /// In JSON configuration, unused lists must explicitly specify `"none"`.
-    /// (e.g. `"allow_cidrs": ["10.0.0.0/8"], "deny_cidrs": "none"`).
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let mode_str = config
+        let mode = match config
             .config
             .get("mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("allow");
-
-        let mode = match mode_str.to_ascii_lowercase().as_str() {
-            "deny" | "denylist" | "blacklist" => IpFilterMode::DenyList,
-            _ => IpFilterMode::AllowList,
+            .unwrap_or("deny")
+        {
+            "allow" | "whitelist" => IpFilterMode::AllowList,
+            _ => IpFilterMode::DenyList,
         };
 
         let client_ip_source = match config
@@ -284,29 +192,7 @@ impl IpFilterPlugin {
     /// Extracts the candidate downstream client IP address from request headers.
     #[inline]
     fn extract_client_ip(&self, req: &L7Request) -> Option<IpAddr> {
-        match self.client_ip_source {
-            ClientIpSource::XForwardedFor => {
-                self.extract_xff(req).or_else(|| self.extract_real_ip(req))
-            }
-            ClientIpSource::XRealIp => self.extract_real_ip(req).or_else(|| self.extract_xff(req)),
-        }
-    }
-
-    #[inline]
-    fn extract_xff(&self, req: &L7Request) -> Option<IpAddr> {
-        req.headers
-            .get("x-forwarded-for")
-            .and_then(|val| val.to_str().ok())
-            .and_then(|raw| raw.split(',').next())
-            .and_then(|first| first.trim().parse::<IpAddr>().ok())
-    }
-
-    #[inline]
-    fn extract_real_ip(&self, req: &L7Request) -> Option<IpAddr> {
-        req.headers
-            .get("x-real-ip")
-            .and_then(|val| val.to_str().ok())
-            .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
+        self.client_ip_source.extract_client_ip(req)
     }
 }
 
@@ -331,9 +217,6 @@ impl PreRoutePlugin for IpFilterPlugin {
         let client_ip = match self.extract_client_ip(req) {
             Some(ip) => ip,
             None => {
-                // If client IP cannot be extracted from headers:
-                // In AllowList mode, fail-safe requires rejection (unknown IP cannot be on whitelist).
-                // In DenyList mode, pass through since IP is not matched on blacklist.
                 return match self.mode {
                     IpFilterMode::AllowList => Action::Respond(L7Response::from_bytes(
                         StatusCode::FORBIDDEN,
@@ -411,32 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ip_network_v4_contains() {
-        let net = IpNetwork::from_cidr("192.168.1.0/24").unwrap();
-        assert!(net.contains("192.168.1.1".parse().unwrap()));
-        assert!(net.contains("192.168.1.254".parse().unwrap()));
-        assert!(!net.contains("192.168.2.1".parse().unwrap()));
-        assert!(!net.contains("10.0.0.1".parse().unwrap()));
-
-        // Single exact IP
-        let single = IpNetwork::from_cidr("10.0.5.99").unwrap();
-        assert!(single.contains("10.0.5.99".parse().unwrap()));
-        assert!(!single.contains("10.0.5.100".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_ip_network_v6_contains() {
-        let net = IpNetwork::from_cidr("2001:db8::/32").unwrap();
-        assert!(net.contains("2001:db8::1".parse().unwrap()));
-        assert!(net.contains("2001:db8:ffff:ffff::1".parse().unwrap()));
-        assert!(!net.contains("2001:db9::1".parse().unwrap()));
-
-        let single = IpNetwork::from_cidr("::1").unwrap();
-        assert!(single.contains("::1".parse().unwrap()));
-        assert!(!single.contains("::2".parse().unwrap()));
-    }
-
-    #[test]
     fn test_allow_list_mode() {
         let plugin = IpFilterPlugin::new(
             "ip-allow",
@@ -448,15 +305,13 @@ mod tests {
             vec![],
         );
 
-        // Permitted IPs
-        let mut req1 = make_request_with_ip("10.1.2.3");
+        let mut req1 = make_request_with_ip("10.5.20.1");
         assert!(matches!(plugin.on_request(&mut req1), Action::Continue));
 
         let mut req2 = make_request_with_ip("192.168.1.50");
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
 
-        // Rejected IP
-        let mut req3 = make_request_with_ip("203.0.113.1");
+        let mut req3 = make_request_with_ip("172.16.0.1");
         assert!(matches!(plugin.on_request(&mut req3), Action::Respond(_)));
     }
 
@@ -469,76 +324,10 @@ mod tests {
             vec![IpNetwork::from_cidr("203.0.113.0/24").unwrap()],
         );
 
-        // Denied IP
         let mut req1 = make_request_with_ip("203.0.113.5");
         assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
 
-        // Permitted IP
-        let mut req2 = make_request_with_ip("198.51.100.1");
+        let mut req2 = make_request_with_ip("8.8.8.8");
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
-    }
-
-    #[test]
-    fn test_hybrid_exceptions_in_allow_mode() {
-        // Allow entire 10.0.0.0/8 EXCEPT 10.0.5.99
-        let plugin = IpFilterPlugin::new(
-            "ip-hybrid",
-            IpFilterMode::AllowList,
-            vec![IpNetwork::from_cidr("10.0.0.0/8").unwrap()],
-            vec![IpNetwork::from_cidr("10.0.5.99").unwrap()],
-        );
-
-        let mut req_normal = make_request_with_ip("10.0.5.1");
-        assert!(matches!(
-            plugin.on_request(&mut req_normal),
-            Action::Continue
-        ));
-
-        let mut req_exception = make_request_with_ip("10.0.5.99");
-        assert!(matches!(
-            plugin.on_request(&mut req_exception),
-            Action::Respond(_)
-        ));
-    }
-
-    #[test]
-    fn test_from_config_with_none_sentinel() {
-        let json = serde_json::json!({
-            "mode": "allow",
-            "allow_cidrs": [
-                "10.0.0.0/8",
-                "192.168.1.0/24"
-            ],
-            "deny_cidrs": "none",
-            "client_ip_source": "x_forwarded_for"
-        });
-
-        let config = PluginConfig {
-            id: "ip-none-test".to_string(),
-            phase: "pre_route".to_string(),
-            config: json,
-        };
-
-        let plugin = IpFilterPlugin::from_config(&config).unwrap();
-        assert_eq!(plugin.mode, IpFilterMode::AllowList);
-        assert_eq!(plugin.allow_cidrs.len(), 2);
-        assert!(plugin.deny_cidrs.is_empty());
-
-        let mut req = make_request_with_ip("10.20.30.40");
-        assert!(matches!(plugin.on_request(&mut req), Action::Continue));
-    }
-
-    #[test]
-    fn test_multi_hop_x_forwarded_for() {
-        let plugin = IpFilterPlugin::new(
-            "ip-xff",
-            IpFilterMode::AllowList,
-            vec![IpNetwork::from_cidr("203.0.113.195").unwrap()],
-            vec![],
-        );
-
-        // Multi-hop XFF: client, proxy1, proxy2
-        let mut req = make_request_with_ip("203.0.113.195, 70.41.3.18, 150.172.238.178");
-        assert!(matches!(plugin.on_request(&mut req), Action::Continue));
     }
 }

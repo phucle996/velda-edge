@@ -11,26 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use super::record::{LogFormat, LogRecord};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::post_response::PostResponsePlugin;
-
-/// Formatting output style for serialized access log entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LogFormat {
-    #[default]
-    Json,
-    Text,
-}
-
-impl LogFormat {
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "text" | "combined" | "clf" => Self::Text,
-            _ => Self::Json,
-        }
-    }
-}
 
 /// Configuration settings for the `access_log` plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,52 +43,6 @@ impl Default for AccessLogConfig {
             format: LogFormat::Json,
             buffer_capacity: 65536,
         }
-    }
-}
-
-/// Strongly typed, structured record emitted by the `access_log` hook on every response.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LogRecord {
-    pub timestamp_ms: u64,
-    pub status: u16,
-    pub version: &'static str,
-    pub content_length: Option<u64>,
-    pub request_id: Option<String>,
-    pub route_id: Option<String>,
-    pub upstream: Option<String>,
-    pub latency_ms: Option<f64>,
-}
-
-impl LogRecord {
-    /// Serializes this record into a structured JSON string.
-    pub fn to_json_string(&self) -> String {
-        serde_json::json!({
-            "timestamp": self.timestamp_ms,
-            "status": self.status,
-            "version": self.version,
-            "content_length": self.content_length,
-            "request_id": self.request_id,
-            "route_id": self.route_id,
-            "upstream": self.upstream,
-            "latency_ms": self.latency_ms,
-        })
-        .to_string()
-    }
-
-    /// Serializes this record into a human-readable, single-line log format.
-    pub fn to_text_string(&self) -> String {
-        format!(
-            "[{}] status={} version={} bytes={} req_id={} route={} upstream={} latency_ms={}",
-            self.timestamp_ms,
-            self.status,
-            self.version,
-            self.content_length.unwrap_or(0),
-            self.request_id.as_deref().unwrap_or("-"),
-            self.route_id.as_deref().unwrap_or("-"),
-            self.upstream.as_deref().unwrap_or("-"),
-            self.latency_ms
-                .map_or("-".to_string(), |l| format!("{:.2}", l)),
-        )
     }
 }
 
@@ -333,7 +271,6 @@ impl PostResponsePlugin for AccessLogPlugin {
 mod tests {
     use super::*;
     use http::{HeaderMap, HeaderValue, StatusCode, Version};
-    use serde_json::json;
     use velda_core::Body;
 
     #[test]
@@ -378,7 +315,6 @@ mod tests {
 
     #[test]
     fn test_access_log_buffer_saturation_drops_non_blocking() {
-        // Tiny capacity of 1 record
         let config = AccessLogConfig {
             buffer_capacity: 1,
             ..Default::default()
@@ -396,53 +332,5 @@ mod tests {
         plugin.on_response(&mut resp);
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 1);
-    }
-
-    #[test]
-    fn test_access_log_format_serialization() {
-        let record = LogRecord {
-            timestamp_ms: 1776543210000,
-            status: 200,
-            version: "HTTP/1.1",
-            content_length: Some(1024),
-            request_id: Some("req-abc".into()),
-            route_id: Some("route-xyz".into()),
-            upstream: Some("127.0.0.1:8081".into()),
-            latency_ms: Some(2.35),
-        };
-
-        let json_str = record.to_json_string();
-        assert!(json_str.contains("\"status\":200"));
-        assert!(json_str.contains("\"request_id\":\"req-abc\""));
-
-        let text_str = record.to_text_string();
-        assert!(text_str.contains("status=200"));
-        assert!(text_str.contains("req_id=req-abc"));
-        assert!(text_str.contains("latency_ms=2.35"));
-    }
-
-    #[test]
-    fn test_access_log_from_config() {
-        let config = PluginConfig {
-            id: "access_log".into(),
-            phase: String::new(),
-            config: json!({
-                "include_request_id": true,
-                "include_route_id": false,
-                "include_upstream": true,
-                "include_latency": false,
-                "format": "text",
-                "buffer_capacity": 1024
-            }),
-        };
-
-        let plugin = AccessLogPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "access_log");
-        assert!(plugin.config.include_request_id);
-        assert!(!plugin.config.include_route_id);
-        assert!(plugin.config.include_upstream);
-        assert!(!plugin.config.include_latency);
-        assert_eq!(plugin.config.format, LogFormat::Text);
-        assert_eq!(plugin.config.buffer_capacity, 1024);
     }
 }
