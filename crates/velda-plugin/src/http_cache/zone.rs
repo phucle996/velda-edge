@@ -99,10 +99,13 @@ impl ShardInner {
             return None;
         }
 
-        // Move to back of LRU queue (most recently accessed)
-        if let Some(pos) = self.lru.iter().position(|&h| h == hash) {
-            self.lru.remove(pos);
-            self.lru.push_back(hash);
+        // Optimization: Fast path if already at the tail (most recent), avoiding LRU queue scan entirely.
+        if self.lru.back() != Some(&hash) {
+            // Optimization: Search from the tail where recent entries cluster (rposition), minimizing iteration steps.
+            if let Some(pos) = self.lru.iter().rposition(|&h| h == hash) {
+                self.lru.remove(pos);
+                self.lru.push_back(hash);
+            }
         }
 
         Some(entry.clone())
@@ -119,7 +122,7 @@ impl ShardInner {
         // If existing entry was present, subtract its old size
         if let Some(old) = self.entries.remove(&hash) {
             self.current_bytes = self.current_bytes.saturating_sub(old.memory_size());
-            if let Some(pos) = self.lru.iter().position(|&h| h == hash) {
+            if let Some(pos) = self.lru.iter().rposition(|&h| h == hash) {
                 self.lru.remove(pos);
             }
         }
@@ -141,7 +144,7 @@ impl ShardInner {
     fn remove(&mut self, hash: u64) -> bool {
         if let Some(removed) = self.entries.remove(&hash) {
             self.current_bytes = self.current_bytes.saturating_sub(removed.memory_size());
-            if let Some(pos) = self.lru.iter().position(|&h| h == hash) {
+            if let Some(pos) = self.lru.iter().rposition(|&h| h == hash) {
                 self.lru.remove(pos);
             }
             true
@@ -157,7 +160,9 @@ impl ShardInner {
     }
 }
 
-/// A lock-striped cache shard.
+/// A lock-striped cache shard aligned to 64 bytes to eliminate false sharing.
+// Optimization: #[repr(align(64))] isolates each shard's RwLock into its own CPU cache line.
+#[repr(align(64))]
 #[derive(Debug)]
 pub struct CacheShard {
     inner: RwLock<ShardInner>,

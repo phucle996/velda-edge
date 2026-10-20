@@ -14,22 +14,34 @@ pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
         .get(http::header::CONNECTION)
         .and_then(|v| v.to_str().ok())
     {
-        let custom_tokens: Vec<String> = raw
-            .split(',')
-            .map(|token| token.trim().to_ascii_lowercase())
-            .filter(|token| !token.is_empty() && token != "close" && token != "keep-alive")
-            .collect();
-
-        for token in custom_tokens {
-            if let Ok(name) = HeaderName::from_bytes(token.as_bytes()) {
-                headers.remove(name);
+        // Optimization: Zero-allocation stack buffer [Option<HeaderName>; 8] to avoid heap allocation
+        // while safely separating the immutable string slice borrow from the mutable headers map modification.
+        let mut custom_tokens = [const { None }; 8];
+        let mut count = 0;
+        for token in raw.split(',') {
+            let trimmed = token.trim();
+            if !trimmed.is_empty()
+                && !trimmed.eq_ignore_ascii_case("close")
+                && !trimmed.eq_ignore_ascii_case("keep-alive")
+                && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
+                && count < custom_tokens.len()
+            {
+                custom_tokens[count] = Some(name);
+                count += 1;
             }
+        }
+
+        for name in custom_tokens.into_iter().flatten() {
+            headers.remove(name);
         }
     }
 
+    // Optimization: Pre-parsed static HeaderName to avoid dynamic header parsing per request
+    const KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
+
     // Standard RFC Hop-by-Hop headers
     headers.remove(http::header::CONNECTION);
-    headers.remove("keep-alive");
+    headers.remove(&KEEP_ALIVE);
     headers.remove(http::header::PROXY_AUTHENTICATE);
     headers.remove(http::header::PROXY_AUTHORIZATION);
     headers.remove(http::header::TE);

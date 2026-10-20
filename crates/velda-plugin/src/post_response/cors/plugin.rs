@@ -120,7 +120,7 @@ impl CorsResponsePlugin {
             PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
         })?;
 
-        // 1. Resolve allow_origins (support array "allow_origins" and fallback string "allow_origin")
+        // 1. Resolve allow_origins
         let mut allow_origins = Vec::new();
         if let Some(arr) = raw.get("allow_origins").and_then(|v| v.as_array()) {
             for item in arr {
@@ -128,8 +128,6 @@ impl CorsResponsePlugin {
                     allow_origins.push(OriginPattern::parse(s));
                 }
             }
-        } else if let Some(single) = raw.get("allow_origin").and_then(|v| v.as_str()) {
-            allow_origins.push(OriginPattern::parse(single));
         }
 
         if allow_origins.is_empty() {

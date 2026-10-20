@@ -125,7 +125,6 @@ impl ApiKeyAuthPlugin {
                         "query" => {
                             let param = src_obj
                                 .get("param")
-                                .or_else(|| src_obj.get("name"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("api_key")
                                 .to_string();
@@ -187,10 +186,7 @@ impl ApiKeyAuthPlugin {
                     .to_string();
 
                 let mut injected_headers = Vec::new();
-                if let Some(inject_map) = key_obj
-                    .get("inject_headers")
-                    .or_else(|| key_obj.get("tags"))
-                    .and_then(|v| v.as_object())
+                if let Some(inject_map) = key_obj.get("inject_headers").and_then(|v| v.as_object())
                 {
                     for (hname_str, hval_val) in inject_map {
                         if let Some(hval_str) = hval_val.as_str() {

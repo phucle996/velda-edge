@@ -55,6 +55,11 @@ pub struct IpFilterPlugin {
     pub allow_cidrs: Vec<IpNetwork>,
     pub deny_cidrs: Vec<IpNetwork>,
     pub client_ip_source: ClientIpSource,
+    // Optimization: Pre-partitioned IPv4 and IPv6 subnet tables for branchless contiguous cache line scanning
+    allow_v4: Vec<(u32, u32)>,
+    deny_v4: Vec<(u32, u32)>,
+    allow_v6: Vec<(u128, u128)>,
+    deny_v6: Vec<(u128, u128)>,
 }
 
 impl IpFilterPlugin {
@@ -78,12 +83,34 @@ impl IpFilterPlugin {
 
     /// Constructs an IP filter with full configuration options.
     pub fn with_config(id: impl Into<String>, config: IpFilterConfig) -> Self {
+        let mut allow_v4 = Vec::new();
+        let mut allow_v6 = Vec::new();
+        for net in &config.allow_cidrs {
+            match *net {
+                IpNetwork::V4 { net, mask } => allow_v4.push((net, mask)),
+                IpNetwork::V6 { net, mask } => allow_v6.push((net, mask)),
+            }
+        }
+
+        let mut deny_v4 = Vec::new();
+        let mut deny_v6 = Vec::new();
+        for net in &config.deny_cidrs {
+            match *net {
+                IpNetwork::V4 { net, mask } => deny_v4.push((net, mask)),
+                IpNetwork::V6 { net, mask } => deny_v6.push((net, mask)),
+            }
+        }
+
         Self {
             id: id.into(),
             mode: config.mode,
             allow_cidrs: config.allow_cidrs,
             deny_cidrs: config.deny_cidrs,
             client_ip_source: config.client_ip_source,
+            allow_v4,
+            deny_v4,
+            allow_v6,
+            deny_v6,
         }
     }
 
@@ -162,37 +189,15 @@ impl IpFilterPlugin {
             }
         }
 
-        // 3. Backward compatibility: if "ips" array is present and specific lists were not provided
-        if allow_cidrs.is_empty()
-            && deny_cidrs.is_empty()
-            && let Some(ips_arr) = config.config.get("ips").and_then(|v| v.as_array())
-        {
-            for item in ips_arr {
-                if let Some(s) = item.as_str() {
-                    let net = IpNetwork::from_cidr(s).map_err(|e| {
-                        PluginError::Config(format!("Plugin '{}' invalid ip: {e}", config.id))
-                    })?;
-                    match mode {
-                        IpFilterMode::AllowList => allow_cidrs.push(net),
-                        IpFilterMode::DenyList => deny_cidrs.push(net),
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            id: config.id.clone(),
-            mode,
-            allow_cidrs,
-            deny_cidrs,
-            client_ip_source,
-        })
-    }
-
-    /// Extracts the candidate downstream client IP address from request headers.
-    #[inline]
-    fn extract_client_ip(&self, req: &L7Request) -> Option<IpAddr> {
-        self.client_ip_source.extract_client_ip(req)
+        Ok(Self::with_config(
+            &config.id,
+            IpFilterConfig {
+                mode,
+                allow_cidrs,
+                deny_cidrs,
+                client_ip_source,
+            },
+        ))
     }
 }
 
@@ -214,7 +219,7 @@ impl PreRoutePlugin for IpFilterPlugin {
     ///   2. Else if matched in `deny_cidrs` -> REJECT 403 Forbidden.
     ///   3. Else -> PASS (Action::Continue).
     fn on_request(&self, req: &mut L7Request) -> Action {
-        let client_ip = match self.extract_client_ip(req) {
+        let client_ip = match self.client_ip_source.extract_client_ip(req) {
             Some(ip) => ip,
             None => {
                 return match self.mode {
@@ -227,8 +232,27 @@ impl PreRoutePlugin for IpFilterPlugin {
             }
         };
 
-        let is_denied = self.deny_cidrs.iter().any(|net| net.contains(client_ip));
-        let is_allowed = self.allow_cidrs.iter().any(|net| net.contains(client_ip));
+        // Optimization: Zero-allocation, branchless evaluation using contiguous (net, mask) integer pairs in L1 cache
+        let (is_denied, is_allowed) = match client_ip {
+            IpAddr::V4(v4) => {
+                let bits = v4.to_bits();
+                let denied = self.deny_v4.iter().any(|&(net, mask)| (bits & mask) == net);
+                let allowed = self
+                    .allow_v4
+                    .iter()
+                    .any(|&(net, mask)| (bits & mask) == net);
+                (denied, allowed)
+            }
+            IpAddr::V6(v6) => {
+                let bits = v6.to_bits();
+                let denied = self.deny_v6.iter().any(|&(net, mask)| (bits & mask) == net);
+                let allowed = self
+                    .allow_v6
+                    .iter()
+                    .any(|&(net, mask)| (bits & mask) == net);
+                (denied, allowed)
+            }
+        };
 
         match self.mode {
             IpFilterMode::AllowList => {

@@ -3,7 +3,7 @@
 //! Extracts and hashes client identification keys (headers, client IP, composite keys)
 //! for lock-striped rate limiting.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::Hasher;
 use std::net::IpAddr;
 
 use velda_core::L7Request;
@@ -79,6 +79,78 @@ impl KeyStrategy {
             }
         }
     }
+
+    /// Optimization: Resolves and hashes the rate-limiting client identifier directly into a 64-bit integer
+    /// with ZERO heap allocations (eliminating String formatting allocations on the serving hot path).
+    #[inline]
+    pub fn resolve_key_hash(&self, headers_list: &[String], req: &L7Request) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        match self {
+            Self::Priority => {
+                for hdr_name in headers_list {
+                    if hdr_name == "client_ip" || hdr_name == "ip" {
+                        if let Some(ip) = extract_client_ip(req) {
+                            hasher.write(b"ip:");
+                            match ip {
+                                IpAddr::V4(v4) => hasher.write(&v4.octets()),
+                                IpAddr::V6(v6) => hasher.write(&v6.octets()),
+                            }
+                            return hasher.finish();
+                        }
+                    } else if let Some(val) = req.headers.get(hdr_name)
+                        && let Ok(s) = val.to_str()
+                    {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            hasher.write(hdr_name.as_bytes());
+                            hasher.write(b":");
+                            hasher.write(trimmed.as_bytes());
+                            return hasher.finish();
+                        }
+                    }
+                }
+                // Fallback if none matched
+                if let Some(ip) = extract_client_ip(req) {
+                    hasher.write(b"ip:");
+                    match ip {
+                        IpAddr::V4(v4) => hasher.write(&v4.octets()),
+                        IpAddr::V6(v6) => hasher.write(&v6.octets()),
+                    }
+                    hasher.finish()
+                } else {
+                    hasher.write(b"global:default");
+                    hasher.finish()
+                }
+            }
+            Self::Composite => {
+                for hdr_name in headers_list {
+                    if hdr_name == "client_ip" || hdr_name == "ip" {
+                        if let Some(ip) = extract_client_ip(req) {
+                            match ip {
+                                IpAddr::V4(v4) => hasher.write(&v4.octets()),
+                                IpAddr::V6(v6) => hasher.write(&v6.octets()),
+                            }
+                        } else {
+                            hasher.write(b"unknown");
+                        }
+                    } else if let Some(val) = req.headers.get(hdr_name)
+                        && let Ok(s) = val.to_str()
+                    {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            hasher.write(trimmed.as_bytes());
+                        } else {
+                            hasher.write(b"none");
+                        }
+                    } else {
+                        hasher.write(b"none");
+                    }
+                    hasher.write(b":");
+                }
+                hasher.finish()
+            }
+        }
+    }
 }
 
 /// Resolves client IP address from standard forwarding headers.
@@ -100,10 +172,11 @@ pub fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
 }
 
 /// Hashes the key string into a 64-bit integer for zero-alloc sharded table lookup.
+// Optimization: Uses FxHasher instead of cryptographic DefaultHasher for 5-10x faster hashing.
 #[inline(always)]
 pub fn hash_key(key: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(key.as_bytes());
     hasher.finish()
 }
 

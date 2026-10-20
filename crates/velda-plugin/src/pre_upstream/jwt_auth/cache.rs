@@ -30,6 +30,8 @@ pub struct InvalidTokenEntry {
     pub expire_epoch_secs: u64,
 }
 
+/// Cache-line aligned shard container preventing false sharing across CPU cores during JWT verification.
+#[repr(align(64))]
 struct CacheShard {
     positive: FxHashMap<u64, ValidTokenEntry>,
     negative: FxHashMap<u64, InvalidTokenEntry>,
@@ -48,6 +50,7 @@ impl CacheShard {
 
 /// Thread-safe, lock-striped dual cache for JWT verification.
 pub struct JwtCache {
+    // Optimization: Sharded into cache-line aligned (64-byte) cells to eliminate MESI cache bouncing between cores.
     shards: Box<[Mutex<CacheShard>]>,
     mask: usize,
     default_ttl_secs: u64,

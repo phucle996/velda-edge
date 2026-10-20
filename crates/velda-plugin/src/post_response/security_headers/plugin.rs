@@ -171,11 +171,7 @@ impl SecurityHeadersPlugin {
         let mut sec_config = SecurityHeadersConfig::default();
 
         // 1. Parse HSTS (supports nested object, boolean, or string "none")
-        if let Some(hsts_val) = config
-            .config
-            .get("hsts")
-            .or_else(|| config.config.get("strict_transport_security"))
-        {
+        if let Some(hsts_val) = config.config.get("hsts") {
             if let Some(hsts_obj) = hsts_val.as_object() {
                 sec_config.hsts.enable = hsts_obj
                     .get("enable")
@@ -200,34 +196,10 @@ impl SecurityHeadersPlugin {
             {
                 sec_config.hsts.enable = false;
             }
-        } else {
-            // Flat backward compatibility
-            if let Some(max_age) = config
-                .config
-                .get("hsts_max_age_secs")
-                .and_then(|v| v.as_u64())
-            {
-                sec_config.hsts.max_age_secs = max_age;
-            }
-            if let Some(inc_sub) = config
-                .config
-                .get("include_subdomains")
-                .and_then(|v| v.as_bool())
-            {
-                sec_config.hsts.include_subdomains = inc_sub;
-            }
-            if let Some(preload) = config.config.get("preload").and_then(|v| v.as_bool()) {
-                sec_config.hsts.preload = preload;
-            }
         }
 
         // 2. Parse X-Frame-Options (strictly "none" to omit)
-        if let Some(fo) = config
-            .config
-            .get("frame_options")
-            .or_else(|| config.config.get("x_frame_options"))
-            .and_then(|v| v.as_str())
-        {
+        if let Some(fo) = config.config.get("frame_options").and_then(|v| v.as_str()) {
             if fo.trim().eq_ignore_ascii_case("none") {
                 sec_config.frame_options = None;
             } else {
@@ -236,11 +208,7 @@ impl SecurityHeadersPlugin {
         }
 
         // 3. Parse X-Content-Type-Options (strictly "none" to omit)
-        if let Some(nosniff_val) = config
-            .config
-            .get("content_type_nosniff")
-            .or_else(|| config.config.get("x_content_type_options"))
-        {
+        if let Some(nosniff_val) = config.config.get("content_type_nosniff") {
             if let Some(b) = nosniff_val.as_bool() {
                 sec_config.content_type_nosniff = b;
             } else if let Some(s) = nosniff_val.as_str() {

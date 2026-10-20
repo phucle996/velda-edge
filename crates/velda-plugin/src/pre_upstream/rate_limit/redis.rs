@@ -88,24 +88,38 @@ impl Default for RedisConfig {
     }
 }
 
+/// Number of lock-striped shards for Redis batch accumulation (power of 2).
+const NUM_BATCH_SHARDS: usize = 64;
+
+/// Cache-line aligned shard container preventing false sharing across CPU cores during Redis hit tracking.
+#[repr(align(64))]
+#[derive(Debug)]
+struct BatchShard {
+    hits: std::sync::Mutex<FxHashMap<u64, u64>>,
+}
+
 /// Connection pool and batch synchronizer for Redis cluster rate limiting.
 #[derive(Debug)]
 pub struct RedisConnectionPool {
     config: RedisConfig,
     is_connected: Arc<AtomicBool>,
-    batch_accumulator: Arc<std::sync::Mutex<FxHashMap<u64, u64>>>,
+    // Optimization: Sharded into 64 cache-aligned shards to eliminate global mutex contention across worker cores.
+    batch_shards: Arc<[BatchShard; NUM_BATCH_SHARDS]>,
 }
 
 impl RedisConnectionPool {
     /// Constructs a new Redis connection pool and initializes synchronization state.
     pub fn new(config: RedisConfig) -> Self {
         let is_connected = Arc::new(AtomicBool::new(config.url.is_some()));
-        let batch_accumulator = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+        // Optimization: Initialize 64 independent, cache-line aligned shards (64-byte boundary)
+        let batch_shards = Arc::new(std::array::from_fn(|_| BatchShard {
+            hits: std::sync::Mutex::new(FxHashMap::default()),
+        }));
 
         Self {
             config,
             is_connected,
-            batch_accumulator,
+            batch_shards,
         }
     }
 
@@ -124,20 +138,24 @@ impl RedisConnectionPool {
     ///
     /// # Performance Contract
     /// Zero-allocation, minimal mutex hold time (~15ns).
+    /// Optimization: Uses bitwise mask (& 63) to route directly to an independent, cache-aligned shard.
     #[inline]
     pub fn record_hit(&self, key_hash: u64) {
-        if let Ok(mut lock) = self.batch_accumulator.lock() {
-            *lock.entry(key_hash).or_insert(0) += 1;
+        let shard_idx = (key_hash as usize) & (NUM_BATCH_SHARDS - 1);
+        if let Ok(mut hits) = self.batch_shards[shard_idx].hits.lock() {
+            *hits.entry(key_hash).or_insert(0) += 1;
         }
     }
 
-    /// Drains all accumulated request increments for batch flushing.
+    /// Drains all accumulated request increments for batch flushing across all shards.
     pub fn drain_batch(&self) -> Vec<(u64, u64)> {
-        if let Ok(mut lock) = self.batch_accumulator.lock() {
-            lock.drain().collect()
-        } else {
-            Vec::new()
+        let mut total_drained = Vec::new();
+        for shard in self.batch_shards.iter() {
+            if let Ok(mut hits) = shard.hits.lock() {
+                total_drained.extend(hits.drain());
+            }
         }
+        total_drained
     }
 
     /// Spawns the auxiliary background synchronization loop on the supervisory Tokio runtime.
@@ -147,7 +165,7 @@ impl RedisConnectionPool {
         }
 
         let is_connected = Arc::clone(&self.is_connected);
-        let batch_accumulator = Arc::clone(&self.batch_accumulator);
+        let batch_shards = Arc::clone(&self.batch_shards);
         let interval_ms = self.config.batch_sync_interval_ms;
         let batch_max_size = self.config.batch_max_size;
         let url_str = self.config.url.clone();
@@ -160,20 +178,19 @@ impl RedisConnectionPool {
                 loop {
                     interval.tick().await;
 
-                    // 1. Drain pending batch
-                    let batch: Vec<(u64, u64)> = {
-                        if let Ok(mut lock) = batch_accumulator.lock() {
-                            if lock.is_empty() {
-                                Vec::new()
-                            } else {
-                                let drained: Vec<(u64, u64)> =
-                                    lock.drain().take(batch_max_size).collect();
-                                drained
-                            }
-                        } else {
-                            Vec::new()
+                    // 1. Drain pending batch across all 64 shards up to batch_max_size
+                    let mut batch: Vec<(u64, u64)> = Vec::new();
+                    for shard in batch_shards.iter() {
+                        if batch.len() >= batch_max_size {
+                            break;
                         }
-                    };
+                        if let Ok(mut hits) = shard.hits.lock()
+                            && !hits.is_empty()
+                        {
+                            let quota = batch_max_size.saturating_sub(batch.len());
+                            batch.extend(hits.drain().take(quota));
+                        }
+                    }
 
                     // 2. Perform batched pipeline execution to Redis
                     if !batch.is_empty() {

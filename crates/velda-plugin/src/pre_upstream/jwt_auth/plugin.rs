@@ -100,8 +100,7 @@ impl JwtAuthPlugin {
                         }
                         "query" => {
                             let param = src_obj
-                                .get("name")
-                                .or_else(|| src_obj.get("param"))
+                                .get("param")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("token")
                                 .to_string();

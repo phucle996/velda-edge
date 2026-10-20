@@ -12,7 +12,7 @@ use http::{HeaderName, HeaderValue, StatusCode};
 use velda_core::{Action, L7Request, L7Response};
 
 use super::algorithm::{RateLimitAlgorithm, ShardedState};
-use super::key::{KeyStrategy, hash_key};
+use super::key::KeyStrategy;
 use super::redis::{RedisConfig, RedisConnectionPool, TlsSource};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -158,17 +158,14 @@ impl RateLimitPlugin {
             .map(RateLimitBackend::parse)
             .unwrap_or(RateLimitBackend::Memory);
 
-        // 3. Rate and Burst (supports both new and legacy property names)
+        // 3. Rate and Burst
         let rate_per_second = json
             .get("rate_per_second")
-            .or_else(|| json.get("limit_per_second"))
-            .or_else(|| json.get("refill_rate_per_second"))
             .and_then(|v| v.as_u64())
             .unwrap_or(1000);
 
         let burst_capacity = json
             .get("burst_capacity")
-            .or_else(|| json.get("capacity"))
             .and_then(|v| v.as_u64())
             .unwrap_or(rate_per_second);
 
@@ -179,7 +176,7 @@ impl RateLimitPlugin {
             .map(KeyStrategy::parse)
             .unwrap_or(KeyStrategy::Priority);
 
-        // 5. Key Headers (supports array or legacy single string)
+        // 5. Key Headers (strictly array of headers or 'none')
         let mut key_headers = Vec::new();
         if let Some(arr) = json.get("key_headers").and_then(|v| v.as_array()) {
             for item in arr {
@@ -190,11 +187,7 @@ impl RateLimitPlugin {
                     }
                 }
             }
-        } else if let Some(s) = json
-            .get("key_headers")
-            .or_else(|| json.get("key"))
-            .and_then(|v| v.as_str())
-        {
+        } else if let Some(s) = json.get("key_headers").and_then(|v| v.as_str()) {
             let trimmed = s.trim();
             if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
                 key_headers.push(trimmed.to_string());
@@ -350,8 +343,11 @@ impl PreUpstreamPlugin for RateLimitPlugin {
     /// # Performance Contract
     /// Executes 100% in-memory with lock-striped sharding. Zero Network I/O.
     fn on_upstream_request(&self, req: &mut L7Request) -> Action {
-        let key = self.resolve_key(req);
-        let key_hash = hash_key(&key);
+        // Optimization: Zero-allocation direct hashing into FxHasher (eliminating heap String allocations on hot path)
+        let key_hash = self
+            .config
+            .key_strategy
+            .resolve_key_hash(&self.config.key_headers, req);
 
         // Check backend execution mode
         let (allowed, retry_after) = match self.config.backend {

@@ -205,7 +205,9 @@ async fn dispatch_grpc_tcp_request_stream(
     if !plan.is_empty() {
         let mut short_circuit_resp = None;
 
-        if let Some(hooks) = &plan.pre_route_hooks {
+        if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
+            // Optimization: Construct L7Request ONCE across both pre_route and pre_upstream phases
+            // to eliminate redundant URI/Method cloning and HeaderMap swapping.
             let mut l7_req = L7Request::new(
                 server_stream.parts.method.clone(),
                 server_stream.parts.uri.clone(),
@@ -213,68 +215,62 @@ async fn dispatch_grpc_tcp_request_stream(
                 std::mem::take(&mut server_stream.parts.headers),
                 velda_core::Body::Empty,
             );
-            let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
-            while let Action::Delay { duration, and_then } = action {
-                tokio::time::sleep(duration).await;
-                action = *and_then;
+
+            if let Some(hooks) = &plan.pre_route_hooks {
+                let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
+                while let Action::Delay { duration, and_then } = action {
+                    tokio::time::sleep(duration).await;
+                    action = *and_then;
+                }
+
+                match action {
+                    Action::Continue => {}
+                    Action::Respond(resp) => {
+                        short_circuit_resp = Some(resp);
+                    }
+                    Action::Reject(err) => {
+                        let grpc_status = match err.kind() {
+                            ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                            ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                            _ => GrpcStatus::Internal,
+                        };
+                        short_circuit_resp =
+                            Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                    }
+                    Action::Delay { .. } => unreachable!(),
+                }
             }
+
+            if short_circuit_resp.is_none()
+                && let Some(hooks) = &plan.pre_upstream_hooks
+            {
+                let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+                while let Action::Delay { duration, and_then } = action {
+                    tokio::time::sleep(duration).await;
+                    action = *and_then;
+                }
+
+                match action {
+                    Action::Continue => {}
+                    Action::Respond(resp) => {
+                        short_circuit_resp = Some(resp);
+                    }
+                    Action::Reject(err) => {
+                        let grpc_status = match err.kind() {
+                            ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                            ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                            _ => GrpcStatus::Internal,
+                        };
+                        short_circuit_resp =
+                            Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                    }
+                    Action::Delay { .. } => unreachable!(),
+                }
+            }
+
             server_stream.parts.headers = l7_req.headers;
             server_stream.parts.uri = l7_req.uri;
             server_stream.parts.method = l7_req.method;
-
-            match action {
-                Action::Continue => {}
-                Action::Respond(resp) => {
-                    short_circuit_resp = Some(resp);
-                }
-                Action::Reject(err) => {
-                    let grpc_status = match err.kind() {
-                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                        _ => GrpcStatus::Internal,
-                    };
-                    short_circuit_resp =
-                        Some(grpc_status.to_l7_response(Some("rejected by plugin")));
-                }
-                Action::Delay { .. } => unreachable!(),
-            }
-        }
-
-        if short_circuit_resp.is_none()
-            && let Some(hooks) = &plan.pre_upstream_hooks
-        {
-            let mut l7_req = L7Request::new(
-                server_stream.parts.method.clone(),
-                server_stream.parts.uri.clone(),
-                http::Version::HTTP_2,
-                std::mem::take(&mut server_stream.parts.headers),
-                velda_core::Body::Empty,
-            );
-            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
-            while let Action::Delay { duration, and_then } = action {
-                tokio::time::sleep(duration).await;
-                action = *and_then;
-            }
-            server_stream.parts.headers = l7_req.headers;
-            server_stream.parts.uri = l7_req.uri;
-            server_stream.parts.method = l7_req.method;
-
-            match action {
-                Action::Continue => {}
-                Action::Respond(resp) => {
-                    short_circuit_resp = Some(resp);
-                }
-                Action::Reject(err) => {
-                    let grpc_status = match err.kind() {
-                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                        _ => GrpcStatus::Internal,
-                    };
-                    short_circuit_resp =
-                        Some(grpc_status.to_l7_response(Some("rejected by plugin")));
-                }
-                Action::Delay { .. } => unreachable!(),
-            }
         }
 
         if let Some(mut resp) = short_circuit_resp {
