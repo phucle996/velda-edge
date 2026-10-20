@@ -17,8 +17,10 @@
     {
       "id": "resource_limit",
       "config": {
-        "max_body_size_bytes": 10485760,
-        "max_concurrent_requests": 10000
+        "max_uri_length": 8192,
+        "max_headers_count": 128,
+        "max_header_bytes": 32768,
+        "max_single_header_bytes": 8192
       }
     },
     {
@@ -27,7 +29,10 @@
         "mode": "block",
         "check_path": true,
         "check_query": true,
-        "check_user_agent": true
+        "check_user_agent": true,
+        "check_headers": [],
+        "custom_blocked_patterns": [],
+        "custom_blocked_user_agents": []
       }
     },
     {
@@ -83,6 +88,7 @@
     {
       "id": "header_mutation",
       "config": {
+        "strip_hop_by_hop": true,
         "set_headers": {
           "x-gateway-proxy": "velda-edge",
           "x-forwarded-proto": "https"
@@ -90,7 +96,8 @@
         "remove_headers": [
           "x-powered-by",
           "server"
-        ]
+        ],
+        "append_headers": {}
       }
     },
     {
@@ -104,7 +111,9 @@
         },
         "frame_options": "DENY",
         "content_type_nosniff": true,
-        "referrer_policy": "strict-origin-when-cross-origin"
+        "referrer_policy": "strict-origin-when-cross-origin",
+        "content_security_policy": null,
+        "permissions_policy": null
       }
     },
     {
@@ -137,10 +146,12 @@
     {
       "id": "access_log",
       "config": {
+        "format": "json",
         "include_request_id": true,
         "include_route_id": true,
         "include_upstream": true,
-        "include_latency": true
+        "include_latency": true,
+        "buffer_capacity": 4096
       }
     },
     {

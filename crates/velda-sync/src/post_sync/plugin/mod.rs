@@ -19,6 +19,18 @@ use sha2::{Digest, Sha256};
 
 use crate::SyncError;
 
+pub mod pre_route;
+pub use pre_route::*;
+
+pub mod pre_upstream;
+pub use pre_upstream::*;
+
+pub mod post_response;
+pub use post_response::*;
+
+pub mod health_probe;
+pub use health_probe::*;
+
 pub mod prometheus_exporter;
 pub use prometheus_exporter::*;
 
@@ -234,6 +246,132 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
 
         // Modular semantic validation dispatched per plugin ID
         match plugin.id.as_str() {
+            "ip_filter" => {
+                if plugin.phase != "pre_route" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
+                    });
+                }
+                pre_route::validate_ip_filter_config(&plugin.id, &plugin.config)?;
+            }
+            "cors_preflight" => {
+                if plugin.phase != "pre_route" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
+                    });
+                }
+                pre_route::validate_cors_preflight_config(&plugin.id, &plugin.config)?;
+            }
+            "resource_limit" => {
+                if plugin.phase != "pre_route" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
+                    });
+                }
+                pre_route::validate_resource_limit_config(&plugin.id, &plugin.config)?;
+            }
+            "waf_lite" => {
+                if plugin.phase != "pre_route" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
+                    });
+                }
+                pre_route::validate_waf_lite_config(&plugin.id, &plugin.config)?;
+            }
+            "api_key_auth" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_api_key_auth_config(&plugin.id, &plugin.config)?;
+            }
+            "jwt_auth" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_jwt_auth_config(&plugin.id, &plugin.config)?;
+            }
+            "rate_limit" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_rate_limit_config(&plugin.id, &plugin.config)?;
+            }
+            "canary" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_canary_config(&plugin.id, &plugin.config)?;
+            }
+            "request_mirror" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_request_mirror_config(&plugin.id, &plugin.config)?;
+            }
+            "url_rewrite" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_url_rewrite_config(&plugin.id, &plugin.config)?;
+            }
+            "grpc_fault_injection" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_grpc_fault_injection_config(&plugin.id, &plugin.config)?;
+            }
+            "http_fault_injection" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_http_fault_injection_config(&plugin.id, &plugin.config)?;
+            }
+            "request_termination" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_request_termination_config(&plugin.id, &plugin.config)?;
+            }
+            "header_mutation" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_header_mutation_config(&plugin.id, &plugin.config)?;
+            }
             "prometheus_exporter" => {
                 if plugin.phase != "background" {
                     return Err(SyncError::Validation {
@@ -247,94 +385,98 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     &plugin.config,
                 )?;
             }
-            "grpc_fault_injection" => {
+            "http_cache_lookup" => {
                 if plugin.phase != "pre_upstream" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
                         reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
                     });
                 }
-                if let Some(status) = plugin
-                    .config
-                    .get("abort")
-                    .and_then(|a| a.get("grpc_status"))
-                    .and_then(|s| s.as_u64())
-                    && status > 16
-                {
+                pre_upstream::validate_http_cache_lookup_config(&plugin.id, &plugin.config)?;
+            }
+            "http_cache_store" => {
+                if plugin.phase != "post_response" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
                         reason: format!(
-                            "Plugin '{}': grpc_status must be between 0 and 16, got {status}",
+                            "Plugin '{}' must specify phase 'post_response'",
                             plugin.id
                         ),
                     });
                 }
+                post_response::validate_http_cache_store_config(&plugin.id, &plugin.config)?;
             }
-            "http_fault_injection" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                if let Some(status) = plugin
-                    .config
-                    .get("abort")
-                    .and_then(|a| a.get("http_status"))
-                    .and_then(|s| s.as_u64())
-                    && !(200..=599).contains(&status)
-                {
+            "security_headers" => {
+                if plugin.phase != "post_response" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
                         reason: format!(
-                            "Plugin '{}': http_status must be between 200 and 599, got {status}",
+                            "Plugin '{}' must specify phase 'post_response'",
                             plugin.id
                         ),
                     });
                 }
+                post_response::validate_security_headers_config(&plugin.id, &plugin.config)?;
             }
-            "http_cache_lookup" if plugin.phase != "pre_upstream" => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                });
-            }
-            "http_cache_store" if plugin.phase != "post_response" => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
-                });
-            }
-            "response_header_mutation" if plugin.phase != "post_response" => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
-                });
-            }
-            "response_compression" if plugin.phase != "post_response" => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!("Plugin '{}' must specify phase 'post_response'", plugin.id),
-                });
-            }
-            "request_termination" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                if let Some(status) = plugin.config.get("status_code").and_then(|s| s.as_u64())
-                    && !(200..=599).contains(&status)
-                {
+            "cors" => {
+                if plugin.phase != "post_response" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
                         reason: format!(
-                            "Plugin '{}': status_code must be between 200 and 599, got {status}",
+                            "Plugin '{}' must specify phase 'post_response'",
                             plugin.id
                         ),
                     });
                 }
+                post_response::validate_cors_response_config(&plugin.id, &plugin.config)?;
+            }
+            "response_header_mutation" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_response_header_mutation_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            }
+            "response_compression" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_response_compression_config(&plugin.id, &plugin.config)?;
+            }
+            "access_log" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_access_log_config(&plugin.id, &plugin.config)?;
+            }
+            "health_probe" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                health_probe::validate_health_probe_config(&plugin.id, &plugin.config)?;
             }
             _ => {
                 // Future plugins will dispatch to their respective validation modules
@@ -492,7 +634,17 @@ mod tests {
                 {
                     "id": " jwt_auth ",
                     "phase": "PRE_UPSTREAM",
-                    "config": { "issuer": "auth.example.com" }
+                    "config": {
+                        "algorithm": "HS256",
+                        "secret_key": "valid-secret-key-for-test",
+                        "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
+                        "validate_exp": true,
+                        "clock_skew_secs": 60,
+                        "issuer": "auth.example.com",
+                        "claims_to_headers": {},
+                        "assert_claims": {},
+                        "cache_ttl_secs": 300
+                    }
                 }
             ]
         }"#;
@@ -524,7 +676,7 @@ mod tests {
         let plugins = vec![PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "issuer": "auth.example.com", "max_age": 3600 }),
+            config: serde_json::json!({ "issuer": "auth.example.com", "secret_key": "valid-secret-key-for-test", "max_age": 3600 }),
         }];
 
         let json_bytes = b"{\"plugins\": []}";
@@ -615,7 +767,10 @@ mod tests {
             id: "request_termination".into(),
             phase: "".into(),
             config: serde_json::json!({
-                "status_code": 503
+                "status_code": 503,
+                "body": "Service Unavailable",
+                "content_type": "text/plain",
+                "headers": {}
             }),
         }];
 
@@ -626,7 +781,12 @@ mod tests {
         let mut invalid_phase_plugins = vec![PluginConfig {
             id: "request_termination".into(),
             phase: "post_response".into(),
-            config: serde_json::json!({ "status_code": 200 }),
+            config: serde_json::json!({
+                "status_code": 200,
+                "body": "OK",
+                "content_type": "text/plain",
+                "headers": {}
+            }),
         }];
         assert!(validate_plugins(&mut invalid_phase_plugins).is_err());
 
@@ -634,14 +794,24 @@ mod tests {
         let mut invalid_status_plugins = vec![PluginConfig {
             id: "request_termination".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "status_code": 199 }),
+            config: serde_json::json!({
+                "status_code": 199,
+                "body": "Bad",
+                "content_type": "text/plain",
+                "headers": {}
+            }),
         }];
         assert!(validate_plugins(&mut invalid_status_plugins).is_err());
 
         let mut invalid_status_high = vec![PluginConfig {
             id: "request_termination".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "status_code": 600 }),
+            config: serde_json::json!({
+                "status_code": 600,
+                "body": "Bad",
+                "content_type": "text/plain",
+                "headers": {}
+            }),
         }];
         assert!(validate_plugins(&mut invalid_status_high).is_err());
     }
