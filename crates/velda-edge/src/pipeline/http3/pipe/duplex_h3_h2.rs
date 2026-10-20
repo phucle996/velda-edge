@@ -8,6 +8,7 @@ use std::sync::Arc;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Request, L7Response};
+use velda_plugin::RoutePluginPlan;
 
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http2Upstream;
@@ -21,7 +22,12 @@ const MIN_H2_WINDOW_UPDATE_BATCH: usize = 32 * 1024;
 const MAX_H2_WINDOW_UPDATE_BATCH: usize = 256 * 1024;
 
 /// Serves a full-duplex HTTP/3 downstream request bridged to an HTTP/2 backend.
-pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Http2Upstream>) {
+pub async fn serve(
+    req: &L7Request,
+    responder: Http3Responder,
+    upstream: &Arc<Http2Upstream>,
+    plan: &Arc<RoutePluginPlan>,
+) {
     let mut headers = req.headers.clone();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
@@ -162,7 +168,15 @@ pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Ht
         }
     };
 
-    let (parts, mut body_stream) = response.into_parts();
+    let (mut parts, mut body_stream) = response.into_parts();
+
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp =
+            L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        parts.status = l7_resp.status;
+        parts.headers = l7_resp.headers;
+    }
 
     let is_head = req.method == http::Method::HEAD;
     let is_no_body = parts.status.is_informational()

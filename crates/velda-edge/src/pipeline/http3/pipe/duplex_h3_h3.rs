@@ -8,12 +8,18 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
+use velda_plugin::RoutePluginPlan;
 
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http3Upstream;
 
 /// Serves a full-duplex HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
-pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Http3Upstream>) {
+pub async fn serve(
+    req: &L7Request,
+    responder: Http3Responder,
+    upstream: &Arc<Http3Upstream>,
+    plan: &Arc<RoutePluginPlan>,
+) {
     let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
@@ -82,6 +88,18 @@ pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Ht
     let is_no_body = stream_resp.status.is_informational()
         || stream_resp.status == StatusCode::NO_CONTENT
         || stream_resp.status == StatusCode::NOT_MODIFIED;
+
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp = L7Response::new(
+            stream_resp.status,
+            stream_resp.version,
+            stream_resp.headers,
+            Body::Empty,
+        );
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        stream_resp.status = l7_resp.status;
+        stream_resp.headers = l7_resp.headers;
+    }
 
     if is_head || is_no_body {
         let resp = L7Response::new(

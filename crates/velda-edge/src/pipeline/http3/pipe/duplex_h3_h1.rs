@@ -11,6 +11,8 @@ use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
 use velda_http1::server::request::Http1BodyFraming;
 
+use velda_plugin::RoutePluginPlan;
+
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http1Upstream;
 
@@ -27,7 +29,12 @@ const MIN_STREAMING_CHUNK_SIZE: usize = 32 * 1024;
 const MAX_STREAMING_CHUNK_SIZE: usize = 128 * 1024;
 
 /// Serves a full-duplex HTTP/3 downstream request bridged to an HTTP/1.1 backend.
-pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Http1Upstream>) {
+pub async fn serve(
+    req: &L7Request,
+    responder: Http3Responder,
+    upstream: &Arc<Http1Upstream>,
+    plan: &Arc<RoutePluginPlan>,
+) {
     let mut headers = req.headers.clone();
 
     // Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
@@ -155,19 +162,23 @@ pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Ht
     let mut clean_headers = resp_head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
 
+    let mut status = resp_head.status;
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp =
+            L7Response::new(status, http::Version::HTTP_3, clean_headers, Body::Empty);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        status = l7_resp.status;
+        clean_headers = l7_resp.headers;
+    }
+
     // Handle responses with no body (HEAD, 1xx, 204, 304)
     let is_head = req.method == http::Method::HEAD;
-    let is_no_body = resp_head.status.is_informational()
-        || resp_head.status == StatusCode::NO_CONTENT
-        || resp_head.status == StatusCode::NOT_MODIFIED;
+    let is_no_body = status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED;
 
     if is_head || is_no_body {
-        let resp = L7Response::new(
-            resp_head.status,
-            http::Version::HTTP_3,
-            clean_headers,
-            Body::Empty,
-        );
+        let resp = L7Response::new(status, http::Version::HTTP_3, clean_headers, Body::Empty);
         let _ = responder.send_response(resp).await;
         if conn_close {
             lease.mark_closed();
@@ -176,10 +187,7 @@ pub async fn serve(req: &L7Request, responder: Http3Responder, upstream: &Arc<Ht
     }
 
     // Open downstream HTTP/3 streaming response
-    let mut stream_sender = match responder
-        .send_stream_response(resp_head.status, &clean_headers)
-        .await
-    {
+    let mut stream_sender = match responder.send_stream_response(status, &clean_headers).await {
         Ok(s) => s,
         Err(e) => {
             lease.mark_closed();

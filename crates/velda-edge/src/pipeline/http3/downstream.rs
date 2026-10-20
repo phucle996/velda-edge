@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use velda_core::{L7Request, L7Response};
+use velda_core::{Action, ErrorKind, L7Request, L7Response};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
@@ -235,14 +235,14 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
-            process_http3_request(&req, &lid, &runtime, responder).await;
+            process_http3_request(req, &lid, &runtime, responder).await;
         });
     }
 }
 
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 async fn process_http3_request(
-    req: &L7Request,
+    mut req: L7Request,
     listener_id: &str,
     runtime: &SharedRuntime,
     responder: super::engine::Http3Responder,
@@ -294,55 +294,145 @@ async fn process_http3_request(
     }
 
     // ========================================================================
+    // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
+    // ========================================================================
+    let plan = rt.plugins.get_plan(route.id);
+    if !plan.is_empty() {
+        let mut short_circuit_resp = None;
+
+        if let Some(hooks) = &plan.pre_route_hooks {
+            let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let status = match err.kind() {
+                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    short_circuit_resp = Some(L7Response::from_bytes(
+                        status,
+                        format!("{status}\n").into_bytes(),
+                    ));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if short_circuit_resp.is_none()
+            && let Some(hooks) = &plan.pre_upstream_hooks
+        {
+            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let status = match err.kind() {
+                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    short_circuit_resp = Some(L7Response::from_bytes(
+                        status,
+                        format!("{status}\n").into_bytes(),
+                    ));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if let Some(mut resp) = short_circuit_resp {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+            }
+            let _ = responder.send_response(resp).await;
+            return;
+        }
+    }
+
+    // ========================================================================
     // Upstream Forwarding & Pipe Strategy Dispatch
     // ========================================================================
     match upstream_target.as_ref() {
         HttpUpstream::Http3(upstream) => match upstream.strategy {
             Http3PipeStrategy::Buffered => {
-                let resp = pipe::buffered_h3_h3::serve(req, upstream).await;
+                let mut resp = pipe::buffered_h3_h3::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h3::serve(req, responder, upstream).await;
+                pipe::server_stream_h3_h3::serve(&req, responder, upstream, plan).await;
             }
             Http3PipeStrategy::ClientStream => {
-                let resp = pipe::client_stream_h3_h3::serve(req, upstream).await;
+                let mut resp = pipe::client_stream_h3_h3::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http3PipeStrategy::Duplex => {
-                pipe::duplex_h3_h3::serve(req, responder, upstream).await;
+                pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await;
             }
         },
         HttpUpstream::Http2(upstream) => match upstream.strategy {
             Http2PipeStrategy::Buffered => {
-                let resp = pipe::buffered_h3_h2::serve(req, upstream).await;
+                let mut resp = pipe::buffered_h3_h2::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http2PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h2::serve(req, responder, upstream).await;
+                pipe::server_stream_h3_h2::serve(&req, responder, upstream, plan).await;
             }
             Http2PipeStrategy::ClientStream => {
-                let resp = pipe::client_stream_h3_h2::serve(req, upstream).await;
+                let mut resp = pipe::client_stream_h3_h2::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http2PipeStrategy::Duplex => {
-                pipe::duplex_h3_h2::serve(req, responder, upstream).await;
+                pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await;
             }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy {
             Http1PipeStrategy::Buffered => {
-                let resp = pipe::buffered_h3_h1::serve(req, upstream).await;
+                let mut resp = pipe::buffered_h3_h1::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h1::serve(req, responder, upstream).await;
+                pipe::server_stream_h3_h1::serve(&req, responder, upstream, plan).await;
             }
             Http1PipeStrategy::ClientStream => {
-                let resp = pipe::client_stream_h3_h1::serve(req, upstream).await;
+                let mut resp = pipe::client_stream_h3_h1::serve(&req, upstream).await;
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                }
                 let _ = responder.send_response(resp).await;
             }
             Http1PipeStrategy::Duplex => {
-                pipe::duplex_h3_h1::serve(req, responder, upstream).await;
+                pipe::duplex_h3_h1::serve(&req, responder, upstream, plan).await;
             }
         },
     }
@@ -475,5 +565,24 @@ mod tests {
 
         // Payload size errors are not retryable
         assert!(!velda_http3::Http3Error::PayloadTooLarge(500).is_connection_closed());
+    }
+
+    #[test]
+    fn test_h3_pipe_coverage() {
+        // Verify all 12 pipeline strategies are declared and available
+        let _ = pipe::buffered_h3_h1::serve;
+        let _ = pipe::server_stream_h3_h1::serve;
+        let _ = pipe::client_stream_h3_h1::serve;
+        let _ = pipe::duplex_h3_h1::serve;
+
+        let _ = pipe::buffered_h3_h2::serve;
+        let _ = pipe::server_stream_h3_h2::serve;
+        let _ = pipe::client_stream_h3_h2::serve;
+        let _ = pipe::duplex_h3_h2::serve;
+
+        let _ = pipe::buffered_h3_h3::serve;
+        let _ = pipe::server_stream_h3_h3::serve;
+        let _ = pipe::client_stream_h3_h3::serve;
+        let _ = pipe::duplex_h3_h3::serve;
     }
 }
