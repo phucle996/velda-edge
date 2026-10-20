@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use velda_core::{L7Request, L7Response};
+use velda_core::{Action, ErrorKind, L7Request, L7Response};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
@@ -84,8 +84,7 @@ pub async fn handle_grpc_udp(
                 GrpcUdpServerStream::new(req_event.handle, req_event.stream_id, req, peer);
             stream.enrich_forwarded_headers(local_addr);
 
-            let mut response =
-                process_grpc_udp_request(&stream.request, &lid, &cfg, &runtime).await;
+            let mut response = process_grpc_udp_request(stream.request, &lid, &cfg, &runtime).await;
             if !response
                 .headers
                 .contains_key(&crate::pipeline::X_REQUEST_ID)
@@ -113,7 +112,7 @@ pub async fn handle_grpc_udp(
 /// Dispatches a single unary gRPC request through `GrpcRouter` to the upstream backend.
 /// Supports both native gRPC over UDP and cross-transport bridge to gRPC over TCP.
 pub async fn process_grpc_udp_request(
-    req: &L7Request,
+    mut req: L7Request,
     listener_id: &str,
     config: &GrpcConfig,
     runtime: &SharedRuntime,
@@ -150,34 +149,103 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
     }
 
+    // ========================================================================
+    // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
+    // ========================================================================
+    let plan = rt.plugins.get_plan(route.id);
+    if !plan.is_empty() {
+        let mut short_circuit_resp = None;
+
+        if let Some(hooks) = &plan.pre_route_hooks {
+            let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let grpc_status = match err.kind() {
+                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                        _ => GrpcStatus::Internal,
+                    };
+                    short_circuit_resp =
+                        Some(grpc_status.to_l7_response(Some("request rejected by plugin")));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if short_circuit_resp.is_none()
+            && let Some(hooks) = &plan.pre_upstream_hooks
+        {
+            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let grpc_status = match err.kind() {
+                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                        _ => GrpcStatus::Internal,
+                    };
+                    short_circuit_resp =
+                        Some(grpc_status.to_l7_response(Some("request rejected by plugin")));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if let Some(mut resp) = short_circuit_resp {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+            }
+            return resp;
+        }
+    }
+
     let pipe_res = match upstream_target.as_ref() {
         GrpcUpstream::Udp(upstream) => match upstream.strategy {
             GrpcUdpPipeStrategy::Buffered => {
-                pipe::buffered_udp_udp::serve(req, upstream, config).await
+                pipe::buffered_udp_udp::serve(&req, upstream, config).await
             }
             GrpcUdpPipeStrategy::ServerStream => {
-                pipe::server_stream_udp_udp::serve(req, upstream, config).await
+                pipe::server_stream_udp_udp::serve(&req, upstream, config).await
             }
             GrpcUdpPipeStrategy::ClientStream => {
-                pipe::client_stream_udp_udp::serve(req, upstream, config).await
+                pipe::client_stream_udp_udp::serve(&req, upstream, config).await
             }
-            GrpcUdpPipeStrategy::Duplex => pipe::duplex_udp_udp::serve(req, upstream, config).await,
+            GrpcUdpPipeStrategy::Duplex => {
+                pipe::duplex_udp_udp::serve(&req, upstream, config).await
+            }
         },
         GrpcUpstream::Tcp(upstream) => match upstream.strategy {
             GrpcPipeStrategy::Buffered => {
-                pipe::buffered_udp_tcp::serve(req, upstream, config).await
+                pipe::buffered_udp_tcp::serve(&req, upstream, config).await
             }
             GrpcPipeStrategy::ServerStream => {
-                pipe::server_stream_udp_tcp::serve(req, upstream, config).await
+                pipe::server_stream_udp_tcp::serve(&req, upstream, config).await
             }
             GrpcPipeStrategy::ClientStream => {
-                pipe::client_stream_udp_tcp::serve(req, upstream, config).await
+                pipe::client_stream_udp_tcp::serve(&req, upstream, config).await
             }
-            GrpcPipeStrategy::Duplex => pipe::duplex_udp_tcp::serve(req, upstream, config).await,
+            GrpcPipeStrategy::Duplex => pipe::duplex_udp_tcp::serve(&req, upstream, config).await,
         },
     };
 
-    match pipe_res {
+    let mut resp = match pipe_res {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(
@@ -187,7 +255,12 @@ pub async fn process_grpc_udp_request(
             );
             GrpcStatus::Unavailable.to_l7_response(Some("upstream unavailable"))
         }
+    };
+
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
     }
+    resp
 }
 
 #[cfg(test)]

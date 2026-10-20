@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use velda_core::{Action, ErrorKind, L7Request};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
@@ -195,6 +196,106 @@ async fn dispatch_grpc_tcp_request_stream(
             .respond
             .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
         return;
+    }
+
+    // ========================================================================
+    // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
+    // ========================================================================
+    let plan = rt.plugins.get_plan(route.id);
+    if !plan.is_empty() {
+        let mut short_circuit_resp = None;
+
+        if let Some(hooks) = &plan.pre_route_hooks {
+            let mut l7_req = L7Request::new(
+                server_stream.parts.method.clone(),
+                server_stream.parts.uri.clone(),
+                http::Version::HTTP_2,
+                std::mem::take(&mut server_stream.parts.headers),
+                velda_core::Body::Empty,
+            );
+            let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+            server_stream.parts.headers = l7_req.headers;
+            server_stream.parts.uri = l7_req.uri;
+            server_stream.parts.method = l7_req.method;
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let grpc_status = match err.kind() {
+                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                        _ => GrpcStatus::Internal,
+                    };
+                    short_circuit_resp =
+                        Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if short_circuit_resp.is_none()
+            && let Some(hooks) = &plan.pre_upstream_hooks
+        {
+            let mut l7_req = L7Request::new(
+                server_stream.parts.method.clone(),
+                server_stream.parts.uri.clone(),
+                http::Version::HTTP_2,
+                std::mem::take(&mut server_stream.parts.headers),
+                velda_core::Body::Empty,
+            );
+            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+            server_stream.parts.headers = l7_req.headers;
+            server_stream.parts.uri = l7_req.uri;
+            server_stream.parts.method = l7_req.method;
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let grpc_status = match err.kind() {
+                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
+                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
+                        _ => GrpcStatus::Internal,
+                    };
+                    short_circuit_resp =
+                        Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if let Some(mut resp) = short_circuit_resp {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &server_stream.parts.headers,
+                    &mut resp,
+                );
+            }
+            let mut builder = http::Response::builder()
+                .status(http::StatusCode::OK)
+                .version(http::Version::HTTP_2);
+            for (name, val) in &resp.headers {
+                builder = builder.header(name, val);
+            }
+            if let Ok(r) = builder.body(()) {
+                let _ = server_stream.respond.send_response(r, true);
+            }
+            return;
+        }
     }
 
     let pipe_res = match upstream_target.as_ref() {
