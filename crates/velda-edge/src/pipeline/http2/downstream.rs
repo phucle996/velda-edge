@@ -10,7 +10,7 @@ use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::L7Response;
+use velda_core::{Action, ErrorKind, L7Request, L7Response};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2Error;
 use velda_http2::Http2PipeStrategy;
@@ -19,6 +19,7 @@ use velda_http2::server::{
     Http2Responder, Http2ServerConnection, Http2ServerRequestHead, Http2StreamReceiver,
 };
 use velda_http3::Http3PipeStrategy;
+use velda_plugin::RoutePluginPlan;
 use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
 use velda_transport::Connection;
@@ -279,6 +280,7 @@ pub async fn run_http2_loop<IO>(
                         continue;
                     }
 
+                    let plan = rt.plugins.get_plan(route.id).clone();
                     let meta_clone = Arc::clone(&meta);
                     tokio::spawn(async move {
                         serve_http2_stream(
@@ -288,6 +290,7 @@ pub async fn run_http2_loop<IO>(
                             meta_clone,
                             config,
                             upstream_target,
+                            plan,
                         )
                         .await;
                     });
@@ -328,66 +331,176 @@ pub async fn run_http2_loop<IO>(
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
 async fn serve_http2_stream(
-    req_head: Http2ServerRequestHead,
+    mut req_head: Http2ServerRequestHead,
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream_target: Arc<HttpUpstream>,
+    plan: Arc<RoutePluginPlan>,
 ) {
+    if !plan.is_empty() {
+        let mut short_circuit_resp = None;
+
+        if let Some(hooks) = &plan.pre_route_hooks {
+            let mut l7_req = L7Request::new(
+                req_head.method.clone(),
+                req_head.uri.clone(),
+                http::Version::HTTP_2,
+                std::mem::take(&mut req_head.headers),
+                velda_core::Body::Empty,
+            );
+            let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+            req_head.headers = l7_req.headers;
+            req_head.uri = l7_req.uri;
+            req_head.method = l7_req.method;
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let status = match err.kind() {
+                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    short_circuit_resp = Some(L7Response::from_bytes(
+                        status,
+                        format!("{status}\n").into_bytes(),
+                    ));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if short_circuit_resp.is_none()
+            && let Some(hooks) = &plan.pre_upstream_hooks
+        {
+            let mut l7_req = L7Request::new(
+                req_head.method.clone(),
+                req_head.uri.clone(),
+                http::Version::HTTP_2,
+                std::mem::take(&mut req_head.headers),
+                velda_core::Body::Empty,
+            );
+            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+            while let Action::Delay { duration, and_then } = action {
+                tokio::time::sleep(duration).await;
+                action = *and_then;
+            }
+            req_head.headers = l7_req.headers;
+            req_head.uri = l7_req.uri;
+            req_head.method = l7_req.method;
+
+            match action {
+                Action::Continue => {}
+                Action::Respond(resp) => {
+                    short_circuit_resp = Some(resp);
+                }
+                Action::Reject(err) => {
+                    let status = match err.kind() {
+                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    short_circuit_resp = Some(L7Response::from_bytes(
+                        status,
+                        format!("{status}\n").into_bytes(),
+                    ));
+                }
+                Action::Delay { .. } => unreachable!(),
+            }
+        }
+
+        if let Some(mut resp) = short_circuit_resp {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
+            }
+            let mut responder = responder;
+            if !receiver.is_end_stream() {
+                let _ = responder.send_response_and_cancel_upload(&resp);
+            } else {
+                let _ = responder.send_response(&resp);
+            }
+            return;
+        }
+    }
+
     match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => match upstream.strategy {
             Http2PipeStrategy::Buffered => {
-                pipe::buffered_h2_h2::serve(req_head, receiver, responder, meta, config, upstream)
-                    .await;
+                pipe::buffered_h2_h2::serve(
+                    req_head, receiver, responder, meta, config, upstream, &plan,
+                )
+                .await;
             }
             Http2PipeStrategy::ServerStream => {
                 pipe::server_stream_h2_h2::serve(
-                    req_head, receiver, responder, meta, config, upstream,
+                    req_head, receiver, responder, meta, config, upstream, &plan,
                 )
                 .await;
             }
             Http2PipeStrategy::ClientStream => {
                 pipe::client_stream_h2_h2::serve(
-                    req_head, receiver, responder, meta, config, upstream,
+                    req_head, receiver, responder, meta, config, upstream, &plan,
                 )
                 .await;
             }
             Http2PipeStrategy::Duplex => {
-                pipe::duplex_h2_h2::serve(req_head, receiver, responder, meta, config, upstream)
-                    .await;
+                pipe::duplex_h2_h2::serve(
+                    req_head, receiver, responder, meta, config, upstream, &plan,
+                )
+                .await;
             }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy {
             Http1PipeStrategy::Buffered => {
-                pipe::buffered_h2_h1::serve(req_head, receiver, responder, meta, upstream).await;
+                pipe::buffered_h2_h1::serve(req_head, receiver, responder, meta, upstream, &plan)
+                    .await;
             }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h2_h1::serve(req_head, receiver, responder, meta, upstream)
-                    .await;
+                pipe::server_stream_h2_h1::serve(
+                    req_head, receiver, responder, meta, upstream, &plan,
+                )
+                .await;
             }
             Http1PipeStrategy::ClientStream => {
-                pipe::client_stream_h2_h1::serve(req_head, receiver, responder, meta, upstream)
-                    .await;
+                pipe::client_stream_h2_h1::serve(
+                    req_head, receiver, responder, meta, upstream, &plan,
+                )
+                .await;
             }
             Http1PipeStrategy::Duplex => {
-                pipe::duplex_h2_h1::serve(req_head, receiver, responder, meta, upstream).await;
+                pipe::duplex_h2_h1::serve(req_head, receiver, responder, meta, upstream, &plan)
+                    .await;
             }
         },
         HttpUpstream::Http3(upstream) => match upstream.strategy {
             Http3PipeStrategy::Buffered => {
-                pipe::buffered_h2_h3::serve(req_head, receiver, responder, meta, upstream).await;
+                pipe::buffered_h2_h3::serve(req_head, receiver, responder, meta, upstream, &plan)
+                    .await;
             }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h2_h3::serve(req_head, receiver, responder, meta, upstream)
-                    .await;
+                pipe::server_stream_h2_h3::serve(
+                    req_head, receiver, responder, meta, upstream, &plan,
+                )
+                .await;
             }
             Http3PipeStrategy::ClientStream => {
-                pipe::client_stream_h2_h3::serve(req_head, receiver, responder, meta, upstream)
-                    .await;
+                pipe::client_stream_h2_h3::serve(
+                    req_head, receiver, responder, meta, upstream, &plan,
+                )
+                .await;
             }
             Http3PipeStrategy::Duplex => {
-                pipe::duplex_h2_h3::serve(req_head, receiver, responder, meta, upstream).await;
+                pipe::duplex_h2_h3::serve(req_head, receiver, responder, meta, upstream, &plan)
+                    .await;
             }
         },
     }

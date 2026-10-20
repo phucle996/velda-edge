@@ -28,6 +28,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
@@ -67,6 +68,11 @@ pub async fn serve(
     // 3. Pipe client streaming frames directly
     let pipe_res = async {
         let is_head = req_head.method == http::Method::HEAD;
+        let req_headers_ref = if plan.post_response_hooks.is_some() {
+            Some(req_head.headers.clone())
+        } else {
+            None
+        };
         velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
         let http_req = req_head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
@@ -244,7 +250,12 @@ pub async fn serve(
             Body::Empty
         };
 
-        let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
+        let mut resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
+        if let Some(post_hooks) = &plan.post_response_hooks
+            && let Some(ref req_headers) = req_headers_ref
+        {
+            velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut resp);
+        }
         responder.send_response(&resp)?;
         if !receiver.is_end_stream() {
             tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });

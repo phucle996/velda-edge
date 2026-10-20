@@ -26,6 +26,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http3Upstream>,
     meta: &DownstreamMeta,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -121,8 +122,7 @@ where
     };
 
     // 7. Send request directly with self-healing on connection close
-    let req_retry = l7_req.clone();
-    let mut pipe_res = client.send_request(l7_req).await;
+    let mut pipe_res = client.send_request_ref(&l7_req).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -136,7 +136,7 @@ where
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            pipe_res = fresh_client.send_request(req_retry).await;
+            pipe_res = fresh_client.send_request_ref(&l7_req).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {
@@ -149,6 +149,9 @@ where
                 l7_resp
                     .headers
                     .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+            }
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
             }
             let server_resp = Http1ServerResponse::new(
                 l7_resp.status,

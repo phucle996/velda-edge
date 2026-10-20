@@ -22,6 +22,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream request body
     let body = match receiver.consume_all().await {
@@ -113,7 +114,7 @@ pub async fn serve(
 
     // 6. Read HTTP/1.1 response head from upstream using pre-allocated pooled read_buf
     let (stream, read_buf) = lease.split_read();
-    let (resp_head, framing) =
+    let (mut resp_head, framing) =
         match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
             Ok(parts) => parts,
             Err(e) => {
@@ -137,6 +138,17 @@ pub async fn serve(
     // 7. Strip hop-by-hop headers before sending over HTTP/2
     let mut clean_headers = resp_head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp = L7Response::new(
+            resp_head.status,
+            http::Version::HTTP_2,
+            clean_headers,
+            velda_core::Body::Empty,
+        );
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        resp_head.status = l7_resp.status;
+        clean_headers = l7_resp.headers;
+    }
 
     // 8. Open downstream HTTP/2 streaming response
     let mut stream_sender = match responder.send_stream_response(resp_head.status, &clean_headers) {

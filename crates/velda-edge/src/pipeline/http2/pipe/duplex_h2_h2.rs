@@ -28,6 +28,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
@@ -68,6 +69,11 @@ pub async fn serve(
     // 3. Pipe duplex frames concurrently
     let duplex_res = async {
         let is_head = req_head.method == http::Method::HEAD;
+        let req_headers_ref = if plan.post_response_hooks.is_some() {
+            Some(req_head.headers.clone())
+        } else {
+            None
+        };
         velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
         let http_req = req_head.into_http_request();
         let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
@@ -114,7 +120,17 @@ pub async fn serve(
         let mut responder = responder;
         let download_task = async move {
             let response = response_fut.await?;
-            let (parts, mut body_stream) = response.into_parts();
+            let (mut parts, mut body_stream) = response.into_parts();
+
+            if let Some(post_hooks) = &plan.post_response_hooks
+                && let Some(ref req_headers) = req_headers_ref
+            {
+                let mut l7_resp =
+                    L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+                velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut l7_resp);
+                parts.status = l7_resp.status;
+                parts.headers = l7_resp.headers;
+            }
 
             let is_no_body_status = parts.status.is_informational()
                 || parts.status == StatusCode::NO_CONTENT

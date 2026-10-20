@@ -28,6 +28,7 @@ async fn forward_server_stream(
     responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,
     config: &Http2Config,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
     let is_head = req_head.method == http::Method::HEAD;
     let mut http_req = http::Request::new(());
@@ -45,7 +46,15 @@ async fn forward_server_stream(
     }
 
     let response = response_fut.await?;
-    let (parts, mut body_stream) = response.into_parts();
+    let (mut parts, mut body_stream) = response.into_parts();
+
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp =
+            L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        parts.status = l7_resp.status;
+        parts.headers = l7_resp.headers;
+    }
 
     let is_no_body_status = parts.status.is_informational()
         || parts.status == StatusCode::NO_CONTENT
@@ -138,6 +147,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
@@ -189,7 +199,7 @@ pub async fn serve(
 
     // 4. Pipe server-streaming response with automatic self-healing retry
     let mut res =
-        forward_server_stream(&req_head, &body, &mut responder, &mut client, &config).await;
+        forward_server_stream(&req_head, &body, &mut responder, &mut client, &config, plan).await;
     if let Err(ref e) = res
         && e.is_refused_or_goaway()
     {
@@ -199,9 +209,15 @@ pub async fn serve(
             "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await {
-            res =
-                forward_server_stream(&req_head, &body, &mut responder, &mut fresh_client, &config)
-                    .await;
+            res = forward_server_stream(
+                &req_head,
+                &body,
+                &mut responder,
+                &mut fresh_client,
+                &config,
+                plan,
+            )
+            .await;
         }
     }
 

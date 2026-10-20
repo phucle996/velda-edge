@@ -29,6 +29,7 @@ async fn forward_buffered(
     responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,
     config: &Http2Config,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
     let is_head = req_head.method == http::Method::HEAD;
     let mut http_req = http::Request::new(());
@@ -149,7 +150,10 @@ async fn forward_buffered(
         Body::Empty
     };
 
-    let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
+    let mut resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
+    }
     responder.send_response_owned(resp)?;
 
     Ok(())
@@ -163,6 +167,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
@@ -213,7 +218,8 @@ pub async fn serve(
     };
 
     // 4. Pipe buffered request & response with automatic self-healing on connection reuse failure
-    let mut res = forward_buffered(&req_head, &body, &mut responder, &mut client, &config).await;
+    let mut res =
+        forward_buffered(&req_head, &body, &mut responder, &mut client, &config, plan).await;
     if let Err(ref e) = res
         && e.is_refused_or_goaway()
     {
@@ -223,8 +229,15 @@ pub async fn serve(
             "HTTP/2 buffered stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await {
-            res = forward_buffered(&req_head, &body, &mut responder, &mut fresh_client, &config)
-                .await;
+            res = forward_buffered(
+                &req_head,
+                &body,
+                &mut responder,
+                &mut fresh_client,
+                &config,
+                plan,
+            )
+            .await;
         }
     }
 

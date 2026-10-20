@@ -29,6 +29,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -228,6 +229,19 @@ where
     // 8. Align response version with downstream request
     if req.version == http::Version::HTTP_10 {
         resp_head.version = http::Version::HTTP_10;
+    }
+
+    // Execute post-response plugins if attached to this route (0 overhead if None)
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp = velda_core::L7Response::new(
+            resp_head.status,
+            resp_head.version,
+            std::mem::take(&mut resp_head.headers),
+            velda_core::Body::Empty,
+        );
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        resp_head.status = l7_resp.status;
+        resp_head.headers = l7_resp.headers;
     }
 
     let is_no_body = is_head || is_no_body_status;

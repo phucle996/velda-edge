@@ -22,6 +22,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
@@ -236,7 +237,14 @@ pub async fn serve(
     drop(lease);
 
     match resp_res {
-        Ok(l7_resp) => {
+        Ok(mut l7_resp) => {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req_head.headers,
+                    &mut l7_resp,
+                );
+            }
             let _ = responder.send_response(&l7_resp);
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });

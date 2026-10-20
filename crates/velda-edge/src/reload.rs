@@ -120,12 +120,19 @@ pub fn load_initial_runtime(
         topo.memory_bytes,
     )?;
 
+    let plugins = Arc::new(crate::runtime::build_plugin_table(
+        &runtime_config.plugins,
+        &runtime_config.routes,
+        &runtime_config.listeners,
+    )?);
+
     Ok(Runtime {
         revision: 1,
         config: runtime_config,
         router,
         pipelines,
         upstreams: upstreams_table,
+        plugins,
         tls_server,
         tls_client,
         overload: Arc::new(velda_core::OverloadTracker::with_config(profile.overload)),
@@ -152,6 +159,7 @@ pub async fn apply_reload(
     let mut listeners_changed = false;
     let mut routes_changed = false;
     let mut upstreams_changed = false;
+    let mut plugins_changed = false;
 
     let hw = velda_core::hardware::global_hardware_topology();
     let profile = crate::profile::resolve_runtime_profile(runtime_dir, hw);
@@ -172,6 +180,7 @@ pub async fn apply_reload(
             }
             "plugins" => {
                 config.plugins = load_plugins(runtime_dir)?;
+                plugins_changed = true;
             }
             "tls" => {
                 config.tls = load_tls(runtime_dir)?;
@@ -229,6 +238,17 @@ pub async fn apply_reload(
         current.upstreams.clone()
     };
 
+    // Recompile PluginTable if plugins, routes, or listeners changed
+    let plugins = if plugins_changed || routes_changed || listeners_changed {
+        Arc::new(crate::runtime::build_plugin_table(
+            &config.plugins,
+            &config.routes,
+            &config.listeners,
+        )?)
+    } else {
+        current.plugins.clone()
+    };
+
     // If listeners or TLS changed, ensure HTTP/3 pipeline engines are registered for any new listeners
     // (existing engines and their active QUIC connections are preserved without disruption!)
     if let Some(tls) = tls_server.as_ref() {
@@ -254,6 +274,7 @@ pub async fn apply_reload(
         upstreams,
         tls_server,
         tls_client,
+        plugins,
         overload,
         buffer_pool,
     };

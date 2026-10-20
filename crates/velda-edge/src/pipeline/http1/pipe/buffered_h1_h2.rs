@@ -26,6 +26,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -150,6 +151,21 @@ where
             if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
                 resp.headers
                     .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+            }
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                let mut l7_resp = velda_core::L7Response::new(
+                    resp.status,
+                    resp.version,
+                    std::mem::take(&mut resp.headers),
+                    velda_core::Body::Empty,
+                );
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req_head.headers,
+                    &mut l7_resp,
+                );
+                resp.status = l7_resp.status;
+                resp.headers = l7_resp.headers;
             }
             conn.send_response(&resp).await?;
             Ok(())

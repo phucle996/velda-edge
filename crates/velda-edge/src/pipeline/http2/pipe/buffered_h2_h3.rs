@@ -22,6 +22,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
@@ -98,7 +99,7 @@ pub async fn serve(
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
-            pipe_res = fresh_client.send_request(l7_req).await;
+            pipe_res = fresh_client.send_request(l7_req.clone()).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {
@@ -106,7 +107,10 @@ pub async fn serve(
     }
 
     match pipe_res {
-        Ok(resp) => {
+        Ok(mut resp) => {
+            if let Some(post_hooks) = &plan.post_response_hooks {
+                velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
+            }
             let _ = responder.send_response(&resp);
         }
         Err(e) => {

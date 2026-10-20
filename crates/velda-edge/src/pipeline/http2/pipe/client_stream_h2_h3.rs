@@ -23,6 +23,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Enrich proxy forwarding headers
     velda_http2::server::header::enrich_headers_precomputed(
@@ -35,6 +36,12 @@ pub async fn serve(
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
+
+    let req_headers_ref = if plan.post_response_hooks.is_some() {
+        Some(req_head.headers.clone())
+    } else {
+        None
+    };
 
     // 3. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&upstream.config).await {
@@ -225,12 +232,17 @@ pub async fn serve(
         velda_core::Body::Bytes(resp_body.freeze())
     };
 
-    let resp = L7Response::new(
+    let mut resp = L7Response::new(
         resp_stream.status,
         http::Version::HTTP_2,
         resp_stream.headers,
         body,
     );
+    if let Some(post_hooks) = &plan.post_response_hooks
+        && let Some(ref req_headers) = req_headers_ref
+    {
+        velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut resp);
+    }
     let _ = responder.send_response(&resp);
     if !receiver.is_end_stream() {
         tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });

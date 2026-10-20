@@ -6,11 +6,13 @@
 //! request serving hot path, and atomic swaps upon configuration reloads.
 
 pub mod pipeline;
+pub mod plugin;
 pub mod router;
 pub mod tls;
 mod transport;
 
 pub use pipeline::{PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol};
+pub use plugin::{PluginTable, build_plugin_table};
 pub use router::build_router;
 pub use tls::{compile_tls_client, compile_tls_server};
 
@@ -81,6 +83,8 @@ pub struct Runtime {
     pub tls_server: Option<TlsServerEngine>,
     /// Pre-compiled upstream TLS client engine for O(1) hot-path backend handshake execution.
     pub tls_client: Option<TlsClientEngine>,
+    /// Pre-compiled plugin execution plan table for zero-overhead hot-path evaluation.
+    pub plugins: Arc<PluginTable>,
     /// Thread-safe resource saturation and overload circuit breaker.
     pub overload: Arc<OverloadTracker>,
     /// Pre-warmed sharded user-space buffer and object pool for zero-allocation serving.

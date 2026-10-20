@@ -212,10 +212,22 @@ pub fn build_route_plugin_plan(
         });
     }
 
-    // 5. Freeze into final Arc slices
-    let pre_route_hooks: Arc<[Arc<dyn PreRoutePlugin>]> = Arc::from(pre_route_list);
-    let pre_upstream_hooks: Arc<[Arc<dyn PreUpstreamPlugin>]> = Arc::from(pre_upstream_list);
-    let post_response_hooks: Arc<[Arc<dyn PostResponsePlugin>]> = Arc::from(post_response_list);
+    // 5. Freeze into final Arc slices (None if empty for zero-overhead phase elimination)
+    let pre_route_hooks = if pre_route_list.is_empty() {
+        None
+    } else {
+        Some(Arc::from(pre_route_list))
+    };
+    let pre_upstream_hooks = if pre_upstream_list.is_empty() {
+        None
+    } else {
+        Some(Arc::from(pre_upstream_list))
+    };
+    let post_response_hooks = if post_response_list.is_empty() {
+        None
+    } else {
+        Some(Arc::from(post_response_list))
+    };
 
     Ok(RoutePluginPlan {
         pre_route_hooks,
@@ -310,18 +322,22 @@ mod tests {
         .expect("Should build plan");
 
         // pre_route hooks
-        assert_eq!(plan.pre_route_hooks.len(), 1);
-        assert_eq!(plan.pre_route_hooks[0].id(), "ip_filter");
+        let pre_route = plan.pre_route_hooks.as_ref().unwrap();
+        assert_eq!(pre_route.len(), 1);
+        assert_eq!(pre_route[0].id(), "ip_filter");
 
         // pre_upstream hooks
-        assert_eq!(plan.pre_upstream_hooks.len(), 1);
-        assert_eq!(plan.pre_upstream_hooks[0].id(), "jwt_auth");
+        let pre_upstream = plan.pre_upstream_hooks.as_ref().unwrap();
+        assert_eq!(pre_upstream.len(), 1);
+        assert_eq!(pre_upstream[0].id(), "jwt_auth");
 
         // post_response hooks
-        assert_eq!(plan.post_response_hooks.len(), 1);
-        assert_eq!(plan.post_response_hooks[0].id(), "cors");
+        let post_resp = plan.post_response_hooks.as_ref().unwrap();
+        assert_eq!(post_resp.len(), 1);
+        assert_eq!(post_resp[0].id(), "cors");
 
         // Zero-copy streaming active because payload access is None!
+        assert!(!plan.is_empty());
         assert!(plan.is_request_payload_passthrough());
         assert!(plan.is_response_payload_passthrough());
     }
@@ -360,9 +376,10 @@ mod tests {
             StreamingMode::DISABLED,
         )
         .expect("Should build plan");
-        assert_eq!(plan_1.pre_route_hooks.len(), 2);
-        assert_eq!(plan_1.pre_route_hooks[0].id(), "cors_preflight");
-        assert_eq!(plan_1.pre_route_hooks[1].id(), "ip_filter");
+        let pre_route_1 = plan_1.pre_route_hooks.as_ref().unwrap();
+        assert_eq!(pre_route_1.len(), 2);
+        assert_eq!(pre_route_1[0].id(), "cors_preflight");
+        assert_eq!(pre_route_1[1].id(), "ip_filter");
 
         // Order 2: ip_filter before cors_preflight (strictly follows route array FIFO)
         let route_plugins_2 = vec!["ip_filter".to_string(), "cors_preflight".to_string()];
@@ -374,9 +391,10 @@ mod tests {
             StreamingMode::DISABLED,
         )
         .expect("Should build plan");
-        assert_eq!(plan_2.pre_route_hooks.len(), 2);
-        assert_eq!(plan_2.pre_route_hooks[0].id(), "ip_filter");
-        assert_eq!(plan_2.pre_route_hooks[1].id(), "cors_preflight");
+        let pre_route_2 = plan_2.pre_route_hooks.as_ref().unwrap();
+        assert_eq!(pre_route_2.len(), 2);
+        assert_eq!(pre_route_2[0].id(), "ip_filter");
+        assert_eq!(pre_route_2[1].id(), "cors_preflight");
     }
 
     #[test]

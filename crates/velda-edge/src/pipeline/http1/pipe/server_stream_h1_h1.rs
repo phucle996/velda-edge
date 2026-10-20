@@ -32,6 +32,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -182,6 +183,18 @@ where
         resp_head
             .headers
             .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+    }
+
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp = velda_core::L7Response::new(
+            resp_head.status,
+            resp_head.version,
+            std::mem::take(&mut resp_head.headers),
+            velda_core::Body::Empty,
+        );
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        resp_head.status = l7_resp.status;
+        resp_head.headers = l7_resp.headers;
     }
 
     // 6. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body

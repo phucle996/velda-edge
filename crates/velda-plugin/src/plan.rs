@@ -22,12 +22,12 @@ use crate::pre_upstream::PreUpstreamPlugin;
 /// Pre-compiled execution plan containing ordered plugin chains and aggregate permissions for a route.
 #[derive(Clone, Default)]
 pub struct RoutePluginPlan {
-    /// Ordered hooks evaluated before route lookup (IP filter, JWT auth, etc.).
-    pub pre_route_hooks: Arc<[Arc<dyn PreRoutePlugin>]>,
-    /// Ordered hooks evaluated after route lookup, before upstream dispatch (Rate limit, Header mutation, etc.).
-    pub pre_upstream_hooks: Arc<[Arc<dyn PreUpstreamPlugin>]>,
-    /// Ordered hooks evaluated on returning response before downstream encoding.
-    pub post_response_hooks: Arc<[Arc<dyn PostResponsePlugin>]>,
+    /// Ordered hooks evaluated before route lookup (IP filter, JWT auth, etc.), or `None` if phase is empty.
+    pub pre_route_hooks: Option<Arc<[Arc<dyn PreRoutePlugin>]>>,
+    /// Ordered hooks evaluated after route lookup, before upstream dispatch (Rate limit, Header mutation, etc.), or `None` if phase is empty.
+    pub pre_upstream_hooks: Option<Arc<[Arc<dyn PreUpstreamPlugin>]>>,
+    /// Ordered hooks evaluated on returning response before downstream encoding, or `None` if phase is empty.
+    pub post_response_hooks: Option<Arc<[Arc<dyn PostResponsePlugin>]>>,
 
     /// Aggregate permission required for request headers across all request hooks.
     pub request_header_access: AccessLevel,
@@ -40,6 +40,14 @@ pub struct RoutePluginPlan {
 }
 
 impl RoutePluginPlan {
+    /// Returns `true` if this plan has no plugins in any phase (enables total route bypass).
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.pre_route_hooks.is_none()
+            && self.pre_upstream_hooks.is_none()
+            && self.post_response_hooks.is_none()
+    }
+
     /// Returns `true` if request payload body is completely bypassed (enables Zero-Copy streaming).
     #[inline(always)]
     pub fn is_request_payload_passthrough(&self) -> bool {
@@ -60,6 +68,10 @@ mod tests {
     #[test]
     fn test_route_plugin_plan_passthrough_defaults() {
         let plan = RoutePluginPlan::default();
+        assert!(plan.is_empty());
+        assert!(plan.pre_route_hooks.is_none());
+        assert!(plan.pre_upstream_hooks.is_none());
+        assert!(plan.post_response_hooks.is_none());
         assert!(plan.is_request_payload_passthrough());
         assert!(plan.is_response_payload_passthrough());
         assert_eq!(plan.request_header_access, AccessLevel::None);

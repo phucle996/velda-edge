@@ -43,6 +43,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
+    plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -211,7 +212,19 @@ where
     if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
         headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
-    let resp_head = Http1ServerResponseHead::new(parts.status, http::Version::HTTP_11, headers);
+    let mut status = parts.status;
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        let mut l7_resp = velda_core::L7Response::new(
+            status,
+            http::Version::HTTP_11,
+            std::mem::take(&mut headers),
+            velda_core::Body::Empty,
+        );
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        status = l7_resp.status;
+        headers = l7_resp.headers;
+    }
+    let resp_head = Http1ServerResponseHead::new(status, http::Version::HTTP_11, headers);
 
     let first_chunk_opt = match body_stream.data().await {
         Some(Ok(c)) => Some(c),

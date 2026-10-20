@@ -10,7 +10,7 @@ use velda_sync::post_sync::upstream::UpstreamConfig;
 
 use crate::error::EdgeError;
 
-fn hash_id_to_u32(s: &str) -> u32 {
+pub(crate) fn hash_id_to_u32(s: &str) -> u32 {
     let mut h: u32 = 0x811c9dc5;
     for b in s.as_bytes() {
         h ^= *b as u32;

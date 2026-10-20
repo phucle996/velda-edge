@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_edge::runtime::{PipelineTable, Runtime, RuntimeConfig, build_router};
+use velda_edge::runtime::{
+    PipelineTable, Runtime, RuntimeConfig, build_plugin_table, build_router,
+};
 use velda_edge::upstream::build_upstreams_default;
 use velda_sync::post_sync::listener::{
     ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
@@ -321,12 +323,17 @@ pub fn build_mock_runtime(
         tls: vec![],
     };
 
+    let plugin_table = std::sync::Arc::new(
+        build_plugin_table(&config.plugins, &config.routes, &config.listeners).unwrap(),
+    );
+
     Runtime {
         revision,
         config,
         router,
         pipelines,
         upstreams: upstreams_table,
+        plugins: plugin_table,
         tls_server: None,
         tls_client: None,
         overload: std::sync::Arc::new(velda_core::OverloadTracker::auto()),

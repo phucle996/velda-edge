@@ -23,6 +23,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
@@ -133,13 +134,24 @@ pub async fn serve(
     // Download task: reads upstream H1 response and streams H2 DATA frames downstream
     let download_fut = async {
         read_buf.clear();
-        let (resp_head, framing) =
+        let (mut resp_head, framing) =
             velda_http1::client::read_response_head(&mut read_half, read_buf, &upstream.config)
                 .await
                 .map_err(std::io::Error::other)?;
 
         let mut clean_headers = resp_head.headers;
         velda_http1::client::sanitize_headers(&mut clean_headers);
+        if let Some(post_hooks) = &plan.post_response_hooks {
+            let mut l7_resp = L7Response::new(
+                resp_head.status,
+                http::Version::HTTP_2,
+                clean_headers,
+                velda_core::Body::Empty,
+            );
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+            resp_head.status = l7_resp.status;
+            clean_headers = l7_resp.headers;
+        }
 
         let mut stream_sender = responder
             .send_stream_response(resp_head.status, &clean_headers)

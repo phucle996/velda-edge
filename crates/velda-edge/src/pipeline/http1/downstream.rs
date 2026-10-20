@@ -22,6 +22,7 @@ use super::pipe;
 use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
+use velda_core::{Action, ErrorKind, L7Request, L7Response};
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 
@@ -246,6 +247,107 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
+        let plan = rt.plugins.get_plan(route.id);
+        if !plan.is_empty() {
+            let mut short_circuit_resp = None;
+
+            if let Some(hooks) = &plan.pre_route_hooks {
+                let mut l7_req = L7Request::new(
+                    req_head.method.clone(),
+                    req_head.uri.clone(),
+                    req_head.version,
+                    std::mem::take(&mut req_head.headers),
+                    velda_core::Body::Empty,
+                );
+                let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
+                while let Action::Delay { duration, and_then } = action {
+                    tokio::time::sleep(duration).await;
+                    action = *and_then;
+                }
+                req_head.headers = l7_req.headers;
+                req_head.uri = l7_req.uri;
+                req_head.method = l7_req.method;
+
+                match action {
+                    Action::Continue => {}
+                    Action::Respond(resp) => {
+                        short_circuit_resp = Some(resp);
+                    }
+                    Action::Reject(err) => {
+                        let status = match err.kind() {
+                            ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                            ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                            _ => StatusCode::INTERNAL_SERVER_ERROR,
+                        };
+                        short_circuit_resp = Some(L7Response::from_bytes(
+                            status,
+                            format!("{status}\n").into_bytes(),
+                        ));
+                    }
+                    Action::Delay { .. } => unreachable!(),
+                }
+            }
+
+            if short_circuit_resp.is_none()
+                && let Some(hooks) = &plan.pre_upstream_hooks
+            {
+                let mut l7_req = L7Request::new(
+                    req_head.method.clone(),
+                    req_head.uri.clone(),
+                    req_head.version,
+                    std::mem::take(&mut req_head.headers),
+                    velda_core::Body::Empty,
+                );
+                let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+                while let Action::Delay { duration, and_then } = action {
+                    tokio::time::sleep(duration).await;
+                    action = *and_then;
+                }
+                req_head.headers = l7_req.headers;
+                req_head.uri = l7_req.uri;
+                req_head.method = l7_req.method;
+
+                match action {
+                    Action::Continue => {}
+                    Action::Respond(resp) => {
+                        short_circuit_resp = Some(resp);
+                    }
+                    Action::Reject(err) => {
+                        let status = match err.kind() {
+                            ErrorKind::Rejected => StatusCode::FORBIDDEN,
+                            ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                            _ => StatusCode::INTERNAL_SERVER_ERROR,
+                        };
+                        short_circuit_resp = Some(L7Response::from_bytes(
+                            status,
+                            format!("{status}\n").into_bytes(),
+                        ));
+                    }
+                    Action::Delay { .. } => unreachable!(),
+                }
+            }
+
+            if let Some(mut resp) = short_circuit_resp {
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req_head.headers,
+                        &mut resp,
+                    );
+                }
+                let mut server_resp = Http1ServerResponse::from_l7_response(resp);
+                if !server_resp.headers.contains_key(&X_REQUEST_ID) {
+                    server_resp
+                        .headers
+                        .insert(X_REQUEST_ID, req_id_header.clone());
+                }
+                conn.mark_close();
+                let _ = conn.send_response(&server_resp).await;
+                conn.lingering_close().await;
+                break;
+            }
+        }
+
         let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
             tracing::error!(
                 listener = %meta.listener_id,
@@ -299,50 +401,68 @@ pub async fn run_http1_loop<IO>(
         let pipe_result = match upstream_target.as_ref() {
             HttpUpstream::Http1(upstream) => match upstream.strategy {
                 Http1PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
                 Http1PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::server_stream_h1_h1::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http1PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::client_stream_h1_h1::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http1PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
             },
             HttpUpstream::Http2(upstream) => match upstream.strategy {
                 Http2PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
                 Http2PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::server_stream_h1_h2::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http2PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::client_stream_h1_h2::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http2PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
             },
             HttpUpstream::Http3(upstream) => match upstream.strategy {
                 Http3PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::buffered_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
                 Http3PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::server_stream_h1_h3::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http3PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta)
-                        .await
+                    pipe::client_stream_h1_h3::serve(
+                        &mut conn, req_head, framing, upstream, &meta, plan,
+                    )
+                    .await
                 }
                 Http3PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta).await
+                    pipe::duplex_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                        .await
                 }
             },
         };

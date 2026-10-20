@@ -22,6 +22,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
@@ -224,7 +225,10 @@ pub async fn serve(
     // 8. Send HTTP/2 response downstream
     let mut clean_headers = resp_head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
-    let l7_resp = L7Response::new(resp_head.status, http::Version::HTTP_2, clean_headers, body);
+    let mut l7_resp = L7Response::new(resp_head.status, http::Version::HTTP_2, clean_headers, body);
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+    }
     let _ = responder.send_response_owned(l7_resp);
 }
 
