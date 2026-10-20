@@ -27,32 +27,155 @@ impl ThreatVector {
     }
 }
 
-/// Fast percent-decoding and ASCII lowercasing with anti-evasion protection.
-///
-/// Converts `%xx` hex encodings to their raw byte equivalent and folds uppercase
-/// letters to lowercase without heap allocations if no `%` is present.
-pub fn normalize_and_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
+use std::sync::Arc;
 
-    while i < bytes.len() {
+use aho_corasick::{AhoCorasick, MatchKind};
+
+use crate::error::PluginError;
+
+/// High-performance SIMD multi-pattern Aho-Corasick matching engine for WAF Lite.
+#[derive(Clone, Debug)]
+pub struct WafMatcher {
+    pattern_ac: Arc<AhoCorasick>,
+    pattern_meta: Arc<Vec<(&'static str, ThreatVector)>>,
+    ua_ac: Arc<AhoCorasick>,
+    ua_names: Arc<Vec<String>>,
+}
+
+impl WafMatcher {
+    /// Compiles built-in attack signatures, custom patterns, and user-agents into SIMD-accelerated automata.
+    pub fn new(custom_patterns: &[String], custom_uas: &[String]) -> Result<Self, PluginError> {
+        let mut patterns = Vec::new();
+        let mut meta = Vec::new();
+
+        for (pat, vector) in default_attack_signatures() {
+            patterns.push(pat.to_string());
+            meta.push((pat, vector));
+        }
+
+        for pat in custom_patterns {
+            patterns.push(pat.clone());
+            meta.push(("", ThreatVector::CustomPattern));
+        }
+
+        let pattern_ac = AhoCorasick::builder()
+            .match_kind(MatchKind::Standard)
+            .build(&patterns)
+            .map_err(|e| {
+                PluginError::Config(format!("Failed to compile WAF pattern automaton: {e}"))
+            })?;
+
+        let mut uas = Vec::new();
+        let mut ua_names = Vec::new();
+        for &ua in &default_malicious_user_agents() {
+            uas.push(ua.to_string());
+            ua_names.push(ua.to_string());
+        }
+        for ua in custom_uas {
+            uas.push(ua.clone());
+            ua_names.push(ua.clone());
+        }
+
+        let ua_ac = AhoCorasick::builder()
+            .match_kind(MatchKind::Standard)
+            .build(&uas)
+            .map_err(|e| {
+                PluginError::Config(format!("Failed to compile WAF User-Agent automaton: {e}"))
+            })?;
+
+        Ok(Self {
+            pattern_ac: Arc::new(pattern_ac),
+            pattern_meta: Arc::new(meta),
+            ua_ac: Arc::new(ua_ac),
+            ua_names: Arc::new(ua_names),
+        })
+    }
+
+    /// Single-pass SIMD pattern matching across all configured signatures.
+    #[inline(always)]
+    pub fn check_patterns(&self, normalized_input: &str) -> Option<(&'static str, ThreatVector)> {
+        if let Some(m) = self.pattern_ac.find(normalized_input.as_bytes()) {
+            let (pat, vector) = self.pattern_meta[m.pattern().as_usize()];
+            Some((pat, vector))
+        } else {
+            None
+        }
+    }
+
+    /// Single-pass SIMD matching against known malicious scanner User-Agents.
+    #[inline(always)]
+    pub fn check_user_agent(&self, normalized_ua: &str) -> Option<&str> {
+        if let Some(m) = self.ua_ac.find(normalized_ua.as_bytes()) {
+            Some(&self.ua_names[m.pattern().as_usize()])
+        } else {
+            None
+        }
+    }
+}
+
+/// In-place byte decoding and ASCII lowercasing helper.
+#[inline(always)]
+fn decode_bytes_into(bytes: &[u8], out: &mut [u8]) -> usize {
+    let mut i = 0;
+    let mut o = 0;
+    while i < bytes.len() && o < out.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             let h1 = hex_val(bytes[i + 1]);
             let h2 = hex_val(bytes[i + 2]);
             if let (Some(v1), Some(v2)) = (h1, h2) {
                 let decoded_byte = (v1 << 4) | v2;
-                out.push(decoded_byte.to_ascii_lowercase());
+                out[o] = decoded_byte.to_ascii_lowercase();
                 i += 3;
+                o += 1;
                 continue;
             }
         }
-        out.push(bytes[i].to_ascii_lowercase());
+        out[o] = bytes[i].to_ascii_lowercase();
         i += 1;
+        o += 1;
+    }
+    o
+}
+
+/// Normalizes and decodes input with ZERO heap allocations for inputs <= 1024 bytes.
+///
+/// Fast-paths lowercase ASCII without `%` directly to avoid copying any bytes.
+#[inline]
+pub fn with_normalized<R>(input: &str, f: impl FnOnce(&str) -> R) -> R {
+    let bytes = input.as_bytes();
+    let mut needs_decode = false;
+    for &b in bytes {
+        if b == b'%' || b.is_ascii_uppercase() {
+            needs_decode = true;
+            break;
+        }
+    }
+    if !needs_decode {
+        return f(input);
     }
 
-    // Safety: we safely convert ASCII-lowercased lossy string to prevent UTF-8 panics
-    String::from_utf8_lossy(&out).into_owned()
+    if bytes.len() <= 1024 {
+        let mut stack_buf = [0u8; 1024];
+        let len = decode_bytes_into(bytes, &mut stack_buf);
+        let s = match std::str::from_utf8(&stack_buf[..len]) {
+            Ok(valid) => valid,
+            Err(_) => return f(&String::from_utf8_lossy(&stack_buf[..len])),
+        };
+        f(s)
+    } else {
+        let mut heap_buf = vec![0u8; bytes.len()];
+        let len = decode_bytes_into(bytes, &mut heap_buf);
+        let s = match std::str::from_utf8(&heap_buf[..len]) {
+            Ok(valid) => valid,
+            Err(_) => return f(&String::from_utf8_lossy(&heap_buf[..len])),
+        };
+        f(s)
+    }
+}
+
+/// Fast percent-decoding and ASCII lowercasing with anti-evasion protection.
+pub fn normalize_and_decode(input: &str) -> String {
+    with_normalized(input, |s| s.to_string())
 }
 
 #[inline(always)]

@@ -70,13 +70,19 @@ impl KeyState {
     }
 }
 
-/// Shard count for in-memory concurrent state striping.
+/// Shard count for in-memory concurrent state striping (power of 2).
 const NUM_SHARDS: usize = 64;
+
+/// Cache-line aligned shard container preventing false sharing across CPU cores.
+#[repr(align(64))]
+struct CacheAlignedShard {
+    lock: std::sync::Mutex<FxHashMap<u64, KeyState>>,
+    last_cleanup: AtomicU64,
+}
 
 /// Sharded in-memory table eliminating lock contention across worker threads.
 pub struct ShardedState {
-    shards: [std::sync::Mutex<FxHashMap<u64, KeyState>>; NUM_SHARDS],
-    last_cleanup: [AtomicU64; NUM_SHARDS],
+    shards: [CacheAlignedShard; NUM_SHARDS],
 }
 
 impl Default for ShardedState {
@@ -86,11 +92,13 @@ impl Default for ShardedState {
 }
 
 impl ShardedState {
-    /// Instantiates a new lock-striped state container with 64 independent shards.
+    /// Instantiates a new lock-striped state container with 64 independent, cache-aligned shards.
     pub fn new() -> Self {
         Self {
-            shards: std::array::from_fn(|_| std::sync::Mutex::new(FxHashMap::default())),
-            last_cleanup: std::array::from_fn(|_| AtomicU64::new(0)),
+            shards: std::array::from_fn(|_| CacheAlignedShard {
+                lock: std::sync::Mutex::new(FxHashMap::default()),
+                last_cleanup: AtomicU64::new(0),
+            }),
         }
     }
 
@@ -104,8 +112,9 @@ impl ShardedState {
         rate_per_second: u64,
         burst_capacity: u64,
     ) -> (bool, u64) {
-        let shard_idx = (key_hash as usize) % NUM_SHARDS;
-        let mut shard = self.shards[shard_idx].lock().unwrap();
+        let shard_idx = (key_hash as usize) & (NUM_SHARDS - 1);
+        let shard_entry = &self.shards[shard_idx];
+        let mut shard = shard_entry.lock.lock().unwrap();
 
         let now_instant = Instant::now();
         let now_sec = SystemTime::now()
@@ -114,10 +123,10 @@ impl ShardedState {
             .unwrap_or(0);
 
         // Perform periodic cleanup of stale keys (>60s inactivity) every 60s
-        let last_clean = self.last_cleanup[shard_idx].load(Ordering::Relaxed);
+        let last_clean = shard_entry.last_cleanup.load(Ordering::Relaxed);
         if now_sec.saturating_sub(last_clean) > 60 {
             shard.retain(|_, v| now_sec.saturating_sub(v.last_access_sec) < 60);
-            self.last_cleanup[shard_idx].store(now_sec, Ordering::Relaxed);
+            shard_entry.last_cleanup.store(now_sec, Ordering::Relaxed);
         }
 
         let entry = shard

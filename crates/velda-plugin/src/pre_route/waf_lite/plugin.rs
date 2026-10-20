@@ -11,10 +11,7 @@ use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::scanner::{
-    ThreatVector, check_patterns, check_user_agent, default_attack_signatures,
-    default_malicious_user_agents, normalize_and_decode,
-};
+use super::scanner::{ThreatVector, WafMatcher, with_normalized};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_route::PreRoutePlugin;
@@ -65,8 +62,7 @@ pub struct WafLitePlugin {
     pub scope: WafScope,
     pub custom_blocked_patterns: Vec<String>,
     pub custom_blocked_user_agents: Vec<String>,
-    signatures: Vec<(&'static str, ThreatVector)>,
-    builtin_user_agents: Vec<&'static str>,
+    pub matcher: WafMatcher,
     forbidden_response: L7Response,
 }
 
@@ -79,9 +75,6 @@ impl WafLitePlugin {
         custom_blocked_patterns: Vec<String>,
         custom_blocked_user_agents: Vec<String>,
     ) -> Self {
-        let signatures = default_attack_signatures();
-        let builtin_user_agents = default_malicious_user_agents();
-
         let forbidden_response = L7Response::from_bytes(
             StatusCode::FORBIDDEN,
             "{\"error\":\"Forbidden: Malicious payload detected\"}",
@@ -91,17 +84,20 @@ impl WafLitePlugin {
             HeaderValue::from_static("application/json"),
         );
 
-        let custom_patterns_lower = custom_blocked_patterns
+        let custom_patterns_lower: Vec<String> = custom_blocked_patterns
             .into_iter()
             .map(|p| p.trim().to_ascii_lowercase())
             .filter(|p| !p.is_empty())
             .collect();
 
-        let custom_ua_lower = custom_blocked_user_agents
+        let custom_ua_lower: Vec<String> = custom_blocked_user_agents
             .into_iter()
             .map(|ua| ua.trim().to_ascii_lowercase())
             .filter(|ua| !ua.is_empty())
             .collect();
+
+        let matcher = WafMatcher::new(&custom_patterns_lower, &custom_ua_lower)
+            .expect("Failed to initialize WafMatcher");
 
         Self {
             id: id.into(),
@@ -109,8 +105,7 @@ impl WafLitePlugin {
             scope,
             custom_blocked_patterns: custom_patterns_lower,
             custom_blocked_user_agents: custom_ua_lower,
-            signatures,
-            builtin_user_agents,
+            matcher,
             forbidden_response,
         }
     }
@@ -220,55 +215,43 @@ impl PreRoutePlugin for WafLitePlugin {
     }
 
     fn on_request(&self, req: &mut L7Request) -> Action {
-        // 1. Inspect URI Path
+        // 1. Inspect URI Path (zero-allocation + SIMD Aho-Corasick)
         if self.scope.check_path {
             let path = req.uri.path();
-            let norm_path = normalize_and_decode(path);
-            if let Some((_, vector)) =
-                check_patterns(&norm_path, &self.signatures, &self.custom_blocked_patterns)
-            {
+            let threat = with_normalized(path, |norm| self.matcher.check_patterns(norm));
+            if let Some((_, vector)) = threat {
                 return self.handle_threat(req, vector);
             }
         }
 
-        // 2. Inspect Query String
+        // 2. Inspect Query String (zero-allocation + SIMD Aho-Corasick)
         if self.scope.check_query
             && let Some(query) = req.uri.query()
         {
-            let norm_query = normalize_and_decode(query);
-            if let Some((_, vector)) =
-                check_patterns(&norm_query, &self.signatures, &self.custom_blocked_patterns)
-            {
+            let threat = with_normalized(query, |norm| self.matcher.check_patterns(norm));
+            if let Some((_, vector)) = threat {
                 return self.handle_threat(req, vector);
             }
         }
 
-        // 3. Inspect User-Agent Header
+        // 3. Inspect User-Agent Header (zero-allocation + SIMD Aho-Corasick)
         if self.scope.check_user_agent
             && let Some(ua) = req.headers.get(http::header::USER_AGENT)
             && let Ok(ua_str) = ua.to_str()
         {
-            let norm_ua = normalize_and_decode(ua_str);
-            if check_user_agent(
-                &norm_ua,
-                &self.builtin_user_agents,
-                &self.custom_blocked_user_agents,
-            )
-            .is_some()
-            {
+            let matched = with_normalized(ua_str, |norm| self.matcher.check_user_agent(norm));
+            if matched.is_some() {
                 return self.handle_threat(req, ThreatVector::MaliciousScanner);
             }
         }
 
-        // 4. Inspect Custom Configured Headers (e.g. referer, x-forwarded-host)
+        // 4. Inspect Custom Configured Headers (zero-allocation + SIMD Aho-Corasick)
         for hdr_name in &self.scope.check_headers {
             if let Some(val) = req.headers.get(hdr_name)
                 && let Ok(s) = val.to_str()
             {
-                let norm = normalize_and_decode(s);
-                if let Some((_, vector)) =
-                    check_patterns(&norm, &self.signatures, &self.custom_blocked_patterns)
-                {
+                let threat = with_normalized(s, |norm| self.matcher.check_patterns(norm));
+                if let Some((_, vector)) = threat {
                     return self.handle_threat(req, vector);
                 }
             }
