@@ -44,6 +44,8 @@ struct RawDelayConfig {
     range_ms: Option<[u64; 2]>,
     #[serde(default)]
     fixed_ms: Option<u64>,
+    #[serde(default)]
+    fixed_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +101,7 @@ impl HttpFaultInjectionPlugin {
         let delay_cfg = if let Some(d) = raw.delay {
             let (min_ms, max_ms) = if let Some([min, max]) = d.range_ms {
                 (min, max)
-            } else if let Some(fixed) = d.fixed_ms {
+            } else if let Some(fixed) = d.fixed_ms.or(d.fixed_delay_ms) {
                 (fixed, fixed)
             } else {
                 return Err(PluginError::Config(format!(

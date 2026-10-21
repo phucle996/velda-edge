@@ -20,6 +20,26 @@ use crate::runtime::router::build_router;
 use crate::runtime::tls::compile_tls_server;
 use crate::runtime::{Runtime, RuntimeConfig, SharedRuntime};
 
+static RELOAD_NOTIFIER: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::OnceLock::new();
+
+/// Returns a receiver subscribed to hot-reload revision updates.
+pub fn get_reload_receiver() -> tokio::sync::watch::Receiver<u64> {
+    RELOAD_NOTIFIER
+        .get_or_init(|| {
+            let (tx, _) = tokio::sync::watch::channel(0);
+            tx
+        })
+        .subscribe()
+}
+
+/// Broadcasts a newly applied runtime revision to background supervisors.
+pub fn notify_reload(revision: u64) {
+    if let Some(tx) = RELOAD_NOTIFIER.get() {
+        let _ = tx.send(revision);
+    }
+}
+
 /// Summary of a successfully applied hot reload operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReloadOutcome {
@@ -296,6 +316,7 @@ pub async fn apply_reload(
 
     // Lock-free atomic swap of active runtime snapshot
     shared_runtime.store(Arc::new(candidate));
+    notify_reload(new_revision);
 
     tracing::info!(
         revision = new_revision,

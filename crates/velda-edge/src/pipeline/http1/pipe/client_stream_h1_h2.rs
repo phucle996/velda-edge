@@ -232,23 +232,29 @@ where
         headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
     let mut status = parts.status;
+    let frozen_body = resp_body.freeze();
+    let initial_body = if plan.is_response_payload_passthrough() {
+        velda_core::Body::Empty
+    } else {
+        velda_core::Body::Bytes(frozen_body.clone())
+    };
+    let mut final_body = velda_core::Body::Bytes(frozen_body);
+
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
             status,
             http::Version::HTTP_11,
             std::mem::take(&mut headers),
-            velda_core::Body::Empty,
+            initial_body,
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
         status = l7_resp.status;
         headers = l7_resp.headers;
+        if !matches!(l7_resp.body, velda_core::Body::Empty) {
+            final_body = l7_resp.body;
+        }
     }
-    let server_resp = Http1ServerResponse::new(
-        status,
-        http::Version::HTTP_11,
-        headers,
-        velda_core::Body::Bytes(resp_body.freeze()),
-    );
+    let server_resp = Http1ServerResponse::new(status, http::Version::HTTP_11, headers, final_body);
     conn.send_response(&server_resp).await?;
 
     Ok(())

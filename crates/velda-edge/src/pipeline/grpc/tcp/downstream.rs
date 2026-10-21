@@ -170,33 +170,7 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
-    let Some(upstream_target) = rt.upstreams.grpc.get(&route.upstream_name) else {
-        tracing::error!(
-            listener = %meta.listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            "No healthy backend endpoints available for gRPC upstream"
-        );
-        let _ = server_stream
-            .respond
-            .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
-        return;
-    };
-
-    // Resource Saturation Circuit Breaker (Overload Protection)
-    let overload_lvl = rt.overload.level();
-    if overload_lvl.is_shedding() {
-        tracing::warn!(
-            route = %route.id,
-            upstream = %route.upstream_name,
-            overload = ?overload_lvl,
-            "Shedding gRPC TCP request due to memory saturation"
-        );
-        let _ = server_stream
-            .respond
-            .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
-        return;
-    }
+    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -244,7 +218,11 @@ async fn dispatch_grpc_tcp_request_stream(
             if short_circuit_resp.is_none()
                 && let Some(hooks) = &plan.pre_upstream_hooks
             {
-                let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+                let mut action = velda_plugin::run_pre_upstream_plugins(
+                    hooks,
+                    &mut l7_req,
+                    &mut target_upstream,
+                );
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
                     action = *and_then;
@@ -292,6 +270,34 @@ async fn dispatch_grpc_tcp_request_stream(
             }
             return;
         }
+    }
+
+    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream.as_ref()) else {
+        tracing::error!(
+            listener = %meta.listener_id,
+            route = %route.id,
+            upstream = %target_upstream,
+            "No healthy backend endpoints available for gRPC upstream"
+        );
+        let _ = server_stream
+            .respond
+            .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
+        return;
+    };
+
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %target_upstream,
+            overload = ?overload_lvl,
+            "Shedding gRPC TCP request due to memory saturation"
+        );
+        let _ = server_stream
+            .respond
+            .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
+        return;
     }
 
     let pipe_res = match upstream_target.as_ref() {

@@ -218,7 +218,64 @@ pub fn encode_zstd(data: &[u8], level: i32) -> std::io::Result<bytes::Bytes> {
     Ok(bytes::Bytes::from(compressed))
 }
 
+/// Compresses a buffer using Zstandard (RFC 8878) with an optional pre-trained dictionary at the specified level (1-22).
+pub fn encode_zstd_with_dict(
+    data: &[u8],
+    level: i32,
+    dict: Option<&[u8]>,
+) -> std::io::Result<bytes::Bytes> {
+    let level = level.clamp(1, 22);
+    match dict {
+        Some(d) if !d.is_empty() => {
+            let mut encoder = zstd::stream::Encoder::with_dictionary(
+                Vec::with_capacity(data.len() / 2 + 64),
+                level,
+                d,
+            )?;
+            encoder.write_all(data)?;
+            let result = encoder.finish()?;
+            Ok(bytes::Bytes::from(result))
+        }
+        _ => encode_zstd(data, level),
+    }
+}
+
+/// Decompresses a buffer using Zstandard (RFC 8878) with an optional pre-trained dictionary.
+pub fn decode_zstd_with_dict(data: &[u8], dict: Option<&[u8]>) -> std::io::Result<bytes::Bytes> {
+    match dict {
+        Some(d) if !d.is_empty() => {
+            use std::io::Read;
+            let mut decoder = zstd::stream::Decoder::with_dictionary(data, d)?;
+            let mut output = Vec::with_capacity(data.len() * 2);
+            decoder.read_to_end(&mut output)?;
+            Ok(bytes::Bytes::from(output))
+        }
+        _ => {
+            let decompressed = zstd::decode_all(data)?;
+            Ok(bytes::Bytes::from(decompressed))
+        }
+    }
+}
+
+/// Dispatches compression using the negotiated algorithm with optional Zstandard dictionary.
+pub fn compress_payload_with_dict(
+    data: &[u8],
+    algo: CompressionAlgorithm,
+    gzip_level: u32,
+    brotli_level: u32,
+    zstd_level: i32,
+    zstd_dict: Option<&[u8]>,
+) -> std::io::Result<bytes::Bytes> {
+    match algo {
+        CompressionAlgorithm::Zstd => encode_zstd_with_dict(data, zstd_level, zstd_dict),
+        CompressionAlgorithm::Brotli => encode_brotli(data, brotli_level),
+        CompressionAlgorithm::Gzip => encode_gzip(data, gzip_level),
+        CompressionAlgorithm::Deflate => encode_deflate(data, gzip_level),
+    }
+}
+
 /// Dispatches compression using the negotiated algorithm.
+#[inline(always)]
 pub fn compress_payload(
     data: &[u8],
     algo: CompressionAlgorithm,
@@ -226,12 +283,7 @@ pub fn compress_payload(
     brotli_level: u32,
     zstd_level: i32,
 ) -> std::io::Result<bytes::Bytes> {
-    match algo {
-        CompressionAlgorithm::Zstd => encode_zstd(data, zstd_level),
-        CompressionAlgorithm::Brotli => encode_brotli(data, brotli_level),
-        CompressionAlgorithm::Gzip => encode_gzip(data, gzip_level),
-        CompressionAlgorithm::Deflate => encode_deflate(data, gzip_level),
-    }
+    compress_payload_with_dict(data, algo, gzip_level, brotli_level, zstd_level, None)
 }
 
 #[cfg(test)]
@@ -367,5 +419,18 @@ mod tests {
 
         let decompressed = zstd::decode_all(&compressed[..]).expect("zstd decode");
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_roundtrip_zstd_with_dict() {
+        let dict = b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\",\"timestamp\":1700000000}";
+        let original = b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\",\"timestamp\":1700000000,\"data\":\"extra_fields_here\"}".repeat(10);
+
+        let compressed = encode_zstd_with_dict(&original, 1, Some(dict)).expect("zstd with dict");
+        assert!(compressed.len() < original.len());
+
+        let decompressed =
+            decode_zstd_with_dict(&compressed, Some(dict)).expect("zstd decode dict");
+        assert_eq!(decompressed, original[..]);
     }
 }

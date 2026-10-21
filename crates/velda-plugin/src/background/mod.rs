@@ -9,11 +9,12 @@
 //!   (`MetricsStore::snapshot`), guaranteeing zero write contention on Data Plane worker hot paths.
 
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::watch;
 
-use crate::error::PluginError;
-
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+use crate::error::PluginError;
 
 pub mod health_probe;
 pub mod prometheus;
@@ -28,9 +29,9 @@ pub trait BackgroundPlugin: Send + Sync {
 
     /// Runs the background service loop until shutdown is signaled.
     fn run(
-        self: Box<Self>,
+        self: Arc<Self>,
         shutdown: watch::Receiver<bool>,
-    ) -> impl Future<Output = Result<(), PluginError>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>>;
 
     /// Declares the reverse-permission capabilities (always default None for background services).
     #[inline(always)]
@@ -51,20 +52,50 @@ pub trait BackgroundPlugin: Send + Sync {
     }
 }
 
+/// Spawns all declared background auxiliary plugins onto isolated Tokio tasks.
+///
+/// Each task is configured with idle scheduling priority (`set_current_thread_idle_priority`)
+/// to guarantee zero CPU contention with traffic worker threads.
+pub fn spawn_background_plugins(
+    plugins: &[Arc<dyn BackgroundPlugin>],
+    shutdown: watch::Receiver<bool>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(plugins.len());
+    for plugin in plugins {
+        let p = Arc::clone(plugin);
+        let shutdown_rx = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            velda_core::set_current_thread_idle_priority();
+            let id = p.id().to_string();
+            tracing::info!(plugin_id = %id, "Background auxiliary plugin starting");
+            if let Err(e) = p.run(shutdown_rx).await {
+                tracing::error!(plugin_id = %id, error = %e, "Background auxiliary plugin exited with error");
+            } else {
+                tracing::info!(plugin_id = %id, "Background auxiliary plugin stopped cleanly");
+            }
+        });
+        handles.push(handle);
+    }
+    handles
+}
+
 /// Sub-dispatcher: instantiates background auxiliary plugin descriptors.
 ///
 /// # Open-Closed Principle (OCP)
 /// Background auxiliary services are instantiated on dedicated supervisory threads.
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
-) -> Result<crate::factory::LoadedPlugin, PluginError> {
+) -> Result<Arc<dyn BackgroundPlugin>, PluginError> {
     match config.id.as_str() {
-        "health_probe" => Ok(crate::factory::LoadedPlugin::Background {
-            id: config.id.clone(),
-        }),
-        "prometheus_exporter" => Ok(crate::factory::LoadedPlugin::Background {
-            id: config.id.clone(),
-        }),
+        "health_probe" => {
+            let probe = HealthProbePlugin::from_config(config)?;
+            probe.state.set_ready(true);
+            Ok(Arc::new(probe))
+        }
+        "prometheus_exporter" => {
+            let exporter = PrometheusExporter::from_config(config)?;
+            Ok(Arc::new(exporter))
+        }
         other => Err(PluginError::Config(format!(
             "Unsupported background plugin '{other}' for plugin '{}'",
             config.id

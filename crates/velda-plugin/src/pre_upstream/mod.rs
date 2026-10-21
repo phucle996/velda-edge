@@ -7,7 +7,7 @@
 //! - **Bounded Authority**: Returns [`Action::Continue`], [`Action::Respond`] (e.g. 429), or [`Action::Reject`].
 //! - **Target Context Available**: The router has already resolved the target upstream pool and endpoint.
 
-use std::sync::Arc;
+pub use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
@@ -43,7 +43,9 @@ pub use rate_limit::{
     FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
     RateLimitPlugin, TlsSource,
 };
-pub use request_mirror::{MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin};
+pub use request_mirror::{
+    MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin, get_mirror_sender, init_mirror_queue,
+};
 pub use request_termination::{RequestTerminationConfig, RequestTerminationPlugin};
 pub use url_rewrite::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
@@ -56,7 +58,10 @@ pub trait PreUpstreamPlugin: Send + Sync {
     fn id(&self) -> &str;
 
     /// Evaluated on routed request before sending to upstream backend.
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action;
+    ///
+    /// Allows mutating the request, short-circuiting, or dynamically re-routing to an
+    /// alternate target upstream (e.g. Canary traffic splitting) by mutating `target_upstream`.
+    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut Arc<str>) -> Action;
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -78,13 +83,14 @@ pub trait PreUpstreamPlugin: Send + Sync {
 pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
     req: &mut L7Request,
+    target_upstream: &mut Arc<str>,
 ) -> Action {
     for (idx, plugin) in chain.iter().enumerate() {
-        match plugin.on_upstream_request(req) {
+        match plugin.on_upstream_request(req, target_upstream) {
             Action::Continue => continue,
             Action::Delay { duration, and_then } => {
                 if and_then.is_continue() {
-                    let next = run_pre_upstream_plugins(&chain[idx + 1..], req);
+                    let next = run_pre_upstream_plugins(&chain[idx + 1..], req, target_upstream);
                     return Action::delay(duration, next);
                 } else {
                     return Action::Delay { duration, and_then };
@@ -159,7 +165,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = run_pre_upstream_plugins(&chain, &mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-internal-secret"));
         assert_eq!(
@@ -181,7 +188,8 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let action1 = run_pre_upstream_plugins(&chain, &mut req1);
+        let mut target1 = Arc::from("default-upstream");
+        let action1 = run_pre_upstream_plugins(&chain, &mut req1, &mut target1);
         assert!(matches!(action1, Action::Continue));
 
         let mut req2 = L7Request::new(
@@ -191,7 +199,8 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let action2 = run_pre_upstream_plugins(&chain, &mut req2);
+        let mut target2 = Arc::from("default-upstream");
+        let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
         match action2 {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
@@ -228,7 +237,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = run_pre_upstream_plugins(&chain, &mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/customers/100");
         assert_eq!(req.uri.query(), Some("tab=overview&cluster=primary"));
@@ -265,7 +275,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = run_pre_upstream_plugins(&chain, &mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);

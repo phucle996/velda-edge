@@ -28,7 +28,24 @@ use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
+use std::sync::RwLock;
+
 static MIRROR_COUNTER: AtomicU64 = AtomicU64::new(0);
+static MIRROR_SENDER: RwLock<Option<mpsc::Sender<MirroredRequest>>> = RwLock::new(None);
+
+/// Initializes the global non-blocking dispatch queue for request mirroring and returns the receiver.
+pub fn init_mirror_queue(capacity: usize) -> mpsc::Receiver<MirroredRequest> {
+    let (tx, rx) = mpsc::channel(capacity);
+    if let Ok(mut lock) = MIRROR_SENDER.write() {
+        *lock = Some(tx);
+    }
+    rx
+}
+
+/// Returns a clone of the active global non-blocking queue sender.
+pub fn get_mirror_sender() -> Option<mpsc::Sender<MirroredRequest>> {
+    MIRROR_SENDER.read().ok().and_then(|lock| lock.clone())
+}
 
 const MIRROR_HEADER_NAME: HeaderName = HeaderName::from_static("x-velda-mirror");
 const MIRROR_HEADER_VALUE: HeaderValue = HeaderValue::from_static("true");
@@ -166,7 +183,7 @@ impl RequestMirrorPlugin {
             .map(|c| c as usize)
             .unwrap_or(65536);
 
-        Self::new(
+        let mut plugin = Self::new(
             &config.id,
             RequestMirrorConfig {
                 mirror_upstream,
@@ -175,7 +192,13 @@ impl RequestMirrorPlugin {
                 ignore_methods,
                 queue_capacity,
             },
-        )
+        )?;
+
+        if let Some(sender) = get_mirror_sender() {
+            plugin.sender = Some(sender);
+        }
+
+        Ok(plugin)
     }
 
     /// Total number of requests successfully enqueued for mirroring.
@@ -221,7 +244,7 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         if self.should_mirror(req) {
             // 1. Prepare shadow headers with hardcoded mandatory X-Velda-Mirror: true
             let mut shadow_headers = req.headers.clone();
@@ -246,7 +269,8 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
             };
 
             // 3. Non-blocking queue dispatch (zero client latency impact)
-            if let Some(ref sender) = self.sender {
+            let sender = self.sender.as_ref().cloned().or_else(get_mirror_sender);
+            if let Some(ref sender) = sender {
                 match sender.try_send(shadow) {
                     Ok(_) => {
                         self.mirrored_count.fetch_add(1, Ordering::Relaxed);
@@ -256,7 +280,22 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
                     }
                 }
             } else {
-                self.mirrored_count.fetch_add(1, Ordering::Relaxed);
+                let target = shadow.target_upstream.clone();
+                let task = Box::pin(async move {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(1000),
+                        dispatch_mirror_request(target, shadow),
+                    )
+                    .await;
+                });
+                match crate::hook::try_dispatch_shadow(task) {
+                    Ok(_) => {
+                        self.mirrored_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }
 
@@ -271,6 +310,48 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
         SupportedProtocols::ALL_L7
+    }
+}
+
+/// Dispatches a replicated HTTP/1.1 request directly to the target mirror endpoint.
+///
+/// Discards responses and swallows errors to ensure 100% failure isolation from primary traffic.
+async fn dispatch_mirror_request(target: String, req: MirroredRequest) {
+    let connect_addr = if target.contains(':') {
+        target.clone()
+    } else {
+        format!("{target}:80")
+    };
+
+    if let Ok(mut stream) = tokio::net::TcpStream::connect(&connect_addr).await {
+        let mut buf = bytes::BytesMut::with_capacity(512 + req.body.len());
+        use std::fmt::Write as _;
+        let path = req
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        let _ = write!(buf, "{} {} HTTP/1.1\r\n", req.method, path);
+        for (k, v) in &req.headers {
+            if k == http::header::CONNECTION {
+                continue;
+            }
+            buf.extend_from_slice(k.as_str().as_bytes());
+            buf.extend_from_slice(b": ");
+            buf.extend_from_slice(v.as_bytes());
+            buf.extend_from_slice(b"\r\n");
+        }
+        if !req.headers.contains_key(http::header::CONTENT_LENGTH) && !req.body.is_empty() {
+            let _ = write!(buf, "content-length: {}\r\n", req.body.len());
+        }
+        buf.extend_from_slice(b"connection: close\r\n\r\n");
+        if !req.body.is_empty() {
+            buf.extend_from_slice(&req.body);
+        }
+        use tokio::io::AsyncWriteExt;
+        if stream.write_all(&buf).await.is_ok() {
+            let _ = stream.flush().await;
+        }
     }
 }
 
@@ -310,7 +391,8 @@ mod tests {
             Bytes::from_static(b"{\"item\":\"book\"}"),
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("primary-backend");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
 
         let mirrored = rx.try_recv().expect("must receive mirrored request");
@@ -342,12 +424,14 @@ mod tests {
         let plugin = RequestMirrorPlugin::with_sender("mirror-ignore", config, tx).unwrap();
 
         let mut req_del = build_test_request(Method::DELETE, HeaderMap::new(), Bytes::new());
-        plugin.on_upstream_request(&mut req_del);
+        let mut target_del = Arc::from("primary-backend");
+        plugin.on_upstream_request(&mut req_del, &mut target_del);
 
         assert!(rx.try_recv().is_err(), "DELETE must be ignored");
 
         let mut req_post = build_test_request(Method::POST, HeaderMap::new(), Bytes::new());
-        plugin.on_upstream_request(&mut req_post);
+        let mut target_post = Arc::from("primary-backend");
+        plugin.on_upstream_request(&mut req_post, &mut target_post);
 
         assert!(rx.try_recv().is_ok(), "POST must be mirrored");
     }
@@ -367,10 +451,12 @@ mod tests {
         let plugin = RequestMirrorPlugin::with_sender("mirror-drop", config, tx).unwrap();
 
         let mut req1 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
-        plugin.on_upstream_request(&mut req1); // fills buffer (1/1)
+        let mut target1 = Arc::from("primary-backend");
+        plugin.on_upstream_request(&mut req1, &mut target1); // fills buffer (1/1)
 
         let mut req2 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
-        let action = plugin.on_upstream_request(&mut req2); // buffer full -> dropped!
+        let mut target2 = Arc::from("primary-backend");
+        let action = plugin.on_upstream_request(&mut req2, &mut target2); // buffer full -> dropped!
 
         // Primary request is unaffected (Continue)
         assert!(matches!(action, Action::Continue));
@@ -399,5 +485,33 @@ mod tests {
         assert_eq!(plugin.config.sample_percent, 50);
         assert_eq!(plugin.config.replace_host, Some("mock.local".into()));
         assert_eq!(plugin.config.ignore_methods, vec!["DELETE"]);
+    }
+
+    #[test]
+    fn test_request_mirror_dynamic_global_sender() {
+        let config = RequestMirrorConfig {
+            mirror_upstream: "staging".into(),
+            sample_percent: 100,
+            replace_host: None,
+            ignore_methods: Vec::new(),
+            queue_capacity: 10,
+        };
+
+        // Plugin instantiated without sender (sender == None)
+        let plugin = RequestMirrorPlugin::new("mirror-dynamic", config).unwrap();
+        assert!(plugin.sender.is_none());
+
+        // Later in lifecycle, global mirror queue is initialized
+        let mut rx = init_mirror_queue(10);
+
+        let mut req = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
+        let mut target = Arc::from("prod-backend");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
+
+        assert!(matches!(action, Action::Continue));
+        let shadow = rx
+            .try_recv()
+            .expect("Should receive dynamically dispatched mirror request");
+        assert_eq!(shadow.target_upstream, "staging");
     }
 }

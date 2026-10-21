@@ -19,6 +19,7 @@
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -92,6 +93,79 @@ impl UrlRewritePlugin {
 
     /// Instantiates plugin from compiled configuration.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
+        if let Some(mode) = config
+            .config
+            .get("path_rewrite_mode")
+            .and_then(|v| v.as_str())
+        {
+            let path_match = config
+                .config
+                .get("path_match")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path_replacement = config
+                .config
+                .get("path_replacement")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path_strat = match mode {
+                "prefix" => {
+                    if path_replacement.is_empty() {
+                        Some(PathRewriteStrategy::StripPrefix {
+                            prefix: path_match.to_string(),
+                        })
+                    } else {
+                        Some(PathRewriteStrategy::ReplacePrefix {
+                            prefix: path_match.to_string(),
+                            replacement: path_replacement.to_string(),
+                        })
+                    }
+                }
+                "regex" => Some(PathRewriteStrategy::Regex {
+                    pattern: path_match.to_string(),
+                    replacement: path_replacement.to_string(),
+                }),
+                "exact" => Some(PathRewriteStrategy::Exact {
+                    path: path_match.to_string(),
+                    replacement: path_replacement.to_string(),
+                }),
+                _ => None,
+            };
+
+            let q_mode = config
+                .config
+                .get("query_rewrite_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("keep");
+            let q_replacement = config
+                .config
+                .get("query_replacement")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let query_strat = match q_mode {
+                "strip" | "drop" => QueryStrategy::Drop,
+                "append" | "replace" => QueryStrategy::Append {
+                    query: q_replacement.to_string(),
+                },
+                _ => QueryStrategy::Keep,
+            };
+
+            let sanitize_path = config
+                .config
+                .get("sanitize_path")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            return Self::new(
+                config.id.clone(),
+                UrlRewriteConfig {
+                    path: path_strat,
+                    query: query_strat,
+                    sanitize_path,
+                },
+            );
+        }
+
         let conf: UrlRewriteConfig = serde_json::from_value(config.config.clone())
             .map_err(|e| PluginError::Config(format!("Invalid url_rewrite config: {e}")))?;
         Self::new(config.id.clone(), conf)
@@ -104,7 +178,7 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         let current_path = req.uri.path();
         let current_query = req.uri.query();
 
@@ -203,7 +277,8 @@ mod tests {
         .unwrap();
 
         let mut req = make_test_request("/api/v1/orders/10?type=fast");
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/orders/10");
         assert_eq!(req.uri.query(), Some("type=fast&source=edge"));
@@ -224,7 +299,8 @@ mod tests {
         .unwrap();
 
         let mut req = make_test_request("/api/v1/../../etc/shadow");
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::BAD_REQUEST);

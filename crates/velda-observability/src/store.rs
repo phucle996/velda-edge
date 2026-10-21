@@ -186,3 +186,20 @@ impl MetricsStore {
         }
     }
 }
+
+static GLOBAL_METRICS: std::sync::OnceLock<std::sync::Arc<MetricsStore>> =
+    std::sync::OnceLock::new();
+
+/// Returns the globally shared in-memory metrics store.
+pub fn global_metrics() -> std::sync::Arc<MetricsStore> {
+    GLOBAL_METRICS
+        .get_or_init(|| std::sync::Arc::new(MetricsStore::new()))
+        .clone()
+}
+
+/// Initializes the globally shared in-memory metrics store during cold-start bootstrap.
+pub fn init_global_metrics(
+    metrics: std::sync::Arc<MetricsStore>,
+) -> Result<(), std::sync::Arc<MetricsStore>> {
+    GLOBAL_METRICS.set(metrics)
+}

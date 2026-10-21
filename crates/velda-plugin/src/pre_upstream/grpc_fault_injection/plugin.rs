@@ -8,6 +8,7 @@
 //! - **Reverse Capability**: Declares `header: Read, payload: None`, guaranteeing Zero-Copy
 //!   direct streaming for unaffected RPC calls.
 
+use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -58,7 +59,7 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
     /// 3. Evaluates delay criteria.
     /// 4. Evaluates abort criteria.
     /// 5. Composes non-blocking [`Action`] (Delay first, then Abort or Continue).
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         // Step 1: Scope filter
         if !self.condition.matches(req) {
             return Action::Continue;
@@ -127,7 +128,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }
 
@@ -146,7 +148,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::OK);
@@ -181,7 +184,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
                 assert_eq!(duration, Duration::from_millis(250));
@@ -228,7 +232,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
                 assert_eq!(duration, Duration::from_millis(350));

@@ -9,6 +9,7 @@
 //! - Appending values to existing headers (e.g. `X-Forwarded-For`).
 
 use http::header::{HeaderName, HeaderValue};
+use std::sync::Arc;
 use velda_core::{Action, L7Request};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -103,7 +104,11 @@ impl HeaderMutationPlugin {
 
         // 2. remove list
         let mut remove = Vec::new();
-        if let Some(rem_arr) = raw.get("remove").and_then(|v| v.as_array()) {
+        if let Some(rem_arr) = raw
+            .get("remove")
+            .or_else(|| raw.get("remove_headers"))
+            .and_then(|v| v.as_array())
+        {
             for item in rem_arr {
                 if let Some(s) = item.as_str() {
                     let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
@@ -135,7 +140,11 @@ impl HeaderMutationPlugin {
 
         // 4. set map
         let mut set = Vec::new();
-        if let Some(set_obj) = raw.get("set").and_then(|v| v.as_object()) {
+        if let Some(set_obj) = raw
+            .get("set")
+            .or_else(|| raw.get("set_headers"))
+            .and_then(|v| v.as_object())
+        {
             for (k, v) in set_obj {
                 let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
                     PluginError::Config(format!("Invalid set header name '{k}': {e}"))
@@ -150,7 +159,11 @@ impl HeaderMutationPlugin {
 
         // 5. append map
         let mut append = Vec::new();
-        if let Some(append_obj) = raw.get("append").and_then(|v| v.as_object()) {
+        if let Some(append_obj) = raw
+            .get("append")
+            .or_else(|| raw.get("append_headers"))
+            .and_then(|v| v.as_object())
+        {
             for (k, v) in append_obj {
                 let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
                     PluginError::Config(format!("Invalid append header name '{k}': {e}"))
@@ -182,7 +195,7 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         // Step 1: Strip RFC Hop-by-hop headers if configured
         if self.config.strip_hop_by_hop {
             strip_hop_by_hop_headers(&mut req.headers);
@@ -263,7 +276,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));
         assert_eq!(req.headers.get("x-custom-gateway").unwrap(), "velda");
@@ -296,7 +310,8 @@ mod tests {
             Body::Empty,
         );
 
-        plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        plugin.on_upstream_request(&mut req, &mut target);
         assert!(!req.headers.contains_key("x-legacy-token"));
         assert_eq!(
             req.headers.get("authorization").unwrap(),
@@ -353,7 +368,8 @@ mod tests {
             Body::Empty,
         );
 
-        plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        plugin.on_upstream_request(&mut req, &mut target);
 
         assert_eq!(req.headers.get("x-client-ip").unwrap(), "192.0.2.1");
         assert_eq!(req.headers.get("x-method").unwrap(), "PUT");

@@ -14,14 +14,22 @@ pub mod capability;
 pub mod error;
 pub mod factory;
 pub mod header;
+pub mod hook;
 pub mod http_cache;
 pub mod plan;
 pub mod post_response;
 pub mod pre_route;
 pub mod pre_upstream;
 
+pub use hook::{
+    ShadowTask, has_shadow_hook, set_core_shadow_sender, set_global_shadow_sender,
+    try_dispatch_shadow,
+};
+
 pub use background::prometheus::{PrometheusExporter, format_snapshot};
-pub use background::{BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState};
+pub use background::{
+    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, spawn_background_plugins,
+};
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
@@ -49,5 +57,6 @@ pub use pre_upstream::{
     HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm, JwtAuthPlugin, KeySource,
     MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, RateLimitPlugin,
     RequestMirrorConfig, RequestMirrorPlugin, RequestTerminationConfig, RequestTerminationPlugin,
-    TokenSource, UrlRewriteConfig, UrlRewritePlugin, run_pre_upstream_plugins,
+    TokenSource, UrlRewriteConfig, UrlRewritePlugin, get_mirror_sender, init_mirror_queue,
+    run_pre_upstream_plugins,
 };

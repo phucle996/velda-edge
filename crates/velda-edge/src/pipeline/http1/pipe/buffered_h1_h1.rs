@@ -174,14 +174,6 @@ where
     }
 
     // 6. Validate that upstream does not violate buffered mode invariant
-    if resp_framing == Http1BodyFraming::Chunked {
-        upstream_lease.mark_closed();
-        return Err(Http1Error::StreamingViolation(
-            "Upstream returned chunked transfer-encoding, but server streaming is disabled on this listener"
-                .into(),
-        ));
-    }
-
     if let Some(content_type) = resp_head.headers.get(http::header::CONTENT_TYPE)
         && content_type
             .as_bytes()
@@ -201,8 +193,8 @@ where
         || resp_head.status == http::StatusCode::NO_CONTENT
         || resp_head.status == http::StatusCode::NOT_MODIFIED;
 
-    let body_len = match resp_framing {
-        Http1BodyFraming::Empty => 0,
+    let (body_len, decoded_chunk_bytes) = match resp_framing {
+        Http1BodyFraming::Empty => (0, None),
         Http1BodyFraming::ContentLength(len) => {
             if len > cfg.max_body_size {
                 upstream_lease.mark_closed();
@@ -221,9 +213,34 @@ where
                     }
                 }
             }
-            len
+            (len, None)
         }
-        Http1BodyFraming::Chunked => unreachable!(),
+        Http1BodyFraming::Chunked => {
+            resp_head.headers.remove(http::header::TRANSFER_ENCODING);
+            loop {
+                match velda_http1::wire::parse_chunked_body(
+                    &conn.upstream_read_buf,
+                    cfg.max_body_size,
+                )? {
+                    Some((_consumed, body)) => {
+                        let bytes = match body {
+                            velda_core::Body::Bytes(b) => b,
+                            velda_core::Body::Empty => bytes::Bytes::new(),
+                        };
+                        break (bytes.len(), Some(bytes));
+                    }
+                    None => {
+                        let n = upstream_lease.read_buf(&mut conn.upstream_read_buf).await?;
+                        if n == 0 {
+                            upstream_lease.mark_closed();
+                            return Err(Http1Error::Parse(
+                                "Unexpected EOF while reading upstream chunked response body: premature connection close".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     };
 
     // 8. Align response version with downstream request
@@ -232,20 +249,50 @@ where
     }
 
     // Execute post-response plugins if attached to this route (0 overhead if None)
-    if let Some(post_hooks) = &plan.post_response_hooks {
+    let transformed_body: Option<bytes::Bytes> = if let Some(post_hooks) = &plan.post_response_hooks
+    {
+        // Enforce Payload Plugin Invariant:
+        // If route has response plugins requiring payload access (e.g. http_cache_store, response_compression),
+        // supply genuine payload slice; otherwise pass Body::Empty for 100% Zero-Copy fast-path.
+        let initial_body = if plan.is_response_payload_passthrough()
+            || is_head
+            || is_no_body_status
+            || body_len == 0
+        {
+            velda_core::Body::Empty
+        } else if let Some(b) = &decoded_chunk_bytes {
+            velda_core::Body::Bytes(b.clone())
+        } else {
+            velda_core::Body::Bytes(bytes::Bytes::copy_from_slice(
+                &conn.upstream_read_buf[..body_len],
+            ))
+        };
+
         let mut l7_resp = velda_core::L7Response::new(
             resp_head.status,
             resp_head.version,
             std::mem::take(&mut resp_head.headers),
-            velda_core::Body::Empty,
+            initial_body,
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         resp_head.status = l7_resp.status;
         resp_head.headers = l7_resp.headers;
-    }
+        match l7_resp.body {
+            velda_core::Body::Bytes(b) => Some(b),
+            velda_core::Body::Empty => None,
+        }
+    } else {
+        None
+    };
 
     let is_no_body = is_head || is_no_body_status;
-    let actual_body_len = if is_no_body { 0 } else { body_len };
+    let actual_body_len = if is_no_body {
+        0
+    } else if let Some(b) = &transformed_body {
+        b.len()
+    } else {
+        body_len
+    };
     let force_close = conn.is_closed() || is_connection_close(&resp_head.headers);
 
     // 9. Encode response head into downstream write_buf with authoritative request ID invariant
@@ -263,11 +310,16 @@ where
     drop(upstream_lease);
 
     // 11. Zero-Copy Vectored Write downstream (writev)
-    // Directly transmits headers (conn.write_buf) and body (conn.upstream_read_buf) without
+    // Directly transmits headers (conn.write_buf) and body without
     // any intermediate memcpy or buffer reallocation on the hot path.
-    if !is_no_body && body_len > 0 {
-        let mut b1 = &conn.write_buf[..];
-        let mut b2 = &conn.upstream_read_buf[..body_len];
+    if !is_no_body && actual_body_len > 0 {
+        let (mut b1, mut b2) = if let Some(b) = &transformed_body {
+            (&conn.write_buf[..], &b[..])
+        } else if let Some(b) = &decoded_chunk_bytes {
+            (&conn.write_buf[..], &b[..])
+        } else {
+            (&conn.write_buf[..], &conn.upstream_read_buf[..body_len])
+        };
         while !b1.is_empty() || !b2.is_empty() {
             let bufs = [std::io::IoSlice::new(b1), std::io::IoSlice::new(b2)];
             let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };

@@ -282,6 +282,8 @@ pub async fn run_http2_loop<IO>(
 
                     let plan = rt.plugins.get_plan(route.id).clone();
                     let meta_clone = Arc::clone(&meta);
+                    let upstreams_table = Arc::new(rt.upstreams.http.clone());
+                    let default_upstream_name: Arc<str> = Arc::from(route.upstream_name.as_str());
                     tokio::spawn(async move {
                         serve_http2_stream(
                             req_head,
@@ -290,6 +292,8 @@ pub async fn run_http2_loop<IO>(
                             meta_clone,
                             config,
                             upstream_target,
+                            default_upstream_name,
+                            upstreams_table,
                             plan,
                         )
                         .await;
@@ -330,15 +334,20 @@ pub async fn run_http2_loop<IO>(
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
+#[allow(clippy::too_many_arguments)]
 async fn serve_http2_stream(
     mut req_head: Http2ServerRequestHead,
     receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
-    upstream_target: Arc<HttpUpstream>,
+    default_upstream: Arc<HttpUpstream>,
+    default_upstream_name: Arc<str>,
+    http_upstreams: Arc<crate::upstream::SubUpstreamTable<HttpUpstream>>,
     plan: Arc<RoutePluginPlan>,
 ) {
+    let mut target_upstream: Arc<str> = Arc::clone(&default_upstream_name);
+
     if !plan.is_empty() {
         let mut short_circuit_resp = None;
 
@@ -385,7 +394,11 @@ async fn serve_http2_stream(
             if short_circuit_resp.is_none()
                 && let Some(hooks) = &plan.pre_upstream_hooks
             {
-                let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+                let mut action = velda_plugin::run_pre_upstream_plugins(
+                    hooks,
+                    &mut l7_req,
+                    &mut target_upstream,
+                );
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
                     action = *and_then;
@@ -432,8 +445,51 @@ async fn serve_http2_stream(
         }
     }
 
+    let upstream_target = if target_upstream.as_ref() == default_upstream_name.as_ref() {
+        default_upstream
+    } else if let Some(target) = http_upstreams.get(target_upstream.as_ref()) {
+        target.clone()
+    } else {
+        tracing::error!(
+            listener = %meta.listener_id,
+            upstream = %target_upstream,
+            "No HTTP upstream configured"
+        );
+        let resp = L7Response::from_bytes(
+            StatusCode::SERVICE_UNAVAILABLE,
+            b"503 Service Unavailable: upstream not configured\n".to_vec(),
+        )
+        .with_header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        let mut responder = responder;
+        if !receiver.is_end_stream() {
+            let _ = responder.send_response_and_cancel_upload(&resp);
+        } else {
+            let _ = responder.send_response(&resp);
+        }
+        return;
+    };
+
+    let is_chunked = !receiver.is_end_stream()
+        && (req_head.headers.get(http::header::CONTENT_LENGTH).is_none()
+            || req_head
+                .headers
+                .get(http::header::TRANSFER_ENCODING)
+                .is_some_and(|te| {
+                    te.as_bytes()
+                        .windows(b"chunked".len())
+                        .any(|w| w.eq_ignore_ascii_case(b"chunked"))
+                }));
+    let is_sse = req_head.headers.get(http::header::ACCEPT).is_some_and(|a| {
+        a.as_bytes()
+            .windows(b"text/event-stream".len())
+            .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
+    });
+
     match upstream_target.as_ref() {
-        HttpUpstream::Http2(upstream) => match upstream.strategy {
+        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http2PipeStrategy::Buffered => {
                 pipe::buffered_h2_h2::serve(
                     req_head, receiver, responder, meta, config, upstream, &plan,
@@ -459,7 +515,7 @@ async fn serve_http2_stream(
                 .await;
             }
         },
-        HttpUpstream::Http1(upstream) => match upstream.strategy {
+        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http1PipeStrategy::Buffered => {
                 pipe::buffered_h2_h1::serve(req_head, receiver, responder, meta, upstream, &plan)
                     .await;
@@ -481,7 +537,7 @@ async fn serve_http2_stream(
                     .await;
             }
         },
-        HttpUpstream::Http3(upstream) => match upstream.strategy {
+        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http3PipeStrategy::Buffered => {
                 pipe::buffered_h2_h3::serve(req_head, receiver, responder, meta, upstream, &plan)
                     .await;
@@ -603,5 +659,24 @@ mod tests {
         let _ = pipe::server_stream_h2_h3::serve;
         let _ = pipe::client_stream_h2_h3::serve;
         let _ = pipe::duplex_h2_h3::serve;
+    }
+
+    #[test]
+    fn test_h2_canary_target_missing_resolution() {
+        use rustc_hash::FxHashMap;
+        let default_upstream_name: Arc<str> = Arc::from("main_upstream");
+        let target_upstream: Arc<str> = Arc::from("canary_v2_upstream");
+
+        let http_upstreams: FxHashMap<String, Arc<HttpUpstream>> = FxHashMap::default();
+
+        let resolved = if target_upstream.as_ref() == default_upstream_name.as_ref() {
+            Some("default")
+        } else if http_upstreams.contains_key(target_upstream.as_ref()) {
+            Some("target")
+        } else {
+            None // Must reject with 503, never fallback to default!
+        };
+
+        assert!(resolved.is_none());
     }
 }

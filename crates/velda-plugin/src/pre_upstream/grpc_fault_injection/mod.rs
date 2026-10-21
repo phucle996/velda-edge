@@ -43,6 +43,8 @@ struct RawDelayConfig {
     range_ms: Option<[u64; 2]>,
     #[serde(default)]
     fixed_ms: Option<u64>,
+    #[serde(default)]
+    fixed_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,8 @@ struct RawAbortConfig {
     grpc_status: u32,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    grpc_message: Option<String>,
 }
 
 fn default_abort_status() -> u32 {
@@ -100,7 +104,7 @@ impl GrpcFaultInjectionPlugin {
         let delay_cfg = if let Some(d) = raw.delay {
             let (min_ms, max_ms) = if let Some([min, max]) = d.range_ms {
                 (min, max)
-            } else if let Some(fixed) = d.fixed_ms {
+            } else if let Some(fixed) = d.fixed_ms.or(d.fixed_delay_ms) {
                 (fixed, fixed)
             } else {
                 return Err(PluginError::Config(format!(
@@ -120,8 +124,9 @@ impl GrpcFaultInjectionPlugin {
 
         // 2. Compile Abort configuration
         let abort_cfg = if let Some(a) = raw.abort {
+            let msg = a.message.or(a.grpc_message);
             Some(
-                GrpcAbortConfig::new(a.percentage, a.grpc_status, a.message).map_err(|e| {
+                GrpcAbortConfig::new(a.percentage, a.grpc_status, msg).map_err(|e| {
                     PluginError::Config(format!("Plugin '{}': abort error: {e}", config.id))
                 })?,
             )

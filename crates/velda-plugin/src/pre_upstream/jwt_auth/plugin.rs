@@ -10,6 +10,7 @@
 //!   consumption by subsequent plugins (e.g., user-scoped `rate_limit`) and backend upstreams.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
@@ -279,7 +280,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         let token_str = match self.extract_token(req) {
             Some(t) => t,
             None => {
@@ -418,7 +419,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
@@ -467,7 +469,8 @@ mod tests {
         );
 
         // First invocation: Cache Miss -> Cryptographic verification -> Cache Populate
-        let action1 = plugin.on_upstream_request(&mut req);
+        let mut target1 = Arc::from("default-upstream");
+        let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(matches!(action1, Action::Continue));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "user_123");
         assert_eq!(req.headers.get("x-user-roles").unwrap(), "admin, billing");
@@ -484,7 +487,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action2 = plugin.on_upstream_request(&mut req2);
+        let mut target2 = Arc::from("default-upstream");
+        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         assert!(matches!(action2, Action::Continue));
         assert_eq!(req2.headers.get("x-user-id").unwrap(), "user_123");
         assert_eq!(req2.headers.get("x-user-roles").unwrap(), "admin, billing");
@@ -519,11 +523,13 @@ mod tests {
         );
 
         // First attempt: validation fails and gets added to negative cache
-        let action1 = plugin.on_upstream_request(&mut req);
+        let mut target1 = Arc::from("default-upstream");
+        let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(matches!(action1, Action::Respond(_)));
 
         // Second attempt: hits negative cache immediately
-        let action2 = plugin.on_upstream_request(&mut req);
+        let mut target2 = Arc::from("default-upstream");
+        let action2 = plugin.on_upstream_request(&mut req, &mut target2);
         match action2 {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
@@ -564,7 +570,8 @@ mod tests {
             headers,
             Body::Empty,
         );
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "cookie_user");
 
@@ -579,7 +586,8 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let action_query = plugin.on_upstream_request(&mut req_query);
+        let mut target_q = Arc::from("default-upstream");
+        let action_query = plugin.on_upstream_request(&mut req_query, &mut target_q);
         assert!(matches!(action_query, Action::Continue));
         assert_eq!(req_query.headers.get("x-user-id").unwrap(), "cookie_user");
     }
@@ -612,7 +620,8 @@ mod tests {
         );
 
         // Must reject cleanly with 401 without panicking!
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);

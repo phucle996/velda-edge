@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, RouteId, StreamingMode};
-use velda_plugin::{RoutePluginPlan, build_route_plugin_plan, instantiate_plugin};
+use velda_plugin::{LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin};
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
@@ -20,6 +20,8 @@ use crate::error::EdgeError;
 pub struct PluginTable {
     /// O(1) integer lookup table: RouteId -> RoutePluginPlan.
     pub routes: FxHashMap<RouteId, Arc<RoutePluginPlan>>,
+    /// Active background auxiliary plugins running on supervisory threads.
+    pub background_plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>>,
     /// Canonical empty plan singleton used for routes without any declared plugins.
     pub empty_plan: Arc<RoutePluginPlan>,
 }
@@ -28,6 +30,7 @@ impl std::fmt::Debug for PluginTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PluginTable")
             .field("routes_count", &self.routes.len())
+            .field("background_plugins_count", &self.background_plugins.len())
             .finish()
     }
 }
@@ -37,6 +40,7 @@ impl PluginTable {
     pub fn empty() -> Self {
         Self {
             routes: FxHashMap::default(),
+            background_plugins: Vec::new(),
             empty_plan: Arc::new(RoutePluginPlan::default()),
         }
     }
@@ -64,18 +68,38 @@ pub fn build_plugin_table(
 ) -> Result<PluginTable, EdgeError> {
     // 1. Instantiate all available plugins into typed LoadedPlugin instances
     let mut available_plugins = FxHashMap::default();
+    let mut background_plugins = Vec::new();
     for plugin_cfg in plugins {
         let loaded = instantiate_plugin(plugin_cfg).map_err(|e| EdgeError::InvalidConfig {
             detail: format!("Failed to instantiate plugin '{}': {e}", plugin_cfg.id),
         })?;
+        if let LoadedPlugin::Background(ref bg) = loaded {
+            background_plugins.push(Arc::clone(bg));
+        }
         available_plugins.insert(plugin_cfg.id.clone(), loaded);
     }
 
-    // 2. Pre-index listeners by listener_id for O(1) protocol & streaming lookup
+    // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
+    let socket_manager = velda_core::global_socket_manager();
+    for l in listeners {
+        if let Ok(addr) = l.address.parse::<std::net::SocketAddr>() {
+            let proto = match l.transport.protocol.to_ascii_lowercase().as_str() {
+                "udp" => velda_core::SocketProtocol::Udp,
+                _ => velda_core::SocketProtocol::Tcp,
+            };
+            socket_manager
+                .register_traffic_socket(addr, proto, &l.id)
+                .map_err(|e| EdgeError::InvalidConfig {
+                    detail: format!("Ingress listener port conflict: {e}"),
+                })?;
+        }
+    }
+
+    // 3. Pre-index listeners by listener_id for O(1) protocol & streaming lookup
     let listener_map: FxHashMap<&str, &ListenerConfig> =
         listeners.iter().map(|l| (l.id.as_str(), l)).collect();
 
-    // 3. Pre-compile RoutePluginPlan for each route that specifies plugins
+    // 4. Pre-compile RoutePluginPlan for each route that specifies plugins
     let mut route_plans = FxHashMap::default();
     let empty_plan = Arc::new(RoutePluginPlan::default());
 
@@ -113,6 +137,7 @@ pub fn build_plugin_table(
 
     Ok(PluginTable {
         routes: route_plans,
+        background_plugins,
         empty_plan,
     })
 }
@@ -127,5 +152,6 @@ mod tests {
         let non_existent = RouteId::new(999);
         assert!(!table.has_plugins(non_existent));
         assert!(table.get_plan(non_existent).is_empty());
+        assert!(table.background_plugins.is_empty());
     }
 }

@@ -22,7 +22,7 @@ pub enum LoadedPlugin {
     PreRoute(Arc<dyn PreRoutePlugin>),
     PreUpstream(Arc<dyn PreUpstreamPlugin>),
     PostResponse(Arc<dyn PostResponsePlugin>),
-    Background { id: String },
+    Background(Arc<dyn crate::background::BackgroundPlugin>),
 }
 
 impl LoadedPlugin {
@@ -32,7 +32,7 @@ impl LoadedPlugin {
             Self::PreRoute(p) => p.id(),
             Self::PreUpstream(p) => p.id(),
             Self::PostResponse(p) => p.id(),
-            Self::Background { id } => id,
+            Self::Background(p) => p.id(),
         }
     }
 
@@ -42,7 +42,7 @@ impl LoadedPlugin {
             Self::PreRoute(p) => p.capability(),
             Self::PreUpstream(p) => p.capability(),
             Self::PostResponse(p) => p.capability(),
-            Self::Background { .. } => PluginCapability::default(),
+            Self::Background(p) => p.capability(),
         }
     }
 
@@ -52,7 +52,7 @@ impl LoadedPlugin {
             Self::PreRoute(p) => p.supported_protocols(),
             Self::PreUpstream(p) => p.supported_protocols(),
             Self::PostResponse(p) => p.supported_protocols(),
-            Self::Background { .. } => SupportedProtocols::empty(),
+            Self::Background(p) => p.supported_protocols(),
         }
     }
 }
@@ -102,7 +102,7 @@ pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginE
         "post_response" => {
             crate::post_response::instantiate(config).map(LoadedPlugin::PostResponse)
         }
-        "background" => crate::background::instantiate(config),
+        "background" => crate::background::instantiate(config).map(LoadedPlugin::Background),
         other => Err(PluginError::Config(format!(
             "Unknown plugin phase '{other}' for plugin '{}'",
             config.id
@@ -123,7 +123,7 @@ pub fn build_route_plugin_plan(
     route_plugin_ids: &[String],
     available_plugins: &FxHashMap<String, LoadedPlugin>,
     route_protocol: ProtocolFamily,
-    route_streaming: StreamingMode,
+    _route_streaming: StreamingMode,
 ) -> Result<RoutePluginPlan, PluginError> {
     let mut pre_route_list: Vec<Arc<dyn PreRoutePlugin>> = Vec::new();
     let mut pre_upstream_list: Vec<Arc<dyn PreUpstreamPlugin>> = Vec::new();
@@ -156,7 +156,7 @@ pub fn build_route_plugin_plan(
             LoadedPlugin::PostResponse(p) => {
                 post_response_list.push(p.clone());
             }
-            LoadedPlugin::Background { .. } => {
+            LoadedPlugin::Background(_) => {
                 return Err(PluginError::PhaseMismatch {
                     plugin_id: plugin_id.clone(),
                     expected: "traffic phase (pre_route, pre_upstream, or post_response)".into(),
@@ -191,26 +191,11 @@ pub fn build_route_plugin_plan(
         resp_payload_access = resp_payload_access.union(cap.payload);
     }
 
-    // 4. Enforce orthogonal streaming / pipe compatibility
-    if !req_payload_access.is_none() && route_streaming.client {
-        return Err(PluginError::StreamingConflict {
-            plugin_id: "request_phase".into(),
-            route_id: route_id.to_string(),
-            detail:
-                "Request plugin requires payload access, but route has streaming upload enabled"
-                    .into(),
-        });
-    }
-
-    if !resp_payload_access.is_none() && route_streaming.server {
-        return Err(PluginError::StreamingConflict {
-            plugin_id: "response_phase".into(),
-            route_id: route_id.to_string(),
-            detail:
-                "Response plugin requires payload access, but route has streaming response enabled"
-                    .into(),
-        });
-    }
+    // 4. Orthogonal streaming / pipe compatibility
+    // In accordance with Header-Driven Dynamic Decoupling:
+    // Listener streaming declaration represents protocol capability (allowance), not an execution mandate.
+    // Standard REST transactions on the listener execute buffered (enabling cache & compression),
+    // while genuine streaming streams (chunked / SSE) bypass payload plugins dynamically based on headers.
 
     // 5. Freeze into final Arc slices (None if empty for zero-overhead phase elimination)
     let pre_route_hooks = if pre_route_list.is_empty() {

@@ -11,6 +11,7 @@
 //!    so the target backend microservice can tag logs, trigger feature flags, or activate sandbox modes.
 
 use http::header::{HeaderName, HeaderValue};
+use std::sync::Arc;
 use velda_core::{Action, L7Request};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -56,8 +57,7 @@ pub struct CanaryPlugin {
     pub config: CanaryConfig,
     canary_header_name: HeaderName,
     canary_header_val: HeaderValue,
-    canary_upstream_val: HeaderValue,
-    upstream_override_name: HeaderName,
+    canary_upstream: Arc<str>,
 }
 
 impl CanaryPlugin {
@@ -69,18 +69,14 @@ impl CanaryPlugin {
         let canary_header_val = HeaderValue::from_str(&config.canary_header_value)
             .map_err(|e| PluginError::Config(format!("Invalid canary_header_value: {e}")))?;
 
-        let canary_upstream_val = HeaderValue::from_str(&config.canary_upstream)
-            .map_err(|e| PluginError::Config(format!("Invalid canary_upstream: {e}")))?;
-
-        let upstream_override_name = HeaderName::from_static("x-velda-upstream");
+        let canary_upstream: Arc<str> = Arc::from(config.canary_upstream.as_str());
 
         Ok(Self {
             id: id.into(),
             config,
             canary_header_name,
             canary_header_val,
-            canary_upstream_val,
-            upstream_override_name,
+            canary_upstream,
         })
     }
 
@@ -113,28 +109,49 @@ impl CanaryPlugin {
         let mut rules = Vec::new();
         if let Some(rules_arr) = raw.get("rules").and_then(|v| v.as_array()) {
             for item in rules_arr {
-                if let Some(r_obj) = item.as_object()
-                    && let Some(hdr) = r_obj.get("header").and_then(|v| v.as_str())
-                {
-                    let exact = r_obj
-                        .get("exact")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let prefix = r_obj
-                        .get("prefix")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let exists = r_obj
-                        .get("exists")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(exact.is_none() && prefix.is_none());
+                if let Some(r_obj) = item.as_object() {
+                    let hdr = r_obj
+                        .get("header")
+                        .or_else(|| r_obj.get("name"))
+                        .and_then(|v| v.as_str());
 
-                    rules.push(HeaderRule {
-                        header: hdr.to_ascii_lowercase(),
-                        exact,
-                        prefix,
-                        exists,
-                    });
+                    if let Some(hdr) = hdr {
+                        let op = r_obj.get("operator").and_then(|v| v.as_str());
+                        let val = r_obj
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let (exact, prefix, exists) = if let Some(op) = op {
+                            match op {
+                                "equals" => (val, None, false),
+                                "prefix" => (None, val, false),
+                                "exists" => (None, None, true),
+                                _ => (val, None, false),
+                            }
+                        } else {
+                            let exact = r_obj
+                                .get("exact")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let prefix = r_obj
+                                .get("prefix")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let exists = r_obj
+                                .get("exists")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(exact.is_none() && prefix.is_none());
+                            (exact, prefix, exists)
+                        };
+
+                        rules.push(HeaderRule {
+                            header: hdr.to_ascii_lowercase(),
+                            exact,
+                            prefix,
+                            exists,
+                        });
+                    }
                 }
             }
         }
@@ -209,7 +226,7 @@ impl PreUpstreamPlugin for CanaryPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut Arc<str>) -> Action {
         if self.should_route_to_canary(req) {
             // 1. Inject informational marker header for backend telemetry/sandbox
             req.headers.insert(
@@ -217,11 +234,8 @@ impl PreUpstreamPlugin for CanaryPlugin {
                 self.canary_header_val.clone(),
             );
 
-            // 2. Set upstream override target for Data Plane leasing
-            req.headers.insert(
-                self.upstream_override_name.clone(),
-                self.canary_upstream_val.clone(),
-            );
+            // 2. Direct in-memory target update without touching HTTP headers
+            *target_upstream = Arc::clone(&self.canary_upstream);
         }
 
         Action::Continue
@@ -272,10 +286,12 @@ mod tests {
             headers,
             Body::Empty,
         );
-        let action1 = plugin.on_upstream_request(&mut req1);
+        let mut target1 = Arc::from("payments-v1");
+        let action1 = plugin.on_upstream_request(&mut req1, &mut target1);
         assert!(matches!(action1, Action::Continue));
         assert_eq!(req1.headers.get("x-velda-canary").unwrap(), "true");
-        assert_eq!(req1.headers.get("x-velda-upstream").unwrap(), "payments-v2");
+        assert_eq!(target1.as_ref(), "payments-v2");
+        assert!(!req1.headers.contains_key("x-velda-upstream"));
 
         // 2. Request without matching rule
         let mut req2 = L7Request::new(
@@ -285,9 +301,11 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let action2 = plugin.on_upstream_request(&mut req2);
+        let mut target2 = Arc::from("payments-v1");
+        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         assert!(matches!(action2, Action::Continue));
         assert!(!req2.headers.contains_key("x-velda-canary"));
+        assert_eq!(target2.as_ref(), "payments-v1");
         assert!(!req2.headers.contains_key("x-velda-upstream"));
     }
 
@@ -310,8 +328,10 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("catalog-v1");
+        plugin.on_upstream_request(&mut req, &mut target);
         assert_eq!(req.headers.get("x-velda-canary").unwrap(), "true");
-        assert_eq!(req.headers.get("x-velda-upstream").unwrap(), "catalog-v2");
+        assert_eq!(target.as_ref(), "catalog-v2");
+        assert!(!req.headers.contains_key("x-velda-upstream"));
     }
 }

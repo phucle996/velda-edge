@@ -247,6 +247,8 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
+        let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
+
         let plan = rt.plugins.get_plan(route.id);
         if !plan.is_empty() {
             let mut short_circuit_resp = None;
@@ -294,7 +296,11 @@ pub async fn run_http1_loop<IO>(
                 if short_circuit_resp.is_none()
                     && let Some(hooks) = &plan.pre_upstream_hooks
                 {
-                    let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut l7_req);
+                    let mut action = velda_plugin::run_pre_upstream_plugins(
+                        hooks,
+                        &mut l7_req,
+                        &mut target_upstream,
+                    );
                     while let Action::Delay { duration, and_then } = action {
                         tokio::time::sleep(duration).await;
                         action = *and_then;
@@ -341,18 +347,23 @@ pub async fn run_http1_loop<IO>(
                         .headers
                         .insert(X_REQUEST_ID, req_id_header.clone());
                 }
-                conn.mark_close();
-                let _ = conn.send_response(&server_resp).await;
-                conn.lingering_close().await;
-                break;
+                if framing == Http1BodyFraming::Empty && !conn.close_requested {
+                    let _ = conn.send_response(&server_resp).await;
+                    continue;
+                } else {
+                    conn.mark_close();
+                    let _ = conn.send_response(&server_resp).await;
+                    conn.lingering_close().await;
+                    break;
+                }
             }
         }
 
-        let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
+        let Some(upstream_target) = rt.upstreams.http.get(target_upstream.as_ref()) else {
             tracing::error!(
                 listener = %meta.listener_id,
                 route = %route.id,
-                upstream = %route.upstream_name,
+                upstream = %target_upstream,
                 "No HTTP upstream configured"
             );
             let no_backend = Http1ServerResponse::from_bytes(
@@ -375,7 +386,7 @@ pub async fn run_http1_loop<IO>(
         if overload_lvl.is_shedding() {
             tracing::warn!(
                 route = %route.id,
-                upstream = %route.upstream_name,
+                upstream = %target_upstream,
                 overload = ?overload_lvl,
                 "Shedding HTTP/1.1 request due to memory saturation"
             );
@@ -398,73 +409,98 @@ pub async fn run_http1_loop<IO>(
         // ========================================================================
         // [PHASE 5: Upstream Forwarding & Pipe Dispatch]
         // ========================================================================
+        let is_chunked = framing == Http1BodyFraming::Chunked;
+        let is_sse = req_head.headers.get(http::header::ACCEPT).is_some_and(|a| {
+            a.as_bytes()
+                .windows(b"text/event-stream".len())
+                .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
+        });
+
         let pipe_result = match upstream_target.as_ref() {
-            HttpUpstream::Http1(upstream) => match upstream.strategy {
-                Http1PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+            HttpUpstream::Http1(upstream) => {
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http1PipeStrategy::Buffered => {
+                        pipe::buffered_h1_h1::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
-                }
-                Http1PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h1::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http1PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h1::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http1PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h1::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                    }
+                    Http1PipeStrategy::ServerStream => {
+                        pipe::server_stream_h1_h1::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
-                }
-            },
-            HttpUpstream::Http2(upstream) => match upstream.strategy {
-                Http2PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                    }
+                    Http1PipeStrategy::ClientStream => {
+                        pipe::client_stream_h1_h1::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
-                }
-                Http2PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h2::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http2PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h2::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http2PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h2::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                    }
+                    Http1PipeStrategy::Duplex => {
+                        pipe::duplex_h1_h1::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
+                    }
                 }
-            },
-            HttpUpstream::Http3(upstream) => match upstream.strategy {
-                Http3PipeStrategy::Buffered => {
-                    pipe::buffered_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+            }
+            HttpUpstream::Http2(upstream) => {
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http2PipeStrategy::Buffered => {
+                        pipe::buffered_h1_h2::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
-                }
-                Http3PipeStrategy::ServerStream => {
-                    pipe::server_stream_h1_h3::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http3PipeStrategy::ClientStream => {
-                    pipe::client_stream_h1_h3::serve(
-                        &mut conn, req_head, framing, upstream, &meta, plan,
-                    )
-                    .await
-                }
-                Http3PipeStrategy::Duplex => {
-                    pipe::duplex_h1_h3::serve(&mut conn, req_head, framing, upstream, &meta, plan)
+                    }
+                    Http2PipeStrategy::ServerStream => {
+                        pipe::server_stream_h1_h2::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
                         .await
+                    }
+                    Http2PipeStrategy::ClientStream => {
+                        pipe::client_stream_h1_h2::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
+                    Http2PipeStrategy::Duplex => {
+                        pipe::duplex_h1_h2::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
                 }
-            },
+            }
+            HttpUpstream::Http3(upstream) => {
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http3PipeStrategy::Buffered => {
+                        pipe::buffered_h1_h3::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
+                    Http3PipeStrategy::ServerStream => {
+                        pipe::server_stream_h1_h3::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
+                    Http3PipeStrategy::ClientStream => {
+                        pipe::client_stream_h1_h3::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
+                    Http3PipeStrategy::Duplex => {
+                        pipe::duplex_h1_h3::serve(
+                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        )
+                        .await
+                    }
+                }
+            }
         };
 
         if let Err(e) = pipe_result {
@@ -588,5 +624,31 @@ mod tests {
         let _ = pipe::server_stream_h1_h3::serve::<tokio::io::DuplexStream>;
         let _ = pipe::client_stream_h1_h3::serve::<tokio::io::DuplexStream>;
         let _ = pipe::duplex_h1_h3::serve::<tokio::io::DuplexStream>;
+    }
+
+    #[test]
+    fn test_dynamic_strategy_resolution() {
+        let strategy = Http1PipeStrategy::Duplex;
+
+        // Standard REST request (neither chunked upload nor text/event-stream) -> Buffered
+        assert_eq!(
+            strategy.effective(false, false),
+            Http1PipeStrategy::Buffered
+        );
+
+        // Client chunked upload on Duplex listener -> ClientStream
+        assert_eq!(
+            strategy.effective(true, false),
+            Http1PipeStrategy::ClientStream
+        );
+
+        // Client SSE Accept header on Duplex listener -> ServerStream
+        assert_eq!(
+            strategy.effective(false, true),
+            Http1PipeStrategy::ServerStream
+        );
+
+        // Both chunked upload and SSE -> Duplex
+        assert_eq!(strategy.effective(true, true), Http1PipeStrategy::Duplex);
     }
 }

@@ -133,21 +133,7 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 
-    let Some(upstream_target) = rt.upstreams.grpc.get(&route.upstream_name) else {
-        return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
-    };
-
-    // Resource Saturation Circuit Breaker (Overload Protection)
-    let overload_lvl = rt.overload.level();
-    if overload_lvl.is_shedding() {
-        tracing::warn!(
-            route = %route.id,
-            upstream = %route.upstream_name,
-            overload = ?overload_lvl,
-            "Shedding gRPC UDP request due to memory saturation"
-        );
-        return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
-    }
+    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -184,7 +170,8 @@ pub async fn process_grpc_udp_request(
         if short_circuit_resp.is_none()
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
-            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut req);
+            let mut action =
+                velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;
@@ -214,6 +201,22 @@ pub async fn process_grpc_udp_request(
             }
             return resp;
         }
+    }
+
+    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream.as_ref()) else {
+        return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
+    };
+
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %target_upstream,
+            overload = ?overload_lvl,
+            "Shedding gRPC UDP request due to memory saturation"
+        );
+        return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
     }
 
     let pipe_res = match upstream_target.as_ref() {

@@ -2007,15 +2007,19 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "velda-bench-backend"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

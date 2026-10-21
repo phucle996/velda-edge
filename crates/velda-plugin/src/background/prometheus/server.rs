@@ -179,13 +179,42 @@ impl PrometheusExporter {
         })
     }
 
+    /// Deserializes and constructs an instance directly from a [`velda_sync::post_sync::plugin::PluginConfig`].
+    pub fn from_config(
+        config: &velda_sync::post_sync::plugin::PluginConfig,
+    ) -> Result<Self, PluginError> {
+        let exporter_cfg =
+            velda_sync::validate_prometheus_exporter_config(&config.id, &config.config).map_err(
+                |e| PluginError::Config(format!("Invalid Prometheus exporter config: {e}")),
+            )?;
+        Self::new(exporter_cfg, velda_observability::global_metrics())
+    }
+
     /// Spawns and drives the Exporter server accept loop until shutdown signal is received.
-    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> Result<(), PluginError> {
-        let listener = TcpListener::bind(&self.config.listen).await.map_err(|e| {
+    pub async fn run_server(
+        self: Arc<Self>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<(), PluginError> {
+        let addr = self
+            .config
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid listen address '{}': {e}",
+                    self.config.listen
+                ))
+            })?;
+        let std_listener = velda_core::global_socket_manager()
+            .acquire_shadow_tcp(addr, "prometheus_exporter")
+            .map_err(|e| PluginError::Config(format!("Failed to acquire shadow socket: {e}")))?;
+        std_listener.set_nonblocking(true).map_err(|e| {
             PluginError::Config(format!(
-                "Failed to bind exporter listener to '{}': {e}",
-                self.config.listen
+                "Failed to set nonblocking on background socket: {e}"
             ))
+        })?;
+        let listener = TcpListener::from_std(std_listener).map_err(|e| {
+            PluginError::Config(format!("Failed to convert to tokio TcpListener: {e}"))
         })?;
 
         tracing::info!(
@@ -196,8 +225,6 @@ impl PrometheusExporter {
             tls_mode = %self.config.tls.mode,
             "Prometheus exporter started on auxiliary subsystem"
         );
-
-        let shared_self = Arc::new(self);
 
         loop {
             tokio::select! {
@@ -210,7 +237,7 @@ impl PrometheusExporter {
                         }
                     };
 
-                    let server = Arc::clone(&shared_self);
+                    let server = Arc::clone(&self);
                     tokio::spawn(async move {
                         if let Err(err) = server.handle_connection(tcp_stream).await {
                             tracing::debug!(error = %err, "Exporter client connection ended");
@@ -218,6 +245,7 @@ impl PrometheusExporter {
                     });
                 }
                 changed = shutdown_rx.changed() => {
+
                     if changed.is_err() || *shutdown_rx.borrow() {
                         tracing::info!("Prometheus exporter received shutdown signal; stopping accept loop");
                         break;
@@ -226,7 +254,13 @@ impl PrometheusExporter {
             }
         }
 
+        velda_core::global_socket_manager().release_shadow_tcp("prometheus_exporter");
         Ok(())
+    }
+
+    /// Spawns and drives the Exporter server accept loop until shutdown signal is received.
+    pub async fn run(self, shutdown_rx: watch::Receiver<bool>) -> Result<(), PluginError> {
+        Arc::new(self).run_server(shutdown_rx).await
     }
 
     /// Handles a single incoming scrape or health check connection.
@@ -446,5 +480,19 @@ impl PrometheusExporter {
         }
 
         Ok(())
+    }
+}
+
+impl crate::background::BackgroundPlugin for PrometheusExporter {
+    #[inline(always)]
+    fn id(&self) -> &str {
+        "prometheus_exporter"
+    }
+
+    fn run(
+        self: Arc<Self>,
+        shutdown: watch::Receiver<bool>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PluginError>> + Send>> {
+        Box::pin(async move { self.run_server(shutdown).await })
     }
 }

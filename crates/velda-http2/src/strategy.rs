@@ -29,4 +29,38 @@ impl Http2PipeStrategy {
             (false, false) => Self::Buffered,
         }
     }
+
+    /// Resolves the effective execution strategy for a specific request based on
+    /// client upload framing (chunked) and client response requirement (SSE).
+    #[inline]
+    pub fn effective(self, is_chunked: bool, is_sse: bool) -> Self {
+        match self {
+            Self::Buffered => Self::Buffered,
+            Self::ServerStream => {
+                if is_sse {
+                    Self::ServerStream
+                } else {
+                    Self::Buffered
+                }
+            }
+            Self::ClientStream => {
+                if is_chunked {
+                    Self::ClientStream
+                } else {
+                    Self::Buffered
+                }
+            }
+            Self::Duplex => {
+                if is_chunked && is_sse {
+                    Self::Duplex
+                } else if is_chunked {
+                    Self::ClientStream
+                } else if is_sse {
+                    Self::ServerStream
+                } else {
+                    Self::Buffered
+                }
+            }
+        }
+    }
 }

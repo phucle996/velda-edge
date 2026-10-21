@@ -113,7 +113,11 @@ impl ResponseHeaderMutationPlugin {
 
         // 1. Parse 'remove' list
         let mut remove = Vec::new();
-        if let Some(rem_arr) = raw.get("remove").and_then(|v| v.as_array()) {
+        if let Some(rem_arr) = raw
+            .get("remove")
+            .or_else(|| raw.get("remove_headers"))
+            .and_then(|v| v.as_array())
+        {
             for item in rem_arr {
                 if let Some(s) = item.as_str() {
                     let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
@@ -125,14 +129,18 @@ impl ResponseHeaderMutationPlugin {
         }
 
         // 2. Parse 'set' specs
-        let set = if let Some(set_val) = raw.get("set") {
+        let set = if let Some(set_val) = raw.get("set").or_else(|| raw.get("set_headers")) {
             parse_specs(set_val, "set")?
         } else {
             Vec::new()
         };
 
-        // 3. Parse 'add' specs
-        let add = if let Some(add_val) = raw.get("add") {
+        // 3. Parse 'add' / 'append' specs
+        let add = if let Some(add_val) = raw
+            .get("add")
+            .or_else(|| raw.get("append_headers"))
+            .or_else(|| raw.get("append"))
+        {
             parse_specs(add_val, "add")?
         } else {
             Vec::new()

@@ -8,6 +8,7 @@
 //!   execution first, then aborts with the pre-compiled response (`Action::delay(dur, Action::Respond(resp))`),
 //!   accurately simulating real-world backend timeouts and cascading failures.
 
+use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -58,7 +59,7 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
     /// 3. Evaluates delay injection criteria.
     /// 4. Evaluates abort injection criteria.
     /// 5. Composes non-blocking [`Action`] (Delay first, then Abort or Continue).
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         // Step 1: Scope filter. If condition does not match, real users are 100% unaffected.
         if !self.condition.matches(req) {
             return Action::Continue;
@@ -130,7 +131,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }
 
@@ -149,7 +151,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
                 assert_eq!(duration, Duration::from_millis(200));
@@ -174,7 +177,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -204,7 +208,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
                 assert_eq!(duration, Duration::from_millis(300));
@@ -259,7 +264,8 @@ mod tests {
             Body::Empty,
         );
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target: Arc<str> = Arc::from("http_upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
                 assert_eq!(duration, Duration::from_millis(400));

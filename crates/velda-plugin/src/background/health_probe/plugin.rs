@@ -258,55 +258,68 @@ impl BackgroundPlugin for HealthProbePlugin {
         &self.id
     }
 
-    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) -> Result<(), PluginError> {
-        let listener = TcpListener::bind(self.config.listen_addr)
-            .await
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Failed to bind health probe auxiliary service to {}: {e}",
-                    self.config.listen_addr
-                ))
+    fn run(
+        self: Arc<Self>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PluginError>> + Send>> {
+        Box::pin(async move {
+            let bg_id = format!("health_probe:{}", self.id);
+            let std_listener = velda_core::global_socket_manager()
+                .acquire_shadow_tcp(self.config.listen_addr, &bg_id)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Failed to acquire health probe shadow socket for {}: {e}",
+                        self.config.listen_addr
+                    ))
+                })?;
+            std_listener.set_nonblocking(true).map_err(|e| {
+                PluginError::Config(format!("Failed to set nonblocking on socket: {e}"))
+            })?;
+            let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                PluginError::Config(format!("Failed to convert to tokio TcpListener: {e}"))
             })?;
 
-        tracing::info!(
-            addr = %self.config.listen_addr,
-            liveness = %self.config.liveness_path,
-            readiness = %self.config.readiness_path,
-            "Auxiliary health & readiness probe service listening"
-        );
+            tracing::info!(
+                addr = %self.config.listen_addr,
+                liveness = %self.config.liveness_path,
+                readiness = %self.config.readiness_path,
+                "Auxiliary health & readiness probe service listening"
+            );
 
-        let config = Arc::new(self.config);
-        let state = self.state.clone();
+            let config = Arc::new(self.config.clone());
+            let state = self.state.clone();
 
-        loop {
-            tokio::select! {
-                res = listener.accept() => {
-                    let (stream, _) = match res {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Health probe accept error");
-                            continue;
+            loop {
+                tokio::select! {
+                    res = listener.accept() => {
+                        let (stream, _) = match res {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Health probe accept error");
+                                continue;
+                            }
+                        };
+
+                        let cfg_clone = config.clone();
+                        let state_clone = state.clone();
+                        tokio::spawn(async move {
+                            Self::handle_connection(&cfg_clone, &state_clone, stream).await;
+                        });
+                    }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            tracing::info!("Health probe received shutdown signal; entering draining state");
+                            state.set_draining(true);
+                            break;
                         }
-                    };
-
-                    let cfg_clone = config.clone();
-                    let state_clone = state.clone();
-                    tokio::spawn(async move {
-                        Self::handle_connection(&cfg_clone, &state_clone, stream).await;
-                    });
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        tracing::info!("Health probe received shutdown signal; entering draining state");
-                        state.set_draining(true);
-                        break;
                     }
                 }
             }
-        }
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        Ok(())
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            velda_core::global_socket_manager().release_shadow_tcp(&bg_id);
+            Ok(())
+        })
     }
 }
 

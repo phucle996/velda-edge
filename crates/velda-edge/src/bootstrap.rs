@@ -120,6 +120,7 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
     );
 
     let metrics = Arc::new(velda_observability::MetricsStore::new());
+    let _ = velda_observability::init_global_metrics(metrics.clone());
 
     Ok(EdgeSupervisor {
         config,

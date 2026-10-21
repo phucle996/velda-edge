@@ -29,8 +29,10 @@ pub mod lifecycle;
 pub mod protocol;
 pub mod provenance;
 pub mod request_id;
+pub mod socket;
 pub mod streaming;
 pub mod types;
+pub mod worker;
 
 // -----------------------------------------------------------------------------
 // Pre-warmed Buffer & Slab Pools
@@ -94,8 +96,15 @@ pub use hardware::{
     OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker, UdpEgressTier,
     UdpOffloadTier, compute_optimal_pool_concurrency, concurrency_shards, global_hardware_topology,
     init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
-    probe_memory_usage,
+    probe_memory_usage, set_current_thread_idle_priority,
 };
 pub use provenance::Provenance;
 pub use request_id::{ID_POOL_CAPACITY, ID_POOL_LOW_WATERMARK, RequestIdPool, next_request_id};
+pub use socket::{
+    SocketClaim, SocketError, SocketManager, SocketProtocol, SocketRole, global_socket_manager,
+};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
+pub use worker::{
+    WorkerDescriptor, WorkerId, WorkerRegistry, WorkerRole, WorkerState, get_allowed_cores,
+    global_worker_registry, pin_current_thread_to_core,
+};

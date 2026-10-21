@@ -9,6 +9,7 @@
 
 use http::header::RETRY_AFTER;
 use http::{HeaderName, HeaderValue, StatusCode};
+use std::sync::Arc;
 use velda_core::{Action, L7Request, L7Response};
 
 use super::algorithm::{RateLimitAlgorithm, ShardedState};
@@ -342,7 +343,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
     ///
     /// # Performance Contract
     /// Executes 100% in-memory with lock-striped sharding. Zero Network I/O.
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         // Optimization: Zero-allocation direct hashing into FxHasher (eliminating heap String allocations on hot path)
         let key_hash = self
             .config
@@ -453,18 +454,20 @@ mod tests {
 
         let mut req = make_test_request(HeaderMap::new());
 
+        let mut target = Arc::from("default-upstream");
+
         // 1st request -> PASS
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         // 2nd request -> PASS (exhausted burst)
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         // 3rd request -> 429 TOO_MANY_REQUESTS
-        match plugin.on_upstream_request(&mut req) {
+        match plugin.on_upstream_request(&mut req, &mut target) {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
                 assert_eq!(resp.headers.get("x-ratelimit-remaining").unwrap(), "0");
@@ -484,15 +487,16 @@ mod tests {
         };
         let plugin = RateLimitPlugin::with_config("rate-fw", config);
         let mut req = make_test_request(HeaderMap::new());
+        let mut target = Arc::from("default-upstream");
 
         // 1st request -> PASS
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         // 2nd request in same window -> REJECT 429
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Respond(_)
         ));
     }
@@ -569,14 +573,15 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
+        let mut target = Arc::from("default-upstream");
         // 1st request -> PASS via memory fallback
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         // 2nd request -> REJECT 429 via memory fallback
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Respond(_)
         ));
     }
@@ -596,13 +601,14 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
+        let mut target = Arc::from("default-upstream");
         // Should continuously pass through (fail-open)
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
     }

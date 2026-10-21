@@ -9,7 +9,7 @@ pub mod zone;
 
 pub use constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 pub use zone::{
-    CacheEntry, CacheShard, HttpCacheZone, HttpCacheZoneRegistry, NUM_SHARDS,
+    CacheEntry, CacheShard, CompressedVariants, HttpCacheZone, HttpCacheZoneRegistry, NUM_SHARDS,
     filter_cacheable_headers, normalize_query, parse_cache_control_ttl,
 };
 
@@ -53,8 +53,8 @@ mod tests {
         headers1.insert(http::header::HOST, "api.example.com".parse().unwrap());
         headers1.insert("x-request-id", "req-001".parse().unwrap());
         let mut req1 = L7Request::new(Method::GET, uri1, Version::HTTP_11, headers1, Body::Empty);
-
-        let action1 = lookup_plugin.on_upstream_request(&mut req1);
+        let mut target1: Arc<str> = Arc::from("default_upstream");
+        let action1 = lookup_plugin.on_upstream_request(&mut req1, &mut target1);
         assert!(action1.is_continue());
         assert!(req1.headers.contains_key("x-velda-cache-key"));
         let cache_key = req1
@@ -98,7 +98,8 @@ mod tests {
         headers2.insert(http::header::HOST, "api.example.com".parse().unwrap());
         let mut req2 = L7Request::new(Method::GET, uri2, Version::HTTP_11, headers2, Body::Empty);
 
-        let action2 = lookup_plugin.on_upstream_request(&mut req2);
+        let mut target2: Arc<str> = Arc::from("default_upstream");
+        let action2 = lookup_plugin.on_upstream_request(&mut req2, &mut target2);
         match action2 {
             Action::Respond(cached_resp) => {
                 assert_eq!(cached_resp.status, StatusCode::OK);
@@ -107,6 +108,13 @@ mod tests {
                 assert_eq!(
                     cached_resp.headers.get(CONTENT_TYPE).unwrap(),
                     "application/json"
+                );
+                assert_eq!(
+                    cached_resp
+                        .headers
+                        .get(http::header::CONTENT_LENGTH)
+                        .unwrap(),
+                    "17"
                 );
                 // CRITICAL SECURITY INVARIANT: Set-Cookie MUST NOT be served from cache!
                 assert!(!cached_resp.headers.contains_key(SET_COOKIE));

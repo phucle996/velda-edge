@@ -267,31 +267,7 @@ async fn process_http3_request(
         return;
     };
 
-    let Some(upstream_target) = rt.upstreams.http.get(&route.upstream_name) else {
-        tracing::error!(
-            listener = %listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            "No HTTP upstream configured"
-        );
-        let _ = responder
-            .send_response(make_service_unavailable_response())
-            .await;
-        return;
-    };
-
-    // Resource Saturation Circuit Breaker (Overload Protection)
-    let overload_lvl = rt.overload.level();
-    if overload_lvl.is_shedding() {
-        tracing::warn!(
-            route = %route.id,
-            upstream = %route.upstream_name,
-            overload = ?overload_lvl,
-            "Shedding HTTP/3 request due to memory saturation"
-        );
-        let _ = responder.send_response(make_overload_response()).await;
-        return;
-    }
+    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -330,7 +306,8 @@ async fn process_http3_request(
         if short_circuit_resp.is_none()
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
-            let mut action = velda_plugin::run_pre_upstream_plugins(hooks, &mut req);
+            let mut action =
+                velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;
@@ -365,11 +342,51 @@ async fn process_http3_request(
         }
     }
 
+    let Some(upstream_target) = rt.upstreams.http.get(target_upstream.as_ref()) else {
+        tracing::error!(
+            listener = %listener_id,
+            route = %route.id,
+            upstream = %target_upstream,
+            "No HTTP upstream configured"
+        );
+        let _ = responder
+            .send_response(make_service_unavailable_response())
+            .await;
+        return;
+    };
+
+    // Resource Saturation Circuit Breaker (Overload Protection)
+    let overload_lvl = rt.overload.level();
+    if overload_lvl.is_shedding() {
+        tracing::warn!(
+            route = %route.id,
+            upstream = %target_upstream,
+            overload = ?overload_lvl,
+            "Shedding HTTP/3 request due to memory saturation"
+        );
+        let _ = responder.send_response(make_overload_response()).await;
+        return;
+    }
+
     // ========================================================================
     // Upstream Forwarding & Pipe Strategy Dispatch
     // ========================================================================
+    let is_chunked = req
+        .headers
+        .get(http::header::TRANSFER_ENCODING)
+        .is_some_and(|te| {
+            te.as_bytes()
+                .windows(b"chunked".len())
+                .any(|w| w.eq_ignore_ascii_case(b"chunked"))
+        });
+    let is_sse = req.headers.get(http::header::ACCEPT).is_some_and(|a| {
+        a.as_bytes()
+            .windows(b"text/event-stream".len())
+            .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
+    });
+
     match upstream_target.as_ref() {
-        HttpUpstream::Http3(upstream) => match upstream.strategy {
+        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http3PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -391,7 +408,7 @@ async fn process_http3_request(
                 pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await;
             }
         },
-        HttpUpstream::Http2(upstream) => match upstream.strategy {
+        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http2PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -413,7 +430,7 @@ async fn process_http3_request(
                 pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await;
             }
         },
-        HttpUpstream::Http1(upstream) => match upstream.strategy {
+        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
             Http1PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {

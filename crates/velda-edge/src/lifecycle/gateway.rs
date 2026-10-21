@@ -3,35 +3,33 @@
 use std::sync::Arc;
 use tokio::sync::watch;
 use velda_core::hardware::{CorePartition, HardwareTopology};
+use velda_core::{get_allowed_cores, set_current_thread_idle_priority};
 use velda_transport::TrafficEngine;
 
-use crate::affinity::{
-    get_allowed_cores, pin_current_thread_to_core, set_current_thread_idle_priority,
-};
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
+use crate::lifecycle::RunningWorkerPool;
 use crate::lifecycle::ipc::run_ipc_server;
-use crate::lifecycle::overload::{DEFAULT_OVERLOAD_SAMPLE_INTERVAL, spawn_overload_monitor};
-use crate::pipeline::{build_tcp_pipeline_runner, build_udp_pipeline_runner};
 use crate::profile::RuntimeProfile;
 use crate::runtime::SharedRuntime;
 
 /// Coordinates the end-to-end Thread-Per-Core gateway execution:
 /// 1. Allocates 100% of allowed CPU cores to Data Plane traffic workers (zero core waste).
 /// 2. Spawns background UDS IPC listener for live config updates (operating on idle CPU).
-/// 3. Spawns background Resource Overload Monitor for OOM protection (operating on idle CPU).
-/// 4. Spawns background Auxiliary Prometheus Exporter if declared in plugins (operating on idle CPU).
-/// 5. Spawns N dedicated worker OS threads, each pinned 1:1 to a CPU traffic core.
-/// 6. Each worker thread runs its own single-threaded Tokio current_thread runtime,
+/// 3. Spawns Symmetrical Worker Pool (1 Primary Traffic Worker + 1 Shadow Worker per Core).
+///    - Primary Shadow Worker (Worker 0) hosts process-wide background services (Prometheus exporter,
+///      overload monitor, buffer pool sweeper) inside a single cooperative event loop.
+///    - All Shadow Workers expose a core-local hook for non-blocking asynchronous plugin tasks.
+/// 4. Each worker thread runs its own single-threaded Tokio current_thread runtime,
 ///    owning its dedicated shard of all TCP and UDP listener sockets with SO_REUSEPORT + SO_INCOMING_CPU.
-/// 7. Awaits graceful termination when shutdown is signaled.
+/// 5. Awaits graceful termination when shutdown is signaled.
 pub async fn run_gateway(
     engine: TrafficEngine,
     shared_runtime: SharedRuntime,
     config: EdgeConfig,
     _hardware: HardwareTopology,
     runtime_profile: RuntimeProfile,
-    metrics: Arc<velda_observability::MetricsStore>,
+    _metrics: Arc<velda_observability::MetricsStore>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), EdgeError> {
     let socket_path = config.socket_path.clone();
@@ -48,10 +46,17 @@ pub async fn run_gateway(
         "Established zero-waste hardware core partition (all-worker balanced sharding)"
     );
 
+    // Register UDS IPC socket claim in host SocketManager
+    if let Err(e) = velda_core::global_socket_manager()
+        .register_management_uds(socket_path.to_string_lossy().to_string(), "gateway_ipc")
+    {
+        tracing::warn!(error = %e, "Gateway IPC UDS socket claim collision");
+    }
+
     // 2. Partition TrafficEngine into N dedicated WorkerEngines
     let (workers, initial_bindings, engine_handle) = engine.into_workers(worker_count);
 
-    // 2. Spawn background UDS IPC server task (runs on idle cycles via SCHED_IDLE)
+    // 3. Spawn background UDS IPC server task (runs on idle cycles via SCHED_IDLE)
     let ipc_shutdown = shutdown.clone();
     let ipc_shared = shared_runtime.clone();
     let ipc_handle = engine_handle.clone();
@@ -70,181 +75,61 @@ pub async fn run_gateway(
         }
     });
 
-    // 3. Spawn background Resource Overload Monitor task (OOM protection)
-    let overload_tracker = shared_runtime.load().overload.clone();
-    let overload_task = spawn_overload_monitor(
-        overload_tracker,
-        DEFAULT_OVERLOAD_SAMPLE_INTERVAL,
+    // 4. Spawn Symmetrical Worker Pool (1 Primary Traffic Worker + 1 Shadow Worker per Core)
+    // Primary Shadow Worker (Worker 0) automatically hosts all process-wide shadow background services
+    let worker_pool = RunningWorkerPool::spawn(
+        workers,
+        &partition,
+        initial_bindings,
+        shared_runtime.clone(),
+        cpu_pinning,
         shutdown.clone(),
-    );
+    )?;
 
-    // 3b. Spawn background Auxiliary Buffer Pool Sweeper task (evicts burst slabs after idle TTL)
-    let sweeper_pool = shared_runtime.load().buffer_pool.clone();
-    let mut sweeper_shutdown = shutdown.clone();
-    let _sweeper_task = tokio::spawn(async move {
-        set_current_thread_idle_priority();
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let _ = sweeper_pool.sweep_all_cores(std::time::Instant::now());
-                }
-                _ = sweeper_shutdown.changed() => break,
-            }
-        }
-    });
+    // 5. Await worker pool shutdown and join
+    worker_pool.shutdown_and_join().await?;
 
-    // 4. Spawn background Auxiliary Prometheus Exporter if configured in plugins
-    let exporter_task = {
-        let active_exporter = {
-            let rt = shared_runtime.load();
-            rt.config
-                .plugins
-                .iter()
-                .find(|p| p.id == "prometheus_exporter")
-                .cloned()
-        };
-
-        if let Some(plugin) = active_exporter {
-            match velda_sync::validate_prometheus_exporter_config(&plugin.id, &plugin.config) {
-                Ok(exporter_cfg) => {
-                    match velda_plugin::PrometheusExporter::new(exporter_cfg, Arc::clone(&metrics))
-                    {
-                        Ok(exporter) => {
-                            let exp_shutdown = shutdown.clone();
-
-                            let handle = tokio::spawn(async move {
-                                // Set thread scheduling to SCHED_IDLE / low priority so it only uses idle cycles
-                                set_current_thread_idle_priority();
-                                if let Err(e) = exporter.run(exp_shutdown).await {
-                                    tracing::error!(error = %e, "Prometheus exporter exited with error");
-                                }
-                            });
-                            Some(handle)
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to instantiate Prometheus exporter");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Invalid Prometheus exporter configuration");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    };
-
-    // 5. Coordinate ephemeral port resolution across worker threads (for port 0 listeners)
-    let (resolved_tx, resolved_rx) = watch::channel(None);
-    let resolved_publisher = Arc::new(resolved_tx);
-
-    // 6. Spawn N dedicated Worker OS threads, each running a core-pinned single-threaded Tokio runtime
-    let mut worker_threads = Vec::with_capacity(worker_count);
-    for worker in workers {
-        let worker_id = worker.worker_id();
-        let core_id = partition.traffic_cores[worker_id % partition.traffic_cores.len()];
-        let worker_shutdown = shutdown.clone();
-        let bindings = initial_bindings.clone();
-        let rt_shared = shared_runtime.clone();
-        let resolved_pub = Arc::clone(&resolved_publisher);
-        let resolved_sub = resolved_rx.clone();
-
-        let handle = std::thread::Builder::new()
-            .name(format!("velda-worker-{worker_id}"))
-            .spawn(move || {
-                if cpu_pinning {
-                    let ok = pin_current_thread_to_core(core_id);
-                    if ok {
-                        tracing::info!(
-                            worker = worker_id,
-                            core = core_id,
-                            "Worker thread affined to dedicated CPU core"
-                        );
-                    } else {
-                        tracing::warn!(
-                            worker = worker_id,
-                            core = core_id,
-                            "Failed to set thread affinity for worker thread"
-                        );
-                    }
-                }
-
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .event_interval(31)
-                    .thread_stack_size(1024 * 1024)
-                    .build()
-                    .expect("Failed to build worker current_thread Tokio runtime");
-
-                rt.block_on(async move {
-                    let rt_tcp = rt_shared.clone();
-                    let tcp_dispatcher = move |listener_id: &str| {
-                        let runner = build_tcp_pipeline_runner(listener_id, rt_tcp.clone());
-                        move |conn| runner(conn)
-                    };
-
-                    let rt_udp = rt_shared.clone();
-                    let udp_dispatcher = move |listener_id: &str| {
-                        let runner = build_udp_pipeline_runner(listener_id, rt_udp.clone());
-                        move |id, sock, dgram| runner(id, sock, dgram)
-                    };
-
-                    if let Err(e) = worker
-                        .run(
-                            bindings,
-                            resolved_pub,
-                            resolved_sub,
-                            worker_shutdown,
-                            tcp_dispatcher,
-                            udp_dispatcher,
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            worker = worker_id,
-                            error = %e,
-                            "Worker engine encountered error"
-                        );
-                    }
-                })
-            })
-            .map_err(|e| {
-                EdgeError::Internal(format!("Failed to spawn worker thread {worker_id}: {e}"))
-            })?;
-
-        worker_threads.push(handle);
-    }
-
-    // 6. Await shutdown or join of worker threads
-    let join_res = tokio::task::spawn_blocking(move || {
-        let mut first_err = None;
-        for handle in worker_threads {
-            if let Err(e) = handle.join() {
-                tracing::error!("Worker thread panicked: {:?}", e);
-                if first_err.is_none() {
-                    first_err = Some(EdgeError::Internal("Worker thread panicked".into()));
-                }
-            }
-        }
-        first_err
-    })
-    .await;
-
-    // 7. Await background supervisor tasks termination
+    // 6. Await Gateway Management IPC server task termination
     let _ = ipc_task.await;
-    let _ = overload_task.await;
-    if let Some(exp_task) = exporter_task {
-        let _ = exp_task.await;
-    }
-
-    if let Ok(Some(err)) = join_res {
-        return Err(err);
-    }
 
     tracing::info!("Velda Edge Data Plane stopped cleanly across all workers.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{Runtime, new_shared_runtime};
+
+    #[tokio::test]
+    async fn test_shadow_worker_0_lifecycle_and_reload() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let initial_rt = Runtime::empty();
+        let shared = new_shared_runtime(initial_rt);
+        let (_task_tx, task_rx) = tokio::sync::mpsc::channel(16);
+
+        let handle = crate::lifecycle::worker::spawn_shadow_worker(
+            0,
+            0,
+            false,
+            shared.clone(),
+            shutdown_rx,
+            task_rx,
+        );
+
+        // Update runtime revision to trigger reload branch on Shadow Worker 0
+        let mut new_rt = Runtime::empty();
+        new_rt.revision = 2;
+        shared.store(Arc::new(new_rt));
+        crate::reload::notify_reload(2);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Signal gateway shutdown
+        let _ = shutdown_tx.send(true);
+
+        // Shadow worker thread must terminate cleanly
+        let res = tokio::task::spawn_blocking(move || handle.join()).await;
+        assert!(res.is_ok());
+    }
 }

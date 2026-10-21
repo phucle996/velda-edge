@@ -22,7 +22,7 @@ use http::{HeaderValue, StatusCode};
 use velda_core::{Body, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::algorithm::{CompressionAlgorithm, compress_payload, negotiate_algorithm};
+use super::algorithm::{CompressionAlgorithm, compress_payload_with_dict, negotiate_algorithm};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::post_response::PostResponsePlugin;
@@ -35,12 +35,14 @@ pub struct ResponseCompressionConfig {
     /// Minimum payload size in bytes required to trigger compression.
     /// Tiny payloads (< 256 bytes) expand in size due to framing and Huffman overhead.
     pub min_length: usize,
-    /// Gzip/Deflate compression level (1-9, default: 6).
+    /// Gzip/Deflate compression level (1-9, default: 1 for Pareto speed/ratio sweet spot).
     pub gzip_level: u32,
-    /// Brotli compression quality level (0-11, default: 4 for low edge latency).
+    /// Brotli compression quality level (0-11, default: 2 for sub-millisecond edge latency).
     pub brotli_level: u32,
-    /// Zstandard compression level (1-22, default: 3 for optimal speed/ratio).
+    /// Zstandard compression level (1-22, default: 1 for ultra-fast line-rate throughput).
     pub zstd_level: i32,
+    /// Optional pre-trained Zstandard dictionary (RFC 8878) for high-ratio structured JSON compression.
+    pub zstd_dict: Option<bytes::Bytes>,
     /// MIME type prefixes eligible for compression.
     pub content_types: Vec<String>,
 }
@@ -50,9 +52,10 @@ impl Default for ResponseCompressionConfig {
         Self {
             algorithms: Vec::new(),
             min_length: 256,
-            gzip_level: 6,
-            brotli_level: 4,
-            zstd_level: 3,
+            gzip_level: 1,
+            brotli_level: 2,
+            zstd_level: 1,
+            zstd_dict: None,
             content_types: Vec::new(),
         }
     }
@@ -126,7 +129,24 @@ impl ResponseCompressionPlugin {
             .map(|v| v as i32)
             .unwrap_or(defaults.zstd_level);
 
-        // 4. Parse content_types whitelist (MUST be explicitly declared)
+        // 4. Parse optional pre-trained Zstandard dictionary (base64 encoded or UTF-8 string)
+        let zstd_dict = raw
+            .get("zstd_dict_base64")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                use base64::Engine;
+                base64::prelude::BASE64_STANDARD
+                    .decode(s.trim())
+                    .ok()
+                    .map(bytes::Bytes::from)
+            })
+            .or_else(|| {
+                raw.get("zstd_dict")
+                    .and_then(|v| v.as_str())
+                    .map(|s| bytes::Bytes::copy_from_slice(s.as_bytes()))
+            });
+
+        // 5. Parse content_types whitelist (MUST be explicitly declared)
         let mut content_types = Vec::new();
         if let Some(arr) = raw.get("content_types").and_then(|v| v.as_array()) {
             for item in arr {
@@ -144,6 +164,7 @@ impl ResponseCompressionPlugin {
                 gzip_level,
                 brotli_level,
                 zstd_level,
+                zstd_dict,
                 content_types,
             },
         ))
@@ -220,12 +241,13 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         };
 
         // Execute In-Place Compression
-        let compressed = match compress_payload(
+        let compressed = match compress_payload_with_dict(
             original_bytes,
             selected_algo,
             self.config.gzip_level,
             self.config.brotli_level,
             self.config.zstd_level,
+            self.config.zstd_dict.as_deref(),
         ) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -306,6 +328,7 @@ mod tests {
             gzip_level: 6,
             brotli_level: 4,
             zstd_level: 3,
+            zstd_dict: None,
             content_types: vec!["application/json".to_string(), "text/plain".to_string()],
         }
     }
@@ -596,8 +619,15 @@ mod tests {
         // Verify the cache zone has UNCOMPRESSED bytes!
         let hash = HttpCacheZone::hash_key("GET:api.example.com:/products");
         let stored_entry = zone.get(hash).expect("Must be stored in cache");
-        assert_eq!(stored_entry.body, bytes::Bytes::from(original_json.clone()));
-        assert!(!stored_entry.headers.contains_key(CONTENT_ENCODING));
+        assert_eq!(
+            stored_entry.raw_body.as_ref().unwrap(),
+            &bytes::Bytes::from(original_json.clone())
+        );
+        assert_eq!(
+            stored_entry.content_type.as_ref().unwrap(),
+            "application/json"
+        );
+        // Pure Payload Invariant: Headers map is never stored in cache zone!
 
         //    Step B: response_compression compresses the payload on the exit return path for client
         compress_plugin.on_response(&req_headers, &mut resp);
@@ -612,6 +642,39 @@ mod tests {
                 let mut decompressed = Vec::new();
                 decoder.read_to_end(&mut decompressed).expect("valid gzip");
                 assert_eq!(decompressed, original_json);
+            }
+            _ => panic!("Expected Body::Bytes"),
+        }
+    }
+
+    #[test]
+    fn test_compression_zstd_with_dict() {
+        let dict = bytes::Bytes::from_static(
+            b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\"}",
+        );
+        let config = ResponseCompressionConfig {
+            algorithms: vec![CompressionAlgorithm::Zstd],
+            zstd_dict: Some(dict.clone()),
+            ..standard_test_config()
+        };
+        let plugin = ResponseCompressionPlugin::new("compress-dict", config);
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("zstd"));
+
+        let payload = b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\",\"session\":\"active_9999\"}".repeat(15);
+        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        plugin.on_response(&req_headers, &mut resp);
+
+        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "zstd");
+        match resp.body {
+            Body::Bytes(b) => {
+                let decompressed = super::super::algorithm::decode_zstd_with_dict(&b, Some(&dict))
+                    .expect("valid zstd dict");
+                assert_eq!(decompressed, payload);
             }
             _ => panic!("Expected Body::Bytes"),
         }

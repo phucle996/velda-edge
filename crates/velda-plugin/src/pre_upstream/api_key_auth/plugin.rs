@@ -5,6 +5,7 @@
 //! attacks and achieve sub-20ns authentication on the request hot path.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
@@ -252,7 +253,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         let (token_str, matched_header) = match extract_token(&self.sources, req) {
             Some(res) => res,
             None => {
@@ -390,7 +391,8 @@ mod tests {
         );
         let mut req = build_test_request(headers, None);
 
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
 
         // Credentials should be stripped when hide_credentials = true
@@ -409,7 +411,8 @@ mod tests {
             },
             None,
         );
-        let action2 = plugin.on_upstream_request(&mut req2);
+        let mut target2 = Arc::from("default-upstream");
+        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         assert!(matches!(action2, Action::Continue));
         assert_eq!(req2.headers.get("x-consumer-id").unwrap(), "org-alpha");
     }
@@ -428,7 +431,8 @@ mod tests {
         );
 
         let mut req = build_test_request(HeaderMap::new(), None);
-        let action = plugin.on_upstream_request(&mut req);
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
@@ -460,7 +464,8 @@ mod tests {
         let mut req = build_test_request(headers, None);
 
         // First attempt -> Miss root keys, added to negative cache
-        let action1 = plugin.on_upstream_request(&mut req);
+        let mut target1 = Arc::from("default-upstream");
+        let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         match action1 {
             Action::Respond(resp) => assert_eq!(resp.status, StatusCode::UNAUTHORIZED),
             _ => panic!("Expected 401 response"),
@@ -470,7 +475,8 @@ mod tests {
         let mut headers2 = HeaderMap::new();
         headers2.insert("x-api-key", bad_key.parse().unwrap());
         let mut req2 = build_test_request(headers2, None);
-        let action2 = plugin.on_upstream_request(&mut req2);
+        let mut target2 = Arc::from("default-upstream");
+        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         match action2 {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
@@ -520,8 +526,9 @@ mod tests {
             "ApiKey secret-query-token".parse().unwrap(),
         );
         let mut req_hdr = build_test_request(headers, None);
+        let mut target_hdr = Arc::from("default-upstream");
         assert!(matches!(
-            plugin.on_upstream_request(&mut req_hdr),
+            plugin.on_upstream_request(&mut req_hdr, &mut target_hdr),
             Action::Continue
         ));
         assert_eq!(req_hdr.headers.get("x-partner").unwrap(), "beta");
@@ -529,8 +536,9 @@ mod tests {
         // 2. Query parameter: ?key=secret-query-token
         let mut req_query =
             build_test_request(HeaderMap::new(), Some("key=secret-query-token&mode=raw"));
+        let mut target_query = Arc::from("default-upstream");
         assert!(matches!(
-            plugin.on_upstream_request(&mut req_query),
+            plugin.on_upstream_request(&mut req_query, &mut target_query),
             Action::Continue
         ));
         assert_eq!(req_query.headers.get("x-partner").unwrap(), "beta");
@@ -571,8 +579,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "sk-live-alpha-1234".parse().unwrap());
         let mut req = build_test_request(headers, None);
+        let mut target = Arc::from("default-upstream");
         assert!(matches!(
-            plugin.on_upstream_request(&mut req),
+            plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         assert_eq!(
