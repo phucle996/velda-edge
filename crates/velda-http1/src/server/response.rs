@@ -221,22 +221,58 @@ pub fn encode_status_line(version: Version, status: StatusCode, dst: &mut BytesM
     dst.put_slice(b"\r\n");
 }
 
-/// Serializes HTTP/1.1 response head metadata with zero heap allocations,
+/// Optional metadata and connection control directives applied during HTTP/1.1 response head serialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeadEncodeOptions<'a> {
+    pub body_len: Option<usize>,
+    pub force_close: bool,
+    pub request_id: Option<&'a HeaderValue>,
+}
+
+impl<'a> HeadEncodeOptions<'a> {
+    pub const fn new() -> Self {
+        Self {
+            body_len: None,
+            force_close: false,
+            request_id: None,
+        }
+    }
+
+    pub const fn with_body_len(mut self, len: Option<usize>) -> Self {
+        self.body_len = len;
+        self
+    }
+
+    pub const fn with_force_close(mut self, force_close: bool) -> Self {
+        self.force_close = force_close;
+        self
+    }
+
+    pub const fn with_request_id(mut self, request_id: Option<&'a HeaderValue>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+}
+
+/// Serializes only the HTTP/1.1 response head with Content-Length or without body framing,
 /// automatically enforcing the system-wide L7 `x-request-id` header invariant.
 ///
 /// Invariant:
 /// - If response headers already contain `x-request-id`, it is written as-is.
-/// - If response headers do not contain `x-request-id` and a `request_id` is supplied,
+/// - If `request_id` is provided and `headers` does not already contain an `x-request-id`,
 ///   it is serialized directly to the wire buffer without any heap allocations.
 pub fn encode_head(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
-    body_len: Option<usize>,
-    force_close: bool,
-    request_id: Option<&HeaderValue>,
+    opts: HeadEncodeOptions<'_>,
     dst: &mut BytesMut,
 ) {
+    let HeadEncodeOptions {
+        body_len,
+        force_close,
+        request_id,
+    } = opts;
     // Fast O(1) capacity estimation: avoids redundant pass over all response headers
     let extra_req_id_len = if request_id.is_some() { 64 } else { 0 };
     dst.reserve(128 + headers.len() * 48 + extra_req_id_len);
@@ -292,10 +328,14 @@ pub fn encode_chunked_head(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
-    force_close: bool,
-    request_id: Option<&HeaderValue>,
+    opts: HeadEncodeOptions<'_>,
     dst: &mut BytesMut,
 ) {
+    let HeadEncodeOptions {
+        force_close,
+        request_id,
+        ..
+    } = opts;
     let mut needed = 64;
     for (name, val) in headers {
         needed += name.as_str().len() + val.as_bytes().len() + 4;
@@ -361,9 +401,11 @@ pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
         response.version,
         response.status,
         &response.headers,
-        body_len,
-        false,
-        None,
+        HeadEncodeOptions {
+            body_len,
+            force_close: false,
+            request_id: None,
+        },
         dst,
     );
 
@@ -392,9 +434,11 @@ where
         response.version,
         response.status,
         &response.headers,
-        Some(response.body.len()),
-        force_close,
-        request_id,
+        HeadEncodeOptions {
+            body_len: Some(response.body.len()),
+            force_close,
+            request_id,
+        },
         write_buf,
     );
 
@@ -437,9 +481,11 @@ where
         head.version,
         head.status,
         &head.headers,
-        Some(body.len()),
-        force_close,
-        request_id,
+        HeadEncodeOptions {
+            body_len: Some(body.len()),
+            force_close,
+            request_id,
+        },
         write_buf,
     );
 
@@ -472,14 +518,14 @@ pub async fn send_chunked_head<W>(
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
-    force_close: bool,
-    request_id: Option<&HeaderValue>,
+    opts: HeadEncodeOptions<'_>,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_chunked_head(version, status, headers, force_close, request_id, write_buf);
+    let force_close = opts.force_close;
+    encode_chunked_head(version, status, headers, opts, write_buf);
     stream.write_all(write_buf).await?;
 
     Ok(force_close || is_connection_close(headers))
@@ -492,21 +538,14 @@ pub async fn send_head_coalesced<W>(
     head: &Http1ServerResponseHead,
     initial_chunk: Option<&[u8]>,
     is_terminated: bool,
-    force_close: bool,
-    request_id: Option<&HeaderValue>,
+    opts: HeadEncodeOptions<'_>,
 ) -> Result<bool, Http1Error>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
-    encode_chunked_head(
-        head.version,
-        head.status,
-        &head.headers,
-        force_close,
-        request_id,
-        write_buf,
-    );
+    let force_close = opts.force_close;
+    encode_chunked_head(head.version, head.status, &head.headers, opts, write_buf);
 
     if let Some(chunk) = initial_chunk
         && !chunk.is_empty()
@@ -541,7 +580,17 @@ pub fn encode_response_head(
     force_close: bool,
     dst: &mut BytesMut,
 ) {
-    encode_head(version, status, headers, body_len, force_close, None, dst);
+    encode_head(
+        version,
+        status,
+        headers,
+        HeadEncodeOptions {
+            body_len,
+            force_close,
+            ..Default::default()
+        },
+        dst,
+    );
 }
 
 #[inline]
@@ -552,7 +601,16 @@ pub fn encode_response_head_chunked(
     force_close: bool,
     dst: &mut BytesMut,
 ) {
-    encode_chunked_head(version, status, headers, force_close, None, dst);
+    encode_chunked_head(
+        version,
+        status,
+        headers,
+        HeadEncodeOptions {
+            force_close,
+            ..Default::default()
+        },
+        dst,
+    );
 }
 
 #[inline]
@@ -587,8 +645,10 @@ where
         version,
         status,
         headers,
-        force_close,
-        None,
+        HeadEncodeOptions {
+            force_close,
+            ..Default::default()
+        },
     )
     .await
 }
@@ -611,8 +671,10 @@ where
         head,
         initial_chunk,
         is_terminated,
-        force_close,
-        None,
+        HeadEncodeOptions {
+            force_close,
+            ..Default::default()
+        },
     )
     .await
 }
@@ -693,9 +755,11 @@ mod tests {
             Version::HTTP_11,
             StatusCode::OK,
             &headers,
-            Some(42),
-            false,
-            Some(&req_id),
+            HeadEncodeOptions {
+                body_len: Some(42),
+                force_close: false,
+                request_id: Some(&req_id),
+            },
             &mut dst,
         );
 
@@ -720,9 +784,11 @@ mod tests {
             Version::HTTP_11,
             StatusCode::OK,
             &headers,
-            None,
-            false,
-            Some(&fallback_req_id),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: false,
+                request_id: Some(&fallback_req_id),
+            },
             &mut dst,
         );
 
@@ -742,8 +808,11 @@ mod tests {
             Version::HTTP_11,
             StatusCode::CREATED,
             &headers,
-            false,
-            Some(&req_id),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: false,
+                request_id: Some(&req_id),
+            },
             &mut dst,
         );
 

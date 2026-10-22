@@ -16,7 +16,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
+    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse, Http1ServerResponseHead, parse_single_chunk, read_chunk_sized,
     read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
 };
@@ -169,6 +169,7 @@ where
             resp_head.status = l7_resp.status;
             resp_head.headers = l7_resp.headers;
         }
+        meta.inject_response_headers(&mut resp_head.headers);
 
         let is_head = req_method == http::Method::HEAD;
         let is_no_body = is_head
@@ -224,8 +225,11 @@ where
                         &server_head,
                         body_slice,
                         true,
-                        conn.close_requested,
-                        conn.current_request_id.as_ref(),
+                        HeadEncodeOptions {
+                            body_len: None,
+                            force_close: conn.close_requested,
+                            request_id: conn.current_request_id.as_ref(),
+                        },
                     )
                     .await?;
                     if close {
@@ -289,8 +293,11 @@ where
                         &server_head,
                         Some(payload1),
                         is_terminated,
-                        conn.close_requested,
-                        conn.current_request_id.as_ref(),
+                        HeadEncodeOptions {
+                            body_len: None,
+                            force_close: conn.close_requested,
+                            request_id: conn.current_request_id.as_ref(),
+                        },
                     )
                     .await?;
                     if close {
@@ -620,6 +627,7 @@ where
             resp_head.status = l7_resp.status;
             resp_head.headers = l7_resp.headers;
         }
+        meta.inject_response_headers(&mut resp_head.headers);
 
         let is_head = req_method == http::Method::HEAD;
         let is_no_body_status = resp_head.status.is_informational()

@@ -18,7 +18,8 @@ use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KE
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::http_cache::{
-    CompressedVariants, HttpCacheZone, HttpCacheZoneRegistry, parse_cache_control_ttl,
+    CompressedVariants, HttpCacheZone, HttpCacheZoneRegistry, StoreVariantParams,
+    parse_cache_control_ttl,
 };
 use crate::post_response::PostResponsePlugin;
 
@@ -371,30 +372,30 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
 
         if let Some(enc_val) = resp.headers.get(http::header::CONTENT_ENCODING) {
             let enc_str = enc_val.to_str().unwrap_or("").trim();
-            self.zone.store_variant(
+            self.zone.store_variant(StoreVariantParams {
                 hash,
-                cache_key,
-                resp.status,
+                key: cache_key,
+                status: resp.status,
                 content_type,
-                computed_ttl,
-                Some(enc_str),
-                body_bytes,
-                None,
+                ttl: computed_ttl,
+                encoding: Some(enc_str),
+                payload: body_bytes,
+                variants: None,
                 is_public,
-            );
+            });
         } else {
             // Eager Mode: Store pristine raw canonical body into RAM cache immediately.
-            self.zone.store_variant(
+            self.zone.store_variant(StoreVariantParams {
                 hash,
-                cache_key,
-                resp.status,
-                content_type.clone(),
-                computed_ttl,
-                None,
-                body_bytes.clone(),
-                None,
+                key: cache_key,
+                status: resp.status,
+                content_type: content_type.clone(),
+                ttl: computed_ttl,
+                encoding: None,
+                payload: body_bytes.clone(),
+                variants: None,
                 is_public,
-            );
+            });
 
             // Asynchronous Background Pre-compression (0ms client delay on Cache Miss):
             if body_bytes.len() >= 256 && is_compressible_mime(content_type.as_ref()) {

@@ -22,8 +22,9 @@ pub use request::{
     decode_request_head, parse_request_head,
 };
 pub use response::{
-    Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head, encode_head,
-    encode_response, encode_response_head, encode_response_head_chunked, encode_status_line,
-    is_connection_close, send_chunked_head, send_head_coalesced, send_parts, send_response,
-    send_response_head_chunked, send_response_head_chunked_coalesced, send_response_parts,
+    HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head,
+    encode_head, encode_response, encode_response_head, encode_response_head_chunked,
+    encode_status_line, is_connection_close, send_chunked_head, send_head_coalesced, send_parts,
+    send_response, send_response_head_chunked, send_response_head_chunked_coalesced,
+    send_response_parts,
 };

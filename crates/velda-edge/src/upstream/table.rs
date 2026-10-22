@@ -175,11 +175,11 @@ impl GrpcUpstream {
 #[derive(Clone, Default, Debug)]
 pub struct UpstreamTable {
     /// [PRE-COMPILED]: Protocol table for L4 Raw streams and datagrams (ProtocolFamily::Raw).
-    pub raw: SubUpstreamTable<RawUpstream>,
+    pub raw: Arc<SubUpstreamTable<RawUpstream>>,
     /// [PRE-COMPILED]: Protocol table for L7 HTTP web traffic (ProtocolFamily::Http).
-    pub http: SubUpstreamTable<HttpUpstream>,
+    pub http: Arc<SubUpstreamTable<HttpUpstream>>,
     /// [PRE-COMPILED]: Protocol table for L7 gRPC RPC endpoints (ProtocolFamily::Grpc).
-    pub grpc: SubUpstreamTable<GrpcUpstream>,
+    pub grpc: Arc<SubUpstreamTable<GrpcUpstream>>,
 }
 
 impl UpstreamTable {

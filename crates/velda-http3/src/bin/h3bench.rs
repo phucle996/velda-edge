@@ -78,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut timeout_secs: u64 = 10;
     let mut json_output = false;
     let mut host_override: Option<String> = None;
+    let mut custom_headers: Vec<(http::header::HeaderName, HeaderValue)> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -132,6 +133,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 1;
                 }
             }
+            "-H" | "--header" => {
+                if i + 1 < args.len() {
+                    let header_str = &args[i + 1];
+                    if let Some((name, val)) = header_str.split_once(':')
+                        && let (Ok(hname), Ok(hval)) = (
+                            name.trim().parse::<http::header::HeaderName>(),
+                            HeaderValue::from_str(val.trim()),
+                        )
+                    {
+                        custom_headers.push((hname, hval));
+                    }
+                    i += 1;
+                }
+            }
             "--json" => {
                 json_output = true;
             }
@@ -181,6 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clients = Arc::new(clients);
     let targets = Arc::new(parsed_targets);
+    let headers_to_send = Arc::new(custom_headers);
     let remaining_counter = Arc::new(AtomicUsize::new(0));
 
     let bench_start = Instant::now();
@@ -189,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for worker_id in 0..concurrency {
         let clients = clients.clone();
         let targets = targets.clone();
+        let headers_to_send = headers_to_send.clone();
         let counter = remaining_counter.clone();
         let eff_host = effective_host.clone();
 
@@ -235,6 +252,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(hv) = HeaderValue::from_str(&eff_host) {
                     req.headers.insert("host", hv);
                 }
+                for (hname, hval) in headers_to_send.iter() {
+                    req.headers.insert(hname.clone(), hval.clone());
+                }
 
                 let mut retries = 0;
                 while retries < 3 {
@@ -251,6 +271,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
                             latencies.push(elapsed_ms);
 
+                            if total_requests <= 10 {
+                                eprintln!("Response Status: {}", resp.status);
+                                for (k, v) in &resp.headers {
+                                    eprintln!("Response Header: {}: {:?}", k, v);
+                                }
+                                if let Body::Bytes(ref b) = resp.body {
+                                    eprintln!("Response Body: {}", String::from_utf8_lossy(b));
+                                }
+                            }
                             if resp.status.is_success() {
                                 status_2xx += 1;
                             } else if resp.status.is_client_error() {

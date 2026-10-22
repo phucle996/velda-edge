@@ -12,7 +12,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_http1::wire::{send_chunk, send_chunked_end};
 use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
+    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
     Http1ServerResponse, ProgressiveChunkDecoder,
 };
 use velda_http2::{Http2Config, sanitize_h2_headers};
@@ -259,6 +259,7 @@ where
             parts.status = l7_resp.status;
             parts.headers = l7_resp.headers;
         }
+        meta.inject_response_headers(&mut parts.headers);
 
         let is_no_body_status = parts.status.is_informational()
             || parts.status == http::StatusCode::NO_CONTENT
@@ -269,9 +270,11 @@ where
                 http::Version::HTTP_11,
                 parts.status,
                 &parts.headers,
-                Some(0),
-                should_close,
-                req_id_val.as_ref(),
+                HeadEncodeOptions {
+                    body_len: Some(0),
+                    force_close: should_close,
+                    request_id: req_id_val.as_ref(),
+                },
                 &mut write_buf,
             );
             client_write.write_all(&write_buf).await?;
@@ -306,9 +309,11 @@ where
                 http::Version::HTTP_11,
                 parts.status,
                 &parts.headers,
-                Some(body_buf.len()),
-                should_close,
-                req_id_val.as_ref(),
+                HeadEncodeOptions {
+                    body_len: Some(body_buf.len()),
+                    force_close: should_close,
+                    request_id: req_id_val.as_ref(),
+                },
                 &mut write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
@@ -326,8 +331,11 @@ where
             http::Version::HTTP_11,
             parts.status,
             &parts.headers,
-            should_close,
-            req_id_val.as_ref(),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: should_close,
+                request_id: req_id_val.as_ref(),
+            },
         )
         .await?;
 

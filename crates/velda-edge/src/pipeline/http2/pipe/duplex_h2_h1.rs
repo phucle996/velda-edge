@@ -152,6 +152,7 @@ pub async fn serve(
             resp_head.status = l7_resp.status;
             clean_headers = l7_resp.headers;
         }
+        meta.inject_response_headers(&mut clean_headers);
 
         let mut stream_sender = responder
             .send_stream_response(resp_head.status, &clean_headers)

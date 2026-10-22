@@ -256,6 +256,7 @@ pub async fn serve(
         {
             velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut resp);
         }
+        meta.inject_response_headers(&mut resp.headers);
         responder.send_response(&resp)?;
         if !receiver.is_end_stream() {
             tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });

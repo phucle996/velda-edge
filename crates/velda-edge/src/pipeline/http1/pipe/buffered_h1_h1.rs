@@ -285,6 +285,8 @@ where
         None
     };
 
+    meta.inject_response_headers(&mut resp_head.headers);
+
     let is_no_body = is_head || is_no_body_status;
     let actual_body_len = if is_no_body {
         0

@@ -245,6 +245,7 @@ pub async fn serve(
                     &mut l7_resp,
                 );
             }
+            meta.inject_response_headers(&mut l7_resp.headers);
             let _ = responder.send_response(&l7_resp);
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
@@ -252,10 +253,11 @@ pub async fn serve(
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to read upstream HTTP/1.1 response");
-            let err_resp = L7Response::from_bytes(
+            let mut err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });

@@ -254,6 +254,7 @@ where
             final_body = l7_resp.body;
         }
     }
+    meta.inject_response_headers(&mut headers);
     let server_resp = Http1ServerResponse::new(status, http::Version::HTTP_11, headers, final_body);
     conn.send_response(&server_resp).await?;
 

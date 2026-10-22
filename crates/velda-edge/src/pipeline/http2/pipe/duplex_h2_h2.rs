@@ -131,6 +131,7 @@ pub async fn serve(
                 parts.status = l7_resp.status;
                 parts.headers = l7_resp.headers;
             }
+            meta.inject_response_headers(&mut parts.headers);
 
             let is_no_body_status = parts.status.is_informational()
                 || parts.status == StatusCode::NO_CONTENT

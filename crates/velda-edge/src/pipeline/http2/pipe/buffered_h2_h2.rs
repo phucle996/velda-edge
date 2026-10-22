@@ -28,6 +28,7 @@ async fn forward_buffered(
     body: &Body,
     responder: &mut Http2Responder,
     client: &mut SendRequest<Bytes>,
+    meta: &DownstreamMeta,
     config: &Http2Config,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
@@ -154,6 +155,7 @@ async fn forward_buffered(
     if let Some(post_hooks) = &plan.post_response_hooks {
         velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
     }
+    meta.inject_response_headers(&mut resp.headers);
     responder.send_response_owned(resp)?;
 
     Ok(())
@@ -173,7 +175,7 @@ pub async fn serve(
     let body = match receiver.consume_all().await {
         Ok(b) => b,
         Err(e) => {
-            let err_resp = L7Response::from_bytes(
+            let mut err_resp = L7Response::from_bytes(
                 StatusCode::BAD_REQUEST,
                 format!("400 Bad Request: {e}\n").into_bytes(),
             )
@@ -181,6 +183,7 @@ pub async fn serve(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return;
         }
@@ -204,7 +207,7 @@ pub async fn serve(
                 upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/2 connection"
             );
-            let err_resp = L7Response::from_bytes(
+            let mut err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -212,14 +215,23 @@ pub async fn serve(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return;
         }
     };
 
     // 4. Pipe buffered request & response with automatic self-healing on connection reuse failure
-    let mut res =
-        forward_buffered(&req_head, &body, &mut responder, &mut client, &config, plan).await;
+    let mut res = forward_buffered(
+        &req_head,
+        &body,
+        &mut responder,
+        &mut client,
+        &meta,
+        &config,
+        plan,
+    )
+    .await;
     if let Err(ref e) = res
         && e.is_refused_or_goaway()
     {
@@ -234,6 +246,7 @@ pub async fn serve(
                 &body,
                 &mut responder,
                 &mut fresh_client,
+                &meta,
                 &config,
                 plan,
             )
@@ -247,7 +260,7 @@ pub async fn serve(
             upstream = %upstream.id(),
             "HTTP/2 upstream pipe failed"
         );
-        let err_resp = L7Response::from_bytes(
+        let mut err_resp = L7Response::from_bytes(
             StatusCode::BAD_GATEWAY,
             format!("502 Bad Gateway: {e}\n").into_bytes(),
         )
@@ -255,6 +268,7 @@ pub async fn serve(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
+        meta.inject_response_headers(&mut err_resp.headers);
         let _ = responder.send_response(&err_resp);
     }
 }

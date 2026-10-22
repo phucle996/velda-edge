@@ -377,15 +377,22 @@ pub fn validate_routes_with_listeners(
             for plugin_id in &route.plugins {
                 if let Some(expected_proto) =
                     super::plugin::canonical_protocol_family_for_id(plugin_id)
-                    && listener_proto != expected_proto
                 {
-                    return Err(SyncError::Validation {
-                        domain: "routes".into(),
-                        reason: format!(
-                            "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin '{}' which is strictly restricted to '{}'",
-                            route.id, route.listener, listener_proto, plugin_id, expected_proto
-                        ),
-                    });
+                    let is_mismatch = match expected_proto {
+                        "http" => !matches!(listener_proto, "http" | "http1" | "http2" | "http3"),
+                        "grpc" => listener_proto != "grpc",
+                        "raw" => !matches!(listener_proto, "raw" | "tcp" | "udp"),
+                        other => listener_proto != other,
+                    };
+                    if is_mismatch {
+                        return Err(SyncError::Validation {
+                            domain: "routes".into(),
+                            reason: format!(
+                                "Route '{}' targets listener '{}' with application protocol '{}', but configures plugin '{}' which is strictly restricted to '{}'",
+                                route.id, route.listener, listener_proto, plugin_id, expected_proto
+                            ),
+                        });
+                    }
                 }
             }
         }

@@ -71,7 +71,7 @@ pub async fn handle_grpc_tcp(
                     return;
                 }
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
+                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, None);
                 run_grpc_tcp_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
@@ -84,7 +84,7 @@ pub async fn handle_grpc_tcp(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false);
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, None);
         run_grpc_tcp_loop(connection, meta, config, runtime).await;
     }
 }

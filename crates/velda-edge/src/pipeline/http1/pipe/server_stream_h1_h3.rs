@@ -174,6 +174,7 @@ where
         h3_resp.status = l7_resp.status;
         h3_resp.headers = l7_resp.headers;
     }
+    meta.inject_response_headers(&mut h3_resp.headers);
 
     // 7. Check if response has no body (RFC 9110: HEAD, 1xx, 204, 304)
     let is_head = req_method == http::Method::HEAD;

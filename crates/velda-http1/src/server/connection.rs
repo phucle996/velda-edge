@@ -13,8 +13,8 @@ use super::request::{
     decode_request_head,
 };
 use super::response::{
-    Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head, encode_head,
-    send_chunked_head, send_head_coalesced, send_parts, send_response,
+    HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head,
+    encode_head, send_chunked_head, send_head_coalesced, send_parts, send_response,
 };
 use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
@@ -268,7 +268,7 @@ where
     }
 
     /// Serializes response head into internal write_buf, automatically injecting the connection's
-    /// authoritative L7 Request ID if not already present in `headers`.
+    /// authoritative L7 Request ID header if not already present in `headers`.
     #[inline]
     pub fn encode_head(
         &mut self,
@@ -282,9 +282,11 @@ where
             version,
             status,
             headers,
-            body_len,
-            force_close,
-            self.current_request_id.as_ref(),
+            HeadEncodeOptions {
+                body_len,
+                force_close,
+                request_id: self.current_request_id.as_ref(),
+            },
             &mut self.write_buf,
         );
     }
@@ -303,7 +305,7 @@ where
     }
 
     /// Serializes chunked response head into internal write_buf, automatically injecting the
-    /// connection's authoritative L7 Request ID if not already present in `headers`.
+    /// connection's authoritative L7 Request ID header if not already present in `headers`.
     #[inline]
     pub fn encode_chunked_head(
         &mut self,
@@ -316,8 +318,11 @@ where
             version,
             status,
             headers,
-            force_close,
-            self.current_request_id.as_ref(),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close,
+                request_id: self.current_request_id.as_ref(),
+            },
             &mut self.write_buf,
         );
     }
@@ -419,8 +424,11 @@ where
             head.version,
             head.status,
             &head.headers,
-            self.close_requested,
-            self.current_request_id.as_ref(),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: self.close_requested,
+                request_id: self.current_request_id.as_ref(),
+            },
         )
         .await?;
 
@@ -464,8 +472,11 @@ where
             head,
             initial_chunk,
             is_terminated,
-            self.close_requested,
-            self.current_request_id.as_ref(),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: self.close_requested,
+                request_id: self.current_request_id.as_ref(),
+            },
         )
         .await?;
 

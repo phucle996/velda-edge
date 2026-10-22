@@ -239,8 +239,7 @@ where
         let mut req = Http2ServerRequest::new(head, body);
         req.head.stream_id = Some(stream_id);
 
-        let responder =
-            Http2Responder::new(respond).with_alt_svc(self.config.alt_svc_header_value());
+        let responder = Http2Responder::new(respond);
         Ok(Some((req, responder)))
     }
 
@@ -284,8 +283,7 @@ where
 
                 let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
                     .with_flood_tracker(Arc::clone(&self.flood_tracker));
-                let responder =
-                    Http2Responder::new(respond).with_alt_svc(self.config.alt_svc_header_value());
+                let responder = Http2Responder::new(respond);
 
                 Some(Ok(Some((head, receiver, responder))))
             }
@@ -333,8 +331,7 @@ where
 
         let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
             .with_flood_tracker(Arc::clone(&self.flood_tracker));
-        let responder =
-            Http2Responder::new(respond).with_alt_svc(self.config.alt_svc_header_value());
+        let responder = Http2Responder::new(respond);
 
         Ok(Some((head, receiver, responder)))
     }

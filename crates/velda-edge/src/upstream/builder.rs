@@ -397,9 +397,9 @@ pub fn build_upstreams(
     }
 
     UpstreamTable {
-        raw: SubUpstreamTable::new(raw_map),
-        http: SubUpstreamTable::new(http_map),
-        grpc: SubUpstreamTable::new(grpc_map),
+        raw: Arc::new(SubUpstreamTable::new(raw_map)),
+        http: Arc::new(SubUpstreamTable::new(http_map)),
+        grpc: Arc::new(SubUpstreamTable::new(grpc_map)),
     }
 }
 

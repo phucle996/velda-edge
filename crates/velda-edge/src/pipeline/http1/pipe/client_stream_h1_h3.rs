@@ -296,6 +296,7 @@ where
         resp_stream.status = l7_resp.status;
         resp_stream.headers = l7_resp.headers;
     }
+    meta.inject_response_headers(&mut resp_stream.headers);
 
     // 8. Deliver response downstream
     let is_no_body_status = resp_stream.status.is_informational()

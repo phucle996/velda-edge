@@ -175,6 +175,7 @@ where
                     resp.body = l7_resp.body;
                 }
             }
+            meta.inject_response_headers(&mut resp.headers);
             conn.send_response(&resp).await?;
             Ok(())
         }
@@ -184,7 +185,7 @@ where
                 upstream = %upstream.id(),
                 "HTTP/2 upstream pipe failed"
             );
-            let err_resp = Http1ServerResponse::from_bytes(
+            let mut err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -192,6 +193,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
             Err(Http1Error::ConnectionClosed)

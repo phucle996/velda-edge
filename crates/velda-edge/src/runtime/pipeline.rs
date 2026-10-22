@@ -86,17 +86,20 @@ pub enum TcpPipeline {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: Http1Config,
+        alt_svc: Option<http::HeaderValue>,
     },
     Http2 {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: Http2Config,
+        alt_svc: Option<http::HeaderValue>,
     },
     HttpAuto {
         tls_enabled: bool,
         streaming: StreamingMode,
         http1_config: Http1Config,
         http2_config: Http2Config,
+        alt_svc: Option<http::HeaderValue>,
     },
     Grpc {
         tls_enabled: bool,
@@ -138,6 +141,16 @@ impl TcpPipeline {
             Self::Http2 { streaming, .. } => *streaming,
             Self::HttpAuto { streaming, .. } => *streaming,
             Self::Grpc { streaming, .. } => *streaming,
+        }
+    }
+
+    #[inline]
+    pub fn alt_svc(&self) -> Option<&http::HeaderValue> {
+        match self {
+            Self::Http1 { alt_svc, .. } => alt_svc.as_ref(),
+            Self::Http2 { alt_svc, .. } => alt_svc.as_ref(),
+            Self::HttpAuto { alt_svc, .. } => alt_svc.as_ref(),
+            Self::Grpc { .. } => None,
         }
     }
 }
@@ -263,6 +276,7 @@ impl PipelineTable {
                     "http" => {
                         let http1_config = resolve_http1_config(listener, cores, ram_bytes);
                         let http2_config = resolve_http2_config(listener, cores, ram_bytes);
+                        let alt_svc = resolve_alt_svc_header(listener);
                         if is_tls {
                             tcp.insert(
                                 listener.id.clone(),
@@ -271,6 +285,7 @@ impl PipelineTable {
                                     streaming,
                                     http1_config,
                                     http2_config,
+                                    alt_svc,
                                 },
                             );
                         } else {
@@ -280,29 +295,34 @@ impl PipelineTable {
                                     tls_enabled: false,
                                     streaming,
                                     config: http1_config,
+                                    alt_svc,
                                 },
                             );
                         }
                     }
                     "http1" => {
                         let config = resolve_http1_config(listener, cores, ram_bytes);
+                        let alt_svc = resolve_alt_svc_header(listener);
                         tcp.insert(
                             listener.id.clone(),
                             TcpPipeline::Http1 {
                                 tls_enabled: is_tls,
                                 streaming,
                                 config,
+                                alt_svc,
                             },
                         );
                     }
                     "http2" => {
                         let config = resolve_http2_config(listener, cores, ram_bytes);
+                        let alt_svc = resolve_alt_svc_header(listener);
                         tcp.insert(
                             listener.id.clone(),
                             TcpPipeline::Http2 {
                                 tls_enabled: is_tls,
                                 streaming,
                                 config,
+                                alt_svc,
                             },
                         );
                     }
@@ -439,11 +459,24 @@ fn resolve_http2_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
         if let Some(v) = h2.max_connection_duration_secs {
             config.max_connection_duration_secs = v;
         }
-        if let Some(v) = h2.alt_svc_port {
-            config.alt_svc_port = Some(v);
-        }
     }
     config
+}
+
+/// Resolves and formats an authoritative L7 `Alt-Svc` response header value from listener configuration.
+fn resolve_alt_svc_header(listener: &ListenerConfig) -> Option<http::HeaderValue> {
+    let alt_svc = listener
+        .http1
+        .as_ref()
+        .and_then(|h1| h1.effective_alt_svc())
+        .or_else(|| {
+            listener
+                .http2
+                .as_ref()
+                .and_then(|h2| h2.effective_alt_svc())
+        })?;
+    let s = alt_svc.to_header_value_string();
+    http::HeaderValue::from_str(&s).ok()
 }
 
 fn resolve_grpc_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize) -> GrpcConfig {

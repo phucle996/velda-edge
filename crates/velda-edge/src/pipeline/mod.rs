@@ -31,6 +31,7 @@ pub struct DownstreamMeta {
     pub is_tls: bool,
     pub client_ip_header: http::HeaderValue,
     pub client_port_header: http::HeaderValue,
+    pub alt_svc_header: Option<http::HeaderValue>,
 }
 
 impl DownstreamMeta {
@@ -40,6 +41,7 @@ impl DownstreamMeta {
         peer: SocketAddr,
         local_addr: SocketAddr,
         is_tls: bool,
+        alt_svc_header: Option<http::HeaderValue>,
     ) -> Self {
         let client_ip_header = http::HeaderValue::from_str(&peer.ip().to_string())
             .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));
@@ -51,6 +53,17 @@ impl DownstreamMeta {
             is_tls,
             client_ip_header,
             client_port_header,
+            alt_svc_header,
+        }
+    }
+
+    /// Injects downstream connection-level headers (e.g. Alt-Svc) into response headers if not already present.
+    #[inline]
+    pub fn inject_response_headers(&self, headers: &mut http::HeaderMap) {
+        if let Some(ref alt_svc) = self.alt_svc_header
+            && !headers.contains_key(http::header::ALT_SVC)
+        {
+            headers.insert(http::header::ALT_SVC, alt_svc.clone());
         }
     }
 }
@@ -82,14 +95,24 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             config,
             tls_enabled,
             streaming,
+            alt_svc,
         }) => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
                 let rt = runtime.clone();
                 let lid = Arc::clone(&lid);
+                let alt_svc = alt_svc.clone();
                 Box::pin(async move {
-                    http1::handle_http1_stream(connection, lid, config, tls_enabled, streaming, rt)
-                        .await;
+                    http1::handle_http1_stream(
+                        connection,
+                        lid,
+                        config,
+                        tls_enabled,
+                        streaming,
+                        alt_svc,
+                        rt,
+                    )
+                    .await;
                 })
             })
         }
@@ -97,13 +120,16 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             config,
             tls_enabled,
             streaming: _,
+            alt_svc,
         }) => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
                 let rt = runtime.clone();
                 let lid = Arc::clone(&lid);
+                let alt_svc = alt_svc.clone();
                 Box::pin(async move {
-                    http2::handle_http2_stream(connection, lid, config, tls_enabled, rt).await;
+                    http2::handle_http2_stream(connection, lid, config, tls_enabled, alt_svc, rt)
+                        .await;
                 })
             })
         }
@@ -112,22 +138,22 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             streaming,
             http1_config,
             http2_config,
+            alt_svc,
         }) => {
             let lid = Arc::clone(&lid);
+            let auto_config = HttpAutoConfig {
+                http1_config,
+                http2_config,
+                tls_enabled,
+                streaming,
+                alt_svc,
+            };
             Arc::new(move |connection: Connection| {
                 let rt = runtime.clone();
                 let lid = Arc::clone(&lid);
+                let auto_config = auto_config.clone();
                 Box::pin(async move {
-                    handle_http_auto_stream(
-                        connection,
-                        lid,
-                        http1_config,
-                        http2_config,
-                        tls_enabled,
-                        streaming,
-                        rt,
-                    )
-                    .await;
+                    handle_http_auto_stream(connection, lid, auto_config, rt).await;
                 })
             })
         }
@@ -221,6 +247,16 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
     }
 }
 
+/// Internal configuration bundle for the unified HTTP auto stream worker.
+#[derive(Clone)]
+struct HttpAutoConfig {
+    http1_config: velda_http1::Http1Config,
+    http2_config: velda_http2::Http2Config,
+    tls_enabled: bool,
+    streaming: velda_core::StreamingMode,
+    alt_svc: Option<http::HeaderValue>,
+}
+
 /// Unified HTTP stream worker for listeners declaring the `http` family.
 ///
 /// Under TLS, negotiates ALPN strictly within the HTTP family ("h2" -> HTTP/2, "http/1.1" -> HTTP/1.1).
@@ -228,19 +264,17 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
 async fn handle_http_auto_stream(
     connection: Connection,
     listener_id: Arc<str>,
-    http1_config: velda_http1::Http1Config,
-    http2_config: velda_http2::Http2Config,
-    tls_enabled: bool,
-    streaming: velda_core::StreamingMode,
+    config: HttpAutoConfig,
     runtime: SharedRuntime,
 ) {
-    if !tls_enabled {
+    if !config.tls_enabled {
         http1::handle_http1_stream(
             connection,
             listener_id,
-            http1_config,
+            config.http1_config,
             false,
-            streaming,
+            config.streaming,
+            config.alt_svc,
             runtime,
         )
         .await;
@@ -271,15 +305,22 @@ async fn handle_http_auto_stream(
                 "Downstream TLS handshake succeeded for HTTP family"
             );
 
-            let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
+            let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, config.alt_svc);
 
             // ALPN demuxing strictly within the HTTP protocol family
             match handshake_info.alpn.as_deref() {
                 Some("h2") => {
-                    http2::run_http2_loop(tls_stream, meta, http2_config, runtime).await;
+                    http2::run_http2_loop(tls_stream, meta, config.http2_config, runtime).await;
                 }
                 Some("http/1.1") | None => {
-                    http1::run_http1_loop(tls_stream, meta, streaming, http1_config, runtime).await;
+                    http1::run_http1_loop(
+                        tls_stream,
+                        meta,
+                        config.streaming,
+                        config.http1_config,
+                        runtime,
+                    )
+                    .await;
                 }
                 Some(other_alpn) => {
                     tracing::warn!(

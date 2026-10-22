@@ -244,6 +244,20 @@ impl CacheEntry {
     }
 }
 
+/// Parameters for storing or merging a cache variant into a [`HttpCacheZone`].
+#[derive(Debug, Clone)]
+pub struct StoreVariantParams<'a> {
+    pub hash: u64,
+    pub key: String,
+    pub status: StatusCode,
+    pub content_type: Option<http::HeaderValue>,
+    pub ttl: Duration,
+    pub encoding: Option<&'a str>,
+    pub payload: Bytes,
+    pub variants: Option<CompressedVariants>,
+    pub is_public: bool,
+}
+
 /// Internal state of a single cache shard protected by a reader-writer lock.
 #[derive(Debug)]
 struct ShardInner {
@@ -315,19 +329,18 @@ impl ShardInner {
         self.lru.push_back(hash);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_or_merge(
-        &mut self,
-        hash: u64,
-        key: String,
-        status: StatusCode,
-        content_type: Option<http::HeaderValue>,
-        ttl: Duration,
-        encoding: Option<&str>,
-        payload: Bytes,
-        variants: Option<CompressedVariants>,
-        is_public: bool,
-    ) {
+    fn insert_or_merge(&mut self, params: StoreVariantParams<'_>) {
+        let StoreVariantParams {
+            hash,
+            key,
+            status,
+            content_type,
+            ttl,
+            encoding,
+            payload,
+            variants,
+            is_public,
+        } = params;
         // If entry exists and is fresh, merge into it
         if let Some(entry) = self.entries.get_mut(&hash)
             && entry.is_fresh()
@@ -476,31 +489,9 @@ impl CacheShard {
     }
 
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn insert_or_merge(
-        &self,
-        hash: u64,
-        key: String,
-        status: StatusCode,
-        content_type: Option<http::HeaderValue>,
-        ttl: Duration,
-        encoding: Option<&str>,
-        payload: Bytes,
-        variants: Option<CompressedVariants>,
-        is_public: bool,
-    ) {
+    fn insert_or_merge(&self, params: StoreVariantParams<'_>) {
         if let Ok(mut guard) = self.inner.write() {
-            guard.insert_or_merge(
-                hash,
-                key,
-                status,
-                content_type,
-                ttl,
-                encoding,
-                payload,
-                variants,
-                is_public,
-            );
+            guard.insert_or_merge(params);
         }
     }
 
@@ -668,31 +659,9 @@ impl HttpCacheZone {
     /// - **Lazy Mode**: `encoding` indicates a single wire variant (`gzip`, `br`, `zstd`, or None for raw).
     ///   If an entry for `hash` already exists in RAM, merges this variant into it without overwriting other variants.
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn store_variant(
-        &self,
-        hash: u64,
-        key: String,
-        status: StatusCode,
-        content_type: Option<http::HeaderValue>,
-        ttl: Duration,
-        encoding: Option<&str>,
-        payload: Bytes,
-        variants: Option<CompressedVariants>,
-        is_public: bool,
-    ) {
-        let shard_idx = (hash as usize) % NUM_SHARDS;
-        self.shards[shard_idx].insert_or_merge(
-            hash,
-            key,
-            status,
-            content_type,
-            ttl,
-            encoding,
-            payload,
-            variants,
-            is_public,
-        );
+    pub fn store_variant(&self, params: StoreVariantParams<'_>) {
+        let shard_idx = (params.hash as usize) % NUM_SHARDS;
+        self.shards[shard_idx].insert_or_merge(params);
     }
 
     /// Merges pre-compressed payload variants into an existing cached entry.
@@ -991,17 +960,17 @@ mod tests {
         let gzip_payload = Bytes::from_static(b"gzip-payload-287B");
 
         // 1. Initial lazy store: only Brotli
-        zone.store_variant(
+        zone.store_variant(StoreVariantParams {
             hash,
-            "GET:example.com:/lazy-item".into(),
-            StatusCode::OK,
-            Some(http::HeaderValue::from_static("application/json")),
-            Duration::from_secs(60),
-            Some("br"),
-            br_payload.clone(),
-            None,
-            false,
-        );
+            key: "GET:example.com:/lazy-item".into(),
+            status: StatusCode::OK,
+            content_type: Some(http::HeaderValue::from_static("application/json")),
+            ttl: Duration::from_secs(60),
+            encoding: Some("br"),
+            payload: br_payload.clone(),
+            variants: None,
+            is_public: false,
+        });
 
         // Verify Brotli hit
         let entry1 = zone.get(hash).expect("Entry must exist");
@@ -1010,17 +979,17 @@ mod tests {
         assert!(entry1.raw_body.is_none());
 
         // 2. Second lazy store: merges Gzip into existing entry
-        zone.store_variant(
+        zone.store_variant(StoreVariantParams {
             hash,
-            "GET:example.com:/lazy-item".into(),
-            StatusCode::OK,
-            Some(http::HeaderValue::from_static("application/json")),
-            Duration::from_secs(60),
-            Some("gzip"),
-            gzip_payload.clone(),
-            None,
-            false,
-        );
+            key: "GET:example.com:/lazy-item".into(),
+            status: StatusCode::OK,
+            content_type: Some(http::HeaderValue::from_static("application/json")),
+            ttl: Duration::from_secs(60),
+            encoding: Some("gzip"),
+            payload: gzip_payload.clone(),
+            variants: None,
+            is_public: false,
+        });
 
         // Verify both variants co-exist in the same entry!
         let entry2 = zone.get(hash).expect("Entry must exist");
@@ -1126,17 +1095,17 @@ mod tests {
         );
 
         // Store uncompressed raw body
-        zone.store_variant(
+        zone.store_variant(StoreVariantParams {
             hash,
-            key.clone(),
-            StatusCode::OK,
-            Some(http::HeaderValue::from_static("application/json")),
-            Duration::from_secs(60),
-            None,
-            Bytes::from_static(b"{\"hello\":\"world\"}"),
-            None,
-            true,
-        );
+            key: key.clone(),
+            status: StatusCode::OK,
+            content_type: Some(http::HeaderValue::from_static("application/json")),
+            ttl: Duration::from_secs(60),
+            encoding: None,
+            payload: Bytes::from_static(b"{\"hello\":\"world\"}"),
+            variants: None,
+            is_public: true,
+        });
 
         let initial = zone.get(hash).expect("Must exist");
         assert_eq!(

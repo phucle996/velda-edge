@@ -37,6 +37,7 @@ pub async fn handle_http1_stream(
     config: Http1Config,
     tls_enabled: bool,
     streaming: velda_core::StreamingMode,
+    alt_svc: Option<http::HeaderValue>,
     runtime: SharedRuntime,
 ) {
     let rt = runtime.load();
@@ -77,7 +78,7 @@ pub async fn handle_http1_stream(
                     return;
                 }
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
+                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
                 run_http1_loop(tls_stream, meta, streaming, config, runtime).await;
             }
             Err(e) => {
@@ -90,7 +91,7 @@ pub async fn handle_http1_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false);
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, alt_svc);
         run_http1_loop(connection, meta, streaming, config, runtime).await;
     }
 }
@@ -121,10 +122,11 @@ pub async fn run_http1_loop<IO>(
                 );
                 let (_req_id, req_id_header) = velda_core::next_request_id();
                 conn.set_request_id(Some(req_id_header));
-                let err_resp = Http1ServerResponse::from_bytes(
+                let mut err_resp = Http1ServerResponse::from_bytes(
                     StatusCode::REQUEST_TIMEOUT,
                     b"408 Request Timeout: header read timeout exceeded\n".to_vec(),
                 );
+                meta.inject_response_headers(&mut err_resp.headers);
                 conn.mark_close();
                 let _ = conn.send_response(&err_resp).await;
                 conn.lingering_close().await;
@@ -141,8 +143,9 @@ pub async fn run_http1_loop<IO>(
                 };
                 let (_req_id, req_id_header) = velda_core::next_request_id();
                 conn.set_request_id(Some(req_id_header));
-                let err_resp =
+                let mut err_resp =
                     Http1ServerResponse::from_bytes(status, format!("{status}\n").into_bytes());
+                meta.inject_response_headers(&mut err_resp.headers);
                 conn.mark_close();
                 let _ = conn.send_response(&err_resp).await;
                 conn.lingering_close().await;
@@ -172,7 +175,7 @@ pub async fn run_http1_loop<IO>(
                 listener = %meta.listener_id,
                 "Rejecting chunked request: streaming upload is disabled on this listener"
             );
-            let rejected = Http1ServerResponse::from_bytes(
+            let mut rejected = Http1ServerResponse::from_bytes(
                 StatusCode::FORBIDDEN,
                 b"403 Forbidden: streaming upload is disabled on this listener\n".to_vec(),
             )
@@ -181,6 +184,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut rejected.headers);
             conn.mark_close();
             let _ = conn.send_response(&rejected).await;
             conn.lingering_close().await;
@@ -194,7 +198,7 @@ pub async fn run_http1_loop<IO>(
                 path = %req_head.uri.path(),
                 "Rejecting HTTP/1.1 request with unsafe URI path"
             );
-            let bad_req = Http1ServerResponse::from_bytes(
+            let mut bad_req = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_REQUEST,
                 b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
             )
@@ -203,6 +207,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut bad_req.headers);
             conn.mark_close();
             let _ = conn.send_response(&bad_req).await;
             conn.lingering_close().await;
@@ -232,7 +237,7 @@ pub async fn run_http1_loop<IO>(
                 method = %req_head.method,
                 "No HTTP/1.1 route matched"
             );
-            let not_found = Http1ServerResponse::from_bytes(
+            let mut not_found = Http1ServerResponse::from_bytes(
                 StatusCode::NOT_FOUND,
                 b"404 Not Found: no matching route\n".to_vec(),
             )
@@ -241,6 +246,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut not_found.headers);
             conn.mark_close();
             let _ = conn.send_response(&not_found).await;
             conn.lingering_close().await;
@@ -347,6 +353,7 @@ pub async fn run_http1_loop<IO>(
                         .headers
                         .insert(X_REQUEST_ID, req_id_header.clone());
                 }
+                meta.inject_response_headers(&mut server_resp.headers);
                 if framing == Http1BodyFraming::Empty && !conn.close_requested {
                     let _ = conn.send_response(&server_resp).await;
                     continue;
@@ -366,7 +373,7 @@ pub async fn run_http1_loop<IO>(
                 upstream = %target_upstream,
                 "No HTTP upstream configured"
             );
-            let no_backend = Http1ServerResponse::from_bytes(
+            let mut no_backend = Http1ServerResponse::from_bytes(
                 StatusCode::SERVICE_UNAVAILABLE,
                 b"503 Service Unavailable: upstream not configured\n".to_vec(),
             )
@@ -375,6 +382,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut no_backend.headers);
             conn.mark_close();
             let _ = conn.send_response(&no_backend).await;
             conn.lingering_close().await;
@@ -390,7 +398,7 @@ pub async fn run_http1_loop<IO>(
                 overload = ?overload_lvl,
                 "Shedding HTTP/1.1 request due to memory saturation"
             );
-            let shed_resp = Http1ServerResponse::from_bytes(
+            let mut shed_resp = Http1ServerResponse::from_bytes(
                 StatusCode::TOO_MANY_REQUESTS,
                 b"429 Too Many Requests\n".to_vec(),
             )
@@ -400,6 +408,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut shed_resp.headers);
             conn.mark_close();
             let _ = conn.send_response(&shed_resp).await;
             conn.lingering_close().await;
@@ -509,7 +518,7 @@ pub async fn run_http1_loop<IO>(
                 upstream = %route.upstream_name,
                 "HTTP/1.1 upstream stream pipe failed"
             );
-            let err_resp = Http1ServerResponse::from_bytes(
+            let mut err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -518,6 +527,7 @@ pub async fn run_http1_loop<IO>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )
             .with_header(X_REQUEST_ID, req_id_header.clone());
+            meta.inject_response_headers(&mut err_resp.headers);
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
             conn.lingering_close().await;

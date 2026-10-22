@@ -129,6 +129,7 @@ pub async fn serve(
         h3_resp.status = l7_resp.status;
         h3_resp.headers = l7_resp.headers;
     }
+    meta.inject_response_headers(&mut h3_resp.headers);
 
     let is_no_body = h3_resp.status.is_informational()
         || h3_resp.status == StatusCode::NO_CONTENT

@@ -42,8 +42,6 @@ pub struct Http2Config {
     pub max_requests_per_connection: u32,
     /// Maximum lifetime of downstream HTTP/2 connection in seconds before graceful draining via GOAWAY (0 = unlimited).
     pub max_connection_duration_secs: u32,
-    /// Optional HTTP/3 UDP port advertised via the `Alt-Svc` response header (RFC 9114 §3.1 & RFC 7838).
-    pub alt_svc_port: Option<u16>,
 }
 
 #[inline]
@@ -138,7 +136,6 @@ impl Http2Config {
             max_continuation_frames,
             max_requests_per_connection: 10_000_000,
             max_connection_duration_secs: 7200,
-            alt_svc_port: None,
         }
     }
 
@@ -260,26 +257,6 @@ impl Http2Config {
         self.max_connection_duration_secs = secs;
         self
     }
-
-    /// Configures an explicit HTTP/3 port to advertise via the `Alt-Svc` response header.
-    #[inline]
-    pub const fn with_alt_svc_port(mut self, port: u16) -> Self {
-        self.alt_svc_port = Some(port);
-        self
-    }
-
-    /// Returns the pre-computed Alt-Svc header value if an HTTP/3 port is configured.
-    #[inline]
-    pub fn alt_svc_header_value(&self) -> Option<http::HeaderValue> {
-        self.alt_svc_port.and_then(|port| match port {
-            443 => Some(http::HeaderValue::from_static("h3=\":443\"; ma=86400")),
-            8443 => Some(http::HeaderValue::from_static("h3=\":8443\"; ma=86400")),
-            other => {
-                let s = format!("h3=\":{other}\"; ma=86400");
-                http::HeaderValue::try_from(s).ok()
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -324,23 +301,5 @@ mod tests {
         assert_eq!(config.initial_stream_window_size, 65535);
         assert_eq!(config.max_body_size, 32 * 1024 * 1024);
         assert_eq!(config.max_frame_size, 64 * 1024);
-    }
-
-    #[test]
-    fn test_alt_svc_header_value() {
-        let config = Http2Config::auto();
-        assert_eq!(config.alt_svc_header_value(), None);
-
-        let config = config.with_alt_svc_port(443);
-        assert_eq!(
-            config.alt_svc_header_value().unwrap().to_str().unwrap(),
-            "h3=\":443\"; ma=86400"
-        );
-
-        let config = config.with_alt_svc_port(8443);
-        assert_eq!(
-            config.alt_svc_header_value().unwrap().to_str().unwrap(),
-            "h3=\":8443\"; ma=86400"
-        );
     }
 }

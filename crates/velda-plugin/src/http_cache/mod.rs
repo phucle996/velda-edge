@@ -10,7 +10,7 @@ pub mod zone;
 pub use constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 pub use zone::{
     CacheEntry, CacheShard, CompressedVariants, HttpCacheZone, HttpCacheZoneRegistry, NUM_SHARDS,
-    filter_cacheable_headers, normalize_query, parse_cache_control_ttl,
+    StoreVariantParams, filter_cacheable_headers, normalize_query, parse_cache_control_ttl,
 };
 
 #[cfg(test)]

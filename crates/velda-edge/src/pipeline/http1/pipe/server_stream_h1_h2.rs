@@ -224,6 +224,7 @@ where
         status = l7_resp.status;
         headers = l7_resp.headers;
     }
+    meta.inject_response_headers(&mut headers);
     let resp_head = Http1ServerResponseHead::new(status, http::Version::HTTP_11, headers);
 
     let first_chunk_opt = match body_stream.data().await {

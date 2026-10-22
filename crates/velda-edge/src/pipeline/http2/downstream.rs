@@ -35,6 +35,7 @@ pub async fn handle_http2_stream(
     listener_id: Arc<str>,
     config: Http2Config,
     tls_enabled: bool,
+    alt_svc: Option<http::HeaderValue>,
     runtime: SharedRuntime,
 ) {
     let rt = runtime.load();
@@ -75,7 +76,7 @@ pub async fn handle_http2_stream(
                     return;
                 }
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true);
+                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
                 run_http2_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
@@ -88,7 +89,7 @@ pub async fn handle_http2_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false);
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, alt_svc);
         run_http2_loop(connection, meta, config, runtime).await;
     }
 }
@@ -157,7 +158,7 @@ pub async fn run_http2_loop<IO>(
                             path = %req_head.uri.path(),
                             "Rejecting HTTP/2 request with unsafe URI path"
                         );
-                        let bad_req = L7Response::from_bytes(
+                        let mut bad_req = L7Response::from_bytes(
                             StatusCode::BAD_REQUEST,
                             b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
                         )
@@ -166,6 +167,7 @@ pub async fn run_http2_loop<IO>(
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
                         .with_header(X_REQUEST_ID, req_id_header.clone());
+                        meta.inject_response_headers(&mut bad_req.headers);
                         let _ = responder.send_response(&bad_req);
                         continue;
                     }
@@ -205,13 +207,14 @@ pub async fn run_http2_loop<IO>(
                             b"404 Not Found: no matching route\n".as_slice()
                         };
 
-                        let not_found =
+                        let mut not_found =
                             L7Response::from_bytes(StatusCode::NOT_FOUND, body_text.to_vec())
                                 .with_header(
                                     CONTENT_TYPE,
                                     HeaderValue::from_static("text/plain; charset=utf-8"),
                                 )
                                 .with_header(X_REQUEST_ID, req_id_header.clone());
+                        meta.inject_response_headers(&mut not_found.headers);
 
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&not_found);
@@ -232,7 +235,7 @@ pub async fn run_http2_loop<IO>(
                             upstream = %route.upstream_name,
                             "No healthy backend endpoints available for HTTP upstream"
                         );
-                        let no_backend = L7Response::from_bytes(
+                        let mut no_backend = L7Response::from_bytes(
                             StatusCode::SERVICE_UNAVAILABLE,
                             b"503 Service Unavailable: no healthy upstream endpoints\n".to_vec(),
                         )
@@ -241,6 +244,7 @@ pub async fn run_http2_loop<IO>(
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
                         .with_header(X_REQUEST_ID, req_id_header.clone());
+                        meta.inject_response_headers(&mut no_backend.headers);
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&no_backend);
                         } else {
@@ -258,7 +262,7 @@ pub async fn run_http2_loop<IO>(
                             overload = ?overload_lvl,
                             "Shedding HTTP/2 request due to memory saturation"
                         );
-                        let shed_resp = L7Response::from_bytes(
+                        let mut shed_resp = L7Response::from_bytes(
                             StatusCode::TOO_MANY_REQUESTS,
                             b"429 Too Many Requests\n".to_vec(),
                         )
@@ -268,6 +272,7 @@ pub async fn run_http2_loop<IO>(
                             HeaderValue::from_static("text/plain; charset=utf-8"),
                         )
                         .with_header(X_REQUEST_ID, req_id_header.clone());
+                        meta.inject_response_headers(&mut shed_resp.headers);
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&shed_resp);
                         } else {
@@ -280,23 +285,16 @@ pub async fn run_http2_loop<IO>(
                         continue;
                     }
 
-                    let plan = rt.plugins.get_plan(route.id).clone();
-                    let meta_clone = Arc::clone(&meta);
-                    let upstreams_table = Arc::new(rt.upstreams.http.clone());
-                    let default_upstream_name: Arc<str> = Arc::from(route.upstream_name.as_str());
+                    let ctx = Http2StreamContext {
+                        meta: Arc::clone(&meta),
+                        config,
+                        default_upstream: upstream_target,
+                        default_upstream_name: Arc::from(route.upstream_name.as_str()),
+                        http_upstreams: Arc::clone(&rt.upstreams.http),
+                        plan: rt.plugins.get_plan(route.id).clone(),
+                    };
                     tokio::spawn(async move {
-                        serve_http2_stream(
-                            req_head,
-                            receiver,
-                            responder,
-                            meta_clone,
-                            config,
-                            upstream_target,
-                            default_upstream_name,
-                            upstreams_table,
-                            plan,
-                        )
-                        .await;
+                        serve_http2_stream(req_head, receiver, responder, ctx).await;
                     });
                 }
                 Ok(Ok(None)) => break,
@@ -333,19 +331,30 @@ pub async fn run_http2_loop<IO>(
     }
 }
 
-/// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
-#[allow(clippy::too_many_arguments)]
-async fn serve_http2_stream(
-    mut req_head: Http2ServerRequestHead,
-    receiver: Http2StreamReceiver,
-    responder: Http2Responder,
+struct Http2StreamContext {
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     default_upstream: Arc<HttpUpstream>,
     default_upstream_name: Arc<str>,
     http_upstreams: Arc<crate::upstream::SubUpstreamTable<HttpUpstream>>,
     plan: Arc<RoutePluginPlan>,
+}
+
+/// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
+async fn serve_http2_stream(
+    mut req_head: Http2ServerRequestHead,
+    receiver: Http2StreamReceiver,
+    responder: Http2Responder,
+    ctx: Http2StreamContext,
 ) {
+    let Http2StreamContext {
+        meta,
+        config,
+        default_upstream,
+        default_upstream_name,
+        http_upstreams,
+        plan,
+    } = ctx;
     let mut target_upstream: Arc<str> = Arc::clone(&default_upstream_name);
 
     if !plan.is_empty() {
@@ -435,6 +444,7 @@ async fn serve_http2_stream(
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
             }
+            meta.inject_response_headers(&mut resp.headers);
             let mut responder = responder;
             if !receiver.is_end_stream() {
                 let _ = responder.send_response_and_cancel_upload(&resp);
@@ -455,7 +465,7 @@ async fn serve_http2_stream(
             upstream = %target_upstream,
             "No HTTP upstream configured"
         );
-        let resp = L7Response::from_bytes(
+        let mut resp = L7Response::from_bytes(
             StatusCode::SERVICE_UNAVAILABLE,
             b"503 Service Unavailable: upstream not configured\n".to_vec(),
         )
@@ -463,6 +473,7 @@ async fn serve_http2_stream(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
+        meta.inject_response_headers(&mut resp.headers);
         let mut responder = responder;
         if !receiver.is_end_stream() {
             let _ = responder.send_response_and_cancel_upload(&resp);

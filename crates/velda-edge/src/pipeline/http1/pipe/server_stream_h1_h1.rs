@@ -16,7 +16,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use velda_core::Body;
 use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
+    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
     Http1ServerRequestHead, Http1ServerResponse, Http1ServerResponseHead, read_chunk_sized,
     read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
     send_request,
@@ -196,6 +196,7 @@ where
         resp_head.status = l7_resp.status;
         resp_head.headers = l7_resp.headers;
     }
+    meta.inject_response_headers(&mut resp_head.headers);
 
     // 6. RFC 9110 §6.4.1 & §9.3.2: HEAD, 1xx, 204, 304 have no body
     let is_head = req.method == http::Method::HEAD;
@@ -322,8 +323,11 @@ where
                     &server_head,
                     body_slice,
                     true,
-                    conn.close_requested,
-                    conn.current_request_id.as_ref(),
+                    HeadEncodeOptions {
+                        body_len: None,
+                        force_close: conn.close_requested,
+                        request_id: conn.current_request_id.as_ref(),
+                    },
                 )
                 .await?;
                 if close {
@@ -417,8 +421,11 @@ where
                     &server_head,
                     Some(payload1),
                     is_terminated,
-                    conn.close_requested,
-                    conn.current_request_id.as_ref(),
+                    HeadEncodeOptions {
+                        body_len: None,
+                        force_close: conn.close_requested,
+                        request_id: conn.current_request_id.as_ref(),
+                    },
                 )
                 .await?;
                 if close {

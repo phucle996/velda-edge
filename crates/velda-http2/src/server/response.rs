@@ -14,25 +14,23 @@ use velda_core::{Body, L7Response};
 use crate::error::Http2Error;
 use crate::headers::X_REQUEST_ID;
 
-#[cold]
-#[inline(never)]
-fn cold_parse_error(e: impl std::fmt::Display) -> Http2Error {
-    Http2Error::Parse(e.to_string())
-}
-
 /// Constructs an HTTP/2 response head frame builder with sanitized RFC 9113 headers.
 #[inline]
 pub fn build_h2_response(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<Response<()>, Http2Error> {
-    let mut builder = Response::builder().status(status).version(Version::HTTP_2);
+    let mut http_response = Response::new(());
+    *http_response.status_mut() = status;
+    *http_response.version_mut() = Version::HTTP_2;
     for (name, val) in headers {
         if !crate::headers::is_disallowed_h2_header(name, val) {
-            builder = builder.header(name, val);
+            http_response
+                .headers_mut()
+                .insert(name.clone(), val.clone());
         }
     }
-    builder.body(()).map_err(cold_parse_error)
+    Ok(http_response)
 }
 
 /// Downstream HTTP/2 response head metadata.
@@ -106,7 +104,6 @@ impl Http2ServerResponse {
 #[derive(Debug)]
 pub struct Http2Responder {
     respond: SendResponse<Bytes>,
-    alt_svc: Option<HeaderValue>,
     request_id: Option<HeaderValue>,
 }
 
@@ -116,16 +113,8 @@ impl Http2Responder {
     pub fn new(respond: SendResponse<Bytes>) -> Self {
         Self {
             respond,
-            alt_svc: None,
             request_id: None,
         }
-    }
-
-    /// Sets an optional Alt-Svc header value to automatically advertise on downstream responses.
-    #[inline]
-    pub fn with_alt_svc(mut self, alt_svc: Option<HeaderValue>) -> Self {
-        self.alt_svc = alt_svc;
-        self
     }
 
     /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
@@ -142,13 +131,6 @@ impl Http2Responder {
         headers: &HeaderMap,
     ) -> Result<Response<()>, Http2Error> {
         let mut response = build_h2_response(status, headers)?;
-        if let Some(ref alt_svc) = self.alt_svc
-            && !response.headers().contains_key(http::header::ALT_SVC)
-        {
-            response
-                .headers_mut()
-                .insert(http::header::ALT_SVC, alt_svc.clone());
-        }
         if let Some(ref req_id) = self.request_id
             && !response.headers().contains_key(&X_REQUEST_ID)
         {
@@ -168,9 +150,40 @@ impl Http2Responder {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
-    /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning.
-    pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
-        self.send_parts_owned(response.status, &response.headers, response.body)
+    /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning and header copying.
+    pub fn send_response_owned(&mut self, mut response: L7Response) -> Result<(), Http2Error> {
+        let is_no_body = response.status.is_informational()
+            || response.status == StatusCode::NO_CONTENT
+            || response.status == StatusCode::NOT_MODIFIED;
+
+        let has_body = !is_no_body && !response.body.is_empty();
+
+        crate::headers::sanitize_h2_headers(&mut response.headers);
+        if let Some(ref req_id) = self.request_id
+            && !response.headers.contains_key(&X_REQUEST_ID)
+        {
+            response.headers.insert(X_REQUEST_ID, req_id.clone());
+        }
+
+        let mut http_response = Response::new(());
+        *http_response.status_mut() = response.status;
+        *http_response.version_mut() = Version::HTTP_2;
+        *http_response.headers_mut() = response.headers;
+
+        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
+
+        if has_body {
+            match response.body {
+                Body::Bytes(b) => {
+                    if !b.is_empty() {
+                        send_stream.send_data(b, true)?;
+                    }
+                }
+                Body::Empty => {}
+            }
+        }
+
+        Ok(())
     }
 
     /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.

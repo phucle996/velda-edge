@@ -121,6 +121,7 @@ where
                 resp_head.status = l7_resp.status;
                 resp_head.headers = l7_resp.headers;
             }
+            meta.inject_response_headers(&mut resp_head.headers);
 
             let is_head = req.method == http::Method::HEAD;
             let is_no_body_status = resp_head.status.is_informational()
@@ -334,6 +335,7 @@ where
             resp_head.status = l7_resp.status;
             resp_head.headers = l7_resp.headers;
         }
+        meta.inject_response_headers(&mut resp_head.headers);
 
         // Validate response framing (client streaming expects non-streaming response)
         if resp_framing == Http1BodyFraming::Chunked {

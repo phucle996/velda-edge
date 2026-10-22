@@ -153,6 +153,7 @@ where
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
             }
+            meta.inject_response_headers(&mut l7_resp.headers);
             let server_resp = Http1ServerResponse::new(
                 l7_resp.status,
                 http::Version::HTTP_11,
@@ -171,7 +172,7 @@ where
                 upstream = %upstream.id(),
                 "HTTP/3 upstream buffered pipe failed"
             );
-            let err_resp = Http1ServerResponse::from_bytes(
+            let mut err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -179,6 +180,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             conn.mark_close();
             let _ = conn.send_response(&err_resp).await;
             Err(Http1Error::ConnectionClosed)

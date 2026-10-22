@@ -171,8 +171,9 @@ pub async fn serve(
                 if read_failed {
                     lease.mark_closed();
                 }
-                let body_slice = &lease.read_buf[..lease.read_buf.len().min(body_len)];
-                velda_core::Body::Bytes(bytes::Bytes::copy_from_slice(body_slice))
+                let actual_len = lease.read_buf.len().min(body_len);
+                let body_bytes = lease.read_buf.split_to(actual_len).freeze();
+                velda_core::Body::Bytes(body_bytes)
             } else {
                 velda_core::Body::Empty
             }
@@ -223,12 +224,16 @@ pub async fn serve(
     drop(lease);
 
     // 8. Send HTTP/2 response downstream
-    let mut clean_headers = resp_head.headers;
-    velda_http1::client::sanitize_headers(&mut clean_headers);
-    let mut l7_resp = L7Response::new(resp_head.status, http::Version::HTTP_2, clean_headers, body);
+    let mut l7_resp = L7Response::new(
+        resp_head.status,
+        http::Version::HTTP_2,
+        resp_head.headers,
+        body,
+    );
     if let Some(post_hooks) = &plan.post_response_hooks {
         velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
     }
+    meta.inject_response_headers(&mut l7_resp.headers);
     let _ = responder.send_response_owned(l7_resp);
 }
 

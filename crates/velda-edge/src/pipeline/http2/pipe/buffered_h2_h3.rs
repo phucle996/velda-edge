@@ -111,6 +111,7 @@ pub async fn serve(
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
             }
+            meta.inject_response_headers(&mut resp.headers);
             let _ = responder.send_response(&resp);
         }
         Err(e) => {
@@ -119,7 +120,7 @@ pub async fn serve(
                 upstream = %upstream.id(),
                 "HTTP/3 upstream buffered pipe failed"
             );
-            let err_resp = L7Response::from_bytes(
+            let mut err_resp = L7Response::from_bytes(
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             )
@@ -127,6 +128,7 @@ pub async fn serve(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
+            meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
         }
     }
