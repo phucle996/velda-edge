@@ -19,7 +19,6 @@ High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Or
 - **Edge Short-Circuiting**: Automatically responds to browser CORS preflight requests (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) directly at the edge in $< 1\ \mu\text{s}$, preventing unnecessary load on backend microservices.
 - **Eliminates False Auth Rejections**: Because standard browsers send Preflight `OPTIONS` without credentials, intercepting in `pre_route` (before `pre_upstream` plugins like `jwt_auth` or `api_key`) prevents preflight requests from falsely failing with `401 Unauthorized`.
 - **W3C Fetch Spec Compliance**: When `allow_credentials` is `true`, wildcards (`*`) are prohibited by browsers. The plugin dynamically reflects the exact requesting origin while preserving security boundaries.
-- **Origin Pattern Matching**: Supports both exact origins (`https://app.velda.io`) and subdomain wildcards (`https://*.velda.io`).
 
 ### Pairing with `cors` (`post_response`)
 - **`cors_preflight` (`pre_route`)**: Handles incoming browser preflight checks (`OPTIONS`).
@@ -27,15 +26,18 @@ High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Or
 
 ---
 
-## 2. Configuration Field Specification
+## 2. 100% Explicit Configuration Invariant
 
-| Field | Type | Required / Default | Constraints / Allowed Values | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `allowed_origins` | array[string] | Optional (`["*"]`) | Array of origins or `["*"]` | Allowed CORS origins. Supports exact matches and wildcards (`https://*.domain.com`). |
-| `allowed_methods` | array[string] | Optional (Standard 7 methods) | `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` | Allowed HTTP methods in preflight response. |
-| `allowed_headers` | array[string] | Optional (`["*"]`) | Array of header names or `["*"]` | Allowed request headers. `"*"` reflects requested headers. |
-| `allow_credentials` | boolean | Optional (`false`) | `true`, `false` | Enables `Access-Control-Allow-Credentials: true`. |
-| `max_age_secs` | integer | Optional (`86400`) | $\ge 0$ | Cache lifetime in seconds for the browser preflight result (`Access-Control-Max-Age`). |
+> [!IMPORTANT]
+> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
+
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| `allowed_origins` | Array of strings | **Yes** | Non-empty list of origins (`"https://*.domain.com"`, exact origins, or `["*"]`). Cannot be `"*"` if `allow_credentials: true`. | `["https://app.example.com", "https://admin.example.com"]` | Allowed CORS origins for preflight requests. |
+| `allowed_methods` | Array of strings | **Yes** | Non-empty list of valid HTTP methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`) | `["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]` | Allowed HTTP methods in preflight response (`Access-Control-Allow-Methods`). |
+| `allowed_headers` | Array of strings | **Yes** | List of valid HTTP header names or `["*"]` to mirror requested headers | `["Authorization", "Content-Type", "X-Requested-With"]` | Allowed request headers (`Access-Control-Allow-Headers`). |
+| `allow_credentials` | Boolean | **Yes** | `true` or `false` | `true` (for authenticated apps) / `false` (for public APIs) | Enables `Access-Control-Allow-Credentials: true`. |
+| `max_age_secs` | Integer (u64) | **Yes** | $\ge 0$ seconds | `86400` (24 hours) | Browser preflight cache lifetime in seconds (`Access-Control-Max-Age`). |
 
 ---
 
@@ -59,47 +61,58 @@ High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Or
 
 ## 4. Configuration Examples
 
-### Production SaaS SPA Setup (Subdomain Wildcard + Credentials)
+### Production Manifest (`plugins.json`)
+
 ```json
 {
-  "id": "cors_preflight",
-  "config": {
-    "allowed_origins": [
-      "https://*.velda.io",
-      "https://velda.io",
-      "https://localhost:3000"
-    ],
-    "allowed_methods": [
-      "GET",
-      "POST",
-      "PUT",
-      "DELETE",
-      "PATCH",
-      "OPTIONS"
-    ],
-    "allowed_headers": [
-      "Authorization",
-      "Content-Type",
-      "X-Requested-With",
-      "X-API-Key"
-    ],
-    "allow_credentials": true,
-    "max_age_secs": 86400
-  }
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "cors_preflight",
+      "config": {
+        "allowed_origins": [
+          "https://*.velda.io",
+          "https://velda.io"
+        ],
+        "allowed_methods": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "PATCH",
+          "HEAD",
+          "OPTIONS"
+        ],
+        "allowed_headers": [
+          "Authorization",
+          "Content-Type",
+          "X-Requested-With"
+        ],
+        "allow_credentials": true,
+        "max_age_secs": 86400
+      }
+    }
+  ]
 }
 ```
 
-### Public API Setup (Permissive Wildcard)
+### Route Attachment (`routes.json`)
+
 ```json
 {
-  "id": "cors_preflight",
-  "config": {
-    "allowed_origins": ["*"],
-    "allowed_methods": ["GET", "POST", "OPTIONS"],
-    "allowed_headers": ["*"],
-    "allow_credentials": false,
-    "max_age_secs": 86400
-  }
+  "id": "api-orders-route",
+  "match": {
+    "path": "/api/v1/orders"
+  },
+  "upstream_id": "orders-backend",
+  "plugins": [
+    "ip_filter",
+    "resource_limit",
+    "cors_preflight",
+    "waf_lite",
+    "jwt_auth",
+    "cors"
+  ]
 }
 ```
 

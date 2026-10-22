@@ -106,90 +106,37 @@ impl HttpCacheLookupPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = HttpCacheLookupConfig::default();
+        let cfg = velda_sync::validate_http_cache_lookup_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid http_cache_lookup configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
+        let mut cacheable_methods = Vec::with_capacity(cfg.cacheable_methods.len());
+        for m_str in &cfg.cacheable_methods {
+            let method = Method::from_bytes(m_str.trim().as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid cacheable method '{m_str}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            cacheable_methods.push(method);
         }
 
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
+        let parsed_cfg = HttpCacheLookupConfig {
+            zone: cfg.zone,
+            cacheable_methods,
+            ignore_query_order: cfg.ignore_query_order,
+            honor_client_no_cache: cfg.honor_client_no_cache,
+            bypass_authenticated_requests: cfg.bypass_authenticated_requests,
+            key_headers: cfg.key_headers,
+            max_memory_mb: cfg.max_memory_mb,
+            default_ttl_secs: cfg.default_ttl_secs,
+        };
 
-        let zone = raw
-            .get("zone")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&defaults.zone)
-            .to_string();
-
-        let mut cacheable_methods = defaults.cacheable_methods;
-        if let Some(arr) = raw.get("cacheable_methods").and_then(|v| v.as_array()) {
-            let mut methods = Vec::new();
-            for item in arr {
-                if let Some(m_str) = item.as_str()
-                    && let Ok(method) = Method::from_bytes(m_str.trim().as_bytes())
-                {
-                    methods.push(method);
-                }
-            }
-            if !methods.is_empty() {
-                cacheable_methods = methods;
-            }
-        }
-
-        let ignore_query_order = raw
-            .get("ignore_query_order")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.ignore_query_order);
-
-        let honor_client_no_cache = raw
-            .get("honor_client_no_cache")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.honor_client_no_cache);
-
-        let bypass_authenticated_requests = raw
-            .get("bypass_authenticated_requests")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.bypass_authenticated_requests);
-
-        let mut key_headers = defaults.key_headers;
-        if let Some(arr) = raw.get("key_headers").and_then(|v| v.as_array()) {
-            let mut headers = Vec::new();
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    let trimmed = s.trim().to_ascii_lowercase();
-                    if !trimmed.is_empty() && !headers.contains(&trimmed) {
-                        headers.push(trimmed);
-                    }
-                }
-            }
-            key_headers = headers;
-        }
-
-        let max_memory_mb = raw
-            .get("max_memory_mb")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_memory_mb);
-
-        let default_ttl_secs = raw
-            .get("default_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(defaults.default_ttl_secs);
-
-        Ok(Self::new(
-            &config.id,
-            HttpCacheLookupConfig {
-                zone,
-                cacheable_methods,
-                ignore_query_order,
-                honor_client_no_cache,
-                bypass_authenticated_requests,
-                key_headers,
-                max_memory_mb,
-                default_ttl_secs,
-            },
-        ))
+        Ok(Self::new(&config.id, parsed_cfg))
     }
 }
 
@@ -852,5 +799,42 @@ mod tests {
             }
             _ => panic!("Expected Action::Respond for Alice"),
         }
+    }
+
+    #[test]
+    fn test_from_config_complete() {
+        let json_cfg = serde_json::json!({
+            "zone": "api_cache",
+            "cacheable_methods": ["GET", "HEAD"],
+            "ignore_query_order": true,
+            "honor_client_no_cache": false,
+            "bypass_authenticated_requests": true,
+            "key_headers": ["x-user-id", "authorization"],
+            "max_memory_mb": 256,
+            "default_ttl_secs": 300
+        });
+        let config = PluginConfig {
+            id: "http_cache_lookup".into(),
+            phase: String::new(),
+            config: json_cfg,
+        };
+        let plugin = HttpCacheLookupPlugin::from_config(&config).expect("valid config");
+        assert_eq!(plugin.id, "http_cache_lookup");
+        assert_eq!(plugin.config.zone, "api_cache");
+        assert_eq!(plugin.config.cacheable_methods.len(), 2);
+        assert!(plugin.config.ignore_query_order);
+        assert!(!plugin.config.honor_client_no_cache);
+        assert!(plugin.config.bypass_authenticated_requests);
+        assert_eq!(plugin.config.key_headers.len(), 2);
+        assert_eq!(plugin.config.max_memory_mb, 256);
+        assert_eq!(plugin.config.default_ttl_secs, 300);
+
+        // Incomplete config must fail validation
+        let bad_config = PluginConfig {
+            id: "http_cache_lookup".into(),
+            phase: String::new(),
+            config: serde_json::json!({}),
+        };
+        assert!(HttpCacheLookupPlugin::from_config(&bad_config).is_err());
     }
 }

@@ -2,112 +2,102 @@
 
 Client-side browser hardening and OWASP L7 hygiene plugin for outgoing HTTP responses. Automatically injects pre-compiled security headers instructing user-agents to activate internal sandbox defenses against MITM, Clickjacking, MIME-sniffing, XSS, and Referrer leakage.
 
+> [!IMPORTANT]
+> **100% Explicit Configuration Invariant**: Every configuration parameter must be declared explicitly in `plugins.json`. No silent fallbacks, implicit defaults, or hidden behaviors are permitted.
+>
+> **Explicit 'none' / null Sentinel**: When a security header is intentionally omitted or disabled, declare `"none"` or `null` explicitly in the configuration.
+>
+> **Zero-Allocation Hot Path**: All `HeaderName` and `HeaderValue` pairs are pre-computed and validated at boot time (`from_config`). Serving a response executes a contiguous iteration with zero heap allocations.
+
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. Specifications
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `security_headers` |
-| **Canonical Phase** | `post_response` |
-| **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
-| **Hot-Path Overhead** | O(1) per header; pre-computed `HeaderValue` atomic ref-count clone; **0 heap allocations** |
-
-### What it Protects
-- **HSTS (RFC 6797)**: Prevents SSL-stripping downgrade attacks by enforcing HTTPS for a declared duration.
-- **X-Content-Type-Options (RFC 7231)**: Sets `nosniff` to disable browser MIME sniffing, preventing malicious scripts disguised as images from executing.
-- **X-Frame-Options (RFC 7034)**: Disables or restricts `<iframe>` embedding (`DENY` or `SAMEORIGIN`), neutralizing UI Redressing and Clickjacking exploits.
-- **Referrer-Policy (W3C)**: Restricts referrer leakage to external origins, preventing tokens and query parameters from exposing in logs.
-- **Content-Security-Policy (CSP W3C Level 3)**: Restricts authorized domains for scripts, styles, images, and child frames.
-- **Permissions-Policy (W3C)**: Disables unused browser hardware capabilities (camera, microphone, geolocation).
-
-### Out of Scope
-- **Backend Protection**: Does not protect servers from SQLi, RCE, or volumetric floods.
-- **CORS Handling**: Cross-Origin Resource Sharing and preflight `OPTIONS` are owned by the `cors` plugin.
-- **Arbitrary Header Transformations**: Dynamic variable substitutions are owned by `header_mutation`.
+| **Lifecycle Phase** | `post_response` (Statically inferred) |
+| **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
+| **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
+| **Hot Path Latency** | ~10ns (Pre-computed HeaderValues, atomic ref-count clone) |
 
 ---
 
-## 2. Configuration Field Specification
+## 2. Configuration Parameters
 
-Any unused security header must be explicitly set to `"none"` to omit it from the response.
-
-| Field | Type | Required / Default | Constraints / Allowed Values | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `hsts` | object \| string | Optional | Object or `"none"` | HTTP Strict Transport Security configuration |
-| `hsts.enable` | boolean | Optional (`true`) | `true`, `false` | Enables or disables the HSTS header |
-| `hsts.max_age_secs` | integer | Optional (`31536000`) | `>= 0` (seconds, default 1 year) | How long the browser must remember to use HTTPS |
-| `hsts.include_subdomains`| boolean | Optional (`true`) | `true`, `false` | Extends HSTS policy to all subdomains |
-| `hsts.preload` | boolean | Optional (`false`) | `true`, `false` | Requests inclusion in browser HSTS preload list |
-| `frame_options` | string | Optional (`"DENY"`) | `"DENY"`, `"SAMEORIGIN"`, or `"none"` | X-Frame-Options clickjacking defense |
-| `content_type_nosniff` | boolean | Optional (`true`) | `true`, `false` | When true, injects `x-content-type-options: nosniff` |
-| `referrer_policy` | string | Optional (`"strict-origin-when-cross-origin"`) | Valid W3C policy or `"none"` | Referrer leakage control policy |
-| `csp` | string | Optional (`"none"`) | CSP directive string or `"none"` | Content-Security-Policy header value |
-| `permissions_policy` | string | Optional (`"none"`) | Permissions policy string or `"none"` | Browser hardware/API restrictions |
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `hsts` | `object` | **Yes** | Object containing `enable`, `max_age_secs`, `include_subdomains`, `preload` | See subfields below | HTTP Strict Transport Security configuration. |
+| `hsts.enable` | `boolean` | **Yes** | `true` or `false` | `true` | Enables or disables the `Strict-Transport-Security` header. |
+| `hsts.max_age_secs` | `integer` | **Yes** | `1..=63072000` (must be > 0 if enabled) | `31536000` (1 year) | How long (seconds) browser enforces HTTPS. |
+| `hsts.include_subdomains` | `boolean` | **Yes** | `true` or `false` | `true` | Extends HSTS policy to all subdomains. |
+| `hsts.preload` | `boolean` | **Yes** | `true` or `false` | `false` | Requests inclusion in browser HSTS preload list. |
+| `frame_options` | `string` | **Yes** | `"DENY"`, `"SAMEORIGIN"`, `"ALLOW-FROM"`, or `"none"` | `"DENY"` | X-Frame-Options clickjacking defense. |
+| `content_type_nosniff` | `boolean` | **Yes** | `true` or `false` | `true` | When true, injects `X-Content-Type-Options: nosniff`. |
+| `referrer_policy` | `string` | **Yes** | Valid W3C policy or `"none"` | `"strict-origin-when-cross-origin"` | Referrer-Policy leakage control directive. |
+| `content_security_policy` | `string \| null` | **Yes** | Valid CSP string, `"none"`, or `null` | `"none"` | Content-Security-Policy header directive. |
+| `permissions_policy` | `string \| null` | **Yes** | Valid permissions policy string, `"none"`, or `null` | `"none"` | Browser hardware/feature restrictions. |
 
 ---
 
-## 3. Headers Contract
+## 3. Configuration Manifest (`plugins.json`)
 
-### Response Headers Injected
-| Header Name | Standard Config Example |
-| :--- | :--- |
-| `strict-transport-security` | `max-age=31536000; includeSubDomains` |
-| `x-content-type-options` | `nosniff` |
-| `x-frame-options` | `DENY` |
-| `referrer-policy` | `strict-origin-when-cross-origin` |
-| `content-security-policy` | `default-src 'self'` (if configured) |
-| `permissions-policy` | `camera=(), microphone=(), geolocation=()` (if configured) |
-
----
-
-## 4. Configuration Examples
-
-### Minimal Production Configuration
 ```json
 {
-  "id": "security_headers",
-  "config": {
-    "hsts": {
-      "enable": true,
-      "max_age_secs": 31536000,
-      "include_subdomains": true,
-      "preload": false
-    },
-    "frame_options": "DENY",
-    "content_type_nosniff": true,
-    "referrer_policy": "strict-origin-when-cross-origin",
-    "csp": "none",
-    "permissions_policy": "none"
-  }
-}
-```
-
-### Full Configuration with CSP & Permissions Policy
-```json
-{
-  "id": "security_headers",
-  "config": {
-    "hsts": {
-      "enable": true,
-      "max_age_secs": 63072000,
-      "include_subdomains": true,
-      "preload": true
-    },
-    "frame_options": "SAMEORIGIN",
-    "content_type_nosniff": true,
-    "referrer_policy": "no-referrer-when-downgrade",
-    "csp": "default-src 'self'; script-src 'self' 'nonce-rAnd0m'; object-src 'none'",
-    "permissions_policy": "camera=(), microphone=(), geolocation=()"
-  }
+  "plugins": [
+    {
+      "id": "edge_security_headers",
+      "plugin": "security_headers",
+      "config": {
+        "hsts": {
+          "enable": true,
+          "max_age_secs": 31536000,
+          "include_subdomains": true,
+          "preload": false
+        },
+        "frame_options": "DENY",
+        "content_type_nosniff": true,
+        "referrer_policy": "strict-origin-when-cross-origin",
+        "content_security_policy": "none",
+        "permissions_policy": "none"
+      }
+    }
+  ]
 }
 ```
 
 ---
 
-## 5. Architectural & Hot-Path Invariants
+## 4. Route Attachment (`routes.json`)
 
-1. **Zero-Allocation Hot Path**: All `HeaderName` and `HeaderValue` pairs are pre-computed, pre-formatted, and validated once during initialization (`from_config`). Serving a response executes a tight contiguous iteration cloning `HeaderValue` (O(1) atomic ref-count increment on internal `Bytes`, strictly **0 heap allocations** on the request hot path).
-2. **Granular Toggles**: Every single security header can be enabled, customized, or disabled individually by specifying `"none"`, ensuring applications requiring iframe embedding or custom staging configs are never broken.
+Attach the plugin to an HTTP route via its unique identifier in the `plugins` array:
+
+```json
+{
+  "routes": [
+    {
+      "id": "route_web",
+      "match": {
+        "path": {
+          "prefix": "/"
+        }
+      },
+      "plugins": [
+        "edge_security_headers"
+      ],
+      "upstream": "cluster_frontend"
+    }
+  ]
+}
+```
+
+---
+
+## 5. Defense Invariants
+
+1. **HSTS (RFC 6797)**: Prevents SSL-stripping downgrade attacks by enforcing HTTPS for a declared duration.
+2. **X-Content-Type-Options (RFC 7231)**: Sets `nosniff` to disable browser MIME sniffing, preventing malicious scripts disguised as images from executing.
+3. **X-Frame-Options (RFC 7034)**: Disables or restricts `<iframe>` embedding (`DENY` or `SAMEORIGIN`), neutralizing UI Redressing and Clickjacking exploits.
+4. **Referrer-Policy (W3C)**: Restricts referrer leakage to external origins, preventing tokens and query parameters from exposing in logs.
+5. **Content-Security-Policy (CSP W3C Level 3)**: Restricts authorized domains for scripts, styles, images, and child frames.
+6. **Permissions-Policy (W3C)**: Disables unused browser hardware capabilities (camera, microphone, geolocation).

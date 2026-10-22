@@ -17,9 +17,11 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 
 pub mod health_probe;
+pub mod otlp_metrics_exporter;
 pub mod prometheus;
 
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
+pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus::{PrometheusExporter, format_snapshot};
 
 /// Contract for plugins operating as background auxiliary services.
@@ -94,6 +96,10 @@ pub fn instantiate(
         }
         "prometheus_exporter" => {
             let exporter = PrometheusExporter::from_config(config)?;
+            Ok(Arc::new(exporter))
+        }
+        "otlp_metrics_exporter" => {
+            let exporter = OtlpMetricsExporterPlugin::from_config(config)?;
             Ok(Arc::new(exporter))
         }
         other => Err(PluginError::Config(format!(

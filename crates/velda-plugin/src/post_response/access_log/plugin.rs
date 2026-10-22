@@ -92,57 +92,25 @@ impl AccessLogPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = AccessLogConfig::default();
+        let cfg =
+            velda_sync::validate_access_log_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid access_log configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
-        }
-
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        let include_request_id = raw
-            .get("include_request_id")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.include_request_id);
-
-        let include_route_id = raw
-            .get("include_route_id")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.include_route_id);
-
-        let include_upstream = raw
-            .get("include_upstream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.include_upstream);
-
-        let include_latency = raw
-            .get("include_latency")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.include_latency);
-
-        let format = raw
-            .get("format")
-            .and_then(|v| v.as_str())
-            .map(LogFormat::parse)
-            .unwrap_or(defaults.format);
-
-        let buffer_capacity = raw
-            .get("buffer_capacity")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.buffer_capacity);
+        let format = LogFormat::parse(&cfg.format);
 
         Ok(Self::new(
             &config.id,
             AccessLogConfig {
-                include_request_id,
-                include_route_id,
-                include_upstream,
-                include_latency,
+                include_request_id: cfg.include_request_id,
+                include_route_id: cfg.include_route_id,
+                include_upstream: cfg.include_upstream,
+                include_latency: cfg.include_latency,
                 format,
-                buffer_capacity,
+                buffer_capacity: cfg.buffer_capacity,
             },
         ))
     }
@@ -331,5 +299,39 @@ mod tests {
         plugin.on_response(&req_headers, &mut resp);
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_from_config_strict_validation() {
+        let valid_json = serde_json::json!({
+            "format": "json",
+            "include_request_id": true,
+            "include_route_id": true,
+            "include_upstream": true,
+            "include_latency": true,
+            "buffer_capacity": 4096
+        });
+
+        let p_cfg = PluginConfig {
+            id: "log_test".into(),
+            phase: "post_response".into(),
+            config: valid_json,
+        };
+
+        let plugin = AccessLogPlugin::from_config(&p_cfg).unwrap();
+        assert_eq!(plugin.config.format, LogFormat::Json);
+        assert_eq!(plugin.config.buffer_capacity, 4096);
+        assert!(plugin.config.include_request_id);
+
+        let invalid_json = serde_json::json!({
+            "format": "json"
+            // Missing other fields
+        });
+        let bad_cfg = PluginConfig {
+            id: "log_bad".into(),
+            phase: "post_response".into(),
+            config: invalid_json,
+        };
+        assert!(AccessLogPlugin::from_config(&bad_cfg).is_err());
     }
 }

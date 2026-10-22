@@ -91,156 +91,65 @@ impl ApiKeyAuthPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
+        let cfg =
+            velda_sync::validate_api_key_auth_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid api_key_auth configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        // 1. Parse extraction sources (defaults to X-API-Key and Authorization: ApiKey)
-        let mut sources = Vec::new();
-        if let Some(sources_arr) = raw.get("sources").and_then(|v| v.as_array()) {
-            for item in sources_arr {
-                if let Some(src_obj) = item.as_object() {
-                    let stype = src_obj
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("header");
-                    match stype {
-                        "header" => {
-                            let name_str = src_obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("x-api-key");
-                            let prefix = src_obj
-                                .get("prefix")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = HeaderName::from_str(name_str).map_err(|e| {
-                                PluginError::Config(format!(
-                                    "Invalid header name '{name_str}' for plugin '{}': {e}",
-                                    config.id
-                                ))
-                            })?;
-                            sources.push(KeySource::Header { name, prefix });
-                        }
-                        "query" => {
-                            let param = src_obj
-                                .get("param")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("api_key")
-                                .to_string();
-                            sources.push(KeySource::Query { param });
-                        }
-                        other => {
-                            return Err(PluginError::Config(format!(
-                                "Unknown key source type '{other}' for plugin '{}'",
-                                config.id
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        if sources.is_empty() {
-            sources.push(KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            });
-            sources.push(KeySource::Header {
-                name: http::header::AUTHORIZATION,
-                prefix: "ApiKey ".to_string(),
-            });
-        }
-
-        let hide_credentials = raw
-            .get("hide_credentials")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        // 2. Parse configured keys
-        let mut keys_map = FxHashMap::default();
-        if let Some(keys_arr) = raw.get("keys").and_then(|v| v.as_array()) {
-            for (idx, item) in keys_arr.iter().enumerate() {
-                let key_obj = item.as_object().ok_or_else(|| {
-                    PluginError::Config(format!(
-                        "Key entry at index {idx} in plugin '{}' must be an object",
-                        config.id
-                    ))
-                })?;
-
-                let key_str = key_obj
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| {
+        let mut sources = Vec::with_capacity(cfg.sources.len());
+        for src in &cfg.sources {
+            match src {
+                velda_sync::ApiKeySourceConfig::Header { name, prefix } => {
+                    let hname = HeaderName::from_str(name).map_err(|e| {
                         PluginError::Config(format!(
-                            "Missing non-empty 'key' at index {idx} in plugin '{}'",
+                            "Invalid header name '{name}' for plugin '{}': {e}",
                             config.id
                         ))
                     })?;
-
-                let consumer_id = key_obj
-                    .get("consumer_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(key_str)
-                    .to_string();
-
-                let mut injected_headers = Vec::new();
-                if let Some(inject_map) = key_obj.get("inject_headers").and_then(|v| v.as_object())
-                {
-                    for (hname_str, hval_val) in inject_map {
-                        if let Some(hval_str) = hval_val.as_str() {
-                            let hname = HeaderName::from_str(hname_str).map_err(|e| {
-                                PluginError::Config(format!(
-                                    "Invalid injected header name '{hname_str}' for plugin '{}': {e}",
-                                    config.id
-                                ))
-                            })?;
-                            let hval = HeaderValue::from_str(hval_str).map_err(|e| {
-                                PluginError::Config(format!(
-                                    "Invalid injected header value '{hval_str}' for plugin '{}': {e}",
-                                    config.id
-                                ))
-                            })?;
-                            injected_headers.push((hname, hval));
-                        }
-                    }
+                    sources.push(KeySource::Header {
+                        name: hname,
+                        prefix: prefix.clone().unwrap_or_default(),
+                    });
                 }
-
-                keys_map.insert(key_str.to_string(), (consumer_id, injected_headers));
+                velda_sync::ApiKeySourceConfig::Query { param } => {
+                    sources.push(KeySource::Query {
+                        param: param.clone(),
+                    });
+                }
             }
         }
 
-        // 3. Cache configuration
-        let cache_ttl_secs = raw
-            .get("cache_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(300);
-        let negative_cache_ttl_secs = raw
-            .get("negative_cache_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10);
-        let cache_shards = raw
-            .get("cache_shards")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(64) as usize;
-        let cache_shard_capacity = raw
-            .get("cache_shard_capacity")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2048) as usize;
+        let mut keys_map = FxHashMap::default();
+        for k in &cfg.keys {
+            let consumer_id = k.consumer_id.clone().unwrap_or_else(|| k.key.clone());
+            let mut injected_headers = Vec::with_capacity(k.inject_headers.len());
+            for (hname_str, hval_str) in &k.inject_headers {
+                let hname = HeaderName::from_str(hname_str).map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid injected header name '{hname_str}' for plugin '{}': {e}",
+                        config.id
+                    ))
+                })?;
+                let hval = HeaderValue::from_str(hval_str).map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid injected header value '{hval_str}' for plugin '{}': {e}",
+                        config.id
+                    ))
+                })?;
+                injected_headers.push((hname, hval));
+            }
+            keys_map.insert(k.key.clone(), (consumer_id, injected_headers));
+        }
 
-        let cache = ApiKeyCache::new(
-            cache_shards,
-            cache_shard_capacity,
-            cache_ttl_secs,
-            negative_cache_ttl_secs,
-        );
+        let cache = ApiKeyCache::new(64, 2048, cfg.cache_ttl_secs, 10);
 
         Ok(Self::new(
             &config.id,
             sources,
-            hide_credentials,
+            cfg.hide_credentials,
             keys_map,
             cache,
         ))

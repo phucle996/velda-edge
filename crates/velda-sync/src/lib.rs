@@ -23,11 +23,7 @@ pub use post_sync::listener::{
     DomainHeader as ListenerDomainHeader, ListenerApplicationConfig, ListenerConfig,
     ListenerTlsConfig, ListenerTransportConfig, ListenersFile,
 };
-pub use post_sync::plugin::{
-    AuthExporterConfig, CorsExporterConfig, DomainHeader as PluginDomainHeader, PluginConfig,
-    PluginsFile, PrometheusExporterConfig, ScrapeExporterConfig, TlsExporterConfig,
-    compile_plugins_to_binary, unpack_plugins_from_binary, validate_prometheus_exporter_config,
-};
+pub use post_sync::plugin::*;
 pub use post_sync::route::{
     DomainHeader as RouteDomainHeader, RouteConfig, RouteMatch, RouteTimeouts, RoutesFile,
 };

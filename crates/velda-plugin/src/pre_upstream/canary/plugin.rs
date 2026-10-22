@@ -82,117 +82,40 @@ impl CanaryPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
+        let cfg = velda_sync::validate_canary_config(&config.id, &config.config).map_err(|e| {
+            PluginError::Config(format!(
+                "Invalid canary configuration for '{}': {e}",
+                config.id
+            ))
         })?;
 
-        // 1. canary_upstream (required)
-        let canary_upstream = raw
-            .get("canary_upstream")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PluginError::Config(format!(
-                    "Plugin '{}' requires 'canary_upstream' string parameter",
-                    config.id
-                ))
-            })?
-            .to_string();
-
-        // 2. weight (0 to 100, defaults to 0)
-        let weight = raw
-            .get("weight")
-            .and_then(|v| v.as_u64())
-            .map(|w| (w as u32).min(100))
-            .unwrap_or(0);
-
-        // 3. rules
-        let mut rules = Vec::new();
-        if let Some(rules_arr) = raw.get("rules").and_then(|v| v.as_array()) {
-            for item in rules_arr {
-                if let Some(r_obj) = item.as_object() {
-                    let hdr = r_obj
-                        .get("header")
-                        .or_else(|| r_obj.get("name"))
-                        .and_then(|v| v.as_str());
-
-                    if let Some(hdr) = hdr {
-                        let op = r_obj.get("operator").and_then(|v| v.as_str());
-                        let val = r_obj
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        let (exact, prefix, exists) = if let Some(op) = op {
-                            match op {
-                                "equals" => (val, None, false),
-                                "prefix" => (None, val, false),
-                                "exists" => (None, None, true),
-                                _ => (val, None, false),
-                            }
-                        } else {
-                            let exact = r_obj
-                                .get("exact")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            let prefix = r_obj
-                                .get("prefix")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            let exists = r_obj
-                                .get("exists")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(exact.is_none() && prefix.is_none());
-                            (exact, prefix, exists)
-                        };
-
-                        rules.push(HeaderRule {
-                            header: hdr.to_ascii_lowercase(),
-                            exact,
-                            prefix,
-                            exists,
-                        });
-                    }
-                }
-            }
+        let mut rules = Vec::with_capacity(cfg.rules.len());
+        for r in &cfg.rules {
+            let (exact, prefix, exists) = match r.operator.to_ascii_lowercase().as_str() {
+                "equals" => (Some(r.value.clone()), None, false),
+                "prefix" => (None, Some(r.value.clone()), false),
+                "exists" => (None, None, true),
+                _ => (Some(r.value.clone()), None, false),
+            };
+            rules.push(HeaderRule {
+                header: r.name.to_ascii_lowercase(),
+                exact,
+                prefix,
+                exists,
+            });
         }
 
-        // 4. hash_by
-        let hash_by = if let Some(hash_obj) = raw.get("hash_by").and_then(|v| v.as_object()) {
-            let src = hash_obj
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("random");
-            let key = hash_obj.get("key").and_then(|v| v.as_str());
-            HashSource::parse(src, key)
-        } else if let Some(src_str) = raw.get("hash_by").and_then(|v| v.as_str()) {
-            HashSource::parse(src_str, None)
-        } else {
-            HashSource::Random
-        };
-
-        // 5. canary_header
-        let canary_header = raw
-            .get("canary_header")
-            .and_then(|v| v.as_str())
-            .unwrap_or("x-velda-canary")
-            .to_string();
-
-        // 6. canary_header_value
-        let canary_header_value = raw
-            .get("canary_header_value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("true")
-            .to_string();
+        let hash_by = HashSource::parse(&cfg.hash_by, None);
 
         Self::new(
             &config.id,
             CanaryConfig {
-                canary_upstream,
-                weight,
+                canary_upstream: cfg.canary_upstream,
+                weight: cfg.weight,
                 rules,
                 hash_by,
-                canary_header,
-                canary_header_value,
+                canary_header: cfg.canary_header,
+                canary_header_value: cfg.canary_header_value,
             },
         )
     }
@@ -333,5 +256,41 @@ mod tests {
         assert_eq!(req.headers.get("x-velda-canary").unwrap(), "true");
         assert_eq!(target.as_ref(), "catalog-v2");
         assert!(!req.headers.contains_key("x-velda-upstream"));
+    }
+
+    #[test]
+    fn test_canary_from_config() {
+        let json_cfg = serde_json::json!({
+            "canary_upstream": "catalog-v2",
+            "weight": 20,
+            "rules": [
+                {
+                    "name": "x-canary",
+                    "operator": "equals",
+                    "value": "always"
+                }
+            ],
+            "hash_by": "client_ip",
+            "canary_header": "x-velda-canary",
+            "canary_header_value": "true"
+        });
+        let config = PluginConfig {
+            id: "canary".into(),
+            phase: String::new(),
+            config: json_cfg,
+        };
+        let plugin = CanaryPlugin::from_config(&config).expect("valid config");
+        assert_eq!(plugin.id, "canary");
+        assert_eq!(plugin.config.canary_upstream, "catalog-v2");
+        assert_eq!(plugin.config.weight, 20);
+        assert_eq!(plugin.config.rules.len(), 1);
+
+        // Empty config must fail validation
+        let bad_config = PluginConfig {
+            id: "canary".into(),
+            phase: String::new(),
+            config: serde_json::json!({}),
+        };
+        assert!(CanaryPlugin::from_config(&bad_config).is_err());
     }
 }

@@ -4,7 +4,7 @@
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **RFC 6454 Security Invariant**: If `allow_credentials` is true, wildcard `*` origin is strictly forbidden.
-//! - **Explicit Parameters**: `allow_origins`, `allow_methods`, `allow_headers`, `expose_headers`, `allow_credentials`, `max_age_secs` are mandatory.
+//! - **Explicit Parameters**: `allow_origins`, `allow_credentials`, `expose_headers`, `max_age_secs` are mandatory.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,26 +15,12 @@ use crate::SyncError;
 pub struct CorsResponseConfig {
     /// Permitted origins (e.g. `["https://app.velda.io"]` or `["*"]`).
     pub allow_origins: Vec<String>,
-    /// Permitted HTTP methods.
-    pub allow_methods: Vec<String>,
-    /// Permitted request headers.
-    pub allow_headers: Vec<String>,
     /// Headers exposed to browser JavaScript (`Access-Control-Expose-Headers`).
     pub expose_headers: Vec<String>,
     /// Whether downstream requests can include credentials.
     pub allow_credentials: bool,
-    /// Preflight cache duration in seconds (`Access-Control-Max-Age`).
-    pub max_age_secs: u64,
-}
-
-fn is_valid_http_method(m: &str) -> bool {
-    let trimmed = m.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    /// Preflight cache duration in seconds (`Access-Control-Max-Age`), or null.
+    pub max_age_secs: Option<u64>,
 }
 
 fn is_valid_header_name(h: &str) -> bool {
@@ -96,55 +82,26 @@ pub fn validate_cors_response_config(
         });
     }
 
-    // 2. Validate Methods
-    if cfg.allow_methods.is_empty() {
-        return Err(SyncError::Validation {
-            domain: "plugins".into(),
-            reason: format!("Plugin '{plugin_id}': allow_methods cannot be empty"),
-        });
-    }
-    for m in &cfg.allow_methods {
-        if !is_valid_http_method(m) {
-            return Err(SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!(
-                    "Plugin '{plugin_id}': invalid HTTP method token '{m}' in allow_methods"
-                ),
-            });
-        }
-    }
-
-    // 3. Validate Headers
-    for h in &cfg.allow_headers {
-        if !is_valid_header_name(h) {
-            return Err(SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!(
-                    "Plugin '{plugin_id}': invalid HTTP header name '{h}' in allow_headers"
-                ),
-            });
-        }
-    }
-
-    // 4. Validate Expose Headers
+    // 2. Validate Expose Headers
     for h in &cfg.expose_headers {
         if !is_valid_header_name(h) {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
                 reason: format!(
-                    "Plugin '{plugin_id}': invalid HTTP header name '{h}' in expose_headers"
+                    "Plugin '{plugin_id}': invalid custom header token '{h}' in expose_headers"
                 ),
             });
         }
     }
 
-    // 5. Validate Max-Age
-    if cfg.max_age_secs > 86400 * 365 {
+    // 3. Validate Max Age
+    if let Some(secs) = cfg.max_age_secs
+        && secs > 86400
+    {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': max_age_secs ({}) exceeds maximum limit of 31,536,000s",
-                cfg.max_age_secs
+                "Plugin '{plugin_id}': max_age_secs ({secs}) exceeds 86400 seconds (24 hours)"
             ),
         });
     }
@@ -160,14 +117,12 @@ mod tests {
     #[test]
     fn test_valid_cors_response() {
         let val = json!({
-            "allow_origins": ["https://app.velda.io", "https://console.velda.io"],
-            "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["authorization", "content-type", "x-requested-with", "x-api-key"],
-            "expose_headers": ["x-request-id"],
+            "allow_origins": ["https://app.velda.io", "https://admin.velda.io"],
             "allow_credentials": true,
-            "max_age_secs": 86400
+            "expose_headers": ["x-request-id", "x-total-count"],
+            "max_age_secs": 3600
         });
-        let res = validate_cors_response_config("cors_1", &val);
+        let res = validate_cors_response_config("cors_resp_1", &val);
         assert!(res.is_ok());
     }
 
@@ -175,22 +130,20 @@ mod tests {
     fn test_wildcard_with_credentials_rejected() {
         let val = json!({
             "allow_origins": ["*"],
-            "allow_methods": ["GET"],
-            "allow_headers": ["Content-Type"],
-            "expose_headers": [],
             "allow_credentials": true,
-            "max_age_secs": 3600
+            "expose_headers": [],
+            "max_age_secs": null
         });
-        let res = validate_cors_response_config("cors_bad_cred", &val);
+        let res = validate_cors_response_config("cors_bad_sec", &val);
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("RFC 6454"));
+        assert!(res.unwrap_err().to_string().contains("RFC 6454 violation"));
     }
 
     #[test]
     fn test_missing_required_fields_rejected() {
         let val = json!({
             "allow_origins": ["https://app.velda.io"]
-            // Missing allow_methods, allow_headers, expose_headers, allow_credentials, max_age_secs
+            // Missing allow_credentials, expose_headers, max_age_secs
         });
         let res = validate_cors_response_config("cors_missing", &val);
         assert!(res.is_err());

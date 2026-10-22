@@ -54,30 +54,8 @@ pub struct HeaderMutationPlugin {
 }
 
 impl HeaderMutationPlugin {
-    /// Constructs a new header mutation plugin with set and remove lists (backward compatibility).
-    pub fn new(
-        id: impl Into<String>,
-        set_headers: Vec<(HeaderName, HeaderValue)>,
-        remove_headers: Vec<HeaderName>,
-    ) -> Self {
-        let set = set_headers
-            .into_iter()
-            .map(|(k, v)| (k, HeaderValueSpec::Static(v)))
-            .collect();
-        Self::with_config(
-            id,
-            HeaderMutationConfig {
-                strip_hop_by_hop: true,
-                remove: remove_headers,
-                rename: Vec::new(),
-                set,
-                append: Vec::new(),
-            },
-        )
-    }
-
     /// Constructs a new header mutation plugin with complete configuration.
-    pub fn with_config(id: impl Into<String>, config: HeaderMutationConfig) -> Self {
+    pub fn new(id: impl Into<String>, config: HeaderMutationConfig) -> Self {
         Self {
             id: id.into(),
             config,
@@ -86,42 +64,42 @@ impl HeaderMutationPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = HeaderMutationConfig::default();
+        let cfg = velda_sync::validate_header_mutation_config(&config.id, &config.config).map_err(
+            |e| {
+                PluginError::Config(format!(
+                    "Invalid header_mutation configuration for '{}': {e}",
+                    config.id
+                ))
+            },
+        )?;
 
-        if config.config.is_null() {
-            return Ok(Self::with_config(&config.id, defaults));
+        let mut remove = Vec::with_capacity(cfg.remove_headers.len());
+        for s in &cfg.remove_headers {
+            let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
+                PluginError::Config(format!("Invalid remove header name '{s}': {e}"))
+            })?;
+            remove.push(name);
         }
 
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        // 1. strip_hop_by_hop (defaults to true)
-        let strip_hop_by_hop = raw
-            .get("strip_hop_by_hop")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        // 2. remove list
-        let mut remove = Vec::new();
-        if let Some(rem_arr) = raw
-            .get("remove")
-            .or_else(|| raw.get("remove_headers"))
-            .and_then(|v| v.as_array())
-        {
-            for item in rem_arr {
-                if let Some(s) = item.as_str() {
-                    let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
-                        PluginError::Config(format!("Invalid remove header name '{s}': {e}"))
-                    })?;
-                    remove.push(name);
-                }
-            }
+        let mut set = Vec::with_capacity(cfg.set_headers.len());
+        for (k, v) in &cfg.set_headers {
+            let name = HeaderName::from_bytes(k.as_bytes())
+                .map_err(|e| PluginError::Config(format!("Invalid set header name '{k}': {e}")))?;
+            let spec = HeaderValueSpec::parse(v)?;
+            set.push((name, spec));
         }
 
-        // 3. rename map
+        let mut append = Vec::with_capacity(cfg.append_headers.len());
+        for (k, v) in &cfg.append_headers {
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                PluginError::Config(format!("Invalid append header name '{k}': {e}"))
+            })?;
+            let spec = HeaderValueSpec::parse(v)?;
+            append.push((name, spec));
+        }
+
         let mut rename = Vec::new();
-        if let Some(rename_obj) = raw.get("rename").and_then(|v| v.as_object()) {
+        if let Some(rename_obj) = config.config.get("rename").and_then(|v| v.as_object()) {
             for (from_k, to_v) in rename_obj {
                 let from_name = HeaderName::from_bytes(from_k.as_bytes()).map_err(|e| {
                     PluginError::Config(format!("Invalid rename source header '{from_k}': {e}"))
@@ -138,48 +116,10 @@ impl HeaderMutationPlugin {
             }
         }
 
-        // 4. set map
-        let mut set = Vec::new();
-        if let Some(set_obj) = raw
-            .get("set")
-            .or_else(|| raw.get("set_headers"))
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in set_obj {
-                let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
-                    PluginError::Config(format!("Invalid set header name '{k}': {e}"))
-                })?;
-                let spec_str = v.as_str().ok_or_else(|| {
-                    PluginError::Config(format!("Set header value for '{k}' must be string"))
-                })?;
-                let spec = HeaderValueSpec::parse(spec_str)?;
-                set.push((name, spec));
-            }
-        }
-
-        // 5. append map
-        let mut append = Vec::new();
-        if let Some(append_obj) = raw
-            .get("append")
-            .or_else(|| raw.get("append_headers"))
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in append_obj {
-                let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
-                    PluginError::Config(format!("Invalid append header name '{k}': {e}"))
-                })?;
-                let spec_str = v.as_str().ok_or_else(|| {
-                    PluginError::Config(format!("Append header value for '{k}' must be string"))
-                })?;
-                let spec = HeaderValueSpec::parse(spec_str)?;
-                append.push((name, spec));
-            }
-        }
-
-        Ok(Self::with_config(
+        Ok(Self::new(
             &config.id,
             HeaderMutationConfig {
-                strip_hop_by_hop,
+                strip_hop_by_hop: cfg.strip_hop_by_hop,
                 remove,
                 rename,
                 set,
@@ -255,13 +195,20 @@ mod tests {
     use velda_core::Body;
 
     #[test]
-    fn test_backward_compatibility_new() {
+    fn test_header_mutation_set_and_remove() {
         let set = vec![(
             HeaderName::from_static("x-custom-gateway"),
-            HeaderValue::from_static("velda"),
+            HeaderValueSpec::Static(HeaderValue::from_static("velda")),
         )];
         let remove = vec![HeaderName::from_static("x-sensitive")];
-        let plugin = HeaderMutationPlugin::new("hm-1", set, remove);
+        let config = HeaderMutationConfig {
+            strip_hop_by_hop: true,
+            remove,
+            rename: Vec::new(),
+            set,
+            append: Vec::new(),
+        };
+        let plugin = HeaderMutationPlugin::new("hm-1", config);
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -295,7 +242,7 @@ mod tests {
             set: Vec::new(),
             append: Vec::new(),
         };
-        let plugin = HeaderMutationPlugin::with_config("hm-rename", config);
+        let plugin = HeaderMutationPlugin::new("hm-rename", config);
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -348,7 +295,7 @@ mod tests {
                 HeaderValueSpec::parse("$client_ip").unwrap(),
             )],
         };
-        let plugin = HeaderMutationPlugin::with_config("hm-dynamic", config);
+        let plugin = HeaderMutationPlugin::new("hm-dynamic", config);
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -380,5 +327,38 @@ mod tests {
         assert_eq!(xff.len(), 2);
         assert_eq!(xff[0], "192.0.2.1");
         assert_eq!(xff[1], "192.0.2.1");
+    }
+
+    #[test]
+    fn test_from_config_complete() {
+        let json_cfg = serde_json::json!({
+            "strip_hop_by_hop": true,
+            "remove_headers": ["x-internal-secret"],
+            "set_headers": {
+                "x-forwarded-proto": "https"
+            },
+            "append_headers": {
+                "x-forwarded-for": "$client_ip"
+            }
+        });
+        let config = PluginConfig {
+            id: "header_mutation".into(),
+            phase: String::new(),
+            config: json_cfg,
+        };
+        let plugin = HeaderMutationPlugin::from_config(&config).expect("valid config");
+        assert_eq!(plugin.id, "header_mutation");
+        assert!(plugin.config.strip_hop_by_hop);
+        assert_eq!(plugin.config.remove.len(), 1);
+        assert_eq!(plugin.config.set.len(), 1);
+        assert_eq!(plugin.config.append.len(), 1);
+
+        // Empty config must fail validation
+        let bad_config = PluginConfig {
+            id: "header_mutation".into(),
+            phase: String::new(),
+            config: serde_json::json!({}),
+        };
+        assert!(HeaderMutationPlugin::from_config(&bad_config).is_err());
     }
 }

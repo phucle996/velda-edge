@@ -67,32 +67,22 @@ impl CorsPreflightPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let origins_raw = config
-            .config
-            .get("allowed_origins")
-            .and_then(|v| v.as_array());
+        let cfg = velda_sync::validate_cors_preflight_config(&config.id, &config.config).map_err(
+            |e| {
+                PluginError::Config(format!(
+                    "Invalid cors_preflight configuration for '{}': {e}",
+                    config.id
+                ))
+            },
+        )?;
 
-        let allowed_origins = match origins_raw {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(OriginPattern::parse)
-                .collect(),
-            None => vec![OriginPattern::Any],
-        };
+        let allowed_origins = cfg
+            .allowed_origins
+            .iter()
+            .map(|s| OriginPattern::parse(s))
+            .collect();
 
-        let methods_str = config
-            .config
-            .get("allowed_methods")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS".to_string());
-
+        let methods_str = cfg.allowed_methods.join(", ");
         let allowed_methods = HeaderValue::from_str(&methods_str).map_err(|e| {
             PluginError::Config(format!(
                 "Invalid allowed_methods '{methods_str}' for plugin '{}': {e}",
@@ -100,48 +90,23 @@ impl CorsPreflightPlugin {
             ))
         })?;
 
-        let mut allow_all_headers = false;
-        let mut allowed_headers = None;
-
-        if let Some(arr) = config
-            .config
-            .get("allowed_headers")
-            .and_then(|v| v.as_array())
-        {
-            let str_list: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-            if str_list.contains(&"*") {
-                allow_all_headers = true;
-            } else if !str_list.is_empty() {
-                let joined = str_list.join(", ");
-                let hv = HeaderValue::from_str(&joined).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Invalid allowed_headers '{joined}' for plugin '{}': {e}",
-                        config.id
-                    ))
-                })?;
-                allowed_headers = Some(hv);
-            }
+        let allow_all_headers = cfg.allowed_headers.iter().any(|h| h == "*");
+        let allowed_headers = if allow_all_headers || cfg.allowed_headers.is_empty() {
+            None
         } else {
-            // Default: allow all requested headers
-            allow_all_headers = true;
-        }
+            let joined = cfg.allowed_headers.join(", ");
+            Some(HeaderValue::from_str(&joined).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid allowed_headers '{joined}' for plugin '{}': {e}",
+                    config.id
+                ))
+            })?)
+        };
 
-        let allow_credentials = config
-            .config
-            .get("allow_credentials")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let max_age_secs = config
-            .config
-            .get("max_age_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(86400);
-
-        let max_age = if max_age_secs > 0 {
+        let max_age = if cfg.max_age_secs > 0 {
             Some(
-                HeaderValue::from_str(&max_age_secs.to_string())
-                    .unwrap_or_else(|_| HeaderValue::from_static("86400")),
+                HeaderValue::from_str(&cfg.max_age_secs.to_string())
+                    .map_err(|e| PluginError::Config(format!("Invalid max_age_secs: {e}")))?,
             )
         } else {
             None
@@ -153,7 +118,7 @@ impl CorsPreflightPlugin {
             allowed_methods,
             allowed_headers,
             allow_all_headers,
-            allow_credentials,
+            cfg.allow_credentials,
             max_age,
         ))
     }
@@ -422,5 +387,13 @@ mod tests {
         assert!(!plugin.allow_all_origins);
         assert!(plugin.allow_credentials);
         assert_eq!(plugin.max_age.unwrap(), "3600");
+
+        // Incomplete config must fail validation
+        let bad_config = PluginConfig {
+            id: "cors_preflight".into(),
+            phase: "pre_route".into(),
+            config: json!({}),
+        };
+        assert!(CorsPreflightPlugin::from_config(&bad_config).is_err());
     }
 }

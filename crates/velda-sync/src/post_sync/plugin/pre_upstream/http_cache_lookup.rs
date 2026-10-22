@@ -4,8 +4,8 @@
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Strict Protocol Invariant**: Restricted exclusively to HTTP routes.
-//! - **Non-Empty Cache Target**: `cache_name` must be non-empty.
-//! - **Valid Strategy**: `key_strategy` must be one of `"uri"`, `"uri_and_headers"`, or `"custom"`.
+//! - **Non-Empty Zone**: `zone` must be non-empty.
+//! - **Cacheable Methods**: `cacheable_methods` must contain valid HTTP methods.
 //! - **Valid Header Grammar**: All header names in `key_headers` must conform to RFC 9110 token grammar.
 
 use serde::{Deserialize, Serialize};
@@ -15,14 +15,32 @@ use crate::SyncError;
 /// Declarative configuration for the HTTP Cache Lookup plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpCacheLookupConfig {
-    /// Target designated cache storage zone name.
-    pub cache_name: String,
-    /// Cache key derivation strategy: "uri", "uri_and_headers", or "custom".
-    pub key_strategy: String,
-    /// Headers included in cache key computation (when key_strategy is "uri_and_headers" or "custom").
+    /// Shared cache zone identifier.
+    pub zone: String,
+    /// HTTP methods eligible for cache lookup (e.g. `["GET", "HEAD"]`).
+    pub cacheable_methods: Vec<String>,
+    /// Whether to sort query string keys alphabetically before hashing.
+    pub ignore_query_order: bool,
+    /// Honor client `Cache-Control: no-cache` / `Pragma: no-cache` directives.
+    pub honor_client_no_cache: bool,
+    /// Whether to bypass cache lookup on requests carrying an `Authorization` header.
+    pub bypass_authenticated_requests: bool,
+    /// Custom request header names to incorporate into the cache key for per-user / segmented caching.
     pub key_headers: Vec<String>,
-    /// Optional header name that triggers an unconditional cache bypass.
-    pub bypass_header: Option<String>,
+    /// Allocated memory limit for this zone if created here (in megabytes).
+    pub max_memory_mb: usize,
+    /// Default TTL fallback in seconds if response does not specify Cache-Control.
+    pub default_ttl_secs: u64,
+}
+
+fn is_valid_http_method(m: &str) -> bool {
+    let trimmed = m.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 fn is_valid_header_name(h: &str) -> bool {
@@ -65,24 +83,28 @@ pub fn validate_http_cache_lookup_config(
             ),
         })?;
 
-    // 1. Validate cache_name
-    let name_trimmed = cfg.cache_name.trim();
-    if name_trimmed.is_empty() {
+    // 1. Validate zone name
+    let zone_trimmed = cfg.zone.trim();
+    if zone_trimmed.is_empty() {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
-            reason: format!("Plugin '{plugin_id}': cache_name cannot be empty"),
+            reason: format!("Plugin '{plugin_id}': zone cannot be empty"),
         });
     }
 
-    // 2. Validate key_strategy
-    let strat_lower = cfg.key_strategy.trim().to_ascii_lowercase();
-    match strat_lower.as_str() {
-        "uri" | "uri_and_headers" | "custom" => {}
-        other => {
+    // 2. Validate cacheable_methods
+    if cfg.cacheable_methods.is_empty() {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!("Plugin '{plugin_id}': cacheable_methods cannot be empty"),
+        });
+    }
+    for m in &cfg.cacheable_methods {
+        if !is_valid_http_method(m) {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
                 reason: format!(
-                    "Plugin '{plugin_id}': invalid key_strategy '{other}' (expected 'uri', 'uri_and_headers', or 'custom')"
+                    "Plugin '{plugin_id}': invalid HTTP method '{m}' in cacheable_methods"
                 ),
             });
         }
@@ -98,13 +120,22 @@ pub fn validate_http_cache_lookup_config(
         }
     }
 
-    // 4. Validate bypass_header
-    if let Some(ref bh) = cfg.bypass_header
-        && !is_valid_header_name(bh)
-    {
+    // 4. Validate memory and TTL
+    if cfg.max_memory_mb == 0 || cfg.max_memory_mb > 1_048_576 {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
-            reason: format!("Plugin '{plugin_id}': invalid header name '{bh}' in bypass_header"),
+            reason: format!(
+                "Plugin '{plugin_id}': max_memory_mb must be between 1 and 1,048,576 MB"
+            ),
+        });
+    }
+
+    if cfg.default_ttl_secs == 0 || cfg.default_ttl_secs > 31_536_000 {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': default_ttl_secs must be between 1 and 31,536,000s"
+            ),
         });
     }
 
@@ -119,54 +150,44 @@ mod tests {
     #[test]
     fn test_valid_http_cache_lookup() {
         let val = json!({
-            "cache_name": "edge_cache_tier1",
-            "key_strategy": "uri_and_headers",
-            "key_headers": ["Accept-Encoding", "Accept"],
-            "bypass_header": "X-Cache-Bypass"
+            "zone": "api_cache",
+            "cacheable_methods": ["GET", "HEAD"],
+            "ignore_query_order": true,
+            "honor_client_no_cache": false,
+            "bypass_authenticated_requests": true,
+            "key_headers": ["x-user-id", "authorization"],
+            "max_memory_mb": 256,
+            "default_ttl_secs": 300
         });
         let res = validate_http_cache_lookup_config("cache_look_1", &val);
         assert!(res.is_ok());
     }
 
     #[test]
-    fn test_empty_cache_name_rejected() {
+    fn test_empty_zone_rejected() {
         let val = json!({
-            "cache_name": "",
-            "key_strategy": "uri",
+            "zone": "",
+            "cacheable_methods": ["GET"],
+            "ignore_query_order": true,
+            "honor_client_no_cache": false,
+            "bypass_authenticated_requests": true,
             "key_headers": [],
-            "bypass_header": null
+            "max_memory_mb": 256,
+            "default_ttl_secs": 300
         });
         let res = validate_http_cache_lookup_config("cache_bad_name", &val);
         assert!(res.is_err());
         assert!(
             res.unwrap_err()
                 .to_string()
-                .contains("cache_name cannot be empty")
-        );
-    }
-
-    #[test]
-    fn test_invalid_key_strategy_rejected() {
-        let val = json!({
-            "cache_name": "cache1",
-            "key_strategy": "ip_hash",
-            "key_headers": [],
-            "bypass_header": null
-        });
-        let res = validate_http_cache_lookup_config("cache_bad_strat", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("invalid key_strategy")
+                .contains("zone cannot be empty")
         );
     }
 
     #[test]
     fn test_missing_required_fields_rejected() {
         let val = json!({
-            "cache_name": "cache1"
-            // Missing key_strategy, key_headers, bypass_header
+            "zone": "cache1"
         });
         let res = validate_http_cache_lookup_config("cache_missing", &val);
         assert!(res.is_err());

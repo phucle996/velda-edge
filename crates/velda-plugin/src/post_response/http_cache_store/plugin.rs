@@ -120,95 +120,37 @@ impl HttpCacheStorePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = HttpCacheStoreConfig::default();
+        let cfg = velda_sync::validate_http_cache_store_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid http_cache_store configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
+        let mut cacheable_status = Vec::with_capacity(cfg.cacheable_status.len());
+        for code in cfg.cacheable_status {
+            let status = StatusCode::from_u16(code).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid status code {code} in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            cacheable_status.push(status);
         }
-
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        let zone = raw
-            .get("zone")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&defaults.zone)
-            .to_string();
-
-        let mut cacheable_status = defaults.cacheable_status;
-        if let Some(arr) = raw.get("cacheable_status").and_then(|v| v.as_array()) {
-            let mut statuses = Vec::new();
-            for item in arr {
-                if let Some(code) = item.as_u64()
-                    && let Ok(status) = StatusCode::from_u16(code as u16)
-                {
-                    statuses.push(status);
-                }
-            }
-            if !statuses.is_empty() {
-                cacheable_status = statuses;
-            }
-        }
-
-        let max_payload_bytes = raw
-            .get("max_payload_bytes")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_payload_bytes);
-
-        let default_ttl_secs = raw
-            .get("default_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(defaults.default_ttl_secs);
-
-        let respect_cache_control = raw
-            .get("respect_cache_control")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.respect_cache_control);
-
-        let bypass_authenticated_requests = raw
-            .get("bypass_authenticated_requests")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.bypass_authenticated_requests);
-
-        let mut key_headers = defaults.key_headers;
-        if let Some(arr) = raw.get("key_headers").and_then(|v| v.as_array()) {
-            let mut headers = Vec::new();
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    let trimmed = s.trim().to_ascii_lowercase();
-                    if !trimmed.is_empty() && !headers.contains(&trimmed) {
-                        headers.push(trimmed);
-                    }
-                }
-            }
-            key_headers = headers;
-        }
-
-        let async_precompression = raw
-            .get("async_precompression")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.async_precompression);
-
-        let max_memory_mb = raw
-            .get("max_memory_mb")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_memory_mb);
 
         Ok(Self::new(
             &config.id,
             HttpCacheStoreConfig {
-                zone,
+                zone: cfg.zone,
                 cacheable_status,
-                max_payload_bytes,
-                default_ttl_secs,
-                respect_cache_control,
-                bypass_authenticated_requests,
-                key_headers,
-                async_precompression,
-                max_memory_mb,
+                max_payload_bytes: cfg.max_payload_bytes,
+                default_ttl_secs: cfg.default_ttl_secs,
+                respect_cache_control: cfg.respect_cache_control,
+                bypass_authenticated_requests: cfg.bypass_authenticated_requests,
+                key_headers: cfg.key_headers,
+                async_precompression: cfg.async_precompression,
+                max_memory_mb: cfg.max_memory_mb,
             },
         ))
     }
@@ -797,5 +739,42 @@ mod tests {
             stored.variants.zstd.is_some(),
             "Zstd variant must be present synchronously"
         );
+    }
+
+    #[test]
+    fn test_from_config_strict_validation() {
+        let valid_json = serde_json::json!({
+            "zone": "zone_test_from_config",
+            "cacheable_status": [200, 203, 204],
+            "max_payload_bytes": 1048576,
+            "default_ttl_secs": 600,
+            "respect_cache_control": true,
+            "bypass_authenticated_requests": false,
+            "key_headers": ["accept-language"],
+            "async_precompression": true,
+            "max_memory_mb": 128
+        });
+
+        let p_cfg = PluginConfig {
+            id: "cache_store_test".into(),
+            phase: "post_response".into(),
+            config: valid_json,
+        };
+
+        let plugin = HttpCacheStorePlugin::from_config(&p_cfg).unwrap();
+        assert_eq!(plugin.config.zone, "zone_test_from_config");
+        assert_eq!(plugin.config.cacheable_status.len(), 3);
+        assert_eq!(plugin.config.max_payload_bytes, 1048576);
+
+        let invalid_json = serde_json::json!({
+            "zone": "zone_test"
+            // Missing required fields
+        });
+        let bad_p_cfg = PluginConfig {
+            id: "cache_store_bad".into(),
+            phase: "post_response".into(),
+            config: invalid_json,
+        };
+        assert!(HttpCacheStorePlugin::from_config(&bad_p_cfg).is_err());
     }
 }

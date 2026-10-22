@@ -23,6 +23,7 @@ pub mod rate_limit;
 pub mod request_mirror;
 pub mod request_termination;
 pub mod url_rewrite;
+pub mod w3c_trace_context;
 
 pub use api_key_auth::*;
 pub use canary::*;
@@ -35,3 +36,4 @@ pub use rate_limit::*;
 pub use request_mirror::*;
 pub use request_termination::*;
 pub use url_rewrite::*;
+pub use w3c_trace_context::*;

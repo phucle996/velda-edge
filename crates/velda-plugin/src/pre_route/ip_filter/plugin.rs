@@ -116,77 +116,56 @@ impl IpFilterPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let mode = match config
-            .config
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("deny")
-        {
-            "allow" | "whitelist" => IpFilterMode::AllowList,
-            _ => IpFilterMode::DenyList,
-        };
+        let cfg =
+            velda_sync::validate_ip_filter_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid ip_filter configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        let client_ip_source = match config
-            .config
-            .get("client_ip_source")
-            .and_then(|v| v.as_str())
-            .unwrap_or("x_forwarded_for")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "x_real_ip" | "x-real-ip" | "real_ip" => ClientIpSource::XRealIp,
-            _ => ClientIpSource::XForwardedFor,
-        };
-
-        let mut allow_cidrs = Vec::new();
-        let mut deny_cidrs = Vec::new();
-
-        // 1. Parse allow_cidrs (strictly "none" to omit)
-        if let Some(allow_val) = config.config.get("allow_cidrs") {
-            if let Some(arr) = allow_val.as_array() {
-                for item in arr {
-                    if let Some(s) = item.as_str() {
-                        let net = IpNetwork::from_cidr(s).map_err(|e| {
-                            PluginError::Config(format!(
-                                "Plugin '{}' invalid allow_cidr: {e}",
-                                config.id
-                            ))
-                        })?;
-                        allow_cidrs.push(net);
-                    }
-                }
-            } else if let Some(s) = allow_val.as_str()
-                && !s.trim().eq_ignore_ascii_case("none")
-            {
-                let net = IpNetwork::from_cidr(s).map_err(|e| {
-                    PluginError::Config(format!("Plugin '{}' invalid allow_cidr: {e}", config.id))
-                })?;
-                allow_cidrs.push(net);
+        let mode = match cfg.mode.to_ascii_lowercase().as_str() {
+            "allow" => IpFilterMode::AllowList,
+            "deny" => IpFilterMode::DenyList,
+            other => {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}': unsupported mode '{other}'",
+                    config.id
+                )));
             }
+        };
+
+        let client_ip_source = match cfg.client_ip_source.to_ascii_lowercase().as_str() {
+            "x_real_ip" | "x-real-ip" | "real_ip" => ClientIpSource::XRealIp,
+            "x_forwarded_for" | "x-forwarded-for" => ClientIpSource::XForwardedFor,
+            other => {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}': unsupported client_ip_source '{other}'",
+                    config.id
+                )));
+            }
+        };
+
+        let mut allow_cidrs = Vec::with_capacity(cfg.allow_cidrs.len());
+        for s in &cfg.allow_cidrs {
+            let net = IpNetwork::from_cidr(s).map_err(|e| {
+                PluginError::Config(format!(
+                    "Plugin '{}' invalid allow_cidr '{s}': {e}",
+                    config.id
+                ))
+            })?;
+            allow_cidrs.push(net);
         }
 
-        // 2. Parse deny_cidrs (strictly "none" to omit)
-        if let Some(deny_val) = config.config.get("deny_cidrs") {
-            if let Some(arr) = deny_val.as_array() {
-                for item in arr {
-                    if let Some(s) = item.as_str() {
-                        let net = IpNetwork::from_cidr(s).map_err(|e| {
-                            PluginError::Config(format!(
-                                "Plugin '{}' invalid deny_cidr: {e}",
-                                config.id
-                            ))
-                        })?;
-                        deny_cidrs.push(net);
-                    }
-                }
-            } else if let Some(s) = deny_val.as_str()
-                && !s.trim().eq_ignore_ascii_case("none")
-            {
-                let net = IpNetwork::from_cidr(s).map_err(|e| {
-                    PluginError::Config(format!("Plugin '{}' invalid deny_cidr: {e}", config.id))
-                })?;
-                deny_cidrs.push(net);
-            }
+        let mut deny_cidrs = Vec::with_capacity(cfg.deny_cidrs.len());
+        for s in &cfg.deny_cidrs {
+            let net = IpNetwork::from_cidr(s).map_err(|e| {
+                PluginError::Config(format!(
+                    "Plugin '{}' invalid deny_cidr '{s}': {e}",
+                    config.id
+                ))
+            })?;
+            deny_cidrs.push(net);
         }
 
         Ok(Self::with_config(
@@ -353,5 +332,36 @@ mod tests {
 
         let mut req2 = make_request_with_ip("8.8.8.8");
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
+    }
+
+    #[test]
+    fn test_ip_filter_from_config() {
+        let valid_json = serde_json::json!({
+            "mode": "allow",
+            "allow_cidrs": ["10.0.0.0/8", "192.168.1.0/24"],
+            "deny_cidrs": ["10.99.0.0/16"],
+            "client_ip_source": "x_forwarded_for"
+        });
+        let config = PluginConfig {
+            id: "ip_filter".into(),
+            phase: String::new(),
+            config: valid_json,
+        };
+        let plugin = IpFilterPlugin::from_config(&config).expect("valid config");
+        assert_eq!(plugin.id, "ip_filter");
+        assert_eq!(plugin.mode, IpFilterMode::AllowList);
+        assert_eq!(plugin.allow_cidrs.len(), 2);
+        assert_eq!(plugin.deny_cidrs.len(), 1);
+
+        // Incomplete config must fail validation (100% explicit configuration required)
+        let incomplete_json = serde_json::json!({
+            "mode": "allow"
+        });
+        let bad_config = PluginConfig {
+            id: "ip_filter".into(),
+            phase: String::new(),
+            config: incomplete_json,
+        };
+        assert!(IpFilterPlugin::from_config(&bad_config).is_err());
     }
 }

@@ -74,47 +74,22 @@ impl ResourceLimitPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = ResourceLimits::default();
-
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
-        }
-
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        let max_uri_length = raw
-            .get("max_uri_length")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_uri_length);
-
-        let max_headers_count = raw
-            .get("max_headers_count")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_headers_count);
-
-        let max_header_bytes = raw
-            .get("max_header_bytes")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_header_bytes);
-
-        let max_single_header_bytes = raw
-            .get("max_single_header_bytes")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.max_single_header_bytes);
+        let cfg = velda_sync::validate_resource_limit_config(&config.id, &config.config).map_err(
+            |e| {
+                PluginError::Config(format!(
+                    "Invalid resource_limit configuration for '{}': {e}",
+                    config.id
+                ))
+            },
+        )?;
 
         Ok(Self::new(
             &config.id,
             ResourceLimits {
-                max_uri_length,
-                max_headers_count,
-                max_header_bytes,
-                max_single_header_bytes,
+                max_uri_length: cfg.max_uri_length,
+                max_headers_count: cfg.max_headers_count,
+                max_header_bytes: cfg.max_header_bytes,
+                max_single_header_bytes: cfg.max_single_header_bytes,
             },
         ))
     }
@@ -322,13 +297,12 @@ mod tests {
         assert_eq!(plugin.limits.max_header_bytes, 32768);
         assert_eq!(plugin.limits.max_single_header_bytes, 4096);
 
-        // Empty config fallback to defaults
+        // Incomplete/empty config must fail validation (100% explicit configuration required)
         let empty_config = PluginConfig {
             id: "resource_limit".into(),
             phase: String::new(),
             config: json!({}),
         };
-        let plugin_default = ResourceLimitPlugin::from_config(&empty_config).expect("defaults");
-        assert_eq!(plugin_default.limits, ResourceLimits::default());
+        assert!(ResourceLimitPlugin::from_config(&empty_config).is_err());
     }
 }

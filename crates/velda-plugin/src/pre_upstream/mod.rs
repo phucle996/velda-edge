@@ -23,6 +23,7 @@ pub mod rate_limit;
 pub mod request_mirror;
 pub mod request_termination;
 pub mod url_rewrite;
+pub mod w3c_trace_context;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
@@ -51,6 +52,7 @@ pub use url_rewrite::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
     UrlRewritePlugin,
 };
+pub use w3c_trace_context::{W3cTraceContextConfig, W3cTraceContextPlugin};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -122,6 +124,7 @@ pub fn instantiate(
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
+        "w3c_trace_context" => Ok(Arc::new(W3cTraceContextPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
@@ -144,11 +147,17 @@ mod tests {
         )];
         let remove_hdrs = vec![HeaderName::from_static("x-internal-secret")];
 
-        let plugin = Arc::new(HeaderMutationPlugin::new(
-            "mutation-1",
-            set_hdrs,
-            remove_hdrs,
-        ));
+        let config = HeaderMutationConfig {
+            strip_hop_by_hop: true,
+            remove: remove_hdrs,
+            rename: Vec::new(),
+            set: set_hdrs
+                .into_iter()
+                .map(|(k, v)| (k, HeaderValueSpec::Static(v)))
+                .collect(),
+            append: Vec::new(),
+        };
+        let plugin = Arc::new(HeaderMutationPlugin::new("mutation-1", config));
         let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
 
         let mut headers = HeaderMap::new();
@@ -255,6 +264,7 @@ mod tests {
                         HeaderName::from_static("retry-after"),
                         HeaderValue::from_static("60"),
                     )],
+                    body: None,
                 },
             )
             .unwrap(),

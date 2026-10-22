@@ -97,6 +97,7 @@
           "x-powered-by",
           "server"
         ],
+        "rename_headers": {},
         "append_headers": {}
       }
     },
@@ -122,19 +123,6 @@
         "allow_origins": [
           "https://app.velda.io",
           "https://console.velda.io"
-        ],
-        "allow_methods": [
-          "GET",
-          "POST",
-          "PUT",
-          "DELETE",
-          "OPTIONS"
-        ],
-        "allow_headers": [
-          "authorization",
-          "content-type",
-          "x-requested-with",
-          "x-api-key"
         ],
         "expose_headers": [
           "x-request-id"
@@ -166,13 +154,22 @@
           "max_buffer_size_kb": 256
         },
         "tls": {
-          "mode": "none"
+          "mode": "none",
+          "cert_file": null,
+          "key_file": null,
+          "client_ca_file": null
         },
         "cors": {
-          "enabled": false
+          "enabled": false,
+          "allow_origins": [],
+          "allow_methods": [],
+          "allow_headers": []
         },
         "auth": {
-          "mode": "none"
+          "mode": "none",
+          "token": null,
+          "username": null,
+          "password": null
         }
       }
     }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
-use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -53,152 +53,74 @@ pub struct JwtAuthPlugin {
 impl JwtAuthPlugin {
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let raw = &config.config;
+        let cfg =
+            velda_sync::validate_jwt_auth_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid jwt_auth configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        let alg_str = raw
-            .get("algorithm")
-            .and_then(|v| v.as_str())
-            .unwrap_or("HS256");
-        let algorithm = JwtAlgorithm::from_str(alg_str)?;
+        let algorithm = JwtAlgorithm::from_str(&cfg.algorithm)?;
+        let key = VerifierKey::new(
+            algorithm,
+            cfg.secret_key.as_deref(),
+            cfg.public_key_pem.as_deref(),
+        )?;
 
-        let secret_key = raw.get("secret_key").and_then(|v| v.as_str());
-        let public_key_pem = raw.get("public_key_pem").and_then(|v| v.as_str());
-        let key = VerifierKey::new(algorithm, secret_key, public_key_pem)?;
-
-        let mut token_sources = Vec::new();
-        if let Some(sources_arr) = raw.get("token_sources").and_then(|v| v.as_array()) {
-            for item in sources_arr {
-                if let Some(src_obj) = item.as_object() {
-                    let stype = src_obj
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("header");
-                    match stype {
-                        "header" => {
-                            let name_str = src_obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("authorization");
-                            let prefix = src_obj
-                                .get("prefix")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = HeaderName::from_str(name_str).map_err(|e| {
-                                PluginError::Config(format!(
-                                    "Invalid header name '{name_str}': {e}"
-                                ))
-                            })?;
-                            token_sources.push(TokenSource::Header { name, prefix });
-                        }
-                        "cookie" => {
-                            let name = src_obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("access_token")
-                                .to_string();
-                            token_sources.push(TokenSource::Cookie { name });
-                        }
-                        "query" => {
-                            let param = src_obj
-                                .get("param")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("token")
-                                .to_string();
-                            token_sources.push(TokenSource::Query { param });
-                        }
-                        other => {
-                            return Err(PluginError::Config(format!(
-                                "Unknown token source type '{other}'"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        if token_sources.is_empty() {
-            token_sources.push(TokenSource::Header {
-                name: AUTHORIZATION,
-                prefix: "Bearer ".to_string(),
-            });
-        }
-
-        let validate_exp = raw
-            .get("validate_exp")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let clock_skew_secs = raw
-            .get("clock_skew_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(60);
-
-        let issuer = raw
-            .get("issuer")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "none")
-            .map(|s| s.to_string());
-
-        let audience = raw
-            .get("audience")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "none")
-            .map(|s| s.to_string());
-
-        let mut claims_to_headers = Vec::new();
-        if let Some(map) = raw.get("claims_to_headers").and_then(|v| v.as_object()) {
-            for (claim_path, hdr_val) in map {
-                if let Some(hdr_str) = hdr_val.as_str() {
-                    let hdr_name = HeaderName::from_str(hdr_str).map_err(|e| {
-                        PluginError::Config(format!("Invalid target header name '{hdr_str}': {e}"))
+        let mut token_sources = Vec::with_capacity(cfg.token_sources.len());
+        for src in &cfg.token_sources {
+            match src {
+                velda_sync::JwtTokenSourceConfig::Header { name, prefix } => {
+                    let hname = HeaderName::from_str(name).map_err(|e| {
+                        PluginError::Config(format!(
+                            "Invalid header name '{name}' for plugin '{}': {e}",
+                            config.id
+                        ))
                     })?;
-                    claims_to_headers.push((claim_path.clone(), hdr_name));
+                    token_sources.push(TokenSource::Header {
+                        name: hname,
+                        prefix: prefix.clone().unwrap_or_default(),
+                    });
+                }
+                velda_sync::JwtTokenSourceConfig::Cookie { name } => {
+                    token_sources.push(TokenSource::Cookie { name: name.clone() });
+                }
+                velda_sync::JwtTokenSourceConfig::Query { param } => {
+                    token_sources.push(TokenSource::Query {
+                        param: param.clone(),
+                    });
                 }
             }
         }
 
-        let mut assert_claims = Vec::new();
-        if let Some(map) = raw.get("assert_claims").and_then(|v| v.as_object()) {
-            for (claim_path, val) in map {
-                if let Some(val_str) = val.as_str() {
-                    assert_claims.push((claim_path.clone(), val_str.to_string()));
-                }
-            }
+        let mut claims_to_headers = Vec::with_capacity(cfg.claims_to_headers.len());
+        for (claim_path, hdr_str) in &cfg.claims_to_headers {
+            let hdr_name = HeaderName::from_str(hdr_str).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid target header name '{hdr_str}' for plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            claims_to_headers.push((claim_path.clone(), hdr_name));
         }
 
-        let cache_ttl_secs = raw
-            .get("cache_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(300);
-        let negative_cache_ttl_secs = raw
-            .get("negative_cache_ttl_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10);
-        let cache_shards = raw
-            .get("cache_shards")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(64) as usize;
-        let cache_shard_capacity = raw
-            .get("cache_shard_capacity")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2048) as usize;
+        let mut assert_claims = Vec::with_capacity(cfg.assert_claims.len());
+        for (claim_path, val_str) in &cfg.assert_claims {
+            assert_claims.push((claim_path.clone(), val_str.clone()));
+        }
 
-        let cache = JwtCache::new(
-            cache_shards,
-            cache_shard_capacity,
-            cache_ttl_secs,
-            negative_cache_ttl_secs,
-        );
+        let cache = JwtCache::new(64, 2048, cfg.cache_ttl_secs, 10);
 
         Ok(Self {
             id: config.id.clone(),
             algorithm,
             key,
             token_sources,
-            validate_exp,
-            clock_skew_secs,
-            issuer,
-            audience,
+            validate_exp: cfg.validate_exp,
+            clock_skew_secs: cfg.clock_skew_secs,
+            issuer: cfg.issuer,
+            audience: cfg.audience,
             claims_to_headers,
             assert_claims,
             cache,
@@ -383,6 +305,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
 mod tests {
     use super::*;
     use base64::prelude::*;
+    use http::header::AUTHORIZATION;
     use http::{HeaderMap, Method, Uri, Version};
     use ring::hmac;
     use velda_core::Body;
@@ -400,14 +323,37 @@ mod tests {
         format!("{signing_input}.{s_b64}")
     }
 
+    fn default_jwt_json(secret: &str, claims_to_headers: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "algorithm": "HS256",
+            "secret_key": secret,
+            "public_key_pem": null,
+            "token_sources": [
+                {
+                    "type": "header",
+                    "name": "authorization",
+                    "prefix": "Bearer "
+                }
+            ],
+            "validate_exp": true,
+            "clock_skew_secs": 60,
+            "issuer": null,
+            "audience": null,
+            "claims_to_headers": claims_to_headers,
+            "assert_claims": {},
+            "cache_shards": 16,
+            "cache_shard_capacity": 512,
+            "cache_ttl_secs": 300,
+            "negative_cache_ttl_secs": 10
+        })
+    }
+
     #[test]
     fn test_on_upstream_request_missing_token() {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({
-                "secret_key": "my-secret-key"
-            }),
+            config: default_jwt_json("my-secret-key", serde_json::json!({})),
         };
 
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
@@ -439,13 +385,13 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({
-                "secret_key": secret,
-                "claims_to_headers": {
+            config: default_jwt_json(
+                secret,
+                serde_json::json!({
                     "sub": "x-user-id",
                     "roles": "x-user-roles"
-                }
-            }),
+                }),
+            ),
         };
 
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
@@ -500,9 +446,7 @@ mod tests {
         let config = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({
-                "secret_key": secret
-            }),
+            config: default_jwt_json(secret, serde_json::json!({})),
         };
 
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
@@ -545,12 +489,20 @@ mod tests {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
             config: serde_json::json!({
+                "algorithm": "HS256",
                 "secret_key": secret,
+                "public_key_pem": null,
                 "token_sources": [
                     { "type": "cookie", "name": "auth_cookie" },
                     { "type": "query", "param": "access_token" }
                 ],
-                "claims_to_headers": { "sub": "x-user-id" }
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "issuer": null,
+                "audience": null,
+                "claims_to_headers": { "sub": "x-user-id" },
+                "assert_claims": {},
+                "cache_ttl_secs": 300
             }),
         };
 
@@ -598,7 +550,19 @@ mod tests {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
             config: serde_json::json!({
-                "secret_key": "my-secret-key"
+                "algorithm": "HS256",
+                "secret_key": "my-secret-key",
+                "public_key_pem": null,
+                "token_sources": [
+                    { "type": "header", "name": "authorization", "prefix": "Bearer " }
+                ],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "issuer": null,
+                "audience": null,
+                "claims_to_headers": {},
+                "assert_claims": {},
+                "cache_ttl_secs": 300
             }),
         };
 

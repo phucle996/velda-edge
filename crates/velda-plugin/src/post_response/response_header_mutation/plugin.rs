@@ -7,7 +7,6 @@
 //! - **Pre-Compiled Static Specs**: Static header values are parsed once during configuration load.
 
 use http::header::HeaderName;
-use serde_json::Value;
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -29,60 +28,6 @@ pub struct ResponseHeaderMutationConfig {
     pub set_if_missing: Vec<(HeaderName, ResponseHeaderValueSpec)>,
 }
 
-/// Helper function to parse header specifications from either a JSON object or array of objects.
-fn parse_specs(
-    val: &Value,
-    section_name: &str,
-) -> Result<Vec<(HeaderName, ResponseHeaderValueSpec)>, PluginError> {
-    let mut specs = Vec::new();
-
-    if let Some(obj) = val.as_object() {
-        for (k, v) in obj {
-            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
-                PluginError::Config(format!("Invalid {section_name} header name '{k}': {e}"))
-            })?;
-            let spec_str = v.as_str().ok_or_else(|| {
-                PluginError::Config(format!(
-                    "{section_name} header value for '{k}' must be string"
-                ))
-            })?;
-            let spec = ResponseHeaderValueSpec::parse(spec_str)?;
-            specs.push((name, spec));
-        }
-    } else if let Some(arr) = val.as_array() {
-        for item in arr {
-            if let Some(item_obj) = item.as_object() {
-                let name_str = item_obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        PluginError::Config(format!(
-                            "{section_name} item must contain 'name' string field"
-                        ))
-                    })?;
-                let val_str = item_obj
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        PluginError::Config(format!(
-                            "{section_name} item must contain 'value' string field"
-                        ))
-                    })?;
-
-                let name = HeaderName::from_bytes(name_str.as_bytes()).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Invalid {section_name} header name '{name_str}': {e}"
-                    ))
-                })?;
-                let spec = ResponseHeaderValueSpec::parse(val_str)?;
-                specs.push((name, spec));
-            }
-        }
-    }
-
-    Ok(specs)
-}
-
 /// Post-Response Header Mutation Plugin.
 #[derive(Debug, Clone)]
 pub struct ResponseHeaderMutationPlugin {
@@ -101,57 +46,60 @@ impl ResponseHeaderMutationPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = ResponseHeaderMutationConfig::default();
+        let cfg = velda_sync::validate_response_header_mutation_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid response_header_mutation configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
+        let mut remove = Vec::with_capacity(cfg.remove_headers.len());
+        for h in &cfg.remove_headers {
+            let name = HeaderName::from_bytes(h.as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid remove header name '{h}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            remove.push(name);
         }
 
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        // 1. Parse 'remove' list
-        let mut remove = Vec::new();
-        if let Some(rem_arr) = raw
-            .get("remove")
-            .or_else(|| raw.get("remove_headers"))
-            .and_then(|v| v.as_array())
-        {
-            for item in rem_arr {
-                if let Some(s) = item.as_str() {
-                    let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
-                        PluginError::Config(format!("Invalid remove header name '{s}': {e}"))
-                    })?;
-                    remove.push(name);
-                }
-            }
+        let mut set = Vec::with_capacity(cfg.set_headers.len());
+        for (k, v) in &cfg.set_headers {
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid set header name '{k}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            let spec = ResponseHeaderValueSpec::parse(v)?;
+            set.push((name, spec));
         }
 
-        // 2. Parse 'set' specs
-        let set = if let Some(set_val) = raw.get("set").or_else(|| raw.get("set_headers")) {
-            parse_specs(set_val, "set")?
-        } else {
-            Vec::new()
-        };
+        let mut add = Vec::with_capacity(cfg.append_headers.len());
+        for (k, v) in &cfg.append_headers {
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid append header name '{k}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            let spec = ResponseHeaderValueSpec::parse(v)?;
+            add.push((name, spec));
+        }
 
-        // 3. Parse 'add' / 'append' specs
-        let add = if let Some(add_val) = raw
-            .get("add")
-            .or_else(|| raw.get("append_headers"))
-            .or_else(|| raw.get("append"))
-        {
-            parse_specs(add_val, "add")?
-        } else {
-            Vec::new()
-        };
-
-        // 4. Parse 'set_if_missing' specs
-        let set_if_missing = if let Some(sim_val) = raw.get("set_if_missing") {
-            parse_specs(sim_val, "set_if_missing")?
-        } else {
-            Vec::new()
-        };
+        let mut set_if_missing = Vec::with_capacity(cfg.set_if_missing.len());
+        for (k, v) in &cfg.set_if_missing {
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid set_if_missing header name '{k}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            let spec = ResponseHeaderValueSpec::parse(v)?;
+            set_if_missing.push((name, spec));
+        }
 
         Ok(Self::new(
             &config.id,
@@ -331,5 +279,45 @@ mod tests {
             .collect();
 
         assert_eq!(vary_values, vec!["Accept-Encoding", "User-Agent"]);
+    }
+
+    #[test]
+    fn test_from_config_strict_validation() {
+        let valid_json = serde_json::json!({
+            "remove_headers": ["server"],
+            "set_headers": {
+                "server": "velda-edge",
+                "x-served-by": "edge-node"
+            },
+            "append_headers": {
+                "vary": "accept-encoding"
+            },
+            "set_if_missing": {
+                "x-content-type-options": "nosniff"
+            }
+        });
+
+        let p_cfg = PluginConfig {
+            id: "res_mut".into(),
+            phase: "post_response".into(),
+            config: valid_json,
+        };
+
+        let plugin = ResponseHeaderMutationPlugin::from_config(&p_cfg).unwrap();
+        assert_eq!(plugin.config.remove.len(), 1);
+        assert_eq!(plugin.config.set.len(), 2);
+        assert_eq!(plugin.config.add.len(), 1);
+        assert_eq!(plugin.config.set_if_missing.len(), 1);
+
+        let invalid_json = serde_json::json!({
+            "remove_headers": ["server"]
+            // Missing other fields
+        });
+        let bad_cfg = PluginConfig {
+            id: "res_mut_bad".into(),
+            phase: "post_response".into(),
+            config: invalid_json,
+        };
+        assert!(ResponseHeaderMutationPlugin::from_config(&bad_cfg).is_err());
     }
 }

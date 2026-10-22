@@ -137,60 +137,25 @@ impl RequestMirrorPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        // 1. mirror_upstream (required)
-        let mirror_upstream = raw
-            .get("mirror_upstream")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
+        let cfg = velda_sync::validate_request_mirror_config(&config.id, &config.config).map_err(
+            |e| {
                 PluginError::Config(format!(
-                    "Plugin '{}' requires 'mirror_upstream' string parameter",
+                    "Invalid request_mirror configuration for '{}': {e}",
                     config.id
                 ))
-            })?
-            .to_string();
+            },
+        )?;
 
-        // 2. sample_percent (0 to 100, defaults to 100)
-        let sample_percent = raw
-            .get("sample_percent")
-            .and_then(|v| v.as_u64())
-            .map(|p| (p as u32).min(100))
-            .unwrap_or(100);
-
-        // 3. replace_host
-        let replace_host = raw
-            .get("replace_host")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // 4. ignore_methods
-        let mut ignore_methods = Vec::new();
-        if let Some(methods_arr) = raw.get("ignore_methods").and_then(|v| v.as_array()) {
-            for m in methods_arr {
-                if let Some(m_str) = m.as_str() {
-                    ignore_methods.push(m_str.to_ascii_uppercase());
-                }
-            }
-        }
-
-        // 5. queue_capacity
-        let queue_capacity = raw
-            .get("queue_capacity")
-            .and_then(|v| v.as_u64())
-            .map(|c| c as usize)
-            .unwrap_or(65536);
+        let sample_percent = (cfg.sample_percent.round() as u32).min(100);
 
         let mut plugin = Self::new(
             &config.id,
             RequestMirrorConfig {
-                mirror_upstream,
+                mirror_upstream: cfg.mirror_upstream,
                 sample_percent,
-                replace_host,
-                ignore_methods,
-                queue_capacity,
+                replace_host: cfg.replace_host,
+                ignore_methods: cfg.ignore_methods,
+                queue_capacity: cfg.queue_capacity,
             },
         )?;
 
@@ -468,9 +433,10 @@ mod tests {
     fn test_request_mirror_from_config() {
         let json_cfg = serde_json::json!({
             "mirror_upstream": "mock-backend",
-            "sample_percent": 50,
+            "sample_percent": 50.0,
             "replace_host": "mock.local",
-            "ignore_methods": ["DELETE"]
+            "ignore_methods": ["DELETE"],
+            "queue_capacity": 65536
         });
 
         let config = PluginConfig {
@@ -485,6 +451,14 @@ mod tests {
         assert_eq!(plugin.config.sample_percent, 50);
         assert_eq!(plugin.config.replace_host, Some("mock.local".into()));
         assert_eq!(plugin.config.ignore_methods, vec!["DELETE"]);
+
+        // Empty config must fail validation
+        let bad_config = PluginConfig {
+            id: "request_mirror".into(),
+            phase: String::new(),
+            config: serde_json::json!({}),
+        };
+        assert!(RequestMirrorPlugin::from_config(&bad_config).is_err());
     }
 
     #[test]

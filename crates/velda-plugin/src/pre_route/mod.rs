@@ -91,6 +91,7 @@ mod tests {
             phase: "pre_route".into(),
             config: serde_json::json!({
                 "mode": "deny",
+                "allow_cidrs": [],
                 "deny_cidrs": ["192.168.1.100/32"],
                 "client_ip_source": "x_forwarded_for"
             }),

@@ -35,9 +35,9 @@ pub struct SecurityHeadersConfig {
     pub content_type_nosniff: bool,
     /// Referrer-Policy header value (e.g. "strict-origin-when-cross-origin", "no-referrer", or "none").
     pub referrer_policy: String,
-    /// Optional Content-Security-Policy header value.
+    /// Optional Content-Security-Policy header value (or "none" / null to omit).
     pub content_security_policy: Option<String>,
-    /// Optional Permissions-Policy header value.
+    /// Optional Permissions-Policy header value (or "none" / null to omit).
     pub permissions_policy: Option<String>,
 }
 

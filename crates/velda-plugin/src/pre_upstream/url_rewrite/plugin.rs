@@ -33,14 +33,10 @@ use crate::pre_upstream::PreUpstreamPlugin;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UrlRewriteConfig {
     /// Path rewrite rule. If `None`, path is not modified.
-    #[serde(default)]
     pub path: Option<PathRewriteStrategy>,
-    /// Query string handling strategy (default: [`QueryStrategy::Keep`]).
-    #[serde(default)]
+    /// Query string handling strategy.
     pub query: QueryStrategy,
     /// Whether to enforce RFC 3986 path normalization and block directory traversal (`..`).
-    /// Defaults to `true` for enterprise edge security.
-    #[serde(default = "default_true")]
     pub sanitize_path: bool,
 }
 
@@ -52,10 +48,6 @@ impl Default for UrlRewriteConfig {
             sanitize_path: true,
         }
     }
-}
-
-const fn default_true() -> bool {
-    true
 }
 
 /// URL Rewrite Plugin instance.
@@ -93,82 +85,49 @@ impl UrlRewritePlugin {
 
     /// Instantiates plugin from compiled configuration.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        if let Some(mode) = config
-            .config
-            .get("path_rewrite_mode")
-            .and_then(|v| v.as_str())
-        {
-            let path_match = config
-                .config
-                .get("path_match")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let path_replacement = config
-                .config
-                .get("path_replacement")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let path_strat = match mode {
-                "prefix" => {
-                    if path_replacement.is_empty() {
-                        Some(PathRewriteStrategy::StripPrefix {
-                            prefix: path_match.to_string(),
-                        })
-                    } else {
-                        Some(PathRewriteStrategy::ReplacePrefix {
-                            prefix: path_match.to_string(),
-                            replacement: path_replacement.to_string(),
-                        })
-                    }
-                }
-                "regex" => Some(PathRewriteStrategy::Regex {
-                    pattern: path_match.to_string(),
-                    replacement: path_replacement.to_string(),
-                }),
-                "exact" => Some(PathRewriteStrategy::Exact {
-                    path: path_match.to_string(),
-                    replacement: path_replacement.to_string(),
-                }),
-                _ => None,
-            };
-
-            let q_mode = config
-                .config
-                .get("query_rewrite_mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("keep");
-            let q_replacement = config
-                .config
-                .get("query_replacement")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let query_strat = match q_mode {
-                "strip" | "drop" => QueryStrategy::Drop,
-                "append" | "replace" => QueryStrategy::Append {
-                    query: q_replacement.to_string(),
-                },
-                _ => QueryStrategy::Keep,
-            };
-
-            let sanitize_path = config
-                .config
-                .get("sanitize_path")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            return Self::new(
-                config.id.clone(),
-                UrlRewriteConfig {
-                    path: path_strat,
-                    query: query_strat,
-                    sanitize_path,
-                },
-            );
-        }
-
-        let conf: UrlRewriteConfig = serde_json::from_value(config.config.clone())
+        let cfg = velda_sync::validate_url_rewrite_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid url_rewrite config: {e}")))?;
-        Self::new(config.id.clone(), conf)
+
+        let path_strat = match cfg.path_rewrite_mode.as_str() {
+            "prefix" => {
+                if cfg.path_replacement.is_empty() {
+                    Some(PathRewriteStrategy::StripPrefix {
+                        prefix: cfg.path_match,
+                    })
+                } else {
+                    Some(PathRewriteStrategy::ReplacePrefix {
+                        prefix: cfg.path_match,
+                        replacement: cfg.path_replacement,
+                    })
+                }
+            }
+            "regex" => Some(PathRewriteStrategy::Regex {
+                pattern: cfg.path_match,
+                replacement: cfg.path_replacement,
+            }),
+            "exact" => Some(PathRewriteStrategy::Exact {
+                path: cfg.path_match,
+                replacement: cfg.path_replacement,
+            }),
+            _ => None,
+        };
+
+        let query_strat = match cfg.query_rewrite_mode.as_str() {
+            "strip" | "drop" => QueryStrategy::Drop,
+            "append" | "replace" => QueryStrategy::Append {
+                query: cfg.query_replacement.unwrap_or_default(),
+            },
+            _ => QueryStrategy::Keep,
+        };
+
+        Self::new(
+            config.id.clone(),
+            UrlRewriteConfig {
+                path: path_strat,
+                query: query_strat,
+                sanitize_path: cfg.sanitize_path,
+            },
+        )
     }
 }
 

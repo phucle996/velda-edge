@@ -234,7 +234,24 @@ mod tests {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
+            config: serde_json::json!({
+                "algorithm": "HS256",
+                "secret_key": "secret-12345678901234567890",
+                "public_key_pem": null,
+                "token_sources": [
+                    { "type": "header", "name": "authorization", "prefix": "Bearer " }
+                ],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "issuer": null,
+                "audience": null,
+                "claims_to_headers": {},
+                "assert_claims": {},
+                "cache_shards": 16,
+                "cache_shard_capacity": 512,
+                "cache_ttl_secs": 300,
+                "negative_cache_ttl_secs": 10
+            }),
         };
         let p1 = instantiate_plugin(&cfg_jwt).expect("Should instantiate jwt");
         assert_eq!(p1.id(), "jwt_auth");
@@ -243,7 +260,15 @@ mod tests {
         let cfg_rate = PluginConfig {
             id: "rate_limit".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "rate_per_second": 500 }),
+            config: serde_json::json!({
+                "algorithm": "token_bucket",
+                "backend": "memory",
+                "rate_per_second": 500,
+                "burst_capacity": 1000,
+                "key_strategy": "priority",
+                "key_headers": ["client_ip"],
+                "fallback_behavior": "memory"
+            }),
         };
         let p2 = instantiate_plugin(&cfg_rate).expect("Should instantiate rate_limit");
         assert_eq!(p2.id(), "rate_limit");
@@ -252,7 +277,12 @@ mod tests {
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            config: serde_json::json!({ "allow_origin": "https://example.com" }),
+            config: serde_json::json!({
+                "allow_origins": ["https://example.com"],
+                "allow_credentials": false,
+                "expose_headers": [],
+                "max_age_secs": null
+            }),
         };
         let p3 = instantiate_plugin(&cfg_cors).expect("Should instantiate cors");
         assert_eq!(p3.id(), "cors");
@@ -266,7 +296,24 @@ mod tests {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
             phase: "pre_upstream".into(),
-            config: serde_json::json!({ "secret_key": "secret-12345678901234567890" }),
+            config: serde_json::json!({
+                "algorithm": "HS256",
+                "secret_key": "secret-12345678901234567890",
+                "public_key_pem": null,
+                "token_sources": [
+                    { "type": "header", "name": "authorization", "prefix": "Bearer " }
+                ],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "issuer": null,
+                "audience": null,
+                "claims_to_headers": {},
+                "assert_claims": {},
+                "cache_shards": 16,
+                "cache_shard_capacity": 512,
+                "cache_ttl_secs": 300,
+                "negative_cache_ttl_secs": 10
+            }),
         };
         available.insert(
             "jwt_auth".to_string(),
@@ -276,7 +323,12 @@ mod tests {
         let cfg_ip = PluginConfig {
             id: "ip_filter".into(),
             phase: "pre_route".into(),
-            config: serde_json::json!({ "mode": "allow", "allow_cidrs": ["127.0.0.1/32"] }),
+            config: serde_json::json!({
+                "mode": "allow",
+                "allow_cidrs": ["127.0.0.1/32"],
+                "deny_cidrs": [],
+                "client_ip_source": "x_forwarded_for"
+            }),
         };
         available.insert(
             "ip_filter".to_string(),
@@ -286,7 +338,12 @@ mod tests {
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            config: serde_json::json!({ "allow_origin": "*" }),
+            config: serde_json::json!({
+                "allow_origins": ["*"],
+                "allow_credentials": false,
+                "expose_headers": [],
+                "max_age_secs": null
+            }),
         };
         available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
 
@@ -334,7 +391,13 @@ mod tests {
         let cfg_cors_preflight = PluginConfig {
             id: "cors_preflight".into(),
             phase: "pre_route".into(),
-            config: serde_json::json!({ "allowed_origins": ["*"] }),
+            config: serde_json::json!({
+                "allowed_origins": ["*"],
+                "allowed_methods": ["GET", "POST", "OPTIONS"],
+                "allowed_headers": ["*"],
+                "allow_credentials": false,
+                "max_age_secs": 86400
+            }),
         };
         available.insert(
             "cors_preflight".to_string(),
@@ -344,7 +407,12 @@ mod tests {
         let cfg_ip = PluginConfig {
             id: "ip_filter".into(),
             phase: "pre_route".into(),
-            config: serde_json::json!({ "mode": "allow", "allow_cidrs": ["127.0.0.1/32"] }),
+            config: serde_json::json!({
+                "mode": "allow",
+                "allow_cidrs": ["127.0.0.1/32"],
+                "deny_cidrs": [],
+                "client_ip_source": "x_forwarded_for"
+            }),
         };
         available.insert(
             "ip_filter".to_string(),
@@ -405,7 +473,12 @@ mod tests {
         let cfg_cors = PluginConfig {
             id: "cors".into(),
             phase: "post_response".into(),
-            config: serde_json::json!({ "allow_origin": "*" }),
+            config: serde_json::json!({
+                "allow_origins": ["*"],
+                "allow_credentials": false,
+                "expose_headers": [],
+                "max_age_secs": null
+            }),
         };
         available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
 

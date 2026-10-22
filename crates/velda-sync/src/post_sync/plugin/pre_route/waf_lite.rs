@@ -3,7 +3,7 @@
 //! Enforces strict declarative contract for the Web Application Firewall Lite plugin.
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Explicit Mode**: `mode` must be explicitly declared as `"block"` or `"detect"` (aliases: `"detect_only"`, `"monitor"`).
+//! - **Explicit Mode**: `mode` must be explicitly declared as `"block"` or `"detect"`.
 //! - **Valid Scope**: At least one inspection vector must be active (`check_path`, `check_query`, `check_user_agent`, or `check_headers`).
 //! - **Valid Header Names**: Every header in `check_headers` must conform to RFC 9110 token grammar.
 //! - **Non-Empty Custom Patterns**: Custom attack and user-agent patterns cannot be empty or whitespace.
@@ -75,7 +75,7 @@ pub fn validate_waf_lite_config(
     // 1. Validate Mode
     let mode_lower = cfg.mode.trim().to_ascii_lowercase();
     match mode_lower.as_str() {
-        "block" | "detect" | "detect_only" | "monitor" => {}
+        "block" | "detect" => {}
         other => {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),

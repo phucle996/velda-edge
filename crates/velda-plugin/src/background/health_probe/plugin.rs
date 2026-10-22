@@ -112,6 +112,10 @@ pub struct HealthProbeConfig {
     pub liveness_path: String,
     /// Path for the Kubernetes / Orchestrator readiness probe.
     pub readiness_path: String,
+    /// Background health assessment interval in milliseconds.
+    pub check_interval_ms: u64,
+    /// Probe execution timeout threshold in milliseconds.
+    pub timeout_ms: u64,
 }
 
 impl Default for HealthProbeConfig {
@@ -120,6 +124,8 @@ impl Default for HealthProbeConfig {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 9091)),
             liveness_path: "/healthz".into(),
             readiness_path: "/readyz".into(),
+            check_interval_ms: 1000,
+            timeout_ms: 500,
         }
     }
 }
@@ -168,48 +174,29 @@ impl HealthProbePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = HealthProbeConfig::default();
-
-        if config.config.is_null() {
-            return Ok(Self::with_config(&config.id, defaults));
-        }
-
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        // 1. listen_addr (defaults to 0.0.0.0:9091)
-        let listen_addr = if let Some(addr_str) = raw.get("listen_addr").and_then(|v| v.as_str()) {
-            addr_str.parse::<SocketAddr>().map_err(|e| {
+        let cfg =
+            velda_sync::validate_health_probe_config(&config.id, &config.config).map_err(|e| {
                 PluginError::Config(format!(
-                    "Invalid listen_addr '{addr_str}' for plugin '{}': {e}",
+                    "Invalid health_probe configuration for '{}': {e}",
                     config.id
                 ))
-            })?
-        } else {
-            defaults.listen_addr
-        };
+            })?;
 
-        // 2. liveness_path
-        let liveness_path = raw
-            .get("liveness_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&defaults.liveness_path)
-            .to_string();
-
-        // 3. readiness_path
-        let readiness_path = raw
-            .get("readiness_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&defaults.readiness_path)
-            .to_string();
+        let listen_addr = cfg.listen.parse::<SocketAddr>().map_err(|e| {
+            PluginError::Config(format!(
+                "Invalid listen address '{}' for plugin '{}': {e}",
+                cfg.listen, config.id
+            ))
+        })?;
 
         Ok(Self::with_config(
             &config.id,
             HealthProbeConfig {
                 listen_addr,
-                liveness_path,
-                readiness_path,
+                liveness_path: cfg.liveness_path,
+                readiness_path: cfg.readiness_path,
+                check_interval_ms: cfg.check_interval_ms,
+                timeout_ms: cfg.timeout_ms,
             },
         ))
     }
@@ -344,9 +331,11 @@ mod tests {
     #[test]
     fn test_health_probe_from_config() {
         let json_cfg = serde_json::json!({
-            "listen_addr": "127.0.0.1:9095",
+            "listen": "127.0.0.1:9095",
             "liveness_path": "/livez",
-            "readiness_path": "/readyz"
+            "readiness_path": "/readyz",
+            "check_interval_ms": 1000,
+            "timeout_ms": 500
         });
         let config = PluginConfig {
             id: "health_probe".into(),
@@ -362,6 +351,8 @@ mod tests {
         );
         assert_eq!(plugin.config.liveness_path, "/livez");
         assert_eq!(plugin.config.readiness_path, "/readyz");
+        assert_eq!(plugin.config.check_interval_ms, 1000);
+        assert_eq!(plugin.config.timeout_ms, 500);
     }
 
     #[test]

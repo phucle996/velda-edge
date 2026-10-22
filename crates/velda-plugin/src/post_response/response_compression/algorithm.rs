@@ -52,7 +52,7 @@ impl CompressionAlgorithm {
         let t = token.trim();
         if t.eq_ignore_ascii_case("zstd") {
             Some(Self::Zstd)
-        } else if t.eq_ignore_ascii_case("br") {
+        } else if t.eq_ignore_ascii_case("br") || t.eq_ignore_ascii_case("brotli") {
             Some(Self::Brotli)
         } else if t.eq_ignore_ascii_case("gzip") || t.eq_ignore_ascii_case("x-gzip") {
             Some(Self::Gzip)

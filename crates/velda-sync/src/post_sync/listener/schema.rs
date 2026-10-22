@@ -43,8 +43,7 @@ pub struct ListenerTransportConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerApplicationConfig {
-    #[serde(alias = "family")]
-    pub protocol: String, // Canonical Protocol Family: "http", "grpc", "raw" (supports alias "family")
+    pub protocol: String, // Canonical Protocol Family: "http", "grpc", "raw"
     #[serde(default)]
     pub version: Option<String>,
     pub streaming: velda_core::StreamingMode,

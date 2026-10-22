@@ -78,92 +78,49 @@ impl ResponseCompressionPlugin {
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    ///
-    /// # Explicit Declaration Invariant
-    /// Both `algorithms` and `content_types` MUST be explicitly configured.
-    /// If omitted or empty, compression is disabled for this plugin instance.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = ResponseCompressionConfig::default();
+        let cfg = velda_sync::validate_response_compression_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid response_compression configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::new(&config.id, defaults));
+        let mut algorithms = Vec::with_capacity(cfg.algorithms.len());
+        for item in &cfg.algorithms {
+            let algo = CompressionAlgorithm::from_token(item).ok_or_else(|| {
+                PluginError::Config(format!(
+                    "Unsupported compression algorithm '{item}' in plugin '{}'",
+                    config.id
+                ))
+            })?;
+            algorithms.push(algo);
         }
 
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
+        let zstd_dict = cfg.zstd_dict.and_then(|s| {
+            use base64::Engine;
+            base64::prelude::BASE64_STANDARD
+                .decode(s.trim())
+                .ok()
+                .map(bytes::Bytes::from)
+                .or_else(|| Some(bytes::Bytes::copy_from_slice(s.as_bytes())))
+        });
 
-        // 1. Parse algorithms list (MUST be explicitly declared)
-        let mut algorithms = Vec::new();
-        if let Some(arr) = raw.get("algorithms").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(algo) = item.as_str().and_then(CompressionAlgorithm::from_token) {
-                    algorithms.push(algo);
-                }
-            }
-        }
-
-        // 2. Parse min_length threshold
-        let min_length = raw
-            .get("min_length")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.min_length);
-
-        // 3. Parse compression levels
-        let gzip_level = raw
-            .get("gzip_level")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(defaults.gzip_level);
-
-        let brotli_level = raw
-            .get("brotli_level")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(defaults.brotli_level);
-
-        let zstd_level = raw
-            .get("zstd_level")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32)
-            .unwrap_or(defaults.zstd_level);
-
-        // 4. Parse optional pre-trained Zstandard dictionary (base64 encoded or UTF-8 string)
-        let zstd_dict = raw
-            .get("zstd_dict_base64")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                use base64::Engine;
-                base64::prelude::BASE64_STANDARD
-                    .decode(s.trim())
-                    .ok()
-                    .map(bytes::Bytes::from)
-            })
-            .or_else(|| {
-                raw.get("zstd_dict")
-                    .and_then(|v| v.as_str())
-                    .map(|s| bytes::Bytes::copy_from_slice(s.as_bytes()))
-            });
-
-        // 5. Parse content_types whitelist (MUST be explicitly declared)
-        let mut content_types = Vec::new();
-        if let Some(arr) = raw.get("content_types").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    content_types.push(s.to_lowercase());
-                }
-            }
-        }
+        let content_types = cfg
+            .content_types
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
 
         Ok(Self::new(
             &config.id,
             ResponseCompressionConfig {
                 algorithms,
-                min_length,
-                gzip_level,
-                brotli_level,
-                zstd_level,
+                min_length: cfg.min_length_bytes,
+                gzip_level: cfg.gzip_level,
+                brotli_level: cfg.brotli_level,
+                zstd_level: cfg.zstd_level,
                 zstd_dict,
                 content_types,
             },
@@ -543,13 +500,18 @@ mod tests {
     }
 
     #[test]
-    fn test_from_config_empty_object_does_not_compress() {
+    fn test_from_config_empty_object_rejected() {
         let plugin_cfg = PluginConfig {
             id: "response_compression".into(),
             phase: "post_response".into(),
             config: serde_json::json!({}),
         };
-        let plugin = ResponseCompressionPlugin::from_config(&plugin_cfg).unwrap();
+        assert!(ResponseCompressionPlugin::from_config(&plugin_cfg).is_err());
+
+        let plugin = ResponseCompressionPlugin::new(
+            "response_compression",
+            ResponseCompressionConfig::default(),
+        );
         assert!(plugin.config.algorithms.is_empty());
         assert!(plugin.config.content_types.is_empty());
 
@@ -678,5 +640,42 @@ mod tests {
             }
             _ => panic!("Expected Body::Bytes"),
         }
+    }
+
+    #[test]
+    fn test_from_config_strict_validation() {
+        let valid_json = serde_json::json!({
+            "algorithms": ["zstd", "brotli", "gzip"],
+            "min_length_bytes": 256,
+            "gzip_level": 1,
+            "brotli_level": 2,
+            "zstd_level": 1,
+            "zstd_dict": null,
+            "content_types": ["text/", "application/json"]
+        });
+
+        let p_cfg = PluginConfig {
+            id: "comp_test".into(),
+            phase: "post_response".into(),
+            config: valid_json,
+        };
+
+        let plugin = ResponseCompressionPlugin::from_config(&p_cfg).unwrap();
+        assert_eq!(plugin.config.algorithms.len(), 3);
+        assert_eq!(plugin.config.min_length, 256);
+        assert_eq!(plugin.config.gzip_level, 1);
+        assert_eq!(plugin.config.brotli_level, 2);
+        assert_eq!(plugin.config.zstd_level, 1);
+
+        let invalid_json = serde_json::json!({
+            "algorithms": ["zstd"]
+            // Missing all other fields
+        });
+        let bad_cfg = PluginConfig {
+            id: "comp_bad".into(),
+            phase: "post_response".into(),
+            config: invalid_json,
+        };
+        assert!(ResponseCompressionPlugin::from_config(&bad_cfg).is_err());
     }
 }

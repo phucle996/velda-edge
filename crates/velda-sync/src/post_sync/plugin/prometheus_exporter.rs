@@ -35,32 +35,29 @@ pub struct ScrapeExporterConfig {
 pub struct TlsExporterConfig {
     /// Operating mode: strictly "none", "tls", or "mtls".
     pub mode: String,
-    /// Path to server certificate file (mandatory if mode != "none").
-    #[serde(default)]
+    /// Path to server certificate file (mandatory if mode != "none", null or "none" if mode == "none").
     pub cert_file: Option<String>,
-    /// Path to private key file (mandatory if mode != "none").
-    #[serde(default)]
+    /// Path to private key file (mandatory if mode != "none", null or "none" if mode == "none").
     pub key_file: Option<String>,
-    /// Path to client CA certificate bundle (mandatory if mode == "mtls").
-    #[serde(default)]
+    /// Path to client CA certificate bundle (mandatory if mode == "mtls", null or "none" if mode != "mtls").
     pub client_ca_file: Option<String>,
 }
 
 /// Strict Cross-Origin Resource Sharing (CORS) configuration for Prometheus Exporter.
 ///
 /// # Strict Declarative Invariant
-/// Must explicitly declare `enabled: true/false`.
+/// Must explicitly declare `enabled: true/false` and explicit array lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorsExporterConfig {
     /// Whether Cross-Origin Resource Sharing (CORS) is enabled.
     pub enabled: bool,
-    /// Permitted origins (e.g. `["https://grafana.internal"]`).
+    /// Permitted origins (e.g. `["https://grafana.internal"]` or `[]`).
     #[serde(default)]
     pub allow_origins: Vec<String>,
-    /// Permitted HTTP methods (e.g. `["GET", "OPTIONS"]`).
+    /// Permitted HTTP methods (e.g. `["GET", "OPTIONS"]` or `[]`).
     #[serde(default)]
     pub allow_methods: Vec<String>,
-    /// Permitted HTTP request headers.
+    /// Permitted HTTP request headers (e.g. `["Authorization"]` or `[]`).
     #[serde(default)]
     pub allow_headers: Vec<String>,
 }
@@ -73,14 +70,11 @@ pub struct CorsExporterConfig {
 pub struct AuthExporterConfig {
     /// Authentication mode: "none", "bearer", or "basic".
     pub mode: String,
-    /// Secret bearer token (mandatory if mode == "bearer").
-    #[serde(default)]
+    /// Secret bearer token (mandatory if mode == "bearer", null or "none" if not bearer).
     pub token: Option<String>,
-    /// Basic auth username (mandatory if mode == "basic").
-    #[serde(default)]
+    /// Basic auth username (mandatory if mode == "basic", null or "none" if not basic).
     pub username: Option<String>,
-    /// Basic auth password (mandatory if mode == "basic").
-    #[serde(default)]
+    /// Basic auth password (mandatory if mode == "basic", null or "none" if not basic).
     pub password: Option<String>,
 }
 
@@ -349,7 +343,10 @@ mod tests {
                 "max_buffer_size_kb": 256
             },
             "tls": {
-                "mode": "none"
+                "mode": "none",
+                "cert_file": null,
+                "key_file": null,
+                "client_ca_file": null
             },
             "cors": {
                 "enabled": false,
@@ -358,7 +355,10 @@ mod tests {
                 "allow_headers": []
             },
             "auth": {
-                "mode": "none"
+                "mode": "none",
+                "token": null,
+                "username": null,
+                "password": null
             }
         });
 
@@ -398,21 +398,22 @@ mod tests {
             "path": "/metrics",
             "protocol": "https",
             "scrape": { "timeout_ms": 5000, "max_concurrency": 16, "max_buffer_size_kb": 256 },
-            "tls": { "mode": "none" },
-            "cors": { "enabled": false },
-            "auth": { "mode": "none" }
+            "tls": { "mode": "none", "cert_file": null, "key_file": null, "client_ca_file": null },
+            "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] },
+            "auth": { "mode": "none", "token": null, "username": null, "password": null }
         });
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
 
         // 2. tls mode tls without cert_file -> fail
-        cfg["tls"] = serde_json::json!({ "mode": "tls", "key_file": "/tmp/key.pem" });
+        cfg["tls"] = serde_json::json!({ "mode": "tls", "cert_file": null, "key_file": "/tmp/key.pem", "client_ca_file": null });
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
 
         // 3. tls mode mtls without client_ca_file -> fail
         cfg["tls"] = serde_json::json!({
             "mode": "mtls",
             "cert_file": "/tmp/cert.pem",
-            "key_file": "/tmp/key.pem"
+            "key_file": "/tmp/key.pem",
+            "client_ca_file": null
         });
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
 
@@ -426,15 +427,15 @@ mod tests {
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_ok());
 
         // 5. bearer auth without token -> fail
-        cfg["auth"] = serde_json::json!({ "mode": "bearer" });
+        cfg["auth"] = serde_json::json!({ "mode": "bearer", "token": null, "username": null, "password": null });
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
 
         // 6. basic auth without password -> fail
-        cfg["auth"] = serde_json::json!({ "mode": "basic", "username": "admin" });
+        cfg["auth"] = serde_json::json!({ "mode": "basic", "token": null, "username": "admin", "password": null });
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
 
         // 7. invalid scrape limits
-        cfg["auth"] = serde_json::json!({ "mode": "none" });
+        cfg["auth"] = serde_json::json!({ "mode": "none", "token": null, "username": null, "password": null });
         cfg["scrape"]["timeout_ms"] = serde_json::json!(10); // < 100ms
         assert!(validate_prometheus_exporter_config("p1", &cfg).is_err());
     }

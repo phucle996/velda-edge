@@ -110,56 +110,27 @@ impl CorsResponsePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = CorsConfig::default();
+        let cfg =
+            velda_sync::validate_cors_response_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid cors configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Ok(Self::with_config(&config.id, defaults));
-        }
-
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
-
-        // 1. Resolve allow_origins
-        let mut allow_origins = Vec::new();
-        if let Some(arr) = raw.get("allow_origins").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    allow_origins.push(OriginPattern::parse(s));
-                }
-            }
-        }
-
-        if allow_origins.is_empty() {
-            allow_origins = defaults.allow_origins;
-        }
-
-        // 2. Resolve allow_credentials
-        let allow_credentials = raw
-            .get("allow_credentials")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.allow_credentials);
-
-        // 3. Resolve expose_headers
-        let mut expose_headers = Vec::new();
-        if let Some(arr) = raw.get("expose_headers").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    expose_headers.push(s.to_string());
-                }
-            }
-        }
-
-        // 4. Resolve max_age_secs
-        let max_age_secs = raw.get("max_age_secs").and_then(|v| v.as_u64());
+        let allow_origins = cfg
+            .allow_origins
+            .iter()
+            .map(|s| OriginPattern::parse(s))
+            .collect();
 
         Ok(Self::with_config(
             &config.id,
             CorsConfig {
                 allow_origins,
-                allow_credentials,
-                expose_headers,
-                max_age_secs,
+                allow_credentials: cfg.allow_credentials,
+                expose_headers: cfg.expose_headers,
+                max_age_secs: cfg.max_age_secs,
             },
         ))
     }

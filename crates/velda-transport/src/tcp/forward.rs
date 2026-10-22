@@ -306,9 +306,6 @@ pub async fn forward_connection(
     Ok(stats)
 }
 
-/// Canonical alias maintaining backwards compatibility.
-pub use forward_connection as forward_connection_with_timeout;
-
 #[cfg(test)]
 mod tests {
     use super::*;

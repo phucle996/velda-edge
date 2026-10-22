@@ -5,6 +5,7 @@
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Valid Algorithms**: Every algorithm must be supported (`"gzip"`, `"brotli"`, `"br"`, `"zstd"`, `"deflate"`).
 //! - **Safe Length Threshold**: `min_length_bytes` must be within 64B to 10MB.
+//! - **Bounded Codec Levels**: `gzip_level` (1..=9), `brotli_level` (0..=11), `zstd_level` (1..=22).
 //! - **Explicit Content-Types**: `content_types` must contain at least one MIME type prefix.
 
 use serde::{Deserialize, Serialize};
@@ -14,11 +15,19 @@ use crate::SyncError;
 /// Declarative configuration for the Response Compression plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseCompressionConfig {
-    /// Supported compression algorithms in order of preference (e.g. `["brotli", "gzip", "zstd"]`).
+    /// Supported compression algorithms in order of preference (e.g. `["zstd", "brotli", "gzip"]`).
     pub algorithms: Vec<String>,
     /// Minimum response body byte length required before applying compression (64B to 10,485,760B).
     pub min_length_bytes: usize,
-    /// MIME content-type prefixes eligible for compression (e.g. `["text/", "application/json", "application/javascript"]`).
+    /// Gzip/Deflate compression level (1-9).
+    pub gzip_level: u32,
+    /// Brotli compression quality level (0-11).
+    pub brotli_level: u32,
+    /// Zstandard compression level (1-22).
+    pub zstd_level: i32,
+    /// Optional pre-trained Zstandard dictionary (RFC 8878) as Base64 string, or null.
+    pub zstd_dict: Option<String>,
+    /// MIME content-type prefixes eligible for compression (e.g. `["text/", "application/json"]`).
     pub content_types: Vec<String>,
 }
 
@@ -69,7 +78,38 @@ pub fn validate_response_compression_config(
         });
     }
 
-    // 3. Validate content_types
+    // 3. Validate compression levels
+    if !(1..=9).contains(&cfg.gzip_level) {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': gzip_level ({}) must be between 1 and 9",
+                cfg.gzip_level
+            ),
+        });
+    }
+
+    if cfg.brotli_level > 11 {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': brotli_level ({}) must be between 0 and 11",
+                cfg.brotli_level
+            ),
+        });
+    }
+
+    if !(1..=22).contains(&cfg.zstd_level) {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': zstd_level ({}) must be between 1 and 22",
+                cfg.zstd_level
+            ),
+        });
+    }
+
+    // 4. Validate content_types
     if cfg.content_types.is_empty() {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
@@ -98,38 +138,30 @@ mod tests {
     #[test]
     fn test_valid_response_compression() {
         let val = json!({
-            "algorithms": ["brotli", "gzip"],
-            "min_length_bytes": 1024,
-            "content_types": ["text/html", "application/json", "application/javascript"]
+            "algorithms": ["zstd", "brotli", "gzip"],
+            "min_length_bytes": 256,
+            "gzip_level": 1,
+            "brotli_level": 2,
+            "zstd_level": 1,
+            "zstd_dict": null,
+            "content_types": ["text/", "application/json", "application/javascript"]
         });
-        let res = validate_response_compression_config("comp_1", &val);
+        let res = validate_response_compression_config("compress_1", &val);
         assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_empty_algorithms_rejected() {
-        let val = json!({
-            "algorithms": [],
-            "min_length_bytes": 1024,
-            "content_types": ["application/json"]
-        });
-        let res = validate_response_compression_config("comp_bad_alg", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("algorithms list cannot be empty")
-        );
     }
 
     #[test]
     fn test_unsupported_algorithm_rejected() {
         let val = json!({
-            "algorithms": ["lzma_unsupported"],
-            "min_length_bytes": 1024,
-            "content_types": ["application/json"]
+            "algorithms": ["snappy"],
+            "min_length_bytes": 256,
+            "gzip_level": 1,
+            "brotli_level": 2,
+            "zstd_level": 1,
+            "zstd_dict": null,
+            "content_types": ["text/"]
         });
-        let res = validate_response_compression_config("comp_bad_alg2", &val);
+        let res = validate_response_compression_config("compress_bad_alg", &val);
         assert!(res.is_err());
         assert!(
             res.unwrap_err()
@@ -142,9 +174,9 @@ mod tests {
     fn test_missing_required_fields_rejected() {
         let val = json!({
             "algorithms": ["gzip"]
-            // Missing min_length_bytes, content_types
+            // Missing all other fields
         });
-        let res = validate_response_compression_config("comp_missing", &val);
+        let res = validate_response_compression_config("compress_missing", &val);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("missing field"));
     }

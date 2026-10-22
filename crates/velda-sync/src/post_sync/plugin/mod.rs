@@ -34,6 +34,9 @@ pub use health_probe::*;
 pub mod prometheus_exporter;
 pub use prometheus_exporter::*;
 
+pub mod otlp_metrics_exporter;
+pub use otlp_metrics_exporter::*;
+
 // ============================================================================
 // Binary Protocol Constants & Domain Header
 // ============================================================================
@@ -97,14 +100,18 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_fault_injection" => Some("pre_upstream"),
         "grpc_fault_injection" => Some("pre_upstream"),
         "request_termination" => Some("pre_upstream"),
+        "w3c_trace_context" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),
         "response_header_mutation" => Some("post_response"),
         "response_compression" => Some("post_response"),
         "access_log" => Some("post_response"),
+        "opentelemetry_logger" => Some("post_response"),
+        "opentelemetry_tracer" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
+        "otlp_metrics_exporter" => Some("background"),
         _ => None,
     }
 }
@@ -477,6 +484,51 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     });
                 }
                 health_probe::validate_health_probe_config(&plugin.id, &plugin.config)?;
+            }
+            "otlp_metrics_exporter" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                otlp_metrics_exporter::validate_otlp_metrics_exporter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            }
+            "opentelemetry_logger" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_opentelemetry_logger_config(&plugin.id, &plugin.config)?;
+            }
+            "opentelemetry_tracer" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_opentelemetry_tracer_config(&plugin.id, &plugin.config)?;
+            }
+            "w3c_trace_context" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_w3c_trace_context_config(&plugin.id, &plugin.config)?;
             }
             _ => {
                 // Future plugins will dispatch to their respective validation modules

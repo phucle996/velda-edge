@@ -24,6 +24,5 @@ pub use error::{Result, TransportError};
 pub use ingress::{IngressBinding, TcpBinding, TcpIngress, UdpBinding, UdpIngress};
 pub use tcp::{
     TcpListener, TcpListenerConfig, TransferStats, forward_bidirectional, forward_connection,
-    forward_connection_with_timeout,
 };
 pub use udp::{Datagram, UdpSocket, UdpSocketConfig};

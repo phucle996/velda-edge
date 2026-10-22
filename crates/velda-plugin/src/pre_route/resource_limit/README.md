@@ -17,81 +17,68 @@ Ultra-low-latency ingress boundary defense plugin that enforces strict physical 
 
 ---
 
-## 2. Architectural Rationale: Why Limit Resources at `pre_route`?
+## 2. 100% Explicit Configuration Invariant
 
-A common question in high-performance proxy architecture is:
+> [!IMPORTANT]
+> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
 
-> *"If a Radix Trie matches routes by prefix, matching terminates as soon as the prefix matches or a mismatch occurs at an early branch. Why do we still need an edge URI length limit?"*
-
-While it is true that Radix Trie prefix lookup stops early and does not traverse the entire URI string, an unbounded URI or header payload threatens the rest of the edge and backend ecosystem:
-
-### 1. 95% of Large URIs Reside in the Query String
-The Radix Trie matcher inspects only the URI `path` (`/api/v1/orders`). It completely ignores query strings (`?filter=...`).
-- When a client sends a 64 KB or 1 MB URL, the query string bypasses route matching unaffected.
-- Subsequent inspection plugins (such as `waf_lite`) must scan every byte of that oversized query string for SQLi, XSS, and RCE threats, ballooning CPU cycle usage from nanoseconds to milliseconds.
-- Access logging and tracing exporters must allocate and serialize these gigantic URLs, causing severe allocator churn and buffer bloat.
-- Upstream HTTP encoders must re-serialize and push those oversized strings over the socket.
-
-### 2. Upstream Backend Buffer Explosion & Connection Pool Aborts
-Even if the Edge gateway handles a 64 KB request line, the backend microservices behind it almost certainly will not:
-- **Spring Boot / Tomcat**: Default `server.max-http-header-size = 8 KB` (inclusive of the request line).
-- **Node.js**: Default `--max-http-header-size = 16 KB`.
-- **Nginx**: Default `large_client_header_buffers = 8 KB`.
-
-If Velda Edge forwards an oversized URI or header block to the upstream backend, the backend will immediately terminate the connection (`TCP RST` or `Connection: close` with `400 Bad Request / 414 URI Too Long`). This destroys persistent connection reuse in Velda's Upstream Connection Pool, forcing the edge to clean up dead sockets and establish new TCP/TLS handshakes under high load.
-
-### 3. Preserving L1 `HeaderWorkspace` Cache Invariants
-Velda Edge pre-warms a fixed `HeaderWorkspace` inside CPU L1/L2 cache (committed to MMU at bootstrap) to achieve zero-allocation header processing.
-- If an attacker floods the gateway with 200 headers or 64 KB header values (Header Bombing / Slowloris), the workspace overflows, forcing fallback heap allocations (`malloc`) and evicting hot cache lines across worker cores.
-- `resource_limit` guarantees that headers stay strictly within L1 cache bounds.
-
-### 4. Wildcard Route Protection
-For wildcard routes (e.g. `/static/*filepath` or dynamic proxies), the router must capture and slice the remainder of the URI. Unbounded URIs force large memory slices and potential buffer copying.
-
----
-
-## 3. Enforced Limits & RFC Error Responses
-
-| Configuration Key | Type | Default | Violated Status Code | Description |
-| :--- | :---: | :---: | :---: | :--- |
-| `max_uri_length` | integer | `4096` bytes (4 KB) | **`414 URI Too Long`** (RFC 9110 §15.5.15) | Total length of Path + `?` + Query string. |
-| `max_headers_count` | integer | `64` | **`431 Request Header Fields Too Large`** (RFC 6585 §5) | Maximum number of header entries in the request. |
-| `max_header_bytes` | integer | `16384` bytes (16 KB) | **`431 Request Header Fields Too Large`** | Cumulative byte size of all header names, values, and wire framing. |
-| `max_single_header_bytes` | integer | `8192` bytes (8 KB) | **`431 Request Header Fields Too Large`** | Maximum byte length of any individual header value. |
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| `max_uri_length` | Integer (usize) | **Yes** | `64 ..= 65536` bytes | `8192` (8 KB) | Maximum allowed total URI length in bytes (Path + `?` + Query string). Violations return `414 URI Too Long`. |
+| `max_headers_count` | Integer (usize) | **Yes** | `8 ..= 1024` | `64` | Maximum allowed number of distinct header entries in the request. Violations return `431 Request Header Fields Too Large`. |
+| `max_header_bytes` | Integer (usize) | **Yes** | `512 ..= 1048576` bytes (1 MB) | `32768` (32 KB) | Cumulative byte size of all header names, values, and wire framing. Violations return `431 Request Header Fields Too Large`. |
+| `max_single_header_bytes` | Integer (usize) | **Yes** | `64 ..= 524288` bytes ($\le \text{max\_header\_bytes}$) | `8192` (8 KB) | Maximum byte length of any individual header value. Violations return `431 Request Header Fields Too Large`. |
 
 All error responses are pre-computed at configuration compile time with immutable `application/json` bodies, resulting in **zero allocations on error paths**.
 
 ---
 
-## 4. Configuration Schema
+## 3. Architectural Rationale: Why Limit Resources at `pre_route`?
 
-As with all Velda Edge plugins, **never specify `phase` or `priority`** in user configuration. The execution phase is statically inferred as `pre_route`, and execution order follows the route's array declaration order (FIFO).
+While Radix Trie prefix lookup stops early and does not traverse the entire URI string, an unbounded URI or header payload threatens the rest of the edge and backend ecosystem:
+
+1. **Query Strings Bypass Trie Lookup**: The router inspects only the URI path. An attacker can send a 100 KB query string that would otherwise force subsequent WAF regex inspection, logging, and upstream serialization buffers to bloat.
+2. **Upstream Backend Buffer Explosion**: Backend servers (Tomcat 8 KB, Node.js 16 KB, Nginx 8 KB) abort connections when headers or request lines exceed their thresholds, destroying connection pool reuse.
+3. **Preserving L1 `HeaderWorkspace` Invariants**: Velda Edge pre-warms a fixed `HeaderWorkspace` inside CPU L1 cache to achieve zero allocations. Bounding header sizes prevents CPU cache eviction and fallback `malloc` invocations.
+
+---
+
+## 4. Configuration Examples
+
+### Manifest Declaration (`plugins.json`)
 
 ```json
 {
-  "id": "resource_limit",
-  "config": {
-    "max_uri_length": 4096,
-    "max_headers_count": 64,
-    "max_header_bytes": 16384,
-    "max_single_header_bytes": 8192
-  }
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "resource_limit",
+      "config": {
+        "max_uri_length": 8192,
+        "max_headers_count": 64,
+        "max_header_bytes": 32768,
+        "max_single_header_bytes": 8192
+      }
+    }
+  ]
 }
 ```
 
-### Route Attachment Example
+### Route Attachment (`routes.json`)
 
 ```json
 {
   "id": "api-orders-route",
-  "path": "/api/v1/orders",
+  "match": {
+    "path": "/api/v1/orders"
+  },
   "upstream_id": "orders-backend",
   "plugins": [
-    { "id": "ip_filter" },
-    { "id": "resource_limit" },
-    { "id": "cors_preflight" },
-    { "id": "waf_lite" },
-    { "id": "jwt_auth" }
+    "ip_filter",
+    "resource_limit",
+    "cors_preflight",
+    "waf_lite",
+    "jwt_auth"
   ]
 }
 ```

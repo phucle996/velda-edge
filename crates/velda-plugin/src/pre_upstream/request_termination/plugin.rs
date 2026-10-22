@@ -15,7 +15,6 @@
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
-use serde_json::Value;
 use std::sync::Arc;
 use velda_core::{Action, Body, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -67,6 +66,8 @@ pub struct RequestTerminationConfig {
     pub status_code: u16,
     /// Custom static HTTP headers to inject into the synthetic response.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Custom synthetic response body. If None or empty, standard RFC canonical text is used.
+    pub body: Option<String>,
 }
 
 impl Default for RequestTerminationConfig {
@@ -74,75 +75,9 @@ impl Default for RequestTerminationConfig {
         Self {
             status_code: 200,
             headers: Vec::new(),
+            body: None,
         }
     }
-}
-
-/// Helper function to convert JSON value (string, integer, boolean) to a header value string.
-fn value_to_header_str(v: &Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        Some(s.to_string())
-    } else if let Some(n) = v.as_i64() {
-        Some(n.to_string())
-    } else if let Some(u) = v.as_u64() {
-        Some(u.to_string())
-    } else {
-        v.as_bool().map(|b| b.to_string())
-    }
-}
-
-/// Parses static headers from JSON object or array of `{ name, value }` objects.
-fn parse_headers(val: &Value) -> Result<Vec<(HeaderName, HeaderValue)>, PluginError> {
-    let mut headers = Vec::new();
-
-    if let Some(obj) = val.as_object() {
-        for (k, v) in obj {
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| PluginError::Config(format!("Invalid header name '{k}': {e}")))?;
-            let val_str = value_to_header_str(v).ok_or_else(|| {
-                PluginError::Config(format!(
-                    "Header value for '{k}' must be scalar (string/number)"
-                ))
-            })?;
-            let value = HeaderValue::from_str(&val_str).map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid header value '{val_str}' for header '{k}': {e}"
-                ))
-            })?;
-            headers.push((name, value));
-        }
-    } else if let Some(arr) = val.as_array() {
-        for item in arr {
-            if let Some(item_obj) = item.as_object() {
-                let name_str = item_obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        PluginError::Config("Header item must contain 'name' string field".into())
-                    })?;
-                let val_node = item_obj.get("value").ok_or_else(|| {
-                    PluginError::Config("Header item must contain 'value' field".into())
-                })?;
-                let val_str = value_to_header_str(val_node).ok_or_else(|| {
-                    PluginError::Config(format!(
-                        "Header value for '{name_str}' must be scalar (string/number)"
-                    ))
-                })?;
-
-                let name = HeaderName::from_bytes(name_str.as_bytes()).map_err(|e| {
-                    PluginError::Config(format!("Invalid header name '{name_str}': {e}"))
-                })?;
-                let value = HeaderValue::from_str(&val_str).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Invalid header value '{val_str}' for header '{name_str}': {e}"
-                    ))
-                })?;
-                headers.push((name, value));
-            }
-        }
-    }
-
-    Ok(headers)
 }
 
 /// Request Termination Plugin instance.
@@ -176,6 +111,17 @@ impl RequestTerminationPlugin {
         // Retrieve canonical static body for this protocol status code
         let canonical_bytes = canonical_http_body(status);
 
+        let body_bytes: Bytes = match &config.body {
+            Some(b) if !b.is_empty() => Bytes::copy_from_slice(b.as_bytes()),
+            _ => {
+                if canonical_bytes.is_empty() {
+                    Bytes::new()
+                } else {
+                    Bytes::from_static(canonical_bytes)
+                }
+            }
+        };
+
         let mut header_map = HeaderMap::with_capacity(config.headers.len() + 2);
         let mut has_content_type = false;
         for (name, val) in &config.headers {
@@ -186,24 +132,24 @@ impl RequestTerminationPlugin {
         }
 
         // If body is non-empty and user did not specify Content-Type, default to text/plain; charset=utf-8
-        if !canonical_bytes.is_empty() && !has_content_type {
+        if !body_bytes.is_empty() && !has_content_type {
             header_map.insert(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
         }
 
-        // Ensure Content-Length matches the actual canonical body length
+        // Ensure Content-Length matches the actual body length
         header_map.insert(
             CONTENT_LENGTH,
-            HeaderValue::from_str(&canonical_bytes.len().to_string())
+            HeaderValue::from_str(&body_bytes.len().to_string())
                 .unwrap_or_else(|_| HeaderValue::from_static("0")),
         );
 
-        let body = if canonical_bytes.is_empty() {
+        let body = if body_bytes.is_empty() {
             Body::Empty
         } else {
-            Body::Bytes(Bytes::from_static(canonical_bytes))
+            Body::Bytes(body_bytes)
         };
 
         let base_response = L7Response::new(status, Version::HTTP_11, header_map, body);
@@ -217,40 +163,49 @@ impl RequestTerminationPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let defaults = RequestTerminationConfig::default();
+        let cfg = velda_sync::validate_request_termination_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid request_termination configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        if config.config.is_null() {
-            return Self::new(&config.id, defaults);
+        let mut headers = Vec::with_capacity(cfg.headers.len() + 1);
+        for (k, v) in &cfg.headers {
+            let hname = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid header name '{k}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            let hval = HeaderValue::from_str(v).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid header value '{v}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            headers.push((hname, hval));
         }
 
-        let status_code = match config.config.get("status_code") {
-            Some(v) => {
-                let code = v.as_u64().ok_or_else(|| {
-                    PluginError::Config(
-                        "'status_code' must be an integer between 200 and 599".into(),
-                    )
-                })?;
-                if !(200..=599).contains(&code) {
-                    return Err(PluginError::Config(format!(
-                        "HTTP status code must be between 200 and 599, got {code}"
-                    )));
-                }
-                code as u16
-            }
-            None => defaults.status_code,
-        };
+        if !cfg.content_type.trim().is_empty() {
+            let ct_val = HeaderValue::from_str(&cfg.content_type).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid content_type '{}' in plugin '{}': {e}",
+                    cfg.content_type, config.id
+                ))
+            })?;
+            headers.push((CONTENT_TYPE, ct_val));
+        }
 
-        let headers = match config.config.get("headers") {
-            Some(v) => parse_headers(v)?,
-            None => defaults.headers,
-        };
-
-        let termination_config = RequestTerminationConfig {
-            status_code,
-            headers,
-        };
-
-        Self::new(&config.id, termination_config)
+        Self::new(
+            &config.id,
+            RequestTerminationConfig {
+                status_code: cfg.status_code,
+                headers,
+                body: Some(cfg.body),
+            },
+        )
     }
 
     /// Returns a reference to the pre-compiled base [`L7Response`].
@@ -349,6 +304,7 @@ mod tests {
                     HeaderValue::from_static("2026-10-20-0300"),
                 ),
             ],
+            body: None,
         };
 
         let plugin = RequestTerminationPlugin::new("maint-503", cfg).unwrap();
@@ -401,6 +357,7 @@ mod tests {
                 HeaderName::from_static("location"),
                 HeaderValue::from_static("https://example.com/login"),
             )],
+            body: None,
         };
 
         let plugin = RequestTerminationPlugin::new("redirect-login", cfg).unwrap();
@@ -444,6 +401,7 @@ mod tests {
         let cfg = RequestTerminationConfig {
             status_code: 200,
             headers: vec![(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            body: None,
         };
 
         let plugin = RequestTerminationPlugin::new("custom-ct", cfg).unwrap();
@@ -452,6 +410,28 @@ mod tests {
             resp.headers.get("content-type").unwrap(),
             "application/json"
         );
+    }
+
+    #[test]
+    fn test_custom_body_preserved() {
+        let cfg = RequestTerminationConfig {
+            status_code: 400,
+            headers: vec![(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            body: Some(r#"{"error":"Custom JSON payload"}"#.to_string()),
+        };
+
+        let plugin = RequestTerminationPlugin::new("custom-body", cfg).unwrap();
+        let resp = plugin.base_response();
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        match &resp.body {
+            Body::Bytes(b) => {
+                assert_eq!(b.as_ref(), br#"{"error":"Custom JSON payload"}"#);
+            }
+            _ => panic!("Expected Body::Bytes"),
+        }
     }
 
     #[test]
@@ -479,9 +459,11 @@ mod tests {
     fn test_from_config_json_parsing() {
         let json_cfg = serde_json::json!({
             "status_code": 418,
+            "body": "I'm a teapot\n",
+            "content_type": "text/plain",
             "headers": {
                 "x-tea-type": "EarlGrey",
-                "retry-after": 60
+                "retry-after": "60"
             }
         });
 
@@ -501,5 +483,13 @@ mod tests {
             plugin.base_response().headers.get("retry-after").unwrap(),
             "60"
         );
+
+        // Incomplete config must fail validation
+        let bad_config = PluginConfig {
+            id: "request_termination".into(),
+            phase: "pre_upstream".into(),
+            config: serde_json::json!({}),
+        };
+        assert!(RequestTerminationPlugin::from_config(&bad_config).is_err());
     }
 }

@@ -159,106 +159,50 @@ impl SecurityHeadersPlugin {
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    ///
-    /// Supports both granular nested objects (`hsts: { ... }`) and legacy flat properties
-    /// (`hsts_max_age_secs: ...`) for seamless backward compatibility.
-    ///
-    /// # Explicit 'none' Handling Invariant
-    /// Operators must explicitly specify `"none"` for any unused or omitted header field
-    /// (e.g. `"csp": "none"`, `"permissions_policy": "none"`). The header is recognized
-    /// as omitted rather than treated as a literal header value.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let mut sec_config = SecurityHeadersConfig::default();
+        let cfg = velda_sync::validate_security_headers_config(&config.id, &config.config)
+            .map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid security_headers configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        // 1. Parse HSTS (supports nested object, boolean, or string "none")
-        if let Some(hsts_val) = config.config.get("hsts") {
-            if let Some(hsts_obj) = hsts_val.as_object() {
-                sec_config.hsts.enable = hsts_obj
-                    .get("enable")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                sec_config.hsts.max_age_secs = hsts_obj
-                    .get("max_age_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(31_536_000);
-                sec_config.hsts.include_subdomains = hsts_obj
-                    .get("include_subdomains")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                sec_config.hsts.preload = hsts_obj
-                    .get("preload")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-            } else if let Some(hsts_bool) = hsts_val.as_bool() {
-                sec_config.hsts.enable = hsts_bool;
-            } else if let Some(hsts_str) = hsts_val.as_str()
-                && hsts_str.trim().eq_ignore_ascii_case("none")
-            {
-                sec_config.hsts.enable = false;
-            }
-        }
+        let frame_options = if cfg.frame_options.trim().eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(cfg.frame_options)
+        };
 
-        // 2. Parse X-Frame-Options (strictly "none" to omit)
-        if let Some(fo) = config.config.get("frame_options").and_then(|v| v.as_str()) {
-            if fo.trim().eq_ignore_ascii_case("none") {
-                sec_config.frame_options = None;
-            } else {
-                sec_config.frame_options = Some(fo.to_string());
-            }
-        }
+        let referrer_policy = if cfg.referrer_policy.trim().eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(cfg.referrer_policy)
+        };
 
-        // 3. Parse X-Content-Type-Options (strictly "none" to omit)
-        if let Some(nosniff_val) = config.config.get("content_type_nosniff") {
-            if let Some(b) = nosniff_val.as_bool() {
-                sec_config.content_type_nosniff = b;
-            } else if let Some(s) = nosniff_val.as_str() {
-                if s.trim().eq_ignore_ascii_case("none") {
-                    sec_config.content_type_nosniff = false;
-                } else if s.trim().eq_ignore_ascii_case("nosniff") {
-                    sec_config.content_type_nosniff = true;
-                }
-            }
-        }
+        let csp = match cfg.content_security_policy {
+            Some(ref s) if s.trim().eq_ignore_ascii_case("none") => None,
+            other => other,
+        };
 
-        // 4. Parse Referrer-Policy (strictly "none" to omit)
-        if let Some(rp) = config
-            .config
-            .get("referrer_policy")
-            .and_then(|v| v.as_str())
-        {
-            if rp.trim().eq_ignore_ascii_case("none") {
-                sec_config.referrer_policy = None;
-            } else {
-                sec_config.referrer_policy = Some(rp.to_string());
-            }
-        }
+        let permissions_policy = match cfg.permissions_policy {
+            Some(ref s) if s.trim().eq_ignore_ascii_case("none") => None,
+            other => other,
+        };
 
-        // 5. Parse Content-Security-Policy (strictly "none" to omit)
-        if let Some(csp) = config
-            .config
-            .get("csp")
-            .or_else(|| config.config.get("content_security_policy"))
-            .and_then(|v| v.as_str())
-        {
-            if csp.trim().eq_ignore_ascii_case("none") {
-                sec_config.csp = None;
-            } else {
-                sec_config.csp = Some(csp.to_string());
-            }
-        }
-
-        // 6. Parse Permissions-Policy (strictly "none" to omit)
-        if let Some(pp) = config
-            .config
-            .get("permissions_policy")
-            .and_then(|v| v.as_str())
-        {
-            if pp.trim().eq_ignore_ascii_case("none") {
-                sec_config.permissions_policy = None;
-            } else {
-                sec_config.permissions_policy = Some(pp.to_string());
-            }
-        }
+        let sec_config = SecurityHeadersConfig {
+            hsts: HstsConfig {
+                enable: cfg.hsts.enable,
+                max_age_secs: cfg.hsts.max_age_secs,
+                include_subdomains: cfg.hsts.include_subdomains,
+                preload: cfg.hsts.preload,
+            },
+            frame_options,
+            content_type_nosniff: cfg.content_type_nosniff,
+            referrer_policy,
+            csp,
+            permissions_policy,
+        };
 
         Ok(Self::with_config(&config.id, sec_config))
     }
@@ -402,7 +346,8 @@ mod tests {
             "frame_options": "SAMEORIGIN",
             "content_type_nosniff": true,
             "referrer_policy": "strict-origin",
-            "csp": "frame-ancestors 'none'"
+            "content_security_policy": "frame-ancestors 'none'",
+            "permissions_policy": "none"
         });
 
         let plugin_config = PluginConfig {
@@ -443,7 +388,7 @@ mod tests {
             "frame_options": "DENY",
             "content_type_nosniff": true,
             "referrer_policy": "strict-origin-when-cross-origin",
-            "csp": "none",
+            "content_security_policy": "none",
             "permissions_policy": "none"
         });
 

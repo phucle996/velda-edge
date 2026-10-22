@@ -3,7 +3,7 @@
 //! Enforces a strict declarative contract for the IP / CIDR Subnet Access Filter plugin.
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Explicit Mode**: `mode` must be explicitly declared as `"allow"` or `"deny"` (aliases: `"whitelist"`, `"blacklist"`).
+//! - **Explicit Mode**: `mode` must be explicitly declared as `"allow"` or `"deny"`.
 //! - **Valid CIDR / IP Format**: Every CIDR entry in `allow_cidrs` and `deny_cidrs` must parse into a valid IPv4 or IPv6 address or subnet prefix.
 //! - **Source Verification**: `client_ip_source` must be a supported ingress IP header extraction strategy.
 //! - **Non-Empty Whitelist**: If `mode` is `"allow"`, `allow_cidrs` cannot be empty.
@@ -17,7 +17,7 @@ use crate::SyncError;
 /// Declarative configuration for the IP Filter plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpFilterConfig {
-    /// Operational filter mode: "allow" (whitelist) or "deny" (blacklist).
+    /// Operational filter mode: "allow" or "deny".
     pub mode: String,
     /// CIDR networks permitted when mode is allow, or exceptions when mode is deny.
     pub allow_cidrs: Vec<String>,
@@ -76,7 +76,7 @@ pub fn validate_ip_filter_config(
     // 1. Validate Mode
     let mode_lower = cfg.mode.trim().to_ascii_lowercase();
     match mode_lower.as_str() {
-        "allow" | "whitelist" | "deny" | "blacklist" => {}
+        "allow" | "deny" => {}
         other => {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
@@ -127,8 +127,8 @@ pub fn validate_ip_filter_config(
         }
     }
 
-    // 5. Fail-Safe: In allowlist mode, allow_cidrs must have at least one valid entry
-    let is_allow_mode = matches!(mode_lower.as_str(), "allow" | "whitelist");
+    // 5. Fail-Safe: In allow mode, allow_cidrs must have at least one valid entry
+    let is_allow_mode = mode_lower.as_str() == "allow";
     let has_allow_cidrs = cfg
         .allow_cidrs
         .iter()

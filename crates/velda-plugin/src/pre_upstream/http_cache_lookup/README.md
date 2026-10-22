@@ -4,39 +4,34 @@ High-performance in-memory cache lookup plugin evaluated during the `pre_upstrea
 
 ---
 
-## 1. Specifications
+## 1. Overview & Pipeline Specification
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `http_cache_lookup` |
-| **Lifecycle Phase** | `pre_upstream` |
-| **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
+| **Canonical Phase** | `pre_upstream` |
+| **Execution Order** | Strictly FIFO based on route `plugins` declaration order (First declared, first executed) |
 | **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Hot Path Latency** | ~25ns lookup (Zero disk I/O, zero network calls) |
+| **Supported Protocols** | HTTP only (`HTTP/1.1`, `HTTP/2`, `HTTP/3`) |
+| **Hot Path Latency** | ~25ns lookup; Zero disk I/O, zero network calls |
 
 ---
 
-## 2. Configuration Schema
+## 2. 100% Explicit Configuration Invariant
 
-```json
-{
-  "zone": "api_cache",
-  "cacheable_methods": ["GET", "HEAD"],
-  "ignore_query_order": true,
-  "honor_client_no_cache": false,
-  "bypass_authenticated_requests": true,
-  "key_headers": ["x-user-id", "authorization"],
-  "max_memory_mb": 256,
-  "default_ttl_secs": 300
-}
-```
+> [!IMPORTANT]
+> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
 
-- **`zone`**: Identifier of the shared in-memory cache zone (shared with `http_cache_store`).
-- **`cacheable_methods`**: HTTP methods eligible for caching (default: `["GET", "HEAD"]`).
-- **`ignore_query_order`**: Alphabetically sorts query parameters so `/items?a=1&b=2` and `/items?b=2&a=1` hit the same cache entry.
-- **`honor_client_no_cache`**: If `true`, honors client `Cache-Control: no-cache` requests by bypassing cache. Default `false` to protect backends from client-induced cache busting.
-- **`bypass_authenticated_requests`**: If `true` (default), enforces **RFC 9111 §3.5 Safety Shield**: requests with an `Authorization` header bypass cache lookup unless the cached entry is explicitly declared `public` by upstream, or partitioned via `key_headers`. Prevents private user data leaks.
-- **`key_headers`**: Array of request header names (e.g. `["x-user-id", "authorization"]`) to incorporate into the cache key. Enables safe, isolated **Per-User / Multi-Tenant Caching**. Header names are normalized to lowercase and sorted deterministically.
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| `zone` | String | **Yes** | Non-empty alphanumeric string (must match `http_cache_store`) | `"api_cache"` | Shared in-memory cache zone identifier. |
+| `cacheable_methods` | Array of strings | **Yes** | Non-empty list of HTTP methods (`"GET"`, `"HEAD"`) | `["GET", "HEAD"]` | HTTP methods eligible for cache lookup. |
+| `ignore_query_order` | Boolean | **Yes** | `true` or `false` | `true` | Sorts query parameters alphabetically so `/items?a=1&b=2` and `/items?b=2&a=1` hit the same entry. |
+| `honor_client_no_cache` | Boolean | **Yes** | `true` or `false` | `false` | If true, honors client `Cache-Control: no-cache` / `Pragma: no-cache`. Set `false` to prevent cache-busting DoS. |
+| `bypass_authenticated_requests` | Boolean | **Yes** | `true` or `false` | `true` | Enforces RFC 9111 §3.5: requests with `Authorization` bypass cache unless partitioned via `key_headers`. |
+| `key_headers` | Array of strings | **Yes** | List of valid RFC 9110 header names (`[]` if none) | `["x-user-id", "authorization"]` | Request header names incorporated into cache key for per-user / multi-tenant caching. |
+| `max_memory_mb` | Integer (usize) | **Yes** | `1 ..= 1048576` (1MB to 1TB) | `256` | Maximum memory limit in megabytes allocated for the in-memory cache zone. |
+| `default_ttl_secs` | Integer (u64) | **Yes** | `1 ..= 31536000` (1s to 1 year) | `300` (5 minutes) | Fallback TTL in seconds when upstream response omits `Cache-Control: max-age`. |
 
 ---
 
@@ -46,18 +41,53 @@ To prevent accidental cross-user data leakage when private APIs are mistakenly c
 1. **Automatic Bypass**: Requests with an `Authorization` header are bypassed by default (`Action::Continue`), unless `key_headers` partitions by the token, or the entry was stored with `Cache-Control: public` / `s-maxage`.
 2. **Per-User Caching**: When `key_headers` includes `authorization` or a user discriminator (such as `x-user-id` or session cookie), each user receives a mathematically isolated cache key:
    $$\text{Key} = \text{Method} + \text{Host} + \text{Path} + \text{Query} + \mathbf{|\text{authorization}=...|\text{x-user-id}=...}$$
-   Alice and Bob can both cache their personal profile or dashboard safely without cross-contamination.
 
 ---
 
-## 4. Smart Variant Matching in Cache Lookup
+## 4. Configuration Examples
 
-On `CACHE HIT`, `http_cache_lookup` negotiates content coding directly against in-memory variants via `CacheEntry::negotiate_smart_variant`:
+### Production Manifest (`plugins.json`)
 
-1. **Content Negotiation**: Inspects the incoming request's `Accept-Encoding` header.
-2. **Zero-IO / Hit Over Miss**:
-   - If the client accepts multiple codecs and an acceptable pre-compressed variant exists in RAM (`zstd`, `br`, or `gzip`), it is selected and served immediately with zero CPU compression overhead.
-   - Attaches `Content-Encoding: <algo>`, `Content-Length: <variant.len()>`, `Age`, `X-Cache: HIT`, and `Vary: Accept-Encoding`.
-3. **Lazy Miss Fallback**:
-   - In Lazy Demand-Driven mode, if a `CacheEntry` exists but lacks a representation acceptable to the client (e.g., entry has only `br`, but client is a legacy tool requiring `identity`), `http_cache_lookup` cleanly falls through to `Action::Continue` (Cache MISS).
-   - Upstream is invoked to retrieve the missing representation, which `http_cache_store` merges into the entry for subsequent clients.
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "http_cache_lookup",
+      "config": {
+        "zone": "api_cache",
+        "cacheable_methods": [
+          "GET",
+          "HEAD"
+        ],
+        "ignore_query_order": true,
+        "honor_client_no_cache": false,
+        "bypass_authenticated_requests": true,
+        "key_headers": [
+          "x-user-id",
+          "authorization"
+        ],
+        "max_memory_mb": 256,
+        "default_ttl_secs": 300
+      }
+    }
+  ]
+}
+```
+
+### Route Attachment (`routes.json`)
+
+```json
+{
+  "id": "catalog-route",
+  "match": {
+    "path": "/api/v1/catalog"
+  },
+  "upstream_id": "catalog-backend",
+  "plugins": [
+    "http_cache_lookup",
+    "jwt_auth",
+    "http_cache_store"
+  ]
+}
+```

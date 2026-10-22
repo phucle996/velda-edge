@@ -29,7 +29,7 @@ pub enum WafMode {
 impl WafMode {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "detect" | "detect_only" | "monitor" => Self::DetectOnly,
+            "detect" => Self::DetectOnly,
             _ => Self::Block,
         }
     }
@@ -112,74 +112,40 @@ impl WafLitePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let raw = config.config.as_object().ok_or_else(|| {
-            PluginError::Config(format!("Plugin '{}' config must be an object", config.id))
-        })?;
+        let cfg =
+            velda_sync::validate_waf_lite_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid waf_lite configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
-        let mode = raw
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .map(WafMode::parse)
-            .unwrap_or(WafMode::Block);
-
-        let check_path = raw
-            .get("check_path")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let check_query = raw
-            .get("check_query")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let check_user_agent = raw
-            .get("check_user_agent")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let mut check_headers = Vec::new();
-        if let Some(hdrs_arr) = raw.get("check_headers").and_then(|v| v.as_array()) {
-            for item in hdrs_arr {
-                if let Some(s) = item.as_str() {
-                    let hname = HeaderName::from_str(s).map_err(|e| {
-                        PluginError::Config(format!(
-                            "Invalid check_header '{s}' in plugin '{}': {e}",
-                            config.id
-                        ))
-                    })?;
-                    check_headers.push(hname);
-                }
+        let mode = match cfg.mode.to_ascii_lowercase().as_str() {
+            "block" => WafMode::Block,
+            "detect" => WafMode::DetectOnly,
+            other => {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}': unsupported waf mode '{other}'",
+                    config.id
+                )));
             }
-        }
+        };
 
-        let mut custom_patterns = Vec::new();
-        if let Some(arr) = raw
-            .get("custom_blocked_patterns")
-            .and_then(|v| v.as_array())
-        {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    custom_patterns.push(s.to_string());
-                }
-            }
-        }
-
-        let mut custom_user_agents = Vec::new();
-        if let Some(arr) = raw
-            .get("custom_blocked_user_agents")
-            .and_then(|v| v.as_array())
-        {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    custom_user_agents.push(s.to_string());
-                }
-            }
+        let mut check_headers = Vec::with_capacity(cfg.check_headers.len());
+        for s in &cfg.check_headers {
+            let hname = HeaderName::from_str(s).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid check_header '{s}' in plugin '{}': {e}",
+                    config.id
+                ))
+            })?;
+            check_headers.push(hname);
         }
 
         let scope = WafScope {
-            check_path,
-            check_query,
-            check_user_agent,
+            check_path: cfg.check_path,
+            check_query: cfg.check_query,
+            check_user_agent: cfg.check_user_agent,
             check_headers,
         };
 
@@ -187,8 +153,8 @@ impl WafLitePlugin {
             &config.id,
             mode,
             scope,
-            custom_patterns,
-            custom_user_agents,
+            cfg.custom_blocked_patterns,
+            cfg.custom_blocked_user_agents,
         ))
     }
 
@@ -438,7 +404,7 @@ mod tests {
             id: "waf_lite".into(),
             phase: String::new(),
             config: json!({
-                "mode": "detect_only",
+                "mode": "detect",
                 "check_path": true,
                 "check_query": true,
                 "check_user_agent": true,
@@ -473,5 +439,13 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.headers.get("x-waf-threat-detected").unwrap(), "true");
+
+        // Incomplete config must fail validation
+        let bad_config = PluginConfig {
+            id: "waf_lite".into(),
+            phase: String::new(),
+            config: json!({}),
+        };
+        assert!(WafLitePlugin::from_config(&bad_config).is_err());
     }
 }

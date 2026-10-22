@@ -143,68 +143,20 @@ impl RateLimitPlugin {
     pub fn from_config(
         config: &velda_sync::post_sync::plugin::PluginConfig,
     ) -> Result<Self, PluginError> {
+        let cfg =
+            velda_sync::validate_rate_limit_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid rate_limit configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
+
+        let algorithm = RateLimitAlgorithm::parse(&cfg.algorithm);
+        let backend = RateLimitBackend::parse(&cfg.backend);
+        let key_strategy = KeyStrategy::parse(&cfg.key_strategy);
+        let fallback_behavior = FallbackBehavior::parse(&cfg.fallback_behavior);
+
         let json = &config.config;
-
-        // 1. Algorithm
-        let algorithm = json
-            .get("algorithm")
-            .and_then(|v| v.as_str())
-            .map(RateLimitAlgorithm::parse)
-            .unwrap_or(RateLimitAlgorithm::TokenBucket);
-
-        // 2. Backend
-        let backend = json
-            .get("backend")
-            .and_then(|v| v.as_str())
-            .map(RateLimitBackend::parse)
-            .unwrap_or(RateLimitBackend::Memory);
-
-        // 3. Rate and Burst
-        let rate_per_second = json
-            .get("rate_per_second")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1000);
-
-        let burst_capacity = json
-            .get("burst_capacity")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(rate_per_second);
-
-        // 4. Key Strategy
-        let key_strategy = json
-            .get("key_strategy")
-            .and_then(|v| v.as_str())
-            .map(KeyStrategy::parse)
-            .unwrap_or(KeyStrategy::Priority);
-
-        // 5. Key Headers (strictly array of headers or 'none')
-        let mut key_headers = Vec::new();
-        if let Some(arr) = json.get("key_headers").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
-                        key_headers.push(trimmed.to_string());
-                    }
-                }
-            }
-        } else if let Some(s) = json.get("key_headers").and_then(|v| v.as_str()) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
-                key_headers.push(trimmed.to_string());
-            }
-        }
-
-        if key_headers.is_empty() {
-            key_headers.push("client_ip".to_string());
-        }
-
-        // 6. Fallback Behavior
-        let fallback_behavior = json
-            .get("fallback_behavior")
-            .and_then(|v| v.as_str())
-            .map(FallbackBehavior::parse)
-            .unwrap_or(FallbackBehavior::Memory);
 
         // 7. Batching Configuration
         let batch_sync_interval_ms = json
@@ -310,11 +262,17 @@ impl RateLimitPlugin {
             batch_max_size,
         };
 
+        let key_headers = cfg
+            .key_headers
+            .into_iter()
+            .filter(|s| !s.trim().eq_ignore_ascii_case("none"))
+            .collect();
+
         let parsed_cfg = RateLimitConfig {
             algorithm,
             backend,
-            rate_per_second,
-            burst_capacity,
+            rate_per_second: cfg.rate_per_second,
+            burst_capacity: cfg.burst_capacity,
             key_strategy,
             key_headers,
             fallback_behavior,

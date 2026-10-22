@@ -28,7 +28,8 @@ pub use hook::{
 
 pub use background::prometheus::{PrometheusExporter, format_snapshot};
 pub use background::{
-    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, spawn_background_plugins,
+    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, OtlpMetricsExporterConfig,
+    OtlpMetricsExporterPlugin, spawn_background_plugins,
 };
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
@@ -40,9 +41,11 @@ pub use http_cache::{
 pub use plan::RoutePluginPlan;
 pub use post_response::{
     AccessLogConfig, AccessLogPlugin, CompressionAlgorithm, CorsConfig, CorsResponsePlugin,
-    HttpCacheStoreConfig, HttpCacheStorePlugin, LogFormat, LogRecord, PostResponsePlugin,
-    ResponseCompressionConfig, ResponseCompressionPlugin, ResponseHeaderMutationConfig,
-    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, run_post_response_plugins,
+    HttpCacheStoreConfig, HttpCacheStorePlugin, LogFormat, LogRecord, OpentelemetryLoggerConfig,
+    OpentelemetryLoggerPlugin, OpentelemetryTracerConfig, OpentelemetryTracerPlugin,
+    PostResponsePlugin, ResponseCompressionConfig, ResponseCompressionPlugin,
+    ResponseHeaderMutationConfig, ResponseHeaderMutationPlugin, SecurityHeadersPlugin,
+    run_post_response_plugins,
 };
 pub use pre_route::{
     CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,
@@ -57,6 +60,6 @@ pub use pre_upstream::{
     HttpFaultInjectionPlugin, IpRangeMatcher, JwtAlgorithm, JwtAuthPlugin, KeySource,
     MirroredRequest, PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, RateLimitPlugin,
     RequestMirrorConfig, RequestMirrorPlugin, RequestTerminationConfig, RequestTerminationPlugin,
-    TokenSource, UrlRewriteConfig, UrlRewritePlugin, get_mirror_sender, init_mirror_queue,
-    run_pre_upstream_plugins,
+    TokenSource, UrlRewriteConfig, UrlRewritePlugin, W3cTraceContextConfig, W3cTraceContextPlugin,
+    get_mirror_sender, init_mirror_queue, run_pre_upstream_plugins,
 };

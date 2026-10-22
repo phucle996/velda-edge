@@ -18,137 +18,89 @@ Production-grade, zero-allocation URI path and query string transformation plugi
 
 ---
 
-## 2. Core Architecture & Invariants
+## 2. 100% Explicit Configuration Invariant
 
-```
-               [ Downstream Client ]
-                         │
-                         ▼ (Public URI: GET /api/v1/orders/42?limit=10)
-                 [ Router Match ] (Matches Route "orders-v1")
-                         │
-                         ▼
-        [ pre_upstream: url_rewrite ]
-        ├─ 1. Path Strategy (StripPrefix: "/api/v1" -> "/orders/42")
-        ├─ 2. Query Strategy (Keep / Drop / Append)
-        ├─ 3. RFC 3986 Sanitization (Collapse //, block /../ traversal)
-        └─ 4. Hot-Path Fast-Bypass (0 alloc if unchanged)
-                         │
-                         ▼ (Upstream URI: GET /orders/42?limit=10)
-               [ Upstream Microservice ]
-```
+> [!IMPORTANT]
+> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
 
-### 2.1. Multi-Level Hot-Path Optimization Hierarchy
-To eliminate Regex bottleneck risks and achieve nanosecond-scale processing on the serving path:
-
-1. **Level 1: Specialized Non-Regex Fast-Paths (90% Production Traffic)**:
-   - `strip_prefix`: Slices path via direct pointer offsets (`&path[prefix.len()..]`).
-   - `replace_prefix`: Replaces matched prefix using pre-sized string concatenation.
-   - `exact`: Performs $O(N)$ string equality and swaps to a pre-allocated static replacement.
-   - **Cost**: $< 5\ \text{ns}$, 0 regex state machine invocations.
-2. **Level 2: Pre-Tokenized Regex & Static Prefix Fast-Reject**:
-   - Leading static literals (e.g. `^/service/([a-z]+)`) are extracted at config compile time. Non-matching paths are rejected via SIMD/byte comparison in $\sim 2\ \text{ns}$ before DFA evaluation.
-   - Replacement templates (`$1`, `$2`) are pre-tokenized into `Vec<ReplacementToken>` at `instantiate` time. On hot path, capture slices are copied directly into a single pre-calculated `String::with_capacity` buffer without re-parsing `$` markers.
-   - Built with deterministic Thompson DFA automata ($O(M \cdot N)$ linear time), preventing Catastrophic Backtracking and ReDoS vulnerabilities.
-3. **Level 3: Zero-Change Bypass**:
-   - If neither the path nor query string requires mutation, the plugin short-circuits immediately without cloning `req.uri`.
-
-### 2.2. RFC 3986 Path Sanitization & Traversal Defense
-When client paths contain redundant slashes or directory traversal markers (e.g. `/api/v1/../../etc/passwd`):
-- Double slashes (`//`) are collapsed to single slashes (`/`).
-- Relative directory markers (`/./`) are stripped.
-- Path traversal (`/../`) is resolved hierarchically. If traversal attempts to climb above root `/`, the plugin **fails fast with `400 Bad Request`**, blocking the request at the edge before upstream dispatch.
-- **Fast-Path**: If the path contains neither `//` nor `/.`, normalization is completely bypassed.
-
-### 2.3. Query String Handling Policies
-- `keep` (default): Preserves the client query string intact.
-- `drop`: Completely strips query parameters before forwarding.
-- `append`: Appends static query parameters to existing queries (e.g. `gateway=velda&cluster=prod`).
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| `path_rewrite_mode` | String | **Yes** | `"prefix"`, `"regex"`, `"exact"`, or `"none"` | `"prefix"` (prefix rewriting) / `"none"` (query only) | Path rewriting strategy to evaluate. |
+| `path_match` | String | **Yes** | Prefix or regex pattern (empty string `""` if mode is `"none"`) | `"/api/v1"` | Pattern matched against incoming URI path. |
+| `path_replacement` | String | **Yes** | Replacement path string (must start with `/` if mode is active, or `""` if `"none"`) | `""` (for strip) / `"/internal/v2"` (replace) | Replacement target path. Supports regex capture tokens `$1`, `$2` in `"regex"` mode. |
+| `query_rewrite_mode` | String | **Yes** | `"keep"`, `"strip"`, `"replace"`, or `"append"` | `"keep"` | Query string transformation policy. |
+| `query_replacement` | String / null | **Yes** | Non-empty string when mode is `"replace"` or `"append"`, otherwise `null` | `null` | Static query string parameter payload to substitute or append. |
+| `sanitize_path` | Boolean | **Yes** | `true` or `false` | `true` | Enables RFC 3986 normalization (collapses redundant `//`, strips `/./`, blocks `/../` traversal). |
 
 ---
 
-## 3. Configuration Schema & Examples
+## 3. Query String Handling Policies
 
-### Example 1: Strip Public Prefix (`strip_prefix`)
-Strip `/api/v1` prefix so upstream microservice receives `/users/42`:
-
-```json
-{
-  "id": "url_rewrite",
-  "config": {
-    "path": {
-      "type": "strip_prefix",
-      "prefix": "/api/v1"
-    },
-    "query": {
-      "action": "keep"
-    },
-    "sanitize_path": true
-  }
-}
-```
-
-### Example 2: Replace Prefix (`replace_prefix`)
-Translate legacy `/v1/payments` prefix to `/internal/v2/payments`:
-
-```json
-{
-  "id": "url_rewrite",
-  "config": {
-    "path": {
-      "type": "replace_prefix",
-      "prefix": "/v1/payments",
-      "replacement": "/internal/v2/payments"
-    },
-    "query": {
-      "action": "keep"
-    }
-  }
-}
-```
-
-### Example 3: Exact Path Rewrite (`exact`)
-Map public legacy health check directly to Spring Actuator:
-
-```json
-{
-  "id": "url_rewrite",
-  "config": {
-    "path": {
-      "type": "exact",
-      "path": "/health",
-      "replacement": "/actuator/healthz"
-    }
-  }
-}
-```
-
-### Example 4: Regex Rewrite with Capture Groups (`regex`)
-Reorder path parameters into upstream query strings or nested paths:
-
-```json
-{
-  "id": "url_rewrite",
-  "config": {
-    "path": {
-      "type": "regex",
-      "pattern": "^/users/([0-9]+)/orders/([0-9]+)$",
-      "replacement": "/orders/$2/user/$1"
-    },
-    "query": {
-      "action": "append",
-      "query": "source=edge_gateway"
-    },
-    "sanitize_path": true
-  }
-}
-```
+- `"keep"`: Preserves downstream client query string intact. `query_replacement` must be `null`.
+- `"strip"`: Completely removes query string before upstream forwarding. `query_replacement` must be `null`.
+- `"replace"`: Replaces entire query string with `query_replacement`.
+- `"append"`: Appends `query_replacement` to existing query parameters (e.g. `gateway=velda&cluster=prod`).
 
 ---
 
-## 4. Verification & Testing
+## 4. Configuration Examples
 
-Run the dedicated test suite verifying all path strategies, query policies, and traversal defenses:
+### Prefix Rewrite Example (`plugins.json`)
 
-```bash
-rtk cargo test -p velda-plugin --lib pre_upstream::url_rewrite
+Strip `/api/v1` prefix so upstream microservice receives `/orders/42`:
+
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "url_rewrite",
+      "config": {
+        "path_rewrite_mode": "prefix",
+        "path_match": "/api/v1",
+        "path_replacement": "",
+        "query_rewrite_mode": "keep",
+        "query_replacement": null,
+        "sanitize_path": true
+      }
+    }
+  ]
+}
+```
+
+### Regex Rewrite with Query Append (`plugins.json`)
+
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "url_rewrite",
+      "config": {
+        "path_rewrite_mode": "regex",
+        "path_match": "^/users/([0-9]+)/orders/([0-9]+)$",
+        "path_replacement": "/orders/$2/user/$1",
+        "query_rewrite_mode": "append",
+        "query_replacement": "source=edge_gateway",
+        "sanitize_path": true
+      }
+    }
+  ]
+}
+```
+
+### Route Attachment (`routes.json`)
+
+```json
+{
+  "id": "api-orders-route",
+  "match": {
+    "path": "/api/v1/orders"
+  },
+  "upstream_id": "orders-backend",
+  "plugins": [
+    "url_rewrite",
+    "jwt_auth"
+  ]
+}
 ```

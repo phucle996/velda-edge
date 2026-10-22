@@ -3,7 +3,9 @@
 High-performance, in-place HTTP response header manipulation plugin evaluated during the `post_response` phase. Provides explicit, user-controlled header stripping, setting, appending, and conditional insertion (`set_if_missing`).
 
 > [!IMPORTANT]
-> **No Magic Overwrites**: Velda Edge never automatically strips or injects headers without explicit configuration. All mutation lists (`remove`, `set`, `add`, `set_if_missing`) default to empty arrays.
+> **100% Explicit Configuration Invariant**: Every configuration parameter must be declared explicitly in `plugins.json`. No silent fallbacks, implicit defaults, or hidden behaviors are permitted. Empty arrays `[]` or maps `{}` must be explicitly declared when unused.
+>
+> **No Magic Overwrites**: Velda Edge never automatically strips or injects headers without explicit configuration.
 >
 > **Never Specify `phase` in User Configuration**: The execution phase is statically inferred by Velda as `post_response`. Execution order strictly follows the route's `plugins` array order (FIFO).
 
@@ -16,49 +18,87 @@ High-performance, in-place HTTP response header manipulation plugin evaluated du
 | **Plugin ID** | `response_header_mutation` |
 | **Lifecycle Phase** | `post_response` (Statically inferred) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
+| **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
 | **Hot Path Latency** | ~15ns to 30ns (In-place mutation, zero heap allocation for static headers) |
 
 ---
 
-## 2. Configuration Schema
+## 2. Configuration Parameters
 
-```json
-{
-  "id": "response_header_mutation",
-  "config": {
-    "remove": [
-      "x-powered-by",
-      "server",
-      "x-aspnet-version",
-      "x-runtime"
-    ],
-    "set": [
-      { "name": "server", "value": "my-gateway" },
-      { "name": "x-request-id", "value": "$request_id" },
-      { "name": "x-status-reflected", "value": "$status" }
-    ],
-    "add": [
-      { "name": "vary", "value": "User-Agent" }
-    ],
-    "set_if_missing": [
-      { "name": "x-content-type-options", "value": "nosniff" }
-    ]
-  }
-}
-```
-
-Both JSON key-value objects (`"set": { "server": "my-gateway" }`) and array format (`"set": [{"name": "server", "value": "my-gateway"}]`) are supported.
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `remove_headers` | `array[string]` | **Yes** | Array of valid RFC 9110 header tokens, or `[]` | `["server", "x-powered-by"]` | Headers stripped from the upstream response before sending downstream. |
+| `set_headers` | `object` | **Yes** | Key-value pairs of string headers (`{ "key": "value" }`), or `{}` | `{"server": "velda-edge"}` | Headers to overwrite or set on response. Supports `$variables`. |
+| `append_headers` | `object` | **Yes** | Key-value pairs of string headers (`{ "key": "value" }`), or `{}` | `{}` | Headers to append comma-separated values to on response. |
+| `set_if_missing` | `object` | **Yes** | Key-value pairs of string headers (`{ "key": "value" }`), or `{}` | `{"x-content-type-options": "nosniff"}` | Headers to set ONLY if the response does not already contain them. |
 
 ---
 
-## 3. Dynamic Variables
+## 3. Configuration Manifest (`plugins.json`)
+
+```json
+{
+  "plugins": [
+    {
+      "id": "edge_response_mutation",
+      "plugin": "response_header_mutation",
+      "config": {
+        "remove_headers": [
+          "x-powered-by",
+          "server",
+          "x-aspnet-version"
+        ],
+        "set_headers": {
+          "server": "velda-edge",
+          "x-request-id": "$request_id",
+          "x-status-reflected": "$status"
+        },
+        "append_headers": {
+          "vary": "User-Agent"
+        },
+        "set_if_missing": {
+          "x-content-type-options": "nosniff"
+        }
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 4. Route Attachment (`routes.json`)
+
+Attach the plugin to an HTTP route via its unique identifier in the `plugins` array:
+
+```json
+{
+  "routes": [
+    {
+      "id": "route_api",
+      "match": {
+        "path": {
+          "prefix": "/api/"
+        }
+      },
+      "plugins": [
+        "edge_response_mutation"
+      ],
+      "upstream": "cluster_main"
+    }
+  ]
+}
+```
+
+---
+
+## 5. Dynamic Variables
 
 Dynamic variables can be specified with a leading `$` in header value strings:
 
 | Variable | Description |
 | :--- | :--- |
-| `$request_id` | Propagates the unique request ID (from `x-request-id` header or fallback) |
+| `$request_id` | Propagates the unique request ID (from `x-request-id` header or system generator) |
 | `$route_id` | Propagates the matched route identifier (`x-route-id`) |
 | `$upstream_addr` | Propagates the upstream backend endpoint (`x-upstream-addr`) |
 | `$status` | Numeric HTTP response status code as string (e.g. `"200"`, `"503"`) |
@@ -66,16 +106,12 @@ Dynamic variables can be specified with a leading `$` in header value strings:
 
 ---
 
-## 4. Pipeline Execution Order & Caveats
+## 6. Pipeline Ordering Guidelines
 
-> [!WARNING]
-> **Plugin Chain Execution Order (FIFO)**:
-> Plugins in the `post_response` phase execute in the exact order declared in the route's `plugins` array.
->
+> [!TIP]
 > **Interaction with `http_cache_store`**:
 > - **Recommended Order**:
 >   ```json
->   "plugins": ["http_cache_store", "response_header_mutation"]
+>   "plugins": ["edge_cache_store", "edge_response_mutation"]
 >   ```
->   Placing `http_cache_store` **first** allows it to evaluate genuine upstream headers (such as `Cache-Control`, `ETag`, `Set-Cookie`) to make accurate caching decisions. `response_header_mutation` will then sanitize headers on the outgoing response.
-> - **Caution with Cache-Control**: Never use `response_header_mutation` to insert `Cache-Control: no-cache, no-store` before `http_cache_store`, as doing so will cause the cache engine to bypass caching.
+>   Placing `http_cache_store` **first** allows it to inspect pristine upstream headers (such as `Cache-Control`, `ETag`, `Set-Cookie`) to make accurate caching decisions. `response_header_mutation` then sanitizes response headers on the outgoing response.
