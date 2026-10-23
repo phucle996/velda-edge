@@ -135,7 +135,7 @@ The test suite was executed against the production `velda-edge` instance running
 ### 5.1 RFC-Compliant Preflight Flow Execution
 ```http
 OPTIONS /api/data HTTP/1.1
-Host: 20.2.249.91
+Host: gateway.example.com
 Origin: https://app.example.com
 Access-Control-Request-Method: POST
 Access-Control-Request-Headers: X-Custom-Header, Authorization
@@ -159,7 +159,7 @@ content-length: 0
 ### 5.2 Malicious Origin Rejection Flow Execution
 ```http
 OPTIONS /api/data HTTP/1.1
-Host: 20.2.249.91
+Host: gateway.example.com
 Origin: https://malicious-attacker.com
 Access-Control-Request-Method: POST
 ```

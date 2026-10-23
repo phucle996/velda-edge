@@ -70,12 +70,12 @@ pub fn validate_resource_limit_config(
         });
     }
 
-    // 4. Validate max_single_header_bytes (128 B ..= max_header_bytes)
-    if !(128..=cfg.max_header_bytes).contains(&cfg.max_single_header_bytes) {
+    // 4. Validate max_single_header_bytes (64 B ..= max_header_bytes)
+    if !(64..=cfg.max_header_bytes).contains(&cfg.max_single_header_bytes) {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': max_single_header_bytes ({}) must be between 128 and max_header_bytes ({})",
+                "Plugin '{plugin_id}': max_single_header_bytes ({}) must be between 64 and max_header_bytes ({})",
                 cfg.max_single_header_bytes, cfg.max_header_bytes
             ),
         });

@@ -105,7 +105,7 @@ fn test_preserve_existing_vary_headers() {
 When an attacker sends an origin not listed in the whitelist:
 ```http
 GET /api/data HTTP/1.1
-Host: 20.2.249.91
+Host: gateway.example.com
 Origin: https://attacker.com
 ```
 **Assertion**:
@@ -117,13 +117,13 @@ Origin: https://attacker.com
 
 ## 5. Live Azure Cluster Verification Summary
 
-Live verification was performed between Azure VM1 (`20.2.249.91`) and Azure VM2 (`20.205.137.141`):
+Live verification was performed between Azure VM1 (`<GATEWAY_VM_IP>`) and Azure VM2 (`<CLIENT_VM_IP>`):
 
 ```bash
 # Valid Origin Request with Credentials:
 curl -s -D - -o /dev/null \
   -H "Origin: https://app.example.com" \
-  http://20.2.249.91/api/data
+  http://<GATEWAY_HOST>/api/data
 
 HTTP/1.1 200 OK
 content-type: text/plain
@@ -138,7 +138,7 @@ vary: Origin
 # Unauthorized Origin Probe:
 curl -s -D - -o /dev/null \
   -H "Origin: https://hacker.com" \
-  http://20.2.249.91/api/data
+  http://<GATEWAY_HOST>/api/data
 
 HTTP/1.1 200 OK
 content-type: text/plain

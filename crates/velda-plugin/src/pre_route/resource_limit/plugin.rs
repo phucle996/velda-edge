@@ -4,9 +4,10 @@
 //! and upstream connection leasing by enforcing strict thresholds on URI length,
 //! header counts, and cumulative header bytes.
 
+use bytes::Bytes;
 use http::StatusCode;
-use http::header::HeaderValue;
-use velda_core::{Action, L7Request, L7Response};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue};
+use velda_core::{Action, HeaderWorkspace, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -16,13 +17,13 @@ use crate::pre_route::PreRoutePlugin;
 /// Configurable thresholds for request URI and header resource consumption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceLimits {
-    /// Maximum allowed total URI length in bytes (Path + Query string).
+    /// Maximum allowed total URI length in bytes (Authority + Path + Query string).
     pub max_uri_length: usize,
     /// Maximum allowed number of distinct header entries.
     pub max_headers_count: usize,
     /// Maximum allowed cumulative size of all headers in bytes (names + values + wire framing).
     pub max_header_bytes: usize,
-    /// Maximum allowed size for any single header value in bytes.
+    /// Maximum allowed size for any single header name, value, or multi-value aggregate in bytes.
     pub max_single_header_bytes: usize,
 }
 
@@ -38,6 +39,7 @@ impl Default for ResourceLimits {
 }
 
 /// Pre-Route Resource Limit Plugin.
+#[derive(Debug, Clone)]
 pub struct ResourceLimitPlugin {
     pub id: String,
     pub limits: ResourceLimits,
@@ -47,21 +49,32 @@ pub struct ResourceLimitPlugin {
 
 impl ResourceLimitPlugin {
     /// Constructs a new `ResourceLimitPlugin` with pre-computed immutable error responses.
+    ///
+    /// # CPDoS (Cache-Poisoned Denial of Service) Invariant
+    /// Both 414 and 431 responses strictly mandate `Cache-Control: no-store` to prevent
+    /// reverse proxies or CDNs from poisoning normalized URI cache keys with client-induced limit errors.
     pub fn new(id: impl Into<String>, limits: ResourceLimits) -> Self {
-        let uri_too_long_response =
-            L7Response::from_bytes(StatusCode::URI_TOO_LONG, "{\"error\":\"URI Too Long\"}")
-                .with_header(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                );
+        let make_static_response = |status: StatusCode, body: &'static [u8]| -> L7Response {
+            let mut ws = HeaderWorkspace::empty();
+            ws.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            L7Response::new(
+                status,
+                http::Version::HTTP_11,
+                ws,
+                velda_core::Body::Bytes(Bytes::from_static(body)),
+            )
+        };
 
-        let header_fields_too_large_response = L7Response::from_bytes(
+        let uri_too_long_response =
+            make_static_response(StatusCode::URI_TOO_LONG, b"{\"error\":\"URI Too Long\"}\n");
+
+        let header_fields_too_large_response = make_static_response(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "{\"error\":\"Request Header Fields Too Large\"}",
-        )
-        .with_header(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
+            b"{\"error\":\"Request Header Fields Too Large\"}\n",
         );
 
         Self {
@@ -102,36 +115,59 @@ impl PreRoutePlugin for ResourceLimitPlugin {
     }
 
     fn on_request(&self, req: &mut L7Request) -> Action {
-        // 1. Inspect URI Length: Path + Query String
-        // Note: Even though Radix Trie route lookup stops early on prefix match,
-        // oversized URIs (especially huge query strings) severely impact downstream
-        // components (WAF scanners, access loggers, and upstream serialization).
-        let uri_len = req.uri.path().len() + req.uri.query().map_or(0, |q| q.len() + 1);
+        // 1. Inspect Full URI Length: Authority + Path + Query String
+        // Fully evaluates absolute-form URIs (RFC 9112 §3.2.2) to prevent authority smuggling
+        let uri_len = req
+            .uri
+            .path_and_query()
+            .map_or_else(|| req.uri.path().len(), |pq| pq.as_str().len())
+            + req.uri.authority().map_or(0, |a| a.as_str().len());
+
         if uri_len > self.limits.max_uri_length {
             return Action::Respond(self.uri_too_long_response.clone());
         }
 
         // 2. Inspect Header Count
-        // Prevents header bombing and forces request headers to fit within
-        // pre-warmed L1/L2 HeaderWorkspace cache slots without dynamic heap spilling.
+        // Prevents header bombing and guarantees bounded execution time in subsequent loop
         let header_count = req.headers.len();
         if header_count > self.limits.max_headers_count {
             return Action::Respond(self.header_fields_too_large_response.clone());
         }
 
-        // 3. Inspect Total Header Bytes & Single Header Limits
+        // 3. Branch-Minimized Single-Pass Inspection of Headers:
+        // - Tracks total wire framing bytes (name + ": " + val + "\r\n")
+        // - Defends against Header Name Bombing (name_len > max_single_header_bytes)
+        // - Defends against Multi-Value Header Fragmentation Bypass by aggregating consecutive values of the same key
+        // - Employs branchless CMOV (.max) inside loop, deferring threshold check to a single bitwise OR test
+        let mut prev_name: Option<&HeaderName> = None;
+        let mut current_key_val_bytes = 0usize;
+        let mut max_single_header_seen = 0usize;
         let mut total_header_bytes = 0usize;
+
         for (name, val) in &req.headers {
+            let name_len = name.as_str().len();
             let val_len = val.as_bytes().len();
-            if val_len > self.limits.max_single_header_bytes {
-                return Action::Respond(self.header_fields_too_large_response.clone());
-            }
 
             // Wire framing estimate: name + ": " (2 bytes) + value + "\r\n" (2 bytes)
-            total_header_bytes += name.as_str().len() + val_len + 4;
-            if total_header_bytes > self.limits.max_header_bytes {
-                return Action::Respond(self.header_fields_too_large_response.clone());
+            total_header_bytes += name_len + val_len + 4;
+
+            // Header name itself cannot exceed single header threshold (Anti-Name-Bombing)
+            max_single_header_seen = max_single_header_seen.max(name_len);
+
+            if prev_name == Some(name) {
+                // Fragmented header split across multiple lines: accumulate combined logical value
+                current_key_val_bytes += val_len + 2; // +2 for ", " delimiter in logical join
+            } else {
+                prev_name = Some(name);
+                current_key_val_bytes = val_len;
             }
+            max_single_header_seen = max_single_header_seen.max(current_key_val_bytes);
+        }
+
+        if (max_single_header_seen > self.limits.max_single_header_bytes)
+            | (total_header_bytes > self.limits.max_header_bytes)
+        {
+            return Action::Respond(self.header_fields_too_large_response.clone());
         }
 
         Action::Continue
@@ -179,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_uri_too_long_returns_414() {
+    fn test_uri_too_long_returns_414_with_cpdos_defense() {
         let limits = ResourceLimits {
             max_uri_length: 30,
             ..Default::default()
@@ -195,10 +231,35 @@ mod tests {
                 assert_eq!(resp.status, StatusCode::URI_TOO_LONG);
                 assert_eq!(
                     resp.headers.get("content-type").unwrap(),
-                    "application/json"
+                    "application/json; charset=utf-8"
                 );
+                // CPDoS mitigation: Cache-Control MUST be no-store
+                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
             }
             _ => panic!("Expected Action::Respond(414 URI Too Long)"),
+        }
+    }
+
+    #[test]
+    fn test_absolute_form_uri_authority_overflow_returns_414() {
+        let limits = ResourceLimits {
+            max_uri_length: 50,
+            ..Default::default()
+        };
+        let plugin = ResourceLimitPlugin::new("resource_limit", limits);
+
+        // Absolute-form URI with huge authority string: http://very-long-gateway-domain-name-exceeding-limit.example.com/api
+        let mut req = build_test_request(
+            "http://very-long-gateway-domain-name-exceeding-limit.example.com/api",
+            HeaderMap::new(),
+        );
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => {
+                assert_eq!(resp.status, StatusCode::URI_TOO_LONG);
+            }
+            _ => panic!("Expected Action::Respond(414 URI Too Long) for absolute-form URI"),
         }
     }
 
@@ -221,6 +282,7 @@ mod tests {
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
             }
             _ => panic!("Expected Action::Respond(431 Request Header Fields Too Large)"),
         }
@@ -274,6 +336,60 @@ mod tests {
                 assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
             _ => panic!("Expected Action::Respond(431 Request Header Fields Too Large)"),
+        }
+    }
+
+    #[test]
+    fn test_header_name_bombing_defense_returns_431() {
+        let limits = ResourceLimits {
+            max_single_header_bytes: 30,
+            max_header_bytes: 1024,
+            ..Default::default()
+        };
+        let plugin = ResourceLimitPlugin::new("resource_limit", limits);
+
+        let mut headers = HeaderMap::new();
+        // Header name of 35 bytes > 30 byte max_single_header_bytes, even though value is only 1 byte
+        let long_name = "x-an-extremely-long-header-name-bomb";
+        headers.insert(
+            HeaderName::from_bytes(long_name.as_bytes()).unwrap(),
+            "1".parse().unwrap(),
+        );
+
+        let mut req = build_test_request("/api/test", headers);
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => {
+                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+            }
+            _ => panic!("Expected Action::Respond(431) for Header Name Bombing"),
+        }
+    }
+
+    #[test]
+    fn test_multi_value_header_fragmentation_bypass_returns_431() {
+        let limits = ResourceLimits {
+            max_single_header_bytes: 30,
+            max_header_bytes: 1024,
+            ..Default::default()
+        };
+        let plugin = ResourceLimitPlugin::new("resource_limit", limits);
+
+        let mut headers = HeaderMap::new();
+        // Attacker sends 2 separate Cookie headers, each 18 bytes (<= 30 byte threshold),
+        // but combined logical header is 18 + 2 + 18 = 38 bytes (> 30 byte threshold)
+        headers.append("cookie", "session_token=1234".parse().unwrap());
+        headers.append("cookie", "session_token=5678".parse().unwrap());
+
+        let mut req = build_test_request("/api/test", headers);
+        let action = plugin.on_request(&mut req);
+
+        match action {
+            Action::Respond(resp) => {
+                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+            }
+            _ => panic!("Expected Action::Respond(431) for fragmented multi-value header bypass"),
         }
     }
 

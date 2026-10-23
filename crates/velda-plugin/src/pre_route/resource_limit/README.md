@@ -1,6 +1,6 @@
 # Resource Limit Plugin (`resource_limit`)
 
-Ultra-low-latency ingress boundary defense plugin that enforces strict physical bounds on URI lengths, header counts, and cumulative header bytes at the Edge before routing trie matching, body streaming, or upstream connection leasing.
+Ultra-low-latency ingress perimeter defense plugin that enforces strict physical bounds on URI lengths, header counts, cumulative header framing bytes, and individual header sizes at the edge before routing trie matching, body streaming, or upstream connection leasing.
 
 ---
 
@@ -11,9 +11,9 @@ Ultra-low-latency ingress boundary defense plugin that enforces strict physical 
 | **Plugin ID** | `resource_limit` |
 | **Canonical Phase** | `pre_route` |
 | **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` |
-| **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
-| **Hot-Path Overhead** | Single-digit nanoseconds ($< 15\ \text{ns}$); **0 heap allocations** |
+| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Can generate `Action::Respond` 414 / 431) |
+| **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) — gRPC limits are handled natively by `velda-grpc` |
+| **Hot-Path Overhead** | Single-digit nanoseconds (~2–4ns); branch-minimized single-pass; **0 heap allocations** |
 
 ---
 
@@ -24,22 +24,24 @@ Ultra-low-latency ingress boundary defense plugin that enforces strict physical 
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `max_uri_length` | Integer (usize) | **Yes** | `64 ..= 65536` bytes | `8192` (8 KB) | Maximum allowed total URI length in bytes (Path + `?` + Query string). Violations return `414 URI Too Long`. |
+| `max_uri_length` | Integer (usize) | **Yes** | `64 ..= 65536` bytes | `8192` (8 KB) | Maximum allowed total URI length in bytes (Authority + Path + `?` + Query string). Violations return `414 URI Too Long`. |
 | `max_headers_count` | Integer (usize) | **Yes** | `8 ..= 1024` | `64` | Maximum allowed number of distinct header entries in the request. Violations return `431 Request Header Fields Too Large`. |
-| `max_header_bytes` | Integer (usize) | **Yes** | `512 ..= 1048576` bytes (1 MB) | `32768` (32 KB) | Cumulative byte size of all header names, values, and wire framing. Violations return `431 Request Header Fields Too Large`. |
-| `max_single_header_bytes` | Integer (usize) | **Yes** | `64 ..= 524288` bytes ($\le \text{max\_header\_bytes}$) | `8192` (8 KB) | Maximum byte length of any individual header value. Violations return `431 Request Header Fields Too Large`. |
+| `max_header_bytes` | Integer (usize) | **Yes** | `512 ..= 1048576` bytes (1 MB) | `32768` (32 KB) | Cumulative byte size of all header names, values, and wire framing (`name + ": " + val + "\r\n"`). Violations return `431 Request Header Fields Too Large`. |
+| `max_single_header_bytes` | Integer (usize) | **Yes** | `64 ..= max_header_bytes` | `8192` (8 KB) | Maximum byte size of any individual header name, value, or multi-value aggregate. Violations return `431 Request Header Fields Too Large`. |
 
-All error responses are pre-computed at configuration compile time with immutable `application/json` bodies, resulting in **zero allocations on error paths**.
+All error responses are pre-computed at configuration compile time with immutable `application/json; charset=utf-8` bodies and **`Cache-Control: no-store`**, resulting in **zero allocations on error paths** and neutralizing CPDoS attacks.
 
 ---
 
-## 3. Architectural Rationale: Why Limit Resources at `pre_route`?
+## 3. Security Mitigations Matrix
 
-While Radix Trie prefix lookup stops early and does not traverse the entire URI string, an unbounded URI or header payload threatens the rest of the edge and backend ecosystem:
-
-1. **Query Strings Bypass Trie Lookup**: The router inspects only the URI path. An attacker can send a 100 KB query string that would otherwise force subsequent WAF regex inspection, logging, and upstream serialization buffers to bloat.
-2. **Upstream Backend Buffer Explosion**: Backend servers (Tomcat 8 KB, Node.js 16 KB, Nginx 8 KB) abort connections when headers or request lines exceed their thresholds, destroying connection pool reuse.
-3. **Preserving L1 `HeaderWorkspace` Invariants**: Velda Edge pre-warms a fixed `HeaderWorkspace` inside CPU L1 cache to achieve zero allocations. Bounding header sizes prevents CPU cache eviction and fallback `malloc` invocations.
+| Vulnerability / Attack Vector | Exploit Syntax / Scenario | Behavior in Naive Proxy | Mitigation in `resource_limit` |
+| :--- | :--- | :--- | :--- |
+| **CPDoS (Cache-Poisoned Denial of Service)** | Attacker floods oversized headers to a public cacheable URI, forcing a 431 response | 431 cached by CDN because `Cache-Control` header is missing, denying service to all legitimate users | Both 414 and 431 responses strictly mandate pre-baked `Cache-Control: no-store` |
+| **Header Name Bombing** | Attacker sends a 16 KB header name with a 1-byte value (`X-AAAA...[16KB]...: 1`) | Only `val.len()` is checked against `max_single_header_bytes`, allowing massive names to exhaust upstream backend memory | `max_single_header_seen` tracks both `name_len` and `val_len`, rejecting header names that exceed threshold |
+| **Multi-Value Header Fragmentation Bypass** | Attacker splits a 16 KB payload into 8 separate 2 KB lines with the same header name (e.g. `Cookie`) | Each individual slice passes `< 4096`, and downstream backend concatenates them into 16 KB, causing buffer overflow | Aggregates consecutive entries sharing the same `HeaderName` in a single pass without heap allocation |
+| **Absolute-Form URI Authority Bypass** | Client sends `GET http://<huge-30KB-authority>/path HTTP/1.1` | Only `path().len() + query().len()` is evaluated (2 bytes), letting 30 KB authority pass | Evaluates full URI length (`authority().len() + path_and_query().len()`) |
+| **Slowloris & Header Bombing DoS** | Client streams hundreds of small headers to exhaust memory tables | Allocates dynamic linked lists or hash maps indefinitely | Rejects immediately if `req.headers.len() > max_headers_count` before scanning bytes |
 
 ---
 

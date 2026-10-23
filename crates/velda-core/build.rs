@@ -1,7 +1,18 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    let git_head = std::path::Path::new("../../.git/HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed=../../.git/HEAD");
+        if let Ok(head_content) = std::fs::read_to_string(git_head)
+            && let Some(ref_path) = head_content.strip_prefix("ref: ")
+        {
+            let ref_file = format!("../../.git/{}", ref_path.trim());
+            if std::path::Path::new(&ref_file).exists() {
+                println!("cargo:rerun-if-changed={ref_file}");
+            }
+        }
+    }
 
     let git_hash = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])

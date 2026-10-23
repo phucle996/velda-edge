@@ -613,7 +613,7 @@ fn test_enrich_headers_overwrites_forwarded_headers() {
 
     velda_http1::enrich_headers(&mut headers, &uri, peer, local, false);
 
-    assert_eq!(headers.get("x-forwarded-for").unwrap(), "1.2.3.4");
+    assert_eq!(headers.get("x-forwarded-for").unwrap(), "9.9.9.9, 1.2.3.4");
     assert_eq!(headers.get("x-real-ip").unwrap(), "1.2.3.4");
     assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
     assert_eq!(headers.get("x-forwarded-port").unwrap(), "80");

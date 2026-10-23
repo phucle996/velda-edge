@@ -25,32 +25,32 @@ fn load_or_generate_tls() -> (Arc<ServerConfig>, Arc<quinn_proto::ServerConfig>)
     let crt_path = "/etc/ssl/velda/backend.crt";
     let key_path = "/etc/ssl/velda/backend.key";
 
-    let (cert_chain, private_key) =
-        if let (Ok(crt_file), Ok(key_file)) = (File::open(crt_path), File::open(key_path)) {
-            let mut crt_reader = BufReader::new(crt_file);
-            let certs = rustls_pemfile::certs(&mut crt_reader)
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>();
-            let mut key_reader = BufReader::new(key_file);
-            let key = rustls_pemfile::private_key(&mut key_reader)
-                .ok()
-                .flatten()
-                .expect("Failed to parse private key");
-            (certs, key)
-        } else {
-            tracing::warn!(
-                "Backend certificate files not found, generating self-signed TLS certificate"
-            );
-            let cert =
-                rcgen::generate_simple_self_signed(vec!["localhost".into(), "172.16.0.5".into()])
-                    .unwrap();
-            let cert_der = cert.cert.der().to_vec();
-            let key_der = cert.signing_key.serialize_der();
-            let cert_chain = vec![CertificateDer::from(cert_der)];
-            let private_key =
-                PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
-            (cert_chain, private_key)
-        };
+    let (cert_chain, private_key) = if let (Ok(crt_file), Ok(key_file)) =
+        (File::open(crt_path), File::open(key_path))
+    {
+        let mut crt_reader = BufReader::new(crt_file);
+        let certs = rustls_pemfile::certs(&mut crt_reader)
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        let mut key_reader = BufReader::new(key_file);
+        let key = rustls_pemfile::private_key(&mut key_reader)
+            .ok()
+            .flatten()
+            .expect("Failed to parse private key");
+        (certs, key)
+    } else {
+        tracing::warn!(
+            "Backend certificate files not found, generating self-signed TLS certificate"
+        );
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+            .unwrap();
+        let cert_der = cert.cert.der().to_vec();
+        let key_der = cert.signing_key.serialize_der();
+        let cert_chain = vec![CertificateDer::from(cert_der)];
+        let private_key =
+            PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
+        (cert_chain, private_key)
+    };
 
     // TCP TLS Server Config (ALPN: h2, http/1.1)
     let mut tcp_tls_cfg = ServerConfig::builder_with_provider(Arc::new(

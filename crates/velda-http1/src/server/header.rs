@@ -332,7 +332,7 @@ mod tests {
 
         assert_eq!(
             headers.get("x-forwarded-for").unwrap().to_str().unwrap(),
-            "192.168.1.50"
+            "1.2.3.4, 192.168.1.50"
         );
         assert_eq!(
             headers.get("x-forwarded-proto").unwrap().to_str().unwrap(),

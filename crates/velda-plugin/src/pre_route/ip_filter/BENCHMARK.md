@@ -11,13 +11,13 @@ This document records the empirical performance benchmarks, chaotic multi-origin
 │     Client Node (Azure VM2)     │                 │     Gateway Node (Azure VM1)    │
 │  - Standard D4s_v5 (4 vCPUs)    │  Private VNet   │  - Standard D4s_v5 (4 vCPUs)    │
 │  - 16 GiB RAM, Linux 6.8        │ ───────────────>│  - 16 GiB RAM, Linux 7.0 Accel │
-│  - Private IP: 172.16.0.5       │  (< 0.5ms RTT)  │  - Private IP: 172.16.0.4       │
+│  - Private VNet Interconnect    │  (< 0.5ms RTT)  │  - Private VNet Interconnect    │
 │  - Tools: wrk, oha, python3     │                 │  - velda-edge + velda-bench-be  │
 └─────────────────────────────────┘                 └─────────────────────────────────┘
 ```
 
-- **Gateway Node**: Azure VM1 (`20.2.249.91` / `172.16.0.4`), 4 worker threads affined 1:1 to physical CPU cores, `RLIMIT_NOFILE=1048576`, Datacenter Jemalloc profile.
-- **Client Node**: Azure VM2 (`20.205.137.141` / `172.16.0.5`), executing `wrk` (50 concurrent keep-alive connections, 4 threads) and chaotic multi-threaded Python stress suites (16 concurrent connection pools).
+- **Gateway Node**: Azure VM1 (`<GATEWAY_VM_IP>`), 4 worker threads affined 1:1 to physical CPU cores, `RLIMIT_NOFILE=1048576`, Datacenter Jemalloc profile.
+- **Client Node**: Azure VM2 (`<CLIENT_VM_IP>`), executing `wrk` (50 concurrent keep-alive connections, 4 threads) and chaotic multi-threaded Python stress suites (16 concurrent connection pools).
 - **Backend Upstream**: `velda-bench-backend` running on VM2 port 8081 (`/healthz` 4-byte `pong` response).
 
 ---
