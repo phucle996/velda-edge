@@ -32,7 +32,19 @@ pub fn enrich_headers(
     let client_ip_bytes = &ip_buf[..ip_len];
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val.clone());
+        if let Some(existing) = headers.get(HeaderName::from_static("x-forwarded-for")) {
+            let mut combined =
+                Vec::with_capacity(existing.as_bytes().len() + 2 + val.as_bytes().len());
+            combined.extend_from_slice(existing.as_bytes());
+            combined.extend_from_slice(b", ");
+            combined.extend_from_slice(val.as_bytes());
+            if let Ok(comb_val) = HeaderValue::from_maybe_shared(bytes::Bytes::from(combined)) {
+                headers.insert(HeaderName::from_static("x-forwarded-for"), comb_val);
+            }
+        } else {
+            headers.insert(HeaderName::from_static("x-forwarded-for"), val.clone());
+        }
+
         headers.insert(HeaderName::from_static("x-real-ip"), val);
     }
 
@@ -109,11 +121,25 @@ pub fn enrich_headers_precomputed(
     // 2. Inject authoritative pre-computed forwarding headers (zero formatting)
     let proto = if is_tls { "https" } else { "http" };
 
-    headers.insert(
-        HeaderName::from_static("x-forwarded-for"),
-        client_ip.clone(),
-    );
-    headers.insert(HeaderName::from_static("x-real-ip"), client_ip.clone());
+    if let Some(existing) = headers.get(HeaderName::from_static("x-forwarded-for")) {
+        let mut combined =
+            Vec::with_capacity(existing.as_bytes().len() + 2 + client_ip.as_bytes().len());
+        combined.extend_from_slice(existing.as_bytes());
+        combined.extend_from_slice(b", ");
+        combined.extend_from_slice(client_ip.as_bytes());
+        if let Ok(comb_val) = HeaderValue::from_maybe_shared(bytes::Bytes::from(combined)) {
+            headers.insert(HeaderName::from_static("x-forwarded-for"), comb_val);
+        }
+    } else {
+        headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            client_ip.clone(),
+        );
+    }
+
+    if !headers.contains_key("x-real-ip") {
+        headers.insert(HeaderName::from_static("x-real-ip"), client_ip.clone());
+    }
     headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static(proto),

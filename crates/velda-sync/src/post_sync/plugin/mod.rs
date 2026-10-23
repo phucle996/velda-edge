@@ -264,7 +264,15 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                         reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
                     });
                 }
-                pre_route::validate_ip_filter_config(&plugin.id, &plugin.config)?;
+                let normalized = pre_route::validate_ip_filter_config(&plugin.id, &plugin.config)?;
+                plugin.config =
+                    serde_json::to_value(normalized).map_err(|e| SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' failed to serialize normalized config: {e}",
+                            plugin.id
+                        ),
+                    })?;
             }
             "cors_preflight" => {
                 if plugin.phase != "pre_route" {

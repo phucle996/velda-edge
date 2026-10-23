@@ -214,6 +214,16 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
+        // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
+        // directly from downstream connection metadata BEFORE route matching and pre_route plugins.
+        velda_http1::server::header::enrich_headers_cached(
+            &mut req_head.headers,
+            &req_head.uri,
+            &meta.client_ip_header,
+            &meta.client_port_header,
+            meta.is_tls,
+        );
+
         // ========================================================================
         // [PHASE 3: Narrow Waist Router Lookup]
         // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
@@ -579,7 +589,10 @@ mod tests {
         head.enrich_forwarded_headers(peer, local, false);
         let headers = head.headers;
 
-        assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.10");
+        assert_eq!(
+            headers.get("x-forwarded-for").unwrap(),
+            "203.0.113.195, 192.0.2.10"
+        );
         assert_eq!(headers.get("x-real-ip").unwrap(), "192.0.2.10");
         assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
         assert_eq!(headers.get("x-forwarded-port").unwrap(), "8080");

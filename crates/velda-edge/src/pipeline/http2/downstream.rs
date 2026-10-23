@@ -357,6 +357,16 @@ async fn serve_http2_stream(
     } = ctx;
     let mut target_upstream: Arc<str> = Arc::clone(&default_upstream_name);
 
+    // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
+    // directly from downstream connection metadata BEFORE pre_route and pre_upstream plugins.
+    velda_http2::server::header::enrich_headers_precomputed(
+        &mut req_head.headers,
+        &req_head.uri,
+        &meta.client_ip_header,
+        &meta.client_port_header,
+        meta.is_tls,
+    );
+
     if !plan.is_empty() {
         let mut short_circuit_resp = None;
 
@@ -608,7 +618,10 @@ mod tests {
 
         head.enrich_forwarded_headers(peer, local, true);
 
-        assert_eq!(head.headers.get("x-forwarded-for").unwrap(), "192.0.2.20");
+        assert_eq!(
+            head.headers.get("x-forwarded-for").unwrap(),
+            "203.0.113.195, 192.0.2.20"
+        );
         assert_eq!(head.headers.get("x-real-ip").unwrap(), "192.0.2.20");
         assert_eq!(head.headers.get("x-forwarded-proto").unwrap(), "https");
         assert_eq!(head.headers.get("x-forwarded-port").unwrap(), "8443");
