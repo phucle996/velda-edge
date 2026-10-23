@@ -1,2 +1,24 @@
+# Velda Edge - Microarchitecture & Compilation Configuration
+#
+# For complete details on the Multi-Edition architecture and compatibility matrix,
+# see docs/EDITIONS_AND_RELEASES.md.
+#
+# Default configuration: Performance Edition (x86-64-v3)
+# Enables 256-bit AVX2, FMA, and BMI1/BMI2 instructions across all modern cloud instances
+# (AWS EC2 c5/m5/t3+, Azure Dv3+, GCP N2/C2, Hetzner, modern dedicated bare-metal).
 [build]
 rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# ── Available Microarchitecture Profiles ─────────────────────────────────────
+#
+# 1. Performance Edition (x86-64-v3) - [DEFAULT]
+#    RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+#
+# 2. Portable Compatibility Edition (x86-64-v2) - [Broadest VPS Compatibility]
+#    RUSTFLAGS="-C target-cpu=x86-64-v2" cargo build --release
+#
+# 3. Dedicated Bare-Metal Edition (Host-Specific Pipeline)
+#    RUSTFLAGS="-C target-cpu=native" cargo build --release
+#
+# 4. ARM64 / Graviton / Ampere Edition
+#    cargo build --release --target aarch64-unknown-linux-gnu

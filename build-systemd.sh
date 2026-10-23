@@ -22,6 +22,7 @@ NC='\033[0m'
 # Default values
 COMPONENT="all"         # all, edge, cp, ui
 BUILD_PROFILE="release" # release, debug
+EDITION="auto"          # auto, v3, v2, native, none
 DO_STRIP=true
 PARALLEL_JOBS=""
 DO_CLEAN=false
@@ -104,6 +105,10 @@ ${BOLD}BUILD TARGETS:${NC}
 ${BOLD}BUILD PROFILES & COMPILER OPTIONS:${NC}
     --release                   Build with release optimizations [Default]
     --debug, --dev              Build in debug mode for rapid testing & debugging
+    --edition <auto|v3|v2|native> Set microarchitecture edition (Default: auto)
+    --v3                        Shorthand for --edition v3 (Cloud Performance: AVX2/FMA/BMI2)
+    --v2                        Shorthand for --edition v2 (Portable Baseline: SSE4.2/Popcnt)
+    --native                    Shorthand for --edition native (Host-Specific CPU Pipeline)
     --no-strip                  Do not strip debug symbols from output binaries
     -j, --jobs <N>              Set parallel build jobs count (passed to cargo & go)
     --clean                     Clean cargo and go caches before compiling
@@ -173,6 +178,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug|--dev)
             BUILD_PROFILE="debug"
+            shift
+            ;;
+        --edition)
+            EDITION="$2"
+            shift 2
+            ;;
+        --v3)
+            EDITION="v3"
+            shift
+            ;;
+        --v2)
+            EDITION="v2"
+            shift
+            ;;
+        --native)
+            EDITION="native"
             shift
             ;;
         --no-strip)
@@ -390,8 +411,36 @@ fi
 # 2. Build Edge Data Plane & Sync (Rust)
 # ------------------------------------------------------------------------------
 if [[ "$COMPONENT" == "all" || "$COMPONENT" == "edge" ]]; then
+    # Resolve Microarchitecture Edition
+    ARCH_RAW="$(uname -m)"
+    RUST_ENV=()
+    if [[ "$ARCH_RAW" == "x86_64" ]]; then
+        if [[ "$EDITION" == "auto" ]]; then
+            if grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
+                SELECTED_EDITION="v3"
+                log_info "Detected modern x86_64 CPU (AVX2+BMI2). Selected Edition: ${BOLD}v3 (Cloud Performance)${NC}"
+            else
+                SELECTED_EDITION="v2"
+                log_info "Detected standard x86_64 CPU without AVX2. Selected Edition: ${BOLD}v2 (Portable Compatibility)${NC}"
+            fi
+        else
+            SELECTED_EDITION="$EDITION"
+            log_info "Microarchitecture Edition (override): ${BOLD}${SELECTED_EDITION}${NC}"
+        fi
+
+        case "$SELECTED_EDITION" in
+            v3)     RUST_ENV=(env RUSTFLAGS="-C target-cpu=x86-64-v3") ;;
+            v2)     RUST_ENV=(env RUSTFLAGS="-C target-cpu=x86-64-v2") ;;
+            native) RUST_ENV=(env RUSTFLAGS="-C target-cpu=native") ;;
+            none)   ;;
+            *)
+                log_warn "Unknown edition: $SELECTED_EDITION. Using default Cargo settings."
+                ;;
+        esac
+    fi
+
     log_info "${BOLD}Compiling Rust crates: velda-edge, velda-sync (${BUILD_PROFILE} profile)...${NC}"
-    run_user cargo build "${CARGO_FLAGS[@]}" -p velda-edge -p velda-sync
+    run_user "${RUST_ENV[@]}" cargo build "${CARGO_FLAGS[@]}" -p velda-edge -p velda-sync
 
     if [[ "$DO_STRIP" == true && "$BUILD_PROFILE" == "release" ]]; then
         if command -v strip >/dev/null 2>&1; then

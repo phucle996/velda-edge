@@ -1,16 +1,21 @@
-# Velda Edge - Datacenter / Cloud Bare-Metal Acceleration Configuration
+# Velda Edge - Microarchitecture & Compilation Configuration Example
 #
-# Copy this file to `.cargo/config.toml` when building production release binaries
-# targeting modern cloud/datacenter servers.
+# Copy this file to `.cargo/config.toml` to customize your compilation baseline.
+# For complete details on the Multi-Edition architecture and compatibility matrix,
+# see docs/EDITIONS_AND_RELEASES.md.
 #
-# Option A: Modern Cloud & VPS Baseline (x86-64-v3) - RECOMMENDED FOR BINARY DISTRIBUTION
+# Option A: Performance Edition (x86-64-v3) - [RECOMMENDED FOR MODERN CLOUD]
 # Enables 256-bit AVX2, FMA, and BMI1/BMI2 instructions across all modern cloud instances
-# (AWS EC2 C5/M5/T3+, GCP N2/C2, Azure v3+, Hetzner, DigitalOcean) without crashing older nodes.
+# (AWS EC2 c5/m5/t3+, Azure Dv3+, GCP N2/C2, Hetzner, modern dedicated bare-metal).
 [build]
 rustflags = ["-C", "target-cpu=x86-64-v3"]
 
-# Option B: Dedicated Bare-Metal Host Acceleration (target-cpu=native)
-# Uncomment the line below (and comment Option A) when compiling specifically for the local machine's
-# exact hardware CPU model to unlock host-specific vector pipeline scheduling.
+# Option B: Portable Baseline Edition (x86-64-v2) - [LEGACY VPS & HYPERVISORS]
+# Enables SSE4.2 and Popcnt for maximum compatibility with older VPS and nested VMs.
+# [build]
+# rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+# Option C: Dedicated Bare-Metal Host Acceleration (target-cpu=native)
+# Unlocks full host-specific pipeline scheduling when building on dedicated bare-metal.
 # [build]
 # rustflags = ["-C", "target-cpu=native"]

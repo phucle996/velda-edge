@@ -15,8 +15,17 @@ env:
 jobs:
   # ── Build Rust binary (velda-edge + velda-sync) ──────────────────
   build-edge:
-    name: Build velda-edge (linux/amd64)
+    name: Build velda-edge (${{ matrix.edition }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - edition: amd64-v3
+            target_cpu: x86-64-v3
+            desc: "Cloud Performance Edition (AVX2, FMA, BMI1/2)"
+          - edition: amd64-v2
+            target_cpu: x86-64-v2
+            desc: "Portable Compatibility Edition (SSE4.2, Popcnt)"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,9 +45,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: release-rust-${{ runner.os }}-${{ matrix.edition }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-rust-${{ runner.os }}-${{ matrix.edition }}-
 
-      - name: Build release binaries
+      - name: Build release binaries (${{ matrix.edition }})
+        env:
+          RUSTFLAGS: "-C target-cpu=${{ matrix.target_cpu }}"
         run: cargo build --release -p velda-edge -p velda-sync
 
       - name: Strip binaries
@@ -56,7 +68,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: velda-edge-linux-amd64
+          name: velda-edge-linux-${{ matrix.edition }}
           path: dist/
 
   # ── Build Go binary (velda-control-plane) ────────────────────────
@@ -119,7 +131,7 @@ jobs:
       - name: Download edge artifacts
         uses: actions/download-artifact@v4
         with:
-          name: velda-edge-linux-amd64
+          name: velda-edge-linux-amd64-v3
           path: dist/edge
 
       - name: Download control-plane artifacts
@@ -144,11 +156,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download edge artifacts
+      - name: Download edge artifacts (amd64-v3)
         uses: actions/download-artifact@v4
         with:
-          name: velda-edge-linux-amd64
-          path: dist/edge
+          name: velda-edge-linux-amd64-v3
+          path: dist/edge-v3
+
+      - name: Download edge artifacts (amd64-v2)
+        uses: actions/download-artifact@v4
+        with:
+          name: velda-edge-linux-amd64-v2
+          path: dist/edge-v2
 
       - name: Download control-plane artifacts
         uses: actions/download-artifact@v4
@@ -159,8 +177,11 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          # Edge binaries
-          tar -czf release/velda-edge-linux-amd64.tar.gz -C dist/edge velda-edge velda-sync SHA256SUMS
+          # Edge binaries: v3 (Cloud Performance) and v2 (Portable Baseline)
+          tar -czf release/velda-edge-linux-amd64-v3.tar.gz -C dist/edge-v3 velda-edge velda-sync SHA256SUMS
+          tar -czf release/velda-edge-linux-amd64-v2.tar.gz -C dist/edge-v2 velda-edge velda-sync SHA256SUMS
+          # Backward-compatible default alias (points to v2 for safest compatibility across legacy hosts)
+          cp release/velda-edge-linux-amd64-v2.tar.gz release/velda-edge-linux-amd64.tar.gz
           # Control Plane binary
           tar -czf release/velda-control-plane-linux-amd64.tar.gz -C dist/cp velda-control-plane SHA256SUMS
           # Global checksums
@@ -171,6 +192,8 @@ jobs:
         with:
           generate_release_notes: true
           files: |
+            release/velda-edge-linux-amd64-v3.tar.gz
+            release/velda-edge-linux-amd64-v2.tar.gz
             release/velda-edge-linux-amd64.tar.gz
             release/velda-control-plane-linux-amd64.tar.gz
             release/SHA256SUMS

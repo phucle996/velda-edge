@@ -26,6 +26,7 @@ GITHUB_REPO="phucle996/velda-edge"
 RELEASE_TAG="latest"
 GITHUB_TOKEN=""
 ARCH_OVERRIDE=""
+EDITION_OVERRIDE="" # auto, v2, v3
 SKIP_CHECKSUM=false
 
 COMPONENT="all" # all, edge, cp
@@ -87,6 +88,9 @@ ${BOLD}SOURCE & VERSION:${NC}
     -r, --repo <OWNER/REPO>     GitHub repository. [Default: phucle996/velda-edge]
     --token <TOKEN>             GitHub Personal Access Token for authenticated API requests
     --arch <amd64|arm64>        Override CPU architecture (Default: auto-detect)
+    --edition <auto|v3|v2>      Microarchitecture edition (v3=AVX2 Cloud, v2=Portable) [Default: auto]
+    --v3                        Shorthand for --edition v3 (Cloud Performance Edition)
+    --v2                        Shorthand for --edition v2 (Portable Baseline Edition)
     --no-checksum               Skip SHA256 checksum verification
 
 ${BOLD}TARGET COMPONENTS:${NC}
@@ -154,6 +158,18 @@ while [[ $# -gt 0 ]]; do
         --arch)
             ARCH_OVERRIDE="$2"
             shift 2
+            ;;
+        --edition)
+            EDITION_OVERRIDE="$2"
+            shift 2
+            ;;
+        --v3)
+            EDITION_OVERRIDE="v3"
+            shift
+            ;;
+        --v2)
+            EDITION_OVERRIDE="v2"
+            shift
             ;;
         --no-checksum)
             SKIP_CHECKSUM=true
@@ -363,7 +379,33 @@ else
     esac
 fi
 
+# Resolve Architecture & Microarchitecture Edition
+if [[ "$ARCH_NAME" == "amd64" ]]; then
+    if [[ -n "$EDITION_OVERRIDE" && "$EDITION_OVERRIDE" != "auto" ]]; then
+        SELECTED_EDITION="$EDITION_OVERRIDE"
+        log_info "Microarchitecture Edition (override): ${BOLD}${SELECTED_EDITION}${NC}"
+    else
+        # Auto-detect CPU microarchitecture capabilities
+        if grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
+            SELECTED_EDITION="v3"
+            log_info "Detected modern x86_64 CPU (AVX2+BMI2). Selected Edition: ${BOLD}v3 (Cloud Performance)${NC}"
+        else
+            SELECTED_EDITION="v2"
+            log_info "Detected legacy/virtualized x86_64 CPU. Selected Edition: ${BOLD}v2 (Portable Compatibility)${NC}"
+        fi
+    fi
+    EDGE_ARCHIVE="velda-edge-linux-amd64-${SELECTED_EDITION}.tar.gz"
+    EDGE_FALLBACK_ARCHIVE="velda-edge-linux-amd64.tar.gz"
+else
+    SELECTED_EDITION="none"
+    EDGE_ARCHIVE="velda-edge-linux-${ARCH_NAME}.tar.gz"
+    EDGE_FALLBACK_ARCHIVE=""
+fi
+
 log_info "Target System:   ${BOLD}Linux/${ARCH_NAME}${NC}"
+if [[ "$ARCH_NAME" == "amd64" ]]; then
+    log_info "Target Edition:  ${BOLD}${SELECTED_EDITION}${NC}"
+fi
 log_info "GitHub Repo:     ${BOLD}${GITHUB_REPO}${NC}"
 log_info "Requested Tag:   ${BOLD}${RELEASE_TAG}${NC}"
 log_info "Target Stack:    ${BOLD}${COMPONENT}${NC}"
@@ -401,7 +443,6 @@ fi
 # ------------------------------------------------------------------------------
 # Download & Verification
 # ------------------------------------------------------------------------------
-EDGE_ARCHIVE="velda-edge-linux-${ARCH_NAME}.tar.gz"
 CP_ARCHIVE="velda-control-plane-linux-${ARCH_NAME}.tar.gz"
 CHECKSUM_FILE="SHA256SUMS"
 
@@ -419,6 +460,7 @@ fi
 
 download_and_extract() {
     local archive="$1"
+    local fallback="${2:-}"
     log_info "Downloading ${archive}..."
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} curl -fSL \"${DOWNLOAD_BASE}/${archive}\" -o \"${archive}\""
@@ -426,26 +468,38 @@ download_and_extract() {
         return 0
     fi
 
+    local fetch_archive="${archive}"
     if ! curl -fSL "${CURL_AUTH[@]}" --progress-bar "${DOWNLOAD_BASE}/${archive}" -o "${archive}"; then
-        log_error "Failed to download asset: ${DOWNLOAD_BASE}/${archive}"
-        exit 1
+        if [[ -n "$fallback" ]]; then
+            log_warn "Asset ${archive} not found. Attempting fallback to ${fallback}..."
+            if curl -fSL "${CURL_AUTH[@]}" --progress-bar "${DOWNLOAD_BASE}/${fallback}" -o "${fallback}"; then
+                fetch_archive="${fallback}"
+                log_success "Successfully fetched fallback archive ${fallback}."
+            else
+                log_error "Failed to download asset: ${DOWNLOAD_BASE}/${archive} (and fallback ${fallback})"
+                exit 1
+            fi
+        else
+            log_error "Failed to download asset: ${DOWNLOAD_BASE}/${archive}"
+            exit 1
+        fi
     fi
 
-    if [[ "$SKIP_CHECKSUM" == false ]] && grep -q "${archive}" "${CHECKSUM_FILE}" 2>/dev/null; then
-        log_info "Verifying SHA256 for ${archive}..."
-        grep "${archive}" "${CHECKSUM_FILE}" | sha256sum -c --status || {
-            log_error "Checksum mismatch on ${archive}!"
+    if [[ "$SKIP_CHECKSUM" == false ]] && grep -q "${fetch_archive}" "${CHECKSUM_FILE}" 2>/dev/null; then
+        log_info "Verifying SHA256 for ${fetch_archive}..."
+        grep "${fetch_archive}" "${CHECKSUM_FILE}" | sha256sum -c --status || {
+            log_error "Checksum mismatch on ${fetch_archive}!"
             exit 1
         }
-        log_success "Checksum verified for ${archive}"
+        log_success "Checksum verified for ${fetch_archive}"
     fi
 
-    log_info "Extracting ${archive}..."
-    tar -xzf "${archive}"
+    log_info "Extracting ${fetch_archive}..."
+    tar -xzf "${fetch_archive}"
 }
 
 if [[ "$COMPONENT" == "all" || "$COMPONENT" == "edge" ]]; then
-    download_and_extract "$EDGE_ARCHIVE"
+    download_and_extract "$EDGE_ARCHIVE" "$EDGE_FALLBACK_ARCHIVE"
 fi
 
 if [[ "$COMPONENT" == "all" || "$COMPONENT" == "cp" ]]; then

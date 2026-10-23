@@ -29,7 +29,7 @@ pub mod url_rewrite;
 pub mod w3c_trace_context;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
-pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
+pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HashStrategy, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
 pub use grpc_fault_injection::{
     GrpcAbortConfig, GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin,
