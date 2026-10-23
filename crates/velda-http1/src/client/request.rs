@@ -195,15 +195,16 @@ pub fn encode_request_head(
 
 /// Serializes an entire HTTP/1.1 request (head + body) into destination buffer.
 pub fn encode_request(req: &Http1ServerRequest, dst: &mut BytesMut) {
-    let body_len = match &req.body {
-        Body::Empty => None,
-        Body::Bytes(bytes) => Some(bytes.len()),
+    let body_len = if req.body.is_empty() {
+        None
+    } else {
+        Some(req.body.len())
     };
 
     encode_request_head(&req.method, &req.uri, &req.headers, body_len, dst);
 
-    if let Body::Bytes(bytes) = &req.body {
-        dst.extend_from_slice(bytes);
+    if !req.body.is_empty() {
+        dst.extend_from_slice(req.body.as_slice());
     }
 }
 
@@ -221,52 +222,51 @@ pub async fn send_request_parts<IO>(
 where
     IO: AsyncWrite + Unpin,
 {
-    let body_len = match body {
-        Body::Empty => None,
-        Body::Bytes(b) => Some(b.len()),
+    let body_len = if body.is_empty() {
+        None
+    } else {
+        Some(body.len())
     };
     write_buf.clear();
     encode_request_head(method, uri, headers, body_len, write_buf);
 
-    match body {
-        Body::Empty => {
+    if body.is_empty() {
+        stream.write_all(write_buf).await?;
+    } else {
+        let b_slice = body.as_slice();
+        if b_slice.len() <= 65536 {
+            write_buf.extend_from_slice(b_slice);
             stream.write_all(write_buf).await?;
+            return Ok(());
         }
-        Body::Bytes(bytes) => {
-            if bytes.len() <= 65536 {
-                write_buf.extend_from_slice(bytes);
-                stream.write_all(write_buf).await?;
-                return Ok(());
-            }
 
-            let mut h_slice = &write_buf[..];
-            let mut b_slice = bytes.as_ref();
-            while !h_slice.is_empty() || !b_slice.is_empty() {
-                let mut io_slices = [
-                    std::io::IoSlice::new(h_slice),
-                    std::io::IoSlice::new(b_slice),
-                ];
-                let active = if h_slice.is_empty() {
-                    &mut io_slices[1..]
-                } else if b_slice.is_empty() {
-                    &mut io_slices[..1]
-                } else {
-                    &mut io_slices[..]
-                };
-                let n = stream.write_vectored(active).await?;
-                if n == 0 {
-                    return Err(Http1Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole request",
-                    )));
-                }
-                if n <= h_slice.len() {
-                    h_slice = &h_slice[n..];
-                } else {
-                    let rem = n - h_slice.len();
-                    h_slice = &[];
-                    b_slice = &b_slice[rem..];
-                }
+        let mut h_slice = &write_buf[..];
+        let mut b_slice = b_slice;
+        while !h_slice.is_empty() || !b_slice.is_empty() {
+            let mut io_slices = [
+                std::io::IoSlice::new(h_slice),
+                std::io::IoSlice::new(b_slice),
+            ];
+            let active = if h_slice.is_empty() {
+                &mut io_slices[1..]
+            } else if b_slice.is_empty() {
+                &mut io_slices[..1]
+            } else {
+                &mut io_slices[..]
+            };
+            let n = stream.write_vectored(active).await?;
+            if n == 0 {
+                return Err(Http1Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole request",
+                )));
+            }
+            if n <= h_slice.len() {
+                h_slice = &h_slice[n..];
+            } else {
+                let rem = n - h_slice.len();
+                h_slice = &[];
+                b_slice = &b_slice[rem..];
             }
         }
     }

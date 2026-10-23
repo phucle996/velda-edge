@@ -248,6 +248,8 @@ where
                 .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
 
+        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
         if let Some(post_hooks) = &plan.post_response_hooks {
             let mut l7_resp = velda_core::L7Response::new(
                 parts.status,
@@ -255,7 +257,8 @@ where
                 std::mem::take(&mut parts.headers),
                 velda_core::Body::Empty,
             );
-            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+            let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
+            velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
             parts.status = l7_resp.status;
             parts.headers = l7_resp.headers.into();
         }

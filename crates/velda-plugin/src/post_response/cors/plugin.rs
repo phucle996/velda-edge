@@ -156,7 +156,7 @@ impl PostResponsePlugin for CorsResponsePlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // 1. Resolve Origin: strictly inspect downstream client request Origin header (RFC 6454)
         let Some(origin_val) = req_headers.get(ORIGIN) else {
             return; // Non-CORS request, do not inject CORS headers
@@ -224,13 +224,14 @@ impl PostResponsePlugin for CorsResponsePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, StatusCode};
+    use http::StatusCode;
+    use velda_core::HeaderWorkspace;
 
     #[test]
     fn test_cors_default_wildcard() {
         let plugin = CorsResponsePlugin::new("cors", "*", false);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://random.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -251,7 +252,7 @@ mod tests {
     fn test_cors_no_origin_header_no_injection() {
         let plugin = CorsResponsePlugin::new("cors", "*", false);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new(); // No Origin header
+        let req_headers = HeaderWorkspace::empty(); // No Origin header
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -267,7 +268,7 @@ mod tests {
     fn test_cors_disallowed_origin_no_injection() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.velda.io", false);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://evil.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -280,7 +281,7 @@ mod tests {
     fn test_cors_exact_origin_with_credentials_and_vary() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.example.com", true);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -305,7 +306,7 @@ mod tests {
         resp.headers
             .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -330,7 +331,7 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -355,7 +356,7 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://portal.partner.io".parse().unwrap());
         let mut resp = L7Response::empty(StatusCode::OK);
 
@@ -395,7 +396,7 @@ mod tests {
         assert_eq!(plugin.config.expose_headers, vec!["x-request-id"]);
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = HeaderWorkspace::empty();
         req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
         plugin.on_response(&req_headers, &mut resp);
 

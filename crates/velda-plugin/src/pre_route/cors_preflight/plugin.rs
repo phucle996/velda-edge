@@ -259,8 +259,8 @@ impl PreRoutePlugin for CorsPreflightPlugin {
         }
 
         // 6. Zero-Branch Response Assembly via Pre-Baked Header Template
-        let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
-        *resp.headers = self.base_headers.clone();
+        let mut resp =
+            L7Response::empty(StatusCode::NO_CONTENT).with_headers(self.base_headers.clone());
 
         // Reflect Origin: When credentials are true, W3C CORS prohibits wildcard '*'
         let allow_origin_val = if self.allow_credentials || !self.allow_all_origins {

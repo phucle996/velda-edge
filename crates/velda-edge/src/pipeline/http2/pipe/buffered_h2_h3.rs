@@ -108,6 +108,7 @@ pub async fn serve(
 
     match pipe_res {
         Ok(mut resp) => {
+            // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
             }

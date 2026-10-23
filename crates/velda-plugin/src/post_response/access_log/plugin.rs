@@ -134,7 +134,7 @@ impl PostResponsePlugin for AccessLogPlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         let status = resp.status.as_u16();
 
         let version = match resp.version {
@@ -261,7 +261,7 @@ mod tests {
             headers,
             Body::Bytes(bytes::Bytes::from_static(b"response-body")),
         );
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert("x-request-id", HeaderValue::from_static("req-12345"));
 
         plugin.on_response(&req_headers, &mut resp);
@@ -288,7 +288,7 @@ mod tests {
         let (plugin, _rx) = AccessLogPlugin::new_with_receiver("access_log", config);
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new();
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         // First record fills capacity
         plugin.on_response(&req_headers, &mut resp);

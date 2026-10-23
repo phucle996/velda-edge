@@ -198,7 +198,7 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // 1. If already served from cache (HIT), skip storing
         if let Some(val) = resp.headers.get(&X_CACHE)
             && val == "HIT"
@@ -294,6 +294,17 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
                     return;
                 }
                 b.clone()
+            }
+            Body::Slab { .. } => {
+                if resp.body.is_empty() {
+                    return;
+                }
+                if resp.body.len() > self.config.max_payload_bytes {
+                    resp.headers
+                        .insert(X_CACHE, HeaderValue::from_static("BYPASS"));
+                    return;
+                }
+                resp.body.to_bytes()
             }
             Body::Empty => {
                 // Pure Payload Invariant: Never cache empty body
@@ -405,9 +416,9 @@ mod tests {
         headers.insert(SET_COOKIE, "session_id=secret".parse().unwrap());
         headers.insert(CACHE_CONTROL, "public, max-age=120".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"data\":[1,2,3]}".to_vec());
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"data\":[1,2,3]}".to_vec())
+            .with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -449,9 +460,9 @@ mod tests {
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"brotli-compressed-binary".to_vec());
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"brotli-compressed-binary".to_vec())
+            .with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -485,9 +496,9 @@ mod tests {
         );
         headers.insert(CACHE_CONTROL, "no-store, private".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"secret\":true}".to_vec());
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"secret\":true}".to_vec())
+            .with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -517,9 +528,8 @@ mod tests {
         );
 
         let large_payload = vec![b'x'; 200];
-        let mut resp = L7Response::from_bytes(StatusCode::OK, large_payload);
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, large_payload).with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -550,10 +560,10 @@ mod tests {
         // Backend did NOT specify public
         headers.insert(CACHE_CONTROL, "max-age=300".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec());
-        *resp.headers = headers;
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec())
+            .with_headers(headers);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(
             http::header::AUTHORIZATION,
             "Bearer secret_token".parse().unwrap(),
@@ -589,10 +599,10 @@ mod tests {
         // Backend explicitly declared public per RFC 9111 §3.5
         headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"news\":\"all\"}".to_vec());
-        *resp.headers = headers;
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"news\":\"all\"}".to_vec())
+            .with_headers(headers);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(
             http::header::AUTHORIZATION,
             "Bearer any_token".parse().unwrap(),
@@ -625,10 +635,10 @@ mod tests {
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(CACHE_CONTROL, "max-age=300".parse().unwrap());
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec());
-        *resp.headers = headers;
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec())
+            .with_headers(headers);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(http::header::AUTHORIZATION, "Bearer alice".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -661,10 +671,10 @@ mod tests {
         headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
         let payload = b"{\"message\":\"testing asynchronous background precompression for high throughput\",\"items\":[1,2,3,4,5]}".repeat(5);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        *resp.headers = headers;
+        let mut resp =
+            L7Response::from_bytes(StatusCode::OK, payload.clone()).with_headers(headers);
 
-        let req_headers = HeaderMap::new();
+        let req_headers = velda_core::HeaderWorkspace::empty();
         plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(resp.headers.get("x-cache").unwrap(), "MISS");
@@ -715,10 +725,10 @@ mod tests {
         headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
         let payload = b"{\"message\":\"testing synchronous precompression when configured\",\"items\":[1,2,3,4,5]}".repeat(5);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        *resp.headers = headers;
+        let mut resp =
+            L7Response::from_bytes(StatusCode::OK, payload.clone()).with_headers(headers);
 
-        let req_headers = HeaderMap::new();
+        let req_headers = velda_core::HeaderWorkspace::empty();
         plugin.on_response(&req_headers, &mut resp);
 
         let hash = HttpCacheZone::hash_key(cache_key);

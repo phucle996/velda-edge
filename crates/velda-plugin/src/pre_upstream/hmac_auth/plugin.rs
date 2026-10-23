@@ -14,7 +14,7 @@ use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
 use rustc_hash::FxHashMap;
-use velda_core::{Action, Body, L7Request, L7Response};
+use velda_core::{Action, L7Request, L7Response};
 use velda_sync::HmacAuthConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -231,47 +231,44 @@ impl HmacAuthPlugin {
 
         let header_val = req.headers.get(&self.content_sha256_header);
 
-        match &req.body {
-            Body::Bytes(bytes) => {
-                // Actual body bytes are available: ALWAYS compute true SHA-256 digest!
-                let digest = compute_sha256(bytes);
-                format_hex_to_buf(&digest, stack_buf);
+        if !req.body.is_empty() {
+            // Actual body bytes are available: ALWAYS compute true SHA-256 digest!
+            let digest = compute_sha256(req.body.as_slice());
+            format_hex_to_buf(&digest, stack_buf);
 
-                // Security check: If client also provided x-content-sha256 header,
-                // strictly verify in constant time that it matches the actual body digest!
-                if !verify_content_sha256(header_val, stack_buf) {
-                    return None;
-                }
-
-                Some(stack_buf.as_slice())
+            // Security check: If client also provided x-content-sha256 header,
+            // strictly verify in constant time that it matches the actual body digest!
+            if !verify_content_sha256(header_val, stack_buf) {
+                return None;
             }
-            Body::Empty => {
-                // If request header declares an unbuffered body in streaming mode,
-                // use client-supplied content_sha256_header if provided.
-                let has_unbuffered_payload = req
-                    .headers
-                    .get(http::header::CONTENT_LENGTH)
-                    .and_then(|v| parse_u64_bytes(v.as_bytes()))
-                    .is_some_and(|len| len > 0)
-                    || req.headers.contains_key(http::header::TRANSFER_ENCODING);
 
-                if has_unbuffered_payload && let Some(val) = header_val {
-                    let client_hash = val.as_bytes().trim_ascii();
-                    if client_hash.len() == 64 {
-                        for (i, &b) in client_hash.iter().enumerate() {
-                            stack_buf[i] = b.to_ascii_lowercase();
-                        }
-                        return Some(stack_buf.as_slice());
+            Some(stack_buf.as_slice())
+        } else {
+            // If request header declares an unbuffered body in streaming mode,
+            // use client-supplied content_sha256_header if provided.
+            let has_unbuffered_payload = req
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| parse_u64_bytes(v.as_bytes()))
+                .is_some_and(|len| len > 0)
+                || req.headers.contains_key(http::header::TRANSFER_ENCODING);
+
+            if has_unbuffered_payload && let Some(val) = header_val {
+                let client_hash = val.as_bytes().trim_ascii();
+                if client_hash.len() == 64 {
+                    for (i, &b) in client_hash.iter().enumerate() {
+                        stack_buf[i] = b.to_ascii_lowercase();
                     }
+                    return Some(stack_buf.as_slice());
                 }
-
-                // Truly empty body: verify client header matches empty SHA-256 in constant time
-                if !verify_content_sha256(header_val, EMPTY_SHA256_HEX) {
-                    return None;
-                }
-
-                Some(EMPTY_SHA256_HEX.as_slice())
             }
+
+            // Truly empty body: verify client header matches empty SHA-256 in constant time
+            if !verify_content_sha256(header_val, EMPTY_SHA256_HEX) {
+                return None;
+            }
+
+            Some(EMPTY_SHA256_HEX.as_slice())
         }
     }
 }
@@ -436,6 +433,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
 mod tests {
     use super::*;
     use http::{HeaderMap, Method, Uri, Version};
+    use velda_core::Body;
     use velda_sync::HmacCredentialConfig;
 
     fn to_hex(bytes: &[u8]) -> String {

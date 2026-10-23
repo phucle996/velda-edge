@@ -139,6 +139,8 @@ pub async fn serve(
     // 7. Strip hop-by-hop headers before sending over HTTP/2
     let mut clean_headers = resp_head.headers;
     velda_http1::client::sanitize_headers(&mut clean_headers);
+    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = L7Response::new(
             resp_head.status,
@@ -146,7 +148,9 @@ pub async fn serve(
             clean_headers,
             velda_core::Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        let req_ws =
+            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
+        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
         resp_head.status = l7_resp.status;
         clean_headers = l7_resp.headers.into();
     }

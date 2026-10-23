@@ -119,7 +119,7 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
         &self.id
     }
 
-    fn on_response(&self, _req_headers: &http::HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, _req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // 1. Remove explicitly requested headers
         for name in &self.config.remove {
             resp.headers.remove(name);
@@ -177,9 +177,8 @@ mod tests {
         headers.insert("server", HeaderValue::from_static("Apache/2.4"));
         headers.insert("content-type", HeaderValue::from_static("application/json"));
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}").with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -209,9 +208,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", HeaderValue::from_static("req-999"));
 
-        let mut resp = L7Response::from_bytes(StatusCode::CREATED, "{}");
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::CREATED, "{}").with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -237,9 +235,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-existing", HeaderValue::from_static("original-val"));
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}").with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -265,9 +262,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("vary", HeaderValue::from_static("Accept-Encoding"));
 
-        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        *resp.headers = headers;
-        let req_headers = HeaderMap::new();
+        let mut resp = L7Response::from_bytes(StatusCode::OK, "{}").with_headers(headers);
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         plugin.on_response(&req_headers, &mut resp);
 

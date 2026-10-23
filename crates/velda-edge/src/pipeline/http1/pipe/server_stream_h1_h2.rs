@@ -97,10 +97,7 @@ where
         }
     };
 
-    let body_bytes = match body {
-        velda_core::Body::Bytes(b) => b,
-        velda_core::Body::Empty => bytes::Bytes::new(),
-    };
+    let body_bytes = body.to_bytes();
 
     // 4. Sanitize headers disallowed by RFC 9113 for HTTP/2
     velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
@@ -213,6 +210,8 @@ where
         headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
     let mut status = parts.status;
+    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
             status,
@@ -220,7 +219,9 @@ where
             std::mem::take(&mut headers),
             velda_core::Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        let req_ws =
+            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
+        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
         status = l7_resp.status;
         headers = l7_resp.headers.into();
     }

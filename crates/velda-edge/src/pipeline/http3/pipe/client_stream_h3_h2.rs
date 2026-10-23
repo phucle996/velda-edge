@@ -17,10 +17,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
     let mut headers = req.headers.clone();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
-    let body_bytes = match &req.body {
-        velda_core::Body::Bytes(b) => b.clone(),
-        velda_core::Body::Empty => bytes::Bytes::new(),
-    };
+    let body_bytes = req.body.to_bytes();
 
     let (mut client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,

@@ -46,6 +46,20 @@ impl SlabClass {
     pub const fn byte_size(self) -> usize {
         self as usize
     }
+
+    /// Selects the smallest pre-warmed slab class that fits `len` bytes, or `None` if `len > 64KB`.
+    #[inline(always)]
+    pub const fn for_size(len: usize) -> Option<Self> {
+        if len <= Self::Small4K.byte_size() {
+            Some(Self::Small4K)
+        } else if len <= Self::Medium16K.byte_size() {
+            Some(Self::Medium16K)
+        } else if len <= Self::Large64K.byte_size() {
+            Some(Self::Large64K)
+        } else {
+            None
+        }
+    }
 }
 
 /// A contiguous pre-allocated byte buffer slab.
@@ -244,6 +258,14 @@ impl PayloadSlabPool {
             slab: Some(slab),
             pool: Arc::clone(self),
         })
+    }
+
+    /// Borrows the smallest pre-warmed slab that can hold `size` bytes, wrapped in an RAII lease.
+    /// Returns `None` if `size > 64KB` or if pool burst ceiling is reached.
+    #[inline(always)]
+    pub fn acquire_for_size(self: &Arc<Self>, size: usize) -> Option<PayloadSlabLease> {
+        let class = SlabClass::for_size(size)?;
+        self.acquire(class)
     }
 
     /// Returns the number of currently checked-out active leases for a class.

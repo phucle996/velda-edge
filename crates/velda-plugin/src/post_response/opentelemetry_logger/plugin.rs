@@ -281,7 +281,7 @@ impl PostResponsePlugin for OpentelemetryLoggerPlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         let now_nano = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -394,7 +394,7 @@ mod tests {
 
         let (plugin, mut rx) = OpentelemetryLoggerPlugin::new_with_receiver("otel_log", config);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert("x-original-method", HeaderValue::from_static("POST"));
         req_headers.insert("x-original-path", HeaderValue::from_static("/api/orders"));
         req_headers.insert(

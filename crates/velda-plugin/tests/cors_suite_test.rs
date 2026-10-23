@@ -49,10 +49,7 @@ fn make_test_request(
 }
 
 fn extract_body_str(resp: &L7Response) -> String {
-    match &resp.body {
-        Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-        Body::Empty => String::new(),
-    }
+    String::from_utf8_lossy(resp.body.as_slice()).to_string()
 }
 
 /// Helper to build standard production preflight plugin with credentials and subdomain support.

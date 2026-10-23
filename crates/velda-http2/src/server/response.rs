@@ -181,15 +181,8 @@ impl Http2Responder {
             self.prepare_h2_response_owned(response.status, response.headers.into())?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if has_body {
-            match response.body {
-                Body::Bytes(b) => {
-                    if !b.is_empty() {
-                        send_stream.send_data(b, true)?;
-                    }
-                }
-                Body::Empty => {}
-            }
+        if has_body && !response.body.is_empty() {
+            send_stream.send_data(response.body.to_bytes(), true)?;
         }
 
         Ok(())
@@ -207,11 +200,8 @@ impl Http2Responder {
         let http_response = self.prepare_h2_response(response.status, &response.headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if has_body
-            && let Body::Bytes(b) = &response.body
-            && !b.is_empty()
-        {
-            let _ = send_stream.send_data(b.clone(), true);
+        if has_body && !response.body.is_empty() {
+            let _ = send_stream.send_data(response.body.to_bytes(), true);
         }
         send_stream.send_reset(h2::Reason::NO_ERROR);
         Ok(())
@@ -239,11 +229,8 @@ impl Http2Responder {
 
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if has_body
-            && let Body::Bytes(b) = body
-            && !b.is_empty()
-        {
-            send_stream.send_data(b.clone(), true)?;
+        if has_body && !body.is_empty() {
+            send_stream.send_data(body.to_bytes(), true)?;
         }
 
         Ok(())
@@ -265,15 +252,8 @@ impl Http2Responder {
 
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
-        if has_body {
-            match body {
-                Body::Bytes(b) => {
-                    if !b.is_empty() {
-                        send_stream.send_data(b, true)?;
-                    }
-                }
-                Body::Empty => {}
-            }
+        if has_body && !body.is_empty() {
+            send_stream.send_data(body.to_bytes(), true)?;
         }
 
         Ok(())

@@ -132,9 +132,10 @@ pub async fn serve(
                 .map(GrpcStatus::from_code)
                 .unwrap_or(GrpcStatus::Ok);
 
-            let body_bytes = match resp.body {
-                Body::Bytes(b) => Some(b),
-                Body::Empty => None,
+            let body_bytes = if resp.body.is_empty() {
+                None
+            } else {
+                Some(resp.body.to_bytes())
             };
 
             server_stream.respond.send_unary_response(

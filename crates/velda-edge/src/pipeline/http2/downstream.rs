@@ -441,8 +441,13 @@ async fn serve_http2_stream(
         }
 
         if let Some(mut resp) = short_circuit_resp {
+            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+            // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
+                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
+                    &mut req_head.headers,
+                ));
+                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
             }
             meta.inject_response_headers(&mut resp.headers);
             let mut responder = responder;

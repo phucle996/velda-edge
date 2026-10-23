@@ -252,12 +252,13 @@ async fn dispatch_grpc_tcp_request_stream(
         }
 
         if let Some(mut resp) = short_circuit_resp {
+            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+            // server_stream reaches end of life here -> mem::take transfers ownership with zero allocations.
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(
-                    post_hooks,
-                    &server_stream.parts.headers,
-                    &mut resp,
-                );
+                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
+                    &mut server_stream.parts.headers,
+                ));
+                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
             }
             let mut builder = http::Response::builder()
                 .status(http::StatusCode::OK)

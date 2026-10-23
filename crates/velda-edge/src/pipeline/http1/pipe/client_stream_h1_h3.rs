@@ -285,6 +285,8 @@ where
             .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
+    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
             resp_stream.status,
@@ -292,7 +294,9 @@ where
             std::mem::take(&mut resp_stream.headers),
             velda_core::Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        let req_ws =
+            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
+        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
         resp_stream.status = l7_resp.status;
         resp_stream.headers = l7_resp.headers.into();
     }

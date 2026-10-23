@@ -57,6 +57,28 @@ impl L7Response {
         }
     }
 
+    /// Creates an HTTP response with a pooled payload slab.
+    #[inline]
+    pub fn from_slab(
+        status: StatusCode,
+        lease: crate::buffer::PayloadSlabLease,
+        len: usize,
+    ) -> Self {
+        Self {
+            status,
+            version: Version::HTTP_11,
+            headers: HeaderWorkspace::empty(),
+            body: Body::from_slab(lease, len),
+        }
+    }
+
+    /// Attaches or replaces headers on the response.
+    #[inline]
+    pub fn with_headers(mut self, headers: impl Into<HeaderWorkspace>) -> Self {
+        self.headers = headers.into();
+        self
+    }
+
     /// Appends a header to the response.
     #[inline]
     pub fn with_header(mut self, name: http::header::HeaderName, value: http::HeaderValue) -> Self {

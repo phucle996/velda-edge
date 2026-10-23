@@ -7,7 +7,6 @@
 //! - **Response Mutability**: Plugins in this phase operate directly on outgoing [`L7Response`] headers and status.
 //! - **Non-failing**: At this phase, the upstream interaction has completed. Plugins mutate headers or status in-place.
 
-use http::HeaderMap;
 use std::sync::Arc;
 use velda_core::L7Response;
 
@@ -45,7 +44,7 @@ pub trait PostResponsePlugin: Send + Sync {
     ///
     /// The borrowed `req_headers` workspace strictly belongs to THIS specific in-flight
     /// request (enforcing zero cross-request contamination in pipelined/multiplexed streams).
-    fn on_response(&self, req_headers: &HeaderMap, resp: &mut L7Response);
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response);
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -64,7 +63,7 @@ pub trait PostResponsePlugin: Send + Sync {
 #[inline]
 pub fn run_post_response_plugins(
     chain: &[Arc<dyn PostResponsePlugin>],
-    req_headers: &HeaderMap,
+    req_headers: &velda_core::HeaderWorkspace,
     resp: &mut L7Response,
 ) {
     for plugin in chain {
@@ -109,7 +108,7 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
-        let req_headers = HeaderMap::new();
+        let req_headers = velda_core::HeaderWorkspace::empty();
 
         run_post_response_plugins(&chain, &req_headers, &mut resp);
 
@@ -135,7 +134,7 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(
             "origin",
             http::HeaderValue::from_static("https://app.example.com"),

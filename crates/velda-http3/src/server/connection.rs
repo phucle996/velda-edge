@@ -476,6 +476,17 @@ impl Http3Engine {
                                     req.body = Body::Empty;
                                     slot.body_buf = Some(body_buf);
                                 }
+                                Body::Slab { .. } => {
+                                    let mut body_buf = BytesMut::with_capacity(
+                                        (req.body.len() + payload.len())
+                                            .max(8192)
+                                            .next_power_of_two(),
+                                    );
+                                    body_buf.extend_from_slice(req.body.as_slice());
+                                    body_buf.extend_from_slice(&payload);
+                                    req.body = Body::Empty;
+                                    slot.body_buf = Some(body_buf);
+                                }
                             }
                         }
                     }

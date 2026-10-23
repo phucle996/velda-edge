@@ -53,7 +53,7 @@ where
     }
 
     // 3. Read entire downstream body into RAM (protect upstream pool from slow uploads)
-    let body = match conn.read_body(framing).await {
+    let body = match conn.read_body_into_slab(framing, None).await {
         Ok(b) => b,
         Err(Http1Error::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -223,10 +223,7 @@ where
                     cfg.max_body_size,
                 )? {
                     Some((_consumed, body)) => {
-                        let bytes = match body {
-                            velda_core::Body::Bytes(b) => b,
-                            velda_core::Body::Empty => bytes::Bytes::new(),
-                        };
+                        let bytes = body.to_bytes();
                         break (bytes.len(), Some(bytes));
                     }
                     None => {
@@ -274,12 +271,16 @@ where
             std::mem::take(&mut resp_head.headers),
             initial_body,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
+        let req_ws = velda_core::HeaderWorkspace::from_headers(req.headers.clone());
+        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
         resp_head.status = l7_resp.status;
         resp_head.headers = l7_resp.headers.into();
-        match l7_resp.body {
-            velda_core::Body::Bytes(b) => Some(b),
-            velda_core::Body::Empty => None,
+        if l7_resp.body.is_empty() {
+            None
+        } else {
+            Some(l7_resp.body.to_bytes())
         }
     } else {
         None

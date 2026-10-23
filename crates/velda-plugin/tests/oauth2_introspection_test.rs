@@ -24,10 +24,7 @@ fn current_epoch_secs() -> u64 {
 }
 
 fn extract_body_str(resp: &L7Response) -> String {
-    match &resp.body {
-        Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-        Body::Empty => String::new(),
-    }
+    String::from_utf8_lossy(resp.body.as_slice()).to_string()
 }
 
 fn test_req(method: Method, uri: &str, headers: &[(&str, &str)]) -> L7Request {

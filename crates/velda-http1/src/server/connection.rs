@@ -185,6 +185,67 @@ where
         }
     }
 
+    /// Reads and decodes request body directly into a pre-warmed user-space slab leased from `slab_pool`.
+    ///
+    /// # Zero-Allocation Invariant
+    /// 1. If `framing` is Content-Length and `len <= 65536`, borrows an eager MMU-mapped physical slab
+    ///    from `slab_pool`.
+    /// 2. Drains any already-buffered bytes from `self.read_buf` into `lease[..buffered]`.
+    /// 3. Streams the remaining bytes directly from `self.stream` into `lease[buffered..total]` (Zero heap allocations).
+    /// 4. If `slab_pool` is unavailable, payload exceeds 64KB, or framing is chunked, falls back seamlessly
+    ///    to standard buffered decoding (`read_body`).
+    pub async fn read_body_into_slab(
+        &mut self,
+        framing: Http1BodyFraming,
+        slab_pool: Option<&std::sync::Arc<velda_core::PayloadSlabPool>>,
+    ) -> Result<Body, Http1Error> {
+        if framing == Http1BodyFraming::Empty {
+            return Ok(Body::Empty);
+        }
+
+        if let Http1BodyFraming::ContentLength(total_len) = framing {
+            if total_len == 0 {
+                return Ok(Body::Empty);
+            }
+            if total_len > self.config.max_body_size {
+                return Err(Http1Error::PayloadTooLarge(total_len));
+            }
+
+            if let Some(pool) = slab_pool
+                && let Some(mut lease) = pool.acquire_for_size(total_len)
+            {
+                let already_buffered = self.read_buf.len().min(total_len);
+                if already_buffered > 0 {
+                    let drained = self.read_buf.split_to(already_buffered);
+                    lease[..already_buffered].copy_from_slice(&drained);
+                }
+
+                let mut current_offset = already_buffered;
+                let idle_timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
+
+                while current_offset < total_len {
+                    let dest = &mut lease[current_offset..total_len];
+                    let n = match tokio::time::timeout(idle_timeout, self.stream.read(dest)).await {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(e)) => return Err(Http1Error::Io(e)),
+                        Err(_) => return Err(Http1Error::Timeout),
+                    };
+                    if n == 0 {
+                        return Err(Http1Error::Parse(
+                            "Unexpected EOF while reading HTTP request body into slab".into(),
+                        ));
+                    }
+                    current_offset += n;
+                }
+
+                return Ok(Body::from_slab(lease, total_len));
+            }
+        }
+
+        // Fallback for Chunked, >64KB, or when pool ceiling is reached
+        self.read_body(framing).await
+    }
+
     /// Reads and decodes the next full HTTP/1.1 request (head + body).
     pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Error> {
         self.current_request_id = None;

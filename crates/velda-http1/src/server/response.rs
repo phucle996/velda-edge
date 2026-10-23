@@ -387,9 +387,10 @@ pub fn encode_chunked_head(
 
 /// Serializes an entire HTTP/1.1 response (head + body) into the destination buffer without heap cloning.
 pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
-    let body_len = match &response.body {
-        Body::Empty => None,
-        Body::Bytes(bytes) => Some(bytes.len()),
+    let body_len = if response.body.is_empty() {
+        None
+    } else {
+        Some(response.body.len())
     };
 
     encode_head(
@@ -408,8 +409,8 @@ pub fn encode_response(response: &Http1ServerResponse, dst: &mut BytesMut) {
         || response.status == StatusCode::NO_CONTENT
         || response.status == StatusCode::NOT_MODIFIED;
 
-    if !is_no_body && let Body::Bytes(bytes) = &response.body {
-        dst.extend_from_slice(bytes);
+    if !is_no_body && !response.body.is_empty() {
+        dst.extend_from_slice(response.body.as_slice());
     }
 }
 
@@ -441,19 +442,17 @@ where
         || response.status == StatusCode::NO_CONTENT
         || response.status == StatusCode::NOT_MODIFIED;
 
-    if !is_no_body
-        && let Body::Bytes(bytes) = &response.body
-        && bytes.len() <= 65536
-    {
-        write_buf.extend_from_slice(bytes);
+    let b_slice = response.body.as_slice();
+    if !is_no_body && !b_slice.is_empty() && b_slice.len() <= 65536 {
+        write_buf.extend_from_slice(b_slice);
         stream.write_all(write_buf).await?;
         return Ok(force_close || is_connection_close(&response.headers));
     }
 
     stream.write_all(write_buf).await?;
 
-    if !is_no_body && let Body::Bytes(bytes) = &response.body {
-        stream.write_all(bytes).await?;
+    if !is_no_body && !b_slice.is_empty() {
+        stream.write_all(b_slice).await?;
     }
 
     Ok(force_close || is_connection_close(&response.headers))
@@ -488,19 +487,17 @@ where
         || head.status == StatusCode::NO_CONTENT
         || head.status == StatusCode::NOT_MODIFIED;
 
-    if !is_no_body
-        && let Body::Bytes(bytes) = body
-        && bytes.len() <= 65536
-    {
-        write_buf.extend_from_slice(bytes);
+    let b_slice = body.as_slice();
+    if !is_no_body && !b_slice.is_empty() && b_slice.len() <= 65536 {
+        write_buf.extend_from_slice(b_slice);
         stream.write_all(write_buf).await?;
         return Ok(force_close || is_connection_close(&head.headers));
     }
 
     stream.write_all(write_buf).await?;
 
-    if !is_no_body && let Body::Bytes(bytes) = body {
-        stream.write_all(bytes).await?;
+    if !is_no_body && !b_slice.is_empty() {
+        stream.write_all(b_slice).await?;
     }
 
     Ok(force_close || is_connection_close(&head.headers))

@@ -118,6 +118,7 @@ pub async fn serve(
         }
     };
 
+    // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = L7Response::new(
             h3_resp.status,

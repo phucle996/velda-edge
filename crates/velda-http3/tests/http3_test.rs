@@ -100,9 +100,10 @@ async fn spawn_echo_server(
                                 L7Response::from_bytes(StatusCode::NO_CONTENT, Vec::new())
                             }
                             _ => {
-                                let body = match req_event.request.body {
-                                    Body::Bytes(b) => b,
-                                    Body::Empty => Bytes::from_static(b"ok"),
+                                let body = if req_event.request.body.is_empty() {
+                                    Bytes::from_static(b"ok")
+                                } else {
+                                    req_event.request.body.to_bytes()
                                 };
                                 L7Response::new(
                                     StatusCode::OK,

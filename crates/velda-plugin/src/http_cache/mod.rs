@@ -80,8 +80,8 @@ mod tests {
         );
         resp_headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
-        let mut resp1 = L7Response::from_bytes(StatusCode::OK, b"{\"items\":[1,2,3]}".to_vec());
-        *resp1.headers = resp_headers;
+        let mut resp1 = L7Response::from_bytes(StatusCode::OK, b"{\"items\":[1,2,3]}".to_vec())
+            .with_headers(resp_headers);
 
         store_plugin.on_response(&req1.headers, &mut resp1);
 
@@ -136,9 +136,9 @@ mod tests {
         );
         bypass_headers.insert(CACHE_CONTROL, "no-store, private".parse().unwrap());
 
-        let mut bypass_resp = L7Response::from_bytes(StatusCode::OK, b"{\"order\":42}".to_vec());
-        *bypass_resp.headers = bypass_headers;
-        let empty_req_headers = HeaderMap::new();
+        let mut bypass_resp = L7Response::from_bytes(StatusCode::OK, b"{\"order\":42}".to_vec())
+            .with_headers(bypass_headers);
+        let empty_req_headers = velda_core::HeaderWorkspace::empty();
 
         store_plugin.on_response(&empty_req_headers, &mut bypass_resp);
         assert_eq!(bypass_resp.headers.get("x-cache").unwrap(), "BYPASS");

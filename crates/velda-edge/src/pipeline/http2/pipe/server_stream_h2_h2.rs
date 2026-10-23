@@ -49,10 +49,14 @@ async fn forward_server_stream(
     let response = response_fut.await?;
     let (mut parts, mut body_stream) = response.into_parts();
 
+    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
+    // req_head is behind an immutable reference (&), so headers.clone() is required to populate workspace.
+    // Note: HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp =
             L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
+        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
         parts.status = l7_resp.status;
         parts.headers = l7_resp.headers.into();
     }

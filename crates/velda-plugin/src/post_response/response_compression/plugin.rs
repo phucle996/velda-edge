@@ -151,7 +151,7 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
+    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // Guard 0: Explicit Declaration Invariant
         // Both `algorithms` and `content_types` MUST be explicitly declared in configuration.
         // If unconfigured or empty, server does NOT support compression on this route and returns uncompressed.
@@ -175,12 +175,9 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         }
 
         // Guard 3: Body and Minimum Size Threshold
-        let original_bytes = match &resp.body {
-            Body::Bytes(bytes) => bytes,
-            Body::Empty => return,
-        };
+        let original_bytes = resp.body.as_slice();
 
-        if original_bytes.len() < self.config.min_length {
+        if original_bytes.is_empty() || original_bytes.len() < self.config.min_length {
             return;
         }
 
@@ -267,7 +264,7 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, StatusCode};
+    use http::StatusCode;
     use std::io::Read;
     use std::sync::Arc;
     use std::time::Duration;
@@ -294,7 +291,7 @@ mod tests {
     fn test_compression_default_priority_zstd() {
         let plugin = ResponseCompressionPlugin::new("compress-1", standard_test_config());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(
             ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br, zstd"),
@@ -340,7 +337,7 @@ mod tests {
         };
         let plugin = ResponseCompressionPlugin::new("compress-br", config);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("br"));
 
         let payload = b"Velda Edge API Gateway Brotli Compression Testing Payload".repeat(15);
@@ -367,7 +364,7 @@ mod tests {
     fn test_compression_gzip_when_only_gzip_accepted() {
         let plugin = ResponseCompressionPlugin::new("compress-gz", standard_test_config());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
         let payload = b"{\"message\":\"hello world gzip compression\"}".repeat(20);
@@ -399,7 +396,7 @@ mod tests {
             },
         );
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
         // Only 20 bytes -> below min_length
@@ -422,7 +419,7 @@ mod tests {
     fn test_compression_bypass_already_compressed() {
         let plugin = ResponseCompressionPlugin::new("compress-skip", standard_test_config());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
 
         let payload = b"already compressed by backend".repeat(20);
@@ -446,7 +443,7 @@ mod tests {
     fn test_compression_bypass_non_compressible_mime() {
         let plugin = ResponseCompressionPlugin::new("compress-mime", standard_test_config());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
 
         let payload = vec![0xFF; 500]; // Simulated PNG bytes
@@ -463,7 +460,7 @@ mod tests {
     fn test_compression_bypass_status_204_and_304() {
         let plugin = ResponseCompressionPlugin::new("compress-status", standard_test_config());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
@@ -481,7 +478,7 @@ mod tests {
         let plugin =
             ResponseCompressionPlugin::new("compress-empty", ResponseCompressionConfig::default());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
 
         let payload =
@@ -515,7 +512,7 @@ mod tests {
         assert!(plugin.config.algorithms.is_empty());
         assert!(plugin.config.content_types.is_empty());
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
 
         let payload = b"{\"message\":\"unconfigured returns raw uncompressed\"}".repeat(20);
@@ -570,7 +567,7 @@ mod tests {
             HeaderValue::from_static("public, max-age=60"),
         );
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
         // 2. Sequential execution in post_response phase:
@@ -621,7 +618,7 @@ mod tests {
         };
         let plugin = ResponseCompressionPlugin::new("compress-dict", config);
 
-        let mut req_headers = HeaderMap::new();
+        let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("zstd"));
 
         let payload = b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\",\"session\":\"active_9999\"}".repeat(15);

@@ -50,7 +50,7 @@ where
     }
 
     // 3. Read entire downstream body into RAM
-    let body = match conn.read_body(framing).await {
+    let body = match conn.read_body_into_slab(framing, None).await {
         Ok(b) => b,
         Err(Http1Error::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -150,6 +150,7 @@ where
                     .headers
                     .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
             }
+            // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
             }

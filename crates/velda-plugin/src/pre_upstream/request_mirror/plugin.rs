@@ -21,7 +21,7 @@ use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Uri};
 use tokio::sync::mpsc;
-use velda_core::{Action, Body, L7Request};
+use velda_core::{Action, L7Request};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -220,10 +220,7 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
             }
 
             // 2. Zero-copy body sharing via reference-counted Bytes
-            let body_bytes = match &req.body {
-                Body::Bytes(b) => b.clone(),
-                Body::Empty => Bytes::new(),
-            };
+            let body_bytes = req.body.to_bytes();
 
             let shadow = MirroredRequest {
                 target_upstream: self.config.mirror_upstream.clone(),
@@ -324,6 +321,7 @@ async fn dispatch_mirror_request(target: String, req: MirroredRequest) {
 mod tests {
     use super::*;
     use http::{HeaderMap, Version};
+    use velda_core::Body;
 
     fn build_test_request(method: Method, headers: HeaderMap, body: Bytes) -> L7Request {
         L7Request::new(

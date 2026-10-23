@@ -60,10 +60,7 @@ pub async fn serve(
     *h2_req.headers_mut().unwrap() = headers.clone().into();
     let h2_req = h2_req.body(()).unwrap();
 
-    let has_body = match &req.body {
-        Body::Bytes(b) => !b.is_empty(),
-        Body::Empty => false,
-    };
+    let has_body = !req.body.is_empty();
 
     let (response_fut, mut send_stream) = match client.send_request(h2_req, !has_body) {
         Ok(res) => res,
@@ -138,10 +135,8 @@ pub async fn serve(
         }
     };
 
-    if let Body::Bytes(ref b) = req.body
-        && !b.is_empty()
-    {
-        let _ = send_stream.send_data(b.clone(), true);
+    if has_body {
+        let _ = send_stream.send_data(req.body.to_bytes(), true);
     }
 
     let response = match response_fut.await {

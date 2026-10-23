@@ -119,10 +119,7 @@ impl GrpcClientRequest {
             builder = builder.header(name, val);
         }
 
-        let has_body = match &self.body {
-            Body::Bytes(b) => !b.is_empty(),
-            Body::Empty => false,
-        };
+        let has_body = !self.body.is_empty();
 
         let req = builder.body(()).map_err(GrpcError::Http)?;
         Ok((req, !has_body))

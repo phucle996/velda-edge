@@ -68,8 +68,13 @@ pub async fn serve(
     // 3. Pipe client streaming frames directly
     let pipe_res = async {
         let is_head = req_head.method == http::Method::HEAD;
+        // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response
+        // hooks are configured on this route. HeaderMap::clone() clones atomic pointer handles
+        // (Bytes) in O(1) without copying string payloads.
         let req_headers_ref = if plan.post_response_hooks.is_some() {
-            Some(req_head.headers.clone())
+            Some(velda_core::HeaderWorkspace::from_headers(
+                req_head.headers.clone(),
+            ))
         } else {
             None
         };

@@ -36,10 +36,7 @@ fn build_test_request(method: Method, uri_str: &str, headers: HeaderMap) -> L7Re
 
 fn extract_body_str(action: &Action) -> String {
     match action {
-        Action::Respond(resp) => match &resp.body {
-            Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            Body::Empty => String::new(),
-        },
+        Action::Respond(resp) => String::from_utf8_lossy(resp.body.as_slice()).to_string(),
         _ => String::new(),
     }
 }
@@ -136,10 +133,7 @@ fn test_csrf_neutralizes_w3c_simple_request_trap() {
     };
 
     assert_eq!(resp.status, StatusCode::FORBIDDEN);
-    let body_str = String::from_utf8_lossy(match &resp.body {
-        Body::Bytes(b) => b,
-        Body::Empty => b"",
-    });
+    let body_str = String::from_utf8_lossy(resp.body.as_slice());
     assert!(
         body_str.contains("CSRF"),
         "Body must state CSRF verification failed: {body_str}"
