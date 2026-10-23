@@ -1,12 +1,11 @@
 //! Pre-Upstream API Key Authentication Plugin (`api_key_auth`).
 //!
-//! Enforces fast L7 API key verification against an in-memory hash store backed by
-//! a lock-striped Dual Cache (`Positive Cache` + `Negative Cache`) to eliminate brute-force
-//! attacks and achieve sub-20ns authentication on the request hot path.
+//! Enforces high-performance L7 API key verification against an in-memory hash store backed by
+//! constant-time cryptographic verification, length bounds checking, managed header sanitization,
+//! and complete credential leakage prevention on the hot path.
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
@@ -15,7 +14,7 @@ use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::ApiKeyCache;
-use super::source::{ApiKeyEntry, KeySource, extract_token};
+use super::source::{ApiKeyEntry, KeySource, MatchedSource, extract_token_ref};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
@@ -25,13 +24,19 @@ pub struct ApiKeyAuthPlugin {
     pub id: String,
     pub sources: Vec<KeySource>,
     pub hide_credentials: bool,
-    /// Fast in-memory hash store: key_hash -> ApiKeyEntry
-    pub keys: FxHashMap<u64, ApiKeyEntry>,
-    /// Thread-safe lock-striped Dual Cache
+    /// Fast in-memory hash store: key_hash -> Vec<ApiKeyEntry> (collision-safe)
+    pub keys: FxHashMap<u64, Vec<ApiKeyEntry>>,
+    /// Thread-safe lock-striped Dual Cache (kept for API compatibility)
     pub cache: ApiKeyCache,
-    /// Pre-computed 401 response for missing API key
+    /// Minimum valid key length among configured keys
+    pub min_key_len: usize,
+    /// Maximum valid key length among configured keys
+    pub max_key_len: usize,
+    /// Pre-compiled list of all injected header names across keys to sanitize prior to injection
+    pub sanitized_headers: Vec<HeaderName>,
+    /// Pre-computed 401 response for missing API key (with Cache-Control: no-store)
     unauthorized_missing: L7Response,
-    /// Pre-computed 401 response for invalid API key
+    /// Pre-computed 401 response for invalid API key (with Cache-Control: no-store)
     unauthorized_invalid: L7Response,
 }
 
@@ -44,16 +49,33 @@ impl ApiKeyAuthPlugin {
         keys: FxHashMap<String, (String, Vec<(HeaderName, HeaderValue)>)>,
         cache: ApiKeyCache,
     ) -> Self {
-        let mut key_map = FxHashMap::default();
+        let mut key_map: FxHashMap<u64, Vec<ApiKeyEntry>> = FxHashMap::default();
+        let mut min_len = usize::MAX;
+        let mut max_len = 0usize;
+        let mut sanitized = Vec::new();
+
         for (raw_key, (consumer_id, injected_headers)) in keys {
-            let hash = ApiKeyCache::hash_key(raw_key.trim());
-            key_map.insert(
-                hash,
-                ApiKeyEntry {
-                    consumer_id,
-                    injected_headers,
-                },
-            );
+            let trimmed_key = raw_key.trim();
+            let k_len = trimmed_key.len();
+            min_len = min_len.min(k_len);
+            max_len = max_len.max(k_len);
+
+            for (hname, _) in &injected_headers {
+                if !sanitized.contains(hname) {
+                    sanitized.push(hname.clone());
+                }
+            }
+
+            let hash = ApiKeyCache::hash_key(trimmed_key);
+            key_map.entry(hash).or_default().push(ApiKeyEntry {
+                key: trimmed_key.to_string(),
+                consumer_id,
+                injected_headers,
+            });
+        }
+
+        if min_len == usize::MAX {
+            min_len = 0;
         }
 
         let unauthorized_missing =
@@ -65,6 +87,10 @@ impl ApiKeyAuthPlugin {
                 .with_header(
                     http::header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
+                )
+                .with_header(
+                    http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
                 );
 
         let unauthorized_invalid =
@@ -76,6 +102,10 @@ impl ApiKeyAuthPlugin {
                 .with_header(
                     http::header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
+                )
+                .with_header(
+                    http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
                 );
 
         Self {
@@ -84,6 +114,9 @@ impl ApiKeyAuthPlugin {
             hide_credentials,
             keys: key_map,
             cache,
+            min_key_len: min_len,
+            max_key_len: max_len,
+            sanitized_headers: sanitized,
             unauthorized_missing,
             unauthorized_invalid,
         }
@@ -163,62 +196,65 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
-        let (token_str, matched_header) = match extract_token(&self.sources, req) {
-            Some(res) => res,
-            None => {
-                return Action::Respond(self.unauthorized_missing.clone());
+        let (entry, matched_source) = {
+            let (token_str, location) = match extract_token_ref(&self.sources, req) {
+                Some(res) => res,
+                None => {
+                    return Action::Respond(self.unauthorized_missing.clone());
+                }
+            };
+
+            // 1. Fast-Reject Length Guard (< 1ns): reject tokens outside valid configured bounds
+            let token_len = token_str.len();
+            if token_len < self.min_key_len || token_len > self.max_key_len {
+                return Action::Respond(self.unauthorized_invalid.clone());
             }
+
+            // 2. Fast O(1) hash indexing
+            let key_hash = ApiKeyCache::hash_key(token_str);
+
+            // 3. Constant-time key comparison to prevent timing attacks and hash collisions
+            let matched_entry = self.keys.get(&key_hash).and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| constant_time_eq(token_str.as_bytes(), entry.key.as_bytes()))
+            });
+
+            let entry = match matched_entry {
+                Some(e) => e,
+                None => {
+                    return Action::Respond(self.unauthorized_invalid.clone());
+                }
+            };
+
+            (entry, location)
         };
 
-        let key_hash = ApiKeyCache::hash_key(token_str);
-        let now = current_epoch_secs();
-
-        // 1. Negative Cache check: fail fast on known invalid/brute-forced keys (~10ns)
-        if self.cache.is_negative(key_hash, now) {
-            return Action::Respond(self.unauthorized_invalid.clone());
-        }
-
-        // 2. Positive Cache check: ultra-fast (~15ns) instant injection
-        if let Some((_consumer_id, injected_headers)) = self.cache.get_valid(key_hash, now) {
-            if self.hide_credentials
-                && let Some(ref hdr) = matched_header
-            {
-                req.headers.remove(hdr);
-            }
-            for (name, val) in injected_headers {
-                req.headers.insert(name, val);
-            }
-            return Action::Continue;
-        }
-
-        // 3. Cache Miss: lookup in pre-compiled root keys
-        match self.keys.get(&key_hash) {
-            Some(entry) => {
-                self.cache.put_valid(
-                    key_hash,
-                    entry.consumer_id.clone(),
-                    entry.injected_headers.clone(),
-                    now,
-                );
-
-                if self.hide_credentials
-                    && let Some(ref hdr) = matched_header
-                {
+        // 4. Strip credentials if hide_credentials is true (both headers and query params)
+        if self.hide_credentials {
+            match matched_source {
+                MatchedSource::Header(hdr) => {
                     req.headers.remove(hdr);
                 }
-
-                for (name, val) in &entry.injected_headers {
-                    req.headers.insert(name.clone(), val.clone());
+                MatchedSource::Query(param) => {
+                    if let Some(new_uri) = strip_query_param(&req.uri, param) {
+                        req.uri = new_uri;
+                    }
                 }
-
-                Action::Continue
-            }
-            None => {
-                // Unknown/invalid key -> record in Negative Cache to mitigate DoS
-                self.cache.put_invalid(key_hash, now);
-                Action::Respond(self.unauthorized_invalid.clone())
             }
         }
+
+        // 5. Prevent privilege escalation: sanitize all managed identity headers
+        for hname in &self.sanitized_headers {
+            req.headers.remove(hname);
+        }
+
+        // 6. Inject authoritative consumer metadata
+        for (name, val) in &entry.injected_headers {
+            req.headers.insert(name.clone(), val.clone());
+        }
+
+        Action::Continue
     }
 
     #[inline(always)]
@@ -232,13 +268,55 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
     }
 }
 
-/// Fast wall-clock epoch time in seconds.
+/// Constant-time slice equality comparison preventing timing attacks (CWE-208).
 #[inline]
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Strips a specific query parameter from a URI, returning a new URI without the secret token.
+fn strip_query_param(uri: &http::Uri, target_param: &str) -> Option<http::Uri> {
+    let query = uri.query()?;
+    let mut new_query = String::with_capacity(query.len());
+    let mut found = false;
+
+    for part in query.split('&') {
+        let key = match part.split_once('=') {
+            Some((k, _)) => k,
+            None => part,
+        };
+        if key == target_param {
+            found = true;
+            continue;
+        }
+        if !new_query.is_empty() {
+            new_query.push('&');
+        }
+        new_query.push_str(part);
+    }
+
+    if !found {
+        return None;
+    }
+
+    let path = uri.path();
+    let new_pq_str = if new_query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{new_query}")
+    };
+
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query =
+        Some(http::uri::PathAndQuery::from_maybe_shared(bytes::Bytes::from(new_pq_str)).ok()?);
+    http::Uri::from_parts(parts).ok()
 }
 
 #[cfg(test)]
@@ -310,24 +388,10 @@ mod tests {
         // Injected headers should be present
         assert_eq!(req.headers.get("x-consumer-id").unwrap(), "org-alpha");
         assert_eq!(req.headers.get("x-consumer-tier").unwrap(), "pro");
-
-        // Subsequent call hits Positive Cache
-        let mut req2 = build_test_request(
-            {
-                let mut h = HeaderMap::new();
-                h.insert("x-api-key", "sk-secret-12345".parse().unwrap());
-                h
-            },
-            None,
-        );
-        let mut target2 = Arc::from("default-upstream");
-        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
-        assert!(matches!(action2, Action::Continue));
-        assert_eq!(req2.headers.get("x-consumer-id").unwrap(), "org-alpha");
     }
 
     #[test]
-    fn test_missing_api_key_returns_401() {
+    fn test_missing_api_key_returns_401_with_no_store() {
         let plugin = ApiKeyAuthPlugin::new(
             "api_key_auth",
             vec![KeySource::Header {
@@ -349,13 +413,17 @@ mod tests {
                     resp.headers.get("www-authenticate").unwrap(),
                     "ApiKey realm=\"velda-edge\""
                 );
+                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
             }
             _ => panic!("Expected Action::Respond(401)"),
         }
     }
 
     #[test]
-    fn test_invalid_api_key_triggers_negative_cache() {
+    fn test_invalid_api_key_rejected_with_no_store() {
+        let mut keys = FxHashMap::default();
+        keys.insert("valid-key-123".to_string(), ("user-1".to_string(), vec![]));
+
         let plugin = ApiKeyAuthPlugin::new(
             "api_key_auth",
             vec![KeySource::Header {
@@ -363,7 +431,7 @@ mod tests {
                 prefix: String::new(),
             }],
             false,
-            FxHashMap::default(),
+            keys,
             ApiKeyCache::new(4, 16, 60, 10),
         );
 
@@ -372,27 +440,16 @@ mod tests {
         headers.insert("x-api-key", bad_key.parse().unwrap());
         let mut req = build_test_request(headers, None);
 
-        // First attempt -> Miss root keys, added to negative cache
-        let mut target1 = Arc::from("default-upstream");
-        let action1 = plugin.on_upstream_request(&mut req, &mut target1);
-        match action1 {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::UNAUTHORIZED),
-            _ => panic!("Expected 401 response"),
-        }
-
-        // Second attempt -> Hits Negative Cache directly
-        let mut headers2 = HeaderMap::new();
-        headers2.insert("x-api-key", bad_key.parse().unwrap());
-        let mut req2 = build_test_request(headers2, None);
-        let mut target2 = Arc::from("default-upstream");
-        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
-        match action2 {
+        let mut target = Arc::from("default-upstream");
+        let action = plugin.on_upstream_request(&mut req, &mut target);
+        match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
                 assert_eq!(
                     resp.headers.get("www-authenticate").unwrap(),
                     "ApiKey error=\"invalid_key\""
                 );
+                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
             }
             _ => panic!("Expected 401 response"),
         }
@@ -454,6 +511,146 @@ mod tests {
     }
 
     #[test]
+    fn test_privilege_escalation_sanitizes_spoofed_headers() {
+        let mut keys = FxHashMap::default();
+        // Low privilege key only injects x-consumer-id
+        keys.insert(
+            "sk-low-priv-123".to_string(),
+            (
+                "partner-low".to_string(),
+                vec![(
+                    HeaderName::from_static("x-consumer-id"),
+                    HeaderValue::from_static("partner-low"),
+                )],
+            ),
+        );
+        // High privilege key injects x-consumer-id and x-consumer-role
+        keys.insert(
+            "sk-admin-root-456".to_string(),
+            (
+                "admin-user".to_string(),
+                vec![
+                    (
+                        HeaderName::from_static("x-consumer-id"),
+                        HeaderValue::from_static("admin-user"),
+                    ),
+                    (
+                        HeaderName::from_static("x-consumer-role"),
+                        HeaderValue::from_static("superuser"),
+                    ),
+                ],
+            ),
+        );
+
+        let plugin = ApiKeyAuthPlugin::new(
+            "api_key_auth",
+            vec![KeySource::Header {
+                name: HeaderName::from_static("x-api-key"),
+                prefix: String::new(),
+            }],
+            true,
+            keys,
+            ApiKeyCache::new(4, 16, 60, 10),
+        );
+
+        // Low priv client sends a spoofed x-consumer-role header
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "sk-low-priv-123".parse().unwrap());
+        headers.insert("x-consumer-role", "superuser".parse().unwrap());
+        let mut req = build_test_request(headers, None);
+
+        let mut target = Arc::from("default-upstream");
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req, &mut target),
+            Action::Continue
+        ));
+
+        // Assert: x-consumer-id is partner-low, and spoofed x-consumer-role is completely stripped!
+        assert_eq!(req.headers.get("x-consumer-id").unwrap(), "partner-low");
+        assert!(!req.headers.contains_key("x-consumer-role"));
+    }
+
+    #[test]
+    fn test_hide_credentials_strips_query_param() {
+        let mut keys = FxHashMap::default();
+        keys.insert(
+            "secret-token-xyz".to_string(),
+            ("user-1".to_string(), vec![]),
+        );
+
+        let plugin = ApiKeyAuthPlugin::new(
+            "api_key_auth",
+            vec![KeySource::Query {
+                param: "api_key".to_string(),
+            }],
+            true, // hide_credentials = true
+            keys,
+            ApiKeyCache::new(4, 16, 60, 10),
+        );
+
+        let mut req = build_test_request(
+            HeaderMap::new(),
+            Some("page=1&api_key=secret-token-xyz&sort=desc"),
+        );
+        let mut target = Arc::from("default-upstream");
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req, &mut target),
+            Action::Continue
+        ));
+
+        // Query param api_key should be completely removed, keeping page=1&sort=desc
+        assert_eq!(req.uri.query(), Some("page=1&sort=desc"));
+    }
+
+    #[test]
+    fn test_length_guard_fast_reject() {
+        let mut keys = FxHashMap::default();
+        keys.insert(
+            "valid-16byte-key".to_string(),
+            ("user-1".to_string(), vec![]),
+        );
+
+        let plugin = ApiKeyAuthPlugin::new(
+            "api_key_auth",
+            vec![KeySource::Header {
+                name: HeaderName::from_static("x-api-key"),
+                prefix: String::new(),
+            }],
+            false,
+            keys,
+            ApiKeyCache::new(4, 16, 60, 10),
+        );
+
+        // 1-character token (< min_key_len) -> rejected
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "a".parse().unwrap());
+        let mut req = build_test_request(headers, None);
+        let mut target = Arc::from("default-upstream");
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req, &mut target),
+            Action::Respond(_)
+        ));
+
+        // 100-character token (> max_key_len) -> rejected
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("x-api-key", "x".repeat(100).parse().unwrap());
+        let mut req2 = build_test_request(headers2, None);
+        let mut target2 = Arc::from("default-upstream");
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req2, &mut target2),
+            Action::Respond(_)
+        ));
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"hellp"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"hello", b"hello world"));
+    }
+
+    #[test]
     fn test_from_config_complete_deserialization() {
         let config = PluginConfig {
             id: "api_key_auth".into(),
@@ -465,7 +662,6 @@ mod tests {
                 ],
                 "hide_credentials": true,
                 "cache_ttl_secs": 600,
-                "negative_cache_ttl_secs": 15,
                 "keys": [
                     {
                         "key": "sk-live-alpha-1234",

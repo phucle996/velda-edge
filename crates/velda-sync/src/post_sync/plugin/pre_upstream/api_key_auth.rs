@@ -129,6 +129,17 @@ pub fn validate_api_key_auth_config(
             });
         }
 
+        if let Some(ref cid) = entry.consumer_id
+            && cid.trim().is_empty()
+        {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': key entry at index {idx} has empty 'consumer_id'"
+                ),
+            });
+        }
+
         // Validate injected headers
         for (hname, hval) in &entry.inject_headers {
             if !is_valid_header_name(hname) {
@@ -151,9 +162,18 @@ pub fn validate_api_key_auth_config(
     }
 
     // 2. Validate Sources
+    if cfg.sources.is_empty() {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': sources list cannot be empty (at least one source is required)"
+            ),
+        });
+    }
+
     for (idx, src) in cfg.sources.iter().enumerate() {
         match src {
-            ApiKeySourceConfig::Header { name, .. } => {
+            ApiKeySourceConfig::Header { name, prefix } => {
                 if !is_valid_header_name(name) {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
@@ -162,13 +182,28 @@ pub fn validate_api_key_auth_config(
                         ),
                     });
                 }
-            }
-            ApiKeySourceConfig::Query { param } => {
-                if param.trim().is_empty() {
+                if let Some(pfx) = prefix
+                    && pfx.bytes().any(|b| b == b'\r' || b == b'\n')
+                {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
                         reason: format!(
-                            "Plugin '{plugin_id}': source at index {idx} has empty query parameter name"
+                            "Plugin '{plugin_id}': source at index {idx} header prefix contains CRLF control characters"
+                        ),
+                    });
+                }
+            }
+            ApiKeySourceConfig::Query { param } => {
+                let trimmed = param.trim();
+                if trimmed.is_empty()
+                    || trimmed
+                        .bytes()
+                        .any(|b| b == b'&' || b == b'=' || b == b'#' || b.is_ascii_whitespace())
+                {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{plugin_id}': source at index {idx} has invalid query parameter name '{param}'"
                         ),
                     });
                 }
@@ -176,12 +211,12 @@ pub fn validate_api_key_auth_config(
         }
     }
 
-    // 3. Validate Cache TTL (max 86400s)
-    if cfg.cache_ttl_secs > 86400 {
+    // 3. Validate Cache TTL (1 ..= 86400s)
+    if cfg.cache_ttl_secs == 0 || cfg.cache_ttl_secs > 86400 {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': cache_ttl_secs ({}) exceeds maximum allowable 86,400s (24 hours)",
+                "Plugin '{plugin_id}': cache_ttl_secs ({}) must be between 1 and 86,400s (24 hours)",
                 cfg.cache_ttl_secs
             ),
         });
@@ -284,5 +319,58 @@ mod tests {
         let res = validate_api_key_auth_config("api_key_missing", &val);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn test_empty_sources_rejected() {
+        let val = json!({
+            "sources": [],
+            "keys": [
+                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
+            ],
+            "hide_credentials": true,
+            "cache_ttl_secs": 300
+        });
+        let res = validate_api_key_auth_config("api_key_no_src", &val);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("sources list cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_zero_cache_ttl_rejected() {
+        let val = json!({
+            "sources": [{ "type": "header", "name": "x-api-key" }],
+            "keys": [
+                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
+            ],
+            "hide_credentials": true,
+            "cache_ttl_secs": 0
+        });
+        let res = validate_api_key_auth_config("api_key_zero_ttl", &val);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("cache_ttl_secs"));
+    }
+
+    #[test]
+    fn test_invalid_query_param_rejected() {
+        let val = json!({
+            "sources": [{ "type": "query", "param": "bad=param&name" }],
+            "keys": [
+                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
+            ],
+            "hide_credentials": true,
+            "cache_ttl_secs": 60
+        });
+        let res = validate_api_key_auth_config("api_key_bad_param", &val);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("invalid query parameter name")
+        );
     }
 }
