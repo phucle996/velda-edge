@@ -406,7 +406,7 @@ mod tests {
         headers.insert(CACHE_CONTROL, "public, max-age=120".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"data\":[1,2,3]}".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -450,7 +450,7 @@ mod tests {
         headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"brotli-compressed-binary".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -486,7 +486,7 @@ mod tests {
         headers.insert(CACHE_CONTROL, "no-store, private".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"secret\":true}".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -518,7 +518,7 @@ mod tests {
 
         let large_payload = vec![b'x'; 200];
         let mut resp = L7Response::from_bytes(StatusCode::OK, large_payload);
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -551,7 +551,7 @@ mod tests {
         headers.insert(CACHE_CONTROL, "max-age=300".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(
@@ -590,7 +590,7 @@ mod tests {
         headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"news\":\"all\"}".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(
@@ -626,7 +626,7 @@ mod tests {
         headers.insert(CACHE_CONTROL, "max-age=300".parse().unwrap());
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec());
-        resp.headers = headers;
+        *resp.headers = headers;
 
         let mut req_headers = HeaderMap::new();
         req_headers.insert(http::header::AUTHORIZATION, "Bearer alice".parse().unwrap());
@@ -662,7 +662,7 @@ mod tests {
 
         let payload = b"{\"message\":\"testing asynchronous background precompression for high throughput\",\"items\":[1,2,3,4,5]}".repeat(5);
         let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers = headers;
+        *resp.headers = headers;
 
         let req_headers = HeaderMap::new();
         plugin.on_response(&req_headers, &mut resp);
@@ -716,7 +716,7 @@ mod tests {
 
         let payload = b"{\"message\":\"testing synchronous precompression when configured\",\"items\":[1,2,3,4,5]}".repeat(5);
         let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers = headers;
+        *resp.headers = headers;
 
         let req_headers = HeaderMap::new();
         plugin.on_response(&req_headers, &mut resp);

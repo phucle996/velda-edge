@@ -108,11 +108,15 @@ where
         where
             M: serde::de::MapAccess<'de>,
         {
+            let mut pre_route = Vec::new();
             let mut pre_upstream = Vec::new();
             let mut post_response = Vec::new();
 
             while let Some(key) = map.next_key::<String>()? {
                 match key.as_str() {
+                    "pre_route" => {
+                        pre_route = map.next_value::<Vec<String>>()?;
+                    }
                     "pre_upstream" => {
                         pre_upstream = map.next_value::<Vec<String>>()?;
                     }
@@ -125,7 +129,9 @@ where
                 }
             }
 
-            let mut result = Vec::with_capacity(pre_upstream.len() + post_response.len());
+            let mut result =
+                Vec::with_capacity(pre_route.len() + pre_upstream.len() + post_response.len());
+            result.extend(pre_route);
             result.extend(pre_upstream);
             result.extend(post_response);
             Ok(result)

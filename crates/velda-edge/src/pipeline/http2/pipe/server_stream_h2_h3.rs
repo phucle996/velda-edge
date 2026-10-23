@@ -127,7 +127,7 @@ pub async fn serve(
         );
         velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
         h3_resp.status = l7_resp.status;
-        h3_resp.headers = l7_resp.headers;
+        h3_resp.headers = l7_resp.headers.into();
     }
     meta.inject_response_headers(&mut h3_resp.headers);
 

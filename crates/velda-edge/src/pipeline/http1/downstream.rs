@@ -334,7 +334,7 @@ pub async fn run_http1_loop<IO>(
                     }
                 }
 
-                req_head.headers = l7_req.headers;
+                req_head.headers = l7_req.headers.into();
                 req_head.uri = l7_req.uri;
                 req_head.method = l7_req.method;
             }

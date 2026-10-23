@@ -66,7 +66,7 @@ impl GrpcUdpClientResponse {
         let head = GrpcUdpClientResponseHead::new(
             resp.status,
             grpc_status,
-            resp.headers.clone(),
+            resp.headers.clone().into(),
             HeaderMap::new(),
         );
 

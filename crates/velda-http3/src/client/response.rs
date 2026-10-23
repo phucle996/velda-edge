@@ -113,7 +113,7 @@ impl Http3ClientResponse {
         Self {
             status: resp.status,
             version: Version::HTTP_3,
-            headers: resp.headers,
+            headers: resp.headers.into(),
             body: resp.body,
         }
     }

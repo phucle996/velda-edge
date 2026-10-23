@@ -62,7 +62,8 @@ impl GrpcUdpServerRequest {
             })
             .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()));
 
-        let head = GrpcUdpServerRequestHead::new(req.uri.clone(), authority, req.headers.clone());
+        let head =
+            GrpcUdpServerRequestHead::new(req.uri.clone(), authority, req.headers.clone().into());
         Self::new(head, req.body.clone())
     }
 

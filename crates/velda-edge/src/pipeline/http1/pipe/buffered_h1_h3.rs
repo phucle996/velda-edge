@@ -157,7 +157,7 @@ where
             let server_resp = Http1ServerResponse::new(
                 l7_resp.status,
                 http::Version::HTTP_11,
-                l7_resp.headers,
+                l7_resp.headers.into(),
                 l7_resp.body,
             );
             conn.send_response(&server_resp).await?;

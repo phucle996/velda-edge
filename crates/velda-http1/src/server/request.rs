@@ -148,7 +148,7 @@ impl Http1ServerRequest {
             method: req.method,
             uri: req.uri,
             version: req.version,
-            headers: req.headers,
+            headers: req.headers.into(),
             body: req.body,
         }
     }

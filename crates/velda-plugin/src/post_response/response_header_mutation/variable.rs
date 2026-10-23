@@ -105,7 +105,7 @@ mod tests {
         let resp = L7Response {
             status: StatusCode::OK,
             version: Version::HTTP_11,
-            headers,
+            headers: headers.into(),
             body: Body::Empty,
         };
 

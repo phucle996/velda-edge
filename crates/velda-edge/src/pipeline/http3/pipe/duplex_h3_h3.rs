@@ -98,7 +98,7 @@ pub async fn serve(
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         stream_resp.status = l7_resp.status;
-        stream_resp.headers = l7_resp.headers;
+        stream_resp.headers = l7_resp.headers.into();
     }
 
     if is_head || is_no_body {

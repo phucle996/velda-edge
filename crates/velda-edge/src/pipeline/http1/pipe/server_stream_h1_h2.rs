@@ -222,7 +222,7 @@ where
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
         status = l7_resp.status;
-        headers = l7_resp.headers;
+        headers = l7_resp.headers.into();
     }
     meta.inject_response_headers(&mut headers);
     let resp_head = Http1ServerResponseHead::new(status, http::Version::HTTP_11, headers);

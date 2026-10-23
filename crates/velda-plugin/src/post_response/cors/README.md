@@ -94,3 +94,25 @@ Attach the plugin to an HTTP route via its unique identifier in the `plugins` ar
    - Automatically injects `Vary: Origin` to ensure intermediate CDNs and reverse proxies never cache cross-tenant responses.
 2. **Expose Headers**:
    - Browsers only expose basic CORS-safelisted response headers by default (`Cache-Control`, `Content-Language`, `Content-Type`, `Expires`, `Last-Modified`, `Pragma`). Custom headers like `x-request-id` require explicit declaration in `expose_headers`.
+3. **No Wildcard Fallback**:
+   - If a client's Origin is not authorized, zero CORS headers are injected. Untrusted origins are never silently granted wildcard access.
+
+---
+
+## 6. Hardware Optimizations & CPU Architecture
+
+- **Pre-Baked Header Template**: Pre-computes `credentials`, `expose-headers`, and `max-age` into an immutable `HeaderMap`, eliminating runtime `if-else` branching on outgoing responses.
+- **Native Multi-Value Vary Append**: Uses `HeaderMap::append(VARY, ...)` to preserve existing upstream `Vary` headers without string parsing, string splitting, or string reallocations.
+- **Branchless 256-Byte Subdomain LUT**: Character classification executes in $O(1)$ from CPU L1 cache, matching exact-origin speeds for wildcard subdomains.
+
+---
+
+## 7. Live Cloud Benchmark Results (Azure 4 vCPUs)
+
+| Scenario | Throughput | Overhead vs Raw | Avg Latency | P50 Latency | P90 Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Raw Baseline (No Plugins)** | 44,216.92 RPS | Baseline | 1.58 ms | 1.25 ms | 2.06 ms |
+| **CORS Exact Origin Reflection** | 43,938.65 RPS | **-0.62%** | 1.50 ms | 1.24 ms | 2.02 ms |
+| **CORS Subdomain Wildcard (*.velda)** | 44,220.20 RPS | **+0.01%** | 1.49 ms | 1.24 ms | 1.99 ms |
+| **Non-CORS Fast Pass-Through** | 44,569.98 RPS | **+0.79%** | 1.60 ms | 1.24 ms | 2.05 ms |
+

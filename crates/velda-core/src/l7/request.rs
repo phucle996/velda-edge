@@ -4,7 +4,9 @@
 //! authentication, WAF, rate limiting, and upstream processing.
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, Uri, Version};
+use http::{Method, Uri, Version};
+
+use crate::buffer::HeaderWorkspace;
 
 /// HTTP request body.
 ///
@@ -42,7 +44,7 @@ impl Body {
 }
 
 /// HTTP request processed by the Velda L7 pipeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L7Request {
     /// HTTP method.
     pub method: Method,
@@ -53,22 +55,28 @@ pub struct L7Request {
     /// HTTP protocol version.
     pub version: Version,
 
-    /// Request headers.
-    pub headers: HeaderMap,
+    /// Request headers backed by a pre-allocated [`HeaderWorkspace`].
+    pub headers: HeaderWorkspace,
 
     /// Request body.
     pub body: Body,
 }
 
 impl L7Request {
-    /// Creates a new HTTP request.
+    /// Creates a new HTTP request from components.
     #[inline]
-    pub fn new(method: Method, uri: Uri, version: Version, headers: HeaderMap, body: Body) -> Self {
+    pub fn new(
+        method: Method,
+        uri: Uri,
+        version: Version,
+        headers: impl Into<HeaderWorkspace>,
+        body: Body,
+    ) -> Self {
         Self {
             method,
             uri,
             version,
-            headers,
+            headers: headers.into(),
             body,
         }
     }

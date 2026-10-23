@@ -181,7 +181,7 @@ async fn test_http3_roundtrip_requests() {
         method: Method::GET,
         uri: "/get".parse::<Uri>().unwrap(),
         version: http::Version::HTTP_3,
-        headers: http::HeaderMap::new(),
+        headers: velda_core::HeaderWorkspace::empty(),
         body: Body::Empty,
     };
     let get_resp = client.send_request(get_req).await.unwrap();
@@ -197,7 +197,7 @@ async fn test_http3_roundtrip_requests() {
         headers: {
             let mut h = http::HeaderMap::new();
             h.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-            h
+            h.into()
         },
         body: Body::Bytes(Bytes::from(payload.clone())),
     };
@@ -214,7 +214,7 @@ async fn test_http3_roundtrip_requests() {
         method: Method::HEAD,
         uri: "/head".parse::<Uri>().unwrap(),
         version: http::Version::HTTP_3,
-        headers: http::HeaderMap::new(),
+        headers: velda_core::HeaderWorkspace::empty(),
         body: Body::Empty,
     };
     let head_resp = client.send_request(head_req).await.unwrap();
@@ -226,7 +226,7 @@ async fn test_http3_roundtrip_requests() {
         method: Method::DELETE,
         uri: "/no-content".parse::<Uri>().unwrap(),
         version: http::Version::HTTP_3,
-        headers: http::HeaderMap::new(),
+        headers: velda_core::HeaderWorkspace::empty(),
         body: Body::Empty,
     };
     let no_content_resp = client.send_request(no_content_req).await.unwrap();
@@ -242,7 +242,7 @@ async fn test_http3_roundtrip_requests() {
                 method: Method::POST,
                 uri: format!("/concurrent-{}", i).parse::<Uri>().unwrap(),
                 version: http::Version::HTTP_3,
-                headers: http::HeaderMap::new(),
+                headers: velda_core::HeaderWorkspace::empty(),
                 body: Body::Bytes(Bytes::from(format!("payload-{}", i))),
             };
             let resp = client_clone.send_request(req).await.unwrap();
@@ -282,7 +282,7 @@ async fn test_http3_payload_limit_enforced() {
         method: Method::POST,
         uri: "/bomb".parse::<Uri>().unwrap(),
         version: http::Version::HTTP_3,
-        headers: http::HeaderMap::new(),
+        headers: velda_core::HeaderWorkspace::empty(),
         body: Body::Bytes(Bytes::from(bomb_payload)),
     };
     let bomb_res = client.send_request(bomb_req).await;
@@ -293,7 +293,7 @@ async fn test_http3_payload_limit_enforced() {
         method: Method::GET,
         uri: "/valid".parse::<Uri>().unwrap(),
         version: http::Version::HTTP_3,
-        headers: http::HeaderMap::new(),
+        headers: velda_core::HeaderWorkspace::empty(),
         body: Body::Empty,
     };
     let valid_resp = client.send_request(valid_req).await.unwrap();

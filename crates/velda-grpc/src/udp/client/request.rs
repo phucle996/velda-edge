@@ -87,7 +87,11 @@ impl GrpcUdpClientRequest {
             .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()));
 
         Self {
-            head: GrpcUdpClientRequestHead::new(req.uri.clone(), authority, req.headers.clone()),
+            head: GrpcUdpClientRequestHead::new(
+                req.uri.clone(),
+                authority,
+                req.headers.clone().into(),
+            ),
             body: req.body.clone(),
         }
     }

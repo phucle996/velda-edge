@@ -180,7 +180,7 @@ impl Http1ClientResponse {
         Self {
             status: resp.status,
             version: resp.version,
-            headers: resp.headers,
+            headers: resp.headers.into(),
             body: resp.body,
         }
     }

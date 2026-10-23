@@ -31,13 +31,16 @@ use std::time::{Duration, Instant};
 use http::HeaderMap;
 
 /// Reusable workspace holding a pre-allocated, clearable [`HeaderMap`].
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderWorkspace {
     headers: HeaderMap,
     initial_capacity: usize,
 }
 
 impl HeaderWorkspace {
+    /// Default baseline capacity commit (32 header entries).
+    pub const DEFAULT_CAPACITY: usize = 32;
+
     /// Creates and pre-warms a header workspace with specified initial bucket capacity.
     pub fn new(capacity: usize) -> Self {
         let mut map = HeaderMap::with_capacity(capacity);
@@ -48,6 +51,40 @@ impl HeaderWorkspace {
             headers: map,
             initial_capacity: capacity,
         }
+    }
+
+    /// Creates an empty pre-warmed workspace with default baseline capacity (32 headers).
+    #[inline(always)]
+    pub fn empty() -> Self {
+        Self::new(Self::DEFAULT_CAPACITY)
+    }
+
+    /// Creates and pre-warms a header workspace with specified initial capacity.
+    #[inline(always)]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+
+    /// Wraps an existing [`HeaderMap`] into a [`HeaderWorkspace`].
+    #[inline]
+    pub fn from_headers(headers: HeaderMap) -> Self {
+        let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
+        Self {
+            headers,
+            initial_capacity: cap,
+        }
+    }
+
+    /// Unwraps and returns the inner [`HeaderMap`].
+    #[inline(always)]
+    pub fn into_inner(self) -> HeaderMap {
+        self.headers
+    }
+
+    /// Returns the initial baseline capacity of this workspace.
+    #[inline(always)]
+    pub fn initial_capacity(&self) -> usize {
+        self.initial_capacity
     }
 
     /// Borrows the internal header map mutably.
@@ -92,6 +129,76 @@ impl HeaderWorkspace {
         if self.headers.capacity() > self.initial_capacity * 4 {
             self.headers = HeaderMap::with_capacity(self.initial_capacity);
         }
+    }
+}
+
+impl Default for HeaderWorkspace {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl std::ops::Deref for HeaderWorkspace {
+    type Target = HeaderMap;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.headers
+    }
+}
+
+impl std::ops::DerefMut for HeaderWorkspace {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.headers
+    }
+}
+
+impl AsRef<HeaderMap> for HeaderWorkspace {
+    #[inline(always)]
+    fn as_ref(&self) -> &HeaderMap {
+        &self.headers
+    }
+}
+
+impl AsMut<HeaderMap> for HeaderWorkspace {
+    #[inline(always)]
+    fn as_mut(&mut self) -> &mut HeaderMap {
+        &mut self.headers
+    }
+}
+
+impl From<HeaderMap> for HeaderWorkspace {
+    #[inline(always)]
+    fn from(headers: HeaderMap) -> Self {
+        Self::from_headers(headers)
+    }
+}
+
+impl From<HeaderWorkspace> for HeaderMap {
+    #[inline(always)]
+    fn from(ws: HeaderWorkspace) -> Self {
+        ws.into_inner()
+    }
+}
+
+impl FromIterator<(http::header::HeaderName, http::header::HeaderValue)> for HeaderWorkspace {
+    fn from_iter<T: IntoIterator<Item = (http::header::HeaderName, http::header::HeaderValue)>>(
+        iter: T,
+    ) -> Self {
+        let headers = HeaderMap::from_iter(iter);
+        Self::from_headers(headers)
+    }
+}
+
+impl<'a> IntoIterator for &'a HeaderWorkspace {
+    type Item = (&'a http::header::HeaderName, &'a http::header::HeaderValue);
+    type IntoIter = http::header::Iter<'a, http::header::HeaderValue>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.headers.iter()
     }
 }
 

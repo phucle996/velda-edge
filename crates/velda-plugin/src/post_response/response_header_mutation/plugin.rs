@@ -178,7 +178,7 @@ mod tests {
         headers.insert("content-type", HeaderValue::from_static("application/json"));
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -210,7 +210,7 @@ mod tests {
         headers.insert("x-request-id", HeaderValue::from_static("req-999"));
 
         let mut resp = L7Response::from_bytes(StatusCode::CREATED, "{}");
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -238,7 +238,7 @@ mod tests {
         headers.insert("x-existing", HeaderValue::from_static("original-val"));
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);
@@ -266,7 +266,7 @@ mod tests {
         headers.insert("vary", HeaderValue::from_static("Accept-Encoding"));
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{}");
-        resp.headers = headers;
+        *resp.headers = headers;
         let req_headers = HeaderMap::new();
 
         plugin.on_response(&req_headers, &mut resp);

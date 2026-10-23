@@ -170,7 +170,7 @@ where
                     &mut l7_resp,
                 );
                 resp.status = l7_resp.status;
-                resp.headers = l7_resp.headers;
+                resp.headers = l7_resp.headers.into();
                 if !matches!(l7_resp.body, velda_core::Body::Empty) {
                     resp.body = l7_resp.body;
                 }

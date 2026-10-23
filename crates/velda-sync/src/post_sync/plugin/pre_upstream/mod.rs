@@ -14,6 +14,7 @@
 
 pub mod api_key_auth;
 pub mod canary;
+pub mod csrf;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
 pub mod hmac_auth;
@@ -29,6 +30,7 @@ pub mod w3c_trace_context;
 
 pub use api_key_auth::*;
 pub use canary::*;
+pub use csrf::*;
 pub use grpc_fault_injection::*;
 pub use header_mutation::*;
 pub use hmac_auth::*;

@@ -161,7 +161,7 @@ pub async fn serve(
             L7Response::new(status, http::Version::HTTP_3, clean_headers, Body::Empty);
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         status = l7_resp.status;
-        clean_headers = l7_resp.headers;
+        clean_headers = l7_resp.headers.into();
     }
 
     // Handle responses with no body (HEAD, 1xx, 204, 304)

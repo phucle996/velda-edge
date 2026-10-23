@@ -90,7 +90,7 @@ impl Http2ClientRequest {
 
     /// Constructs from canonical [`L7Request`].
     pub fn from_l7_request(req: L7Request) -> Self {
-        let head = Http2ClientRequestHead::new(req.method, req.uri, req.headers);
+        let head = Http2ClientRequestHead::new(req.method, req.uri, req.headers.into());
         Self::new(head, req.body)
     }
 }

@@ -137,7 +137,7 @@ pub async fn serve(
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         status = l7_resp.status;
-        clean_headers = l7_resp.headers;
+        clean_headers = l7_resp.headers.into();
     }
 
     // Open downstream HTTP/3 streaming response

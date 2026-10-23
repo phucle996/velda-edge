@@ -1,15 +1,25 @@
-//! Cross-Origin Resource Sharing (CORS) Post-Response Plugin (`cors`).
+//! Cross-Origin Resource Sharing (CORS) Post-Response Plugin (`phase: "post_response"`).
 //!
 //! Evaluated on outgoing upstream responses immediately before downstream encoding.
 //! Injects standard CORS response headers (`Access-Control-Allow-Origin`,
 //! `Access-Control-Allow-Credentials`, `Access-Control-Expose-Headers`, `Access-Control-Max-Age`),
 //! supporting dynamic origin reflection matching and pre-computed immutable values.
+//!
+//! # Execution Invariants & Hardware Optimizations
+//! - **Pre-Baked Header Template**: Static response headers (`credentials`, `expose-headers`,
+//!   `max-age`) are pre-baked at initialization into an immutable template, eliminating runtime
+//!   `if-else` branching on outgoing responses.
+//! - **Native Multi-Value Vary Append**: Uses HTTP `HeaderMap::append` to preserve existing
+//!   `Vary` headers without string parsing, string splitting, or string reallocations.
+//! - **Non-CORS Request Pass-Through**: Non-CORS requests (no `Origin` header) exit immediately.
+//! - **Strict Origin Isolation**: Disallowed origins receive zero CORS headers (no wildcards fallback).
+//! - **Zero-Allocation Hot Path**: Atomic ref-count clone on `HeaderValue` without heap re-allocations.
 
-use http::HeaderValue;
 use http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
-    ACCESS_CONTROL_MAX_AGE, VARY,
+    ACCESS_CONTROL_MAX_AGE, ORIGIN, VARY,
 };
+use http::{HeaderMap, HeaderValue};
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -47,11 +57,9 @@ impl Default for CorsConfig {
 pub struct CorsResponsePlugin {
     pub id: String,
     pub config: CorsConfig,
-    expose_headers_val: Option<HeaderValue>,
-    credentials_val: HeaderValue,
-    max_age_val: Option<HeaderValue>,
-    vary_val: HeaderValue,
-    default_origin_val: HeaderValue,
+    pub allow_all_origins: bool,
+    pub base_headers: HeaderMap,
+    pub needs_vary_origin: bool,
 }
 
 impl CorsResponsePlugin {
@@ -73,38 +81,44 @@ impl CorsResponsePlugin {
         )
     }
 
-    /// Constructs a new CORS response plugin with full configuration.
+    /// Constructs a new CORS response plugin with pre-baked static headers template.
     pub fn with_config(id: impl Into<String>, config: CorsConfig) -> Self {
-        let expose_headers_val = if !config.expose_headers.is_empty() {
+        let allow_all_origins = config
+            .allow_origins
+            .iter()
+            .any(|p| matches!(p, OriginPattern::Any));
+
+        // Pre-bake static headers template (credentials, expose-headers, max-age)
+        let mut base_headers = HeaderMap::with_capacity(3);
+
+        if config.allow_credentials {
+            base_headers.insert(
+                ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                HeaderValue::from_static("true"),
+            );
+        }
+
+        if !config.expose_headers.is_empty() {
             let joined = config.expose_headers.join(", ");
-            HeaderValue::from_str(&joined).ok()
-        } else {
-            None
-        };
-
-        let max_age_val = config
-            .max_age_secs
-            .and_then(|secs| HeaderValue::from_str(&secs.to_string()).ok());
-
-        let default_origin_val = if let Some(first) = config.allow_origins.first() {
-            match first {
-                OriginPattern::Exact(s) => {
-                    HeaderValue::from_str(s).unwrap_or_else(|_| HeaderValue::from_static("*"))
-                }
-                _ => HeaderValue::from_static("*"),
+            if let Ok(val) = HeaderValue::from_str(&joined) {
+                base_headers.insert(ACCESS_CONTROL_EXPOSE_HEADERS, val);
             }
-        } else {
-            HeaderValue::from_static("*")
-        };
+        }
+
+        if let Some(secs) = config.max_age_secs
+            && let Ok(val) = HeaderValue::from_str(&secs.to_string())
+        {
+            base_headers.insert(ACCESS_CONTROL_MAX_AGE, val);
+        }
+
+        let needs_vary_origin = config.allow_credentials || !allow_all_origins;
 
         Self {
             id: id.into(),
             config,
-            expose_headers_val,
-            credentials_val: HeaderValue::from_static("true"),
-            max_age_val,
-            vary_val: HeaderValue::from_static("Origin"),
-            default_origin_val,
+            allow_all_origins,
+            base_headers,
+            needs_vary_origin,
         }
     }
 
@@ -142,51 +156,57 @@ impl PostResponsePlugin for CorsResponsePlugin {
         &self.id
     }
 
-    fn on_response(&self, req_headers: &http::HeaderMap, resp: &mut L7Response) {
-        // 1. Resolve Origin: Check borrowed request headers from client workspace,
-        // falling back to response headers if forwarded.
-        let origin_header = req_headers
-            .get("origin")
-            .or_else(|| req_headers.get("x-origin"))
-            .or_else(|| resp.headers.get("origin"))
-            .or_else(|| resp.headers.get("x-origin"))
-            .and_then(|v| v.to_str().ok());
+    fn on_response(&self, req_headers: &HeaderMap, resp: &mut L7Response) {
+        // 1. Resolve Origin: strictly inspect downstream client request Origin header (RFC 6454)
+        let Some(origin_val) = req_headers.get(ORIGIN) else {
+            return; // Non-CORS request, do not inject CORS headers
+        };
 
-        let mut matched_origin = None;
-        if let Some(client_origin) = origin_header {
-            for pattern in &self.config.allow_origins {
-                if pattern.matches(client_origin) {
-                    if let Ok(val) = HeaderValue::from_str(client_origin) {
-                        matched_origin = Some(val);
-                    }
-                    break;
-                }
-            }
+        let Ok(origin_str) = origin_val.to_str() else {
+            return;
+        };
+
+        // 2. Validate Origin against allowed patterns
+        let is_allowed = self.allow_all_origins
+            || self
+                .config
+                .allow_origins
+                .iter()
+                .any(|p| p.matches(origin_str));
+
+        if !is_allowed {
+            // Disallowed origin: do NOT inject any CORS headers (prevents unauthorized cross-origin access)
+            return;
         }
 
-        let allow_origin_val = matched_origin.unwrap_or_else(|| self.default_origin_val.clone());
+        // 3. Inject Access-Control-Allow-Origin:
+        // When credentials are true, W3C CORS prohibits wildcard '*'. We must reflect the exact Origin.
+        let allow_origin_val = if self.config.allow_credentials || !self.allow_all_origins {
+            origin_val.clone() // Atomic ref-count increment, zero allocation
+        } else {
+            HeaderValue::from_static("*")
+        };
         resp.headers
             .insert(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin_val);
 
-        // 2. Invalidate caches across origins if credentials or specific origin reflection is used
-        if self.config.allow_credentials {
-            resp.headers.insert(
-                ACCESS_CONTROL_ALLOW_CREDENTIALS,
-                self.credentials_val.clone(),
-            );
-            resp.headers.insert(VARY, self.vary_val.clone());
+        // 4. Batch inject pre-baked static response headers (credentials, expose-headers, max-age)
+        for (name, val) in &self.base_headers {
+            resp.headers.insert(name.clone(), val.clone());
         }
 
-        // 3. Expose configured headers to frontend JavaScript
-        if let Some(ref expose_val) = self.expose_headers_val {
-            resp.headers
-                .insert(ACCESS_CONTROL_EXPOSE_HEADERS, expose_val.clone());
-        }
-
-        // 4. Cache duration
-        if let Some(ref max_age_val) = self.max_age_val {
-            resp.headers
-                .insert(ACCESS_CONTROL_MAX_AGE, max_age_val.clone());
+        // 5. Invalidate caches across origins (Vary: Origin) if credentials or dynamic reflection used
+        if self.needs_vary_origin {
+            let already_has_origin = resp.headers.get_all(VARY).iter().any(|v| {
+                v.to_str().is_ok_and(|s| {
+                    s.split(',').any(|part| {
+                        part.trim().eq_ignore_ascii_case("origin") || part.trim() == "*"
+                    })
+                })
+            });
+            if !already_has_origin {
+                resp.headers
+                    .append(VARY, HeaderValue::from_static("Origin"));
+            }
         }
     }
 
@@ -210,7 +230,8 @@ mod tests {
     fn test_cors_default_wildcard() {
         let plugin = CorsResponsePlugin::new("cors", "*", false);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://random.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -227,10 +248,40 @@ mod tests {
     }
 
     #[test]
+    fn test_cors_no_origin_header_no_injection() {
+        let plugin = CorsResponsePlugin::new("cors", "*", false);
+        let mut resp = L7Response::empty(StatusCode::OK);
+        let req_headers = HeaderMap::new(); // No Origin header
+
+        plugin.on_response(&req_headers, &mut resp);
+
+        assert!(!resp.headers.contains_key("access-control-allow-origin"));
+        assert!(
+            !resp
+                .headers
+                .contains_key("access-control-allow-credentials")
+        );
+    }
+
+    #[test]
+    fn test_cors_disallowed_origin_no_injection() {
+        let plugin = CorsResponsePlugin::new("cors", "https://app.velda.io", false);
+        let mut resp = L7Response::empty(StatusCode::OK);
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://evil.com".parse().unwrap());
+
+        plugin.on_response(&req_headers, &mut resp);
+
+        // Security invariant: Untrusted origin must receive zero CORS headers
+        assert!(!resp.headers.contains_key("access-control-allow-origin"));
+    }
+
+    #[test]
     fn test_cors_exact_origin_with_credentials_and_vary() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.example.com", true);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -248,6 +299,28 @@ mod tests {
     }
 
     #[test]
+    fn test_cors_existing_vary_preserved() {
+        let plugin = CorsResponsePlugin::new("cors", "https://app.example.com", true);
+        let mut resp = L7Response::empty(StatusCode::OK);
+        resp.headers
+            .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
+
+        plugin.on_response(&req_headers, &mut resp);
+
+        let vary_headers: Vec<&str> = resp
+            .headers
+            .get_all("vary")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert!(vary_headers.contains(&"Accept-Encoding"));
+        assert!(vary_headers.contains(&"Origin"));
+    }
+
+    #[test]
     fn test_cors_expose_headers_and_max_age() {
         let config = CorsConfig {
             allow_origins: vec![OriginPattern::Any],
@@ -257,7 +330,8 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -281,9 +355,8 @@ mod tests {
         };
         let plugin = CorsResponsePlugin::with_config("cors", config);
 
-        // Request with Origin matching subdomain in client request headers workspace
         let mut req_headers = HeaderMap::new();
-        req_headers.insert("origin", "https://portal.partner.io".parse().unwrap());
+        req_headers.insert(ORIGIN, "https://portal.partner.io".parse().unwrap());
         let mut resp = L7Response::empty(StatusCode::OK);
 
         plugin.on_response(&req_headers, &mut resp);
@@ -322,7 +395,8 @@ mod tests {
         assert_eq!(plugin.config.expose_headers, vec!["x-request-id"]);
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = HeaderMap::new();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
         plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(

@@ -177,7 +177,8 @@ impl Http2Responder {
             || response.status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !response.body.is_empty();
-        let http_response = self.prepare_h2_response_owned(response.status, response.headers)?;
+        let http_response =
+            self.prepare_h2_response_owned(response.status, response.headers.into())?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
         if has_body {

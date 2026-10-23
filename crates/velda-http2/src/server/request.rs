@@ -231,7 +231,7 @@ impl Http2ServerRequest {
 
     /// Constructs an [`Http2ServerRequest`] from a canonical [`L7Request`].
     pub fn from_l7_request(req: L7Request) -> Self {
-        let head = Http2ServerRequestHead::new(req.method, req.uri, req.headers, None);
+        let head = Http2ServerRequestHead::new(req.method, req.uri, req.headers.into(), None);
         Self::new(head, req.body)
     }
 }

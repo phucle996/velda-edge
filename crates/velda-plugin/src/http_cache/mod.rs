@@ -81,7 +81,7 @@ mod tests {
         resp_headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
 
         let mut resp1 = L7Response::from_bytes(StatusCode::OK, b"{\"items\":[1,2,3]}".to_vec());
-        resp1.headers = resp_headers;
+        *resp1.headers = resp_headers;
 
         store_plugin.on_response(&req1.headers, &mut resp1);
 
@@ -137,7 +137,7 @@ mod tests {
         bypass_headers.insert(CACHE_CONTROL, "no-store, private".parse().unwrap());
 
         let mut bypass_resp = L7Response::from_bytes(StatusCode::OK, b"{\"order\":42}".to_vec());
-        bypass_resp.headers = bypass_headers;
+        *bypass_resp.headers = bypass_headers;
         let empty_req_headers = HeaderMap::new();
 
         store_plugin.on_response(&empty_req_headers, &mut bypass_resp);

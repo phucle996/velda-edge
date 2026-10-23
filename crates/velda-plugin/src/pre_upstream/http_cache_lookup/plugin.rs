@@ -253,12 +253,12 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
                     );
                 }
 
-                let resp = L7Response {
-                    status: entry.status,
-                    version: Version::HTTP_11,
-                    headers: resp_headers,
-                    body: Body::Bytes(payload),
-                };
+                let resp = L7Response::new(
+                    entry.status,
+                    Version::HTTP_11,
+                    resp_headers,
+                    Body::Bytes(payload),
+                );
 
                 return Action::Respond(resp);
             }

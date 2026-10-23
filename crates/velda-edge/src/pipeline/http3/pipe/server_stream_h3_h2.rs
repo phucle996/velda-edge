@@ -56,7 +56,7 @@ pub async fn serve(
         .method(req.method.clone())
         .uri(req.uri.clone())
         .version(Version::HTTP_2);
-    *h2_req.headers_mut().unwrap() = headers;
+    *h2_req.headers_mut().unwrap() = headers.into();
     let h2_req = h2_req.body(()).unwrap();
 
     let has_body = match &req.body {
@@ -121,7 +121,7 @@ pub async fn serve(
             L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         parts.status = l7_resp.status;
-        parts.headers = l7_resp.headers;
+        parts.headers = l7_resp.headers.into();
     }
 
     let is_head = req.method == http::Method::HEAD;

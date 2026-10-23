@@ -1,24 +1,30 @@
-use http::{HeaderMap, StatusCode, Version};
+use http::{StatusCode, Version};
 
 use super::request::Body;
+use crate::buffer::HeaderWorkspace;
 
 /// HTTP response returned by the Velda L7 pipeline or upstream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L7Response {
     pub status: StatusCode,
     pub version: Version,
-    pub headers: HeaderMap,
+    pub headers: HeaderWorkspace,
     pub body: Body,
 }
 
 impl L7Response {
     /// Creates a new HTTP response.
     #[inline]
-    pub fn new(status: StatusCode, version: Version, headers: HeaderMap, body: Body) -> Self {
+    pub fn new(
+        status: StatusCode,
+        version: Version,
+        headers: impl Into<HeaderWorkspace>,
+        body: Body,
+    ) -> Self {
         Self {
             status,
             version,
-            headers,
+            headers: headers.into(),
             body,
         }
     }
@@ -35,7 +41,7 @@ impl L7Response {
         Self {
             status,
             version: Version::HTTP_11,
-            headers: HeaderMap::new(),
+            headers: HeaderWorkspace::empty(),
             body: Body::Empty,
         }
     }
@@ -46,7 +52,7 @@ impl L7Response {
         Self {
             status,
             version: Version::HTTP_11,
-            headers: HeaderMap::new(),
+            headers: HeaderWorkspace::empty(),
             body: Body::Bytes(bytes.into()),
         }
     }

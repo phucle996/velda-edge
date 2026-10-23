@@ -167,7 +167,7 @@ where
             );
             velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            resp_head.headers = l7_resp.headers;
+            resp_head.headers = l7_resp.headers.into();
         }
         meta.inject_response_headers(&mut resp_head.headers);
 
@@ -640,7 +640,7 @@ where
             );
             velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            resp_head.headers = l7_resp.headers;
+            resp_head.headers = l7_resp.headers.into();
         }
         meta.inject_response_headers(&mut resp_head.headers);
 

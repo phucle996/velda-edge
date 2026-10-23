@@ -119,7 +119,7 @@ pub async fn serve(
             server_stream.respond.send_unary_response(
                 status,
                 body_bytes.as_deref(),
-                Some(resp.headers),
+                Some(resp.headers.into()),
             )?;
             Ok(())
         }

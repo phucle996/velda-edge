@@ -14,6 +14,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod api_key_auth;
 pub mod canary;
+pub mod csrf;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
 pub mod hmac_auth;
@@ -29,6 +30,7 @@ pub mod w3c_trace_context;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HeaderRule};
+pub use csrf::{CsrfConfig, CsrfPlugin};
 pub use grpc_fault_injection::{
     GrpcAbortConfig, GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin,
     GrpcTargetMatcher,
@@ -132,6 +134,7 @@ pub fn instantiate(
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
         "w3c_trace_context" => Ok(Arc::new(W3cTraceContextPlugin::from_config(config)?)),
+        "csrf" | "csrf_protection" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
         "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(

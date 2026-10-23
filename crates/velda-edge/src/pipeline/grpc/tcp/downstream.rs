@@ -246,7 +246,7 @@ async fn dispatch_grpc_tcp_request_stream(
                 }
             }
 
-            server_stream.parts.headers = l7_req.headers;
+            server_stream.parts.headers = l7_req.headers.into();
             server_stream.parts.uri = l7_req.uri;
             server_stream.parts.method = l7_req.method;
         }

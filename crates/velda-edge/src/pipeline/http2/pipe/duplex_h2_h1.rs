@@ -150,7 +150,7 @@ pub async fn serve(
             );
             velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            clean_headers = l7_resp.headers;
+            clean_headers = l7_resp.headers.into();
         }
         meta.inject_response_headers(&mut clean_headers);
 

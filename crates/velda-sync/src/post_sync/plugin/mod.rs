@@ -103,6 +103,8 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "grpc_fault_injection" => Some("pre_upstream"),
         "request_termination" => Some("pre_upstream"),
         "w3c_trace_context" => Some("pre_upstream"),
+        "csrf" => Some("pre_upstream"),
+        "csrf_protection" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),

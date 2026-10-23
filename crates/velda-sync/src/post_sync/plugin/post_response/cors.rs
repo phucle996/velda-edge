@@ -3,8 +3,11 @@
 //! Enforces a strict declarative contract for Cross-Origin Resource Sharing response headers.
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **RFC 6454 Security Invariant**: If `allow_credentials` is true, wildcard `*` origin is strictly forbidden.
-//! - **Explicit Parameters**: `allow_origins`, `allow_credentials`, `expose_headers`, `max_age_secs` are mandatory.
+//! - **Explicit Origins**: `allow_origins` must be non-empty.
+//! - **Security Invariant (RFC 6454 / W3C Fetch Spec)**: If `allow_credentials` is `true`, wildcard origin `"*"` and `"null"` are strictly forbidden.
+//! - **Origin Grammar**: Absolute origins must start with `http://` or `https://` and contain no path (`/`), query (`?`), fragment (`#`), or userinfo (`@`).
+//! - **Expose Headers Restriction**: If `allow_credentials` is `true`, wildcard `"*"` in `expose_headers` is forbidden by W3C Fetch specification.
+//! - **Preflight Cache Bounds**: `max_age_secs`, if specified, must not exceed 86,400 seconds (24 hours).
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +26,106 @@ pub struct CorsResponseConfig {
     pub max_age_secs: Option<u64>,
 }
 
+/// Validates that an origin pattern conforms to RFC 6454 and security standards.
+fn validate_origin_pattern(
+    pattern: &str,
+    allow_credentials: bool,
+    plugin_id: &str,
+) -> Result<(), SyncError> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!("Plugin '{plugin_id}': origin pattern cannot be empty"),
+        });
+    }
+
+    // 1. Wildcard origin '*'
+    if trimmed == "*" {
+        if allow_credentials {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': allow_credentials cannot be true when allow_origins contains '*' (RFC 6454 / Fetch Spec violation)"
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    // 2. Serialized 'null' origin
+    if trimmed.eq_ignore_ascii_case("null") {
+        if allow_credentials {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': allow_credentials cannot be true when allow_origins contains 'null' (security risk: credential exposure to sandboxed contexts)"
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    // 3. Absolute URI scheme: must be http:// or https://
+    let after_scheme = if let Some(rest) = trimmed.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        rest
+    } else {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': origin '{trimmed}' must start with 'http://' or 'https://'"
+            ),
+        });
+    };
+
+    if after_scheme.is_empty() {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!("Plugin '{plugin_id}': origin '{trimmed}' has empty authority"),
+        });
+    }
+
+    // 4. Must not contain path '/', userinfo '@', query '?', or fragment '#'
+    if after_scheme.contains('/')
+        || after_scheme.contains('@')
+        || after_scheme.contains('?')
+        || after_scheme.contains('#')
+    {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': origin '{trimmed}' must not contain path, userinfo, query, or fragment"
+            ),
+        });
+    }
+
+    // 5. Wildcard validation
+    if after_scheme.contains('*') {
+        if !after_scheme.starts_with("*.") {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': wildcard origin '{trimmed}' must use '*.domain' syntax immediately after scheme (e.g. 'https://*.example.com')"
+                ),
+            });
+        }
+        let host_rest = &after_scheme[2..];
+        if host_rest.is_empty() || host_rest.contains('*') || host_rest.starts_with('.') {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': invalid wildcard origin pattern '{trimmed}'"
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper to validate RFC 9110 header field name grammar: 1*tchar.
 fn is_valid_header_name(h: &str) -> bool {
     let trimmed = h.trim();
     if trimmed == "*" {
@@ -72,14 +175,8 @@ pub fn validate_cors_response_config(
         });
     }
 
-    let has_wildcard = cfg.allow_origins.iter().any(|o| o.trim() == "*");
-    if cfg.allow_credentials && has_wildcard {
-        return Err(SyncError::Validation {
-            domain: "plugins".into(),
-            reason: format!(
-                "Plugin '{plugin_id}': allow_credentials cannot be true when allow_origins contains '*' (RFC 6454 violation)"
-            ),
-        });
+    for origin in &cfg.allow_origins {
+        validate_origin_pattern(origin, cfg.allow_credentials, plugin_id)?;
     }
 
     // 2. Validate Expose Headers
@@ -92,6 +189,14 @@ pub fn validate_cors_response_config(
                 ),
             });
         }
+        if cfg.allow_credentials && h.trim() == "*" {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': expose_headers cannot contain '*' when allow_credentials is true (W3C Fetch Spec violation)"
+                ),
+            });
+        }
     }
 
     // 3. Validate Max Age
@@ -101,7 +206,7 @@ pub fn validate_cors_response_config(
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': max_age_secs ({secs}) exceeds 86400 seconds (24 hours)"
+                "Plugin '{plugin_id}': max_age_secs ({secs}) exceeds 86,400 seconds (24 hours)"
             ),
         });
     }
@@ -117,7 +222,7 @@ mod tests {
     #[test]
     fn test_valid_cors_response() {
         let val = json!({
-            "allow_origins": ["https://app.velda.io", "https://admin.velda.io"],
+            "allow_origins": ["https://app.velda.io", "https://*.velda.io"],
             "allow_credentials": true,
             "expose_headers": ["x-request-id", "x-total-count"],
             "max_age_secs": 3600
@@ -136,14 +241,43 @@ mod tests {
         });
         let res = validate_cors_response_config("cors_bad_sec", &val);
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("RFC 6454 violation"));
+        assert!(res.unwrap_err().to_string().contains("RFC 6454"));
+    }
+
+    #[test]
+    fn test_expose_wildcard_with_credentials_rejected() {
+        let val = json!({
+            "allow_origins": ["https://app.velda.io"],
+            "allow_credentials": true,
+            "expose_headers": ["*"],
+            "max_age_secs": null
+        });
+        let res = validate_cors_response_config("cors_bad_expose", &val);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("expose_headers"));
+    }
+
+    #[test]
+    fn test_origin_with_userinfo_rejected() {
+        let val = json!({
+            "allow_origins": ["https://admin@app.velda.io"],
+            "allow_credentials": false,
+            "expose_headers": [],
+            "max_age_secs": null
+        });
+        let res = validate_cors_response_config("cors_bad_userinfo", &val);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must not contain path, userinfo")
+        );
     }
 
     #[test]
     fn test_missing_required_fields_rejected() {
         let val = json!({
             "allow_origins": ["https://app.velda.io"]
-            // Missing allow_credentials, expose_headers, max_age_secs
         });
         let res = validate_cors_response_config("cors_missing", &val);
         assert!(res.is_err());

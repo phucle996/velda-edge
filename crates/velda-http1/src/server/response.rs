@@ -117,7 +117,7 @@ impl Http1ServerResponse {
         Self {
             status: resp.status,
             version: resp.version,
-            headers: resp.headers,
+            headers: resp.headers.into(),
             body: resp.body,
         }
     }

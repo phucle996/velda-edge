@@ -63,7 +63,7 @@ impl Http3ClientRequest {
     #[inline]
     pub fn from_l7(req: L7Request) -> Self {
         Self {
-            head: Http3ClientRequestHead::new(req.method, req.uri, req.headers),
+            head: Http3ClientRequestHead::new(req.method, req.uri, req.headers.into()),
             body: req.body,
         }
     }

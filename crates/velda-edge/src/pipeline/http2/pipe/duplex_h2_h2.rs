@@ -129,7 +129,7 @@ pub async fn serve(
                     L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
                 velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut l7_resp);
                 parts.status = l7_resp.status;
-                parts.headers = l7_resp.headers;
+                parts.headers = l7_resp.headers.into();
             }
             meta.inject_response_headers(&mut parts.headers);
 

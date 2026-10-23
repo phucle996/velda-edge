@@ -69,7 +69,7 @@ impl GrpcClientResponse {
         let head = GrpcClientResponseHead::new(
             resp.status,
             grpc_status,
-            resp.headers.clone(),
+            resp.headers.clone().into(),
             HeaderMap::new(),
         );
 

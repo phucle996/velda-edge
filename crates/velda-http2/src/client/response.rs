@@ -90,7 +90,7 @@ impl Http2ClientResponse {
 
     /// Constructs an [`Http2ClientResponse`] from a canonical [`L7Response`].
     pub fn from_l7_response(resp: L7Response) -> Self {
-        let head = Http2ClientResponseHead::new(resp.status, resp.headers);
+        let head = Http2ClientResponseHead::new(resp.status, resp.headers.into());
         Self::new(head, resp.body)
     }
 

@@ -229,7 +229,7 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
                 target_upstream: self.config.mirror_upstream.clone(),
                 method: req.method.clone(),
                 uri: req.uri.clone(),
-                headers: shadow_headers,
+                headers: shadow_headers.into(),
                 body: body_bytes,
             };
 
