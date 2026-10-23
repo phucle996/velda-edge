@@ -308,7 +308,13 @@ pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, 
     }
 
     buf.advance(header_len);
-    let chunk = buf.split_to(chunk_size).freeze();
+    let chunk = if chunk_size <= 4096 && buf.capacity() >= 16384 {
+        let b = bytes::Bytes::copy_from_slice(&buf[..chunk_size]);
+        buf.advance(chunk_size);
+        b
+    } else {
+        buf.split_to(chunk_size).freeze()
+    };
     buf.advance(2);
     Ok(Some(Some(chunk)))
 }
@@ -481,7 +487,13 @@ impl ProgressiveChunkDecoder {
                         return Ok(None);
                     }
                     let available = buf.len().min(*remaining);
-                    let payload = buf.split_to(available).freeze();
+                    let payload = if available <= 4096 && buf.capacity() >= 16384 {
+                        let b = bytes::Bytes::copy_from_slice(&buf[..available]);
+                        buf.advance(available);
+                        b
+                    } else {
+                        buf.split_to(available).freeze()
+                    };
                     *remaining -= available;
                     if *remaining == 0 {
                         self.state = ProgressiveChunkState::TrailingCrlf;
@@ -514,11 +526,8 @@ pub fn encode_headers(headers: &HeaderMap, dst: &mut BytesMut) {
     if headers.is_empty() {
         return;
     }
-    let mut total_len = 0;
-    for (name, val) in headers {
-        total_len += name.as_str().len() + val.as_bytes().len() + 4;
-    }
-    dst.reserve(total_len);
+    // Fast O(1) capacity estimation avoiding redundant pass over headers
+    dst.reserve(headers.len() * 48);
 
     for (name, val) in headers {
         dst.put_slice(name.as_str().as_bytes());

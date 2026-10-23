@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::L7Response;
+use velda_http1::is_connection_close;
 use velda_http1::server::request::Http1BodyFraming;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
@@ -133,7 +134,7 @@ pub async fn serve(
             }
         };
 
-    let conn_close = check_connection_close(&resp_head.headers);
+    let conn_close = is_connection_close(&resp_head.headers);
 
     // 7. Strip hop-by-hop headers before sending over HTTP/2
     let mut clean_headers = resp_head.headers;
@@ -152,18 +153,19 @@ pub async fn serve(
     meta.inject_response_headers(&mut clean_headers);
 
     // 8. Open downstream HTTP/2 streaming response
-    let mut stream_sender = match responder.send_stream_response(resp_head.status, &clean_headers) {
-        Ok(s) => s,
-        Err(e) => {
-            lease.mark_closed();
-            tracing::warn!(
-                error = %e,
-                upstream = %upstream.id(),
-                "Failed to initiate downstream HTTP/2 streaming response"
-            );
-            return;
-        }
-    };
+    let mut stream_sender =
+        match responder.send_stream_response_owned(resp_head.status, clean_headers) {
+            Ok(s) => s,
+            Err(e) => {
+                lease.mark_closed();
+                tracing::warn!(
+                    error = %e,
+                    upstream = %upstream.id(),
+                    "Failed to initiate downstream HTTP/2 streaming response"
+                );
+                return;
+            }
+        };
 
     // 9. Stream response chunks based on HTTP/1.1 framing
     let stream_res = match framing {
@@ -225,12 +227,4 @@ pub async fn serve(
     drop(lease);
 
     let _ = stream_sender.finish();
-}
-
-#[inline]
-fn check_connection_close(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|val| val.eq_ignore_ascii_case("close"))
 }

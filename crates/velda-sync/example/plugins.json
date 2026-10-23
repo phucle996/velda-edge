@@ -172,6 +172,72 @@
           "password": null
         }
       }
+    },
+    {
+      "id": "hmac_auth",
+      "phase": "pre_upstream",
+      "config": {
+        "access_key_header": "x-access-key-id",
+        "signature_header": "x-signature",
+        "signature_algorithm": "hmac-sha256",
+        "signature_encoding": "hex",
+        "timestamp_header": "x-timestamp",
+        "clock_skew_seconds": 60,
+        "signed_headers": [
+          "host",
+          "x-timestamp",
+          "x-nonce"
+        ],
+        "validate_request_body": true,
+        "content_sha256_header": "x-content-sha256",
+        "nonce_header": "x-nonce",
+        "enforce_nonce": true,
+        "credentials": [
+          {
+            "access_key_id": "client_fintech_partner_01",
+            "secret_key": "sec_k89f2a019482bca881726c0981273412",
+            "consumer_id": "fintech-partner-prod"
+          }
+        ]
+      }
+    },
+    {
+      "id": "oauth2_introspection",
+      "phase": "pre_upstream",
+      "config": {
+        "introspection_url": "http://127.0.0.1:8080/oauth/introspect",
+        "client_id": "velda-edge-gateway",
+        "client_secret": "sec_gateway_secret_key_12345",
+        "auth_method": "client_secret_basic",
+        "token_headers": [
+          "x-access-token",
+          "authorization"
+        ],
+        "token_cookies": [
+          "access_token"
+        ],
+        "token_query_params": [
+          "token"
+        ],
+        "token_type_hint": "access_token",
+        "cache_ttl_seconds": 300,
+        "negative_cache_ttl_seconds": 10,
+        "max_cache_entries": 10000,
+        "keepalive_timeout_secs": 60,
+        "pool_max_idle_connections": 10,
+        "request_timeout_ms": 500,
+        "required_scopes": [
+          "read",
+          "orders"
+        ],
+        "claims_to_headers": [
+          { "claim": "sub", "header": "x-user-id" },
+          { "claim": "client_id", "header": "x-client-id" },
+          { "claim": "scope", "header": "x-authenticated-scope" }
+        ],
+        "hide_credentials": true,
+        "fallback_behavior": "reject"
+      }
     }
   ]
 }

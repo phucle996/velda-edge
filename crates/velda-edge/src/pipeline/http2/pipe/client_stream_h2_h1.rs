@@ -7,9 +7,10 @@
 use std::sync::Arc;
 
 use http::StatusCode;
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, TRANSFER_ENCODING};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, TRANSFER_ENCODING};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use velda_core::L7Response;
+use velda_http1::is_connection_close;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
 use crate::pipeline::DownstreamMeta;
@@ -223,7 +224,7 @@ pub async fn serve(
 
         match res {
             Ok(resp) => {
-                let close = !upload_done || check_connection_close(&resp.headers);
+                let close = !upload_done || is_connection_close(&resp.headers);
                 (Ok(resp.into_l7_response()), close)
             }
             Err(e) => (Err(e), true),
@@ -264,12 +265,4 @@ pub async fn serve(
             }
         }
     }
-}
-
-#[inline]
-fn check_connection_close(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|val| val.eq_ignore_ascii_case("close"))
 }

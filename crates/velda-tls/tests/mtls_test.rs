@@ -205,3 +205,103 @@ async fn test_upstream_mtls_with_tls_client_engine() {
         backend_task.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn test_downstream_mixed_standard_and_mtls_domains() {
+    let (std_cert, std_key) = make_test_cert(vec!["standard.example.com".into()]);
+    let (mtls_cert, mtls_key) = make_test_cert(vec!["mtls.example.com".into()]);
+    let (client_cert, client_key) = make_test_cert(vec!["client.internal".into()]);
+
+    let std_server_cfg = ServerTlsConfig {
+        sni: vec!["standard.example.com".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: std_cert.clone(),
+        key_pem: std_key,
+        client_ca_pem: None,
+    };
+
+    let mtls_server_cfg = ServerTlsConfig {
+        sni: vec!["mtls.example.com".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["h2".into()],
+        cert_pem: mtls_cert.clone(),
+        key_pem: mtls_key,
+        client_ca_pem: Some(client_cert.clone()),
+    };
+
+    let server_engine = TlsServerEngine::new(&[std_server_cfg, mtls_server_cfg]).unwrap();
+
+    // 1. Standard domain accepts clients WITHOUT client certificate
+    {
+        let connector = make_client_connector(&std_cert, Some(vec!["h2"]));
+        let (client_io, server_io) = duplex(65536);
+
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move {
+            let mut stream = s_engine.accept(server_io).await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+
+        let server_name = ServerName::try_from("standard.example.com".to_string()).unwrap();
+        let mut client_stream = connector.connect(server_name, client_io).await.unwrap();
+        client_stream.write_all(b"ping").await.unwrap();
+        let mut reply = [0u8; 4];
+        client_stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"pong");
+
+        server_task.await.unwrap();
+    }
+
+    // 2. mTLS domain rejects clients WITHOUT client certificate
+    {
+        let connector = make_client_connector(&mtls_cert, Some(vec!["h2"]));
+        let (client_io, server_io) = duplex(65536);
+
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move { s_engine.accept(server_io).await });
+
+        let server_name = ServerName::try_from("mtls.example.com".to_string()).unwrap();
+        let client_res = connector.connect(server_name, client_io).await;
+        let server_res = server_task.await.unwrap();
+
+        assert!(
+            server_res.is_err(),
+            "mTLS domain must reject client without certificate"
+        );
+        if let Ok(mut c_stream) = client_res {
+            let mut buf = [0u8; 1];
+            assert_eq!(c_stream.read(&mut buf).await.unwrap_or(0), 0);
+        }
+    }
+
+    // 3. mTLS domain accepts clients WITH valid client certificate
+    {
+        let connector =
+            make_mtls_client_connector(&mtls_cert, &client_cert, &client_key, Some(vec!["h2"]));
+        let (client_io, server_io) = duplex(65536);
+
+        let s_engine = server_engine.clone();
+        let server_task = tokio::spawn(async move {
+            let mut stream = s_engine.accept(server_io).await.unwrap();
+            let info = TlsServerEngine::extract_handshake_info(&stream);
+            assert!(info.peer_certs.is_some());
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"mtls");
+            stream.write_all(b"pass").await.unwrap();
+        });
+
+        let server_name = ServerName::try_from("mtls.example.com".to_string()).unwrap();
+        let mut client_stream = connector.connect(server_name, client_io).await.unwrap();
+        client_stream.write_all(b"mtls").await.unwrap();
+        let mut reply = [0u8; 4];
+        client_stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"pass");
+
+        server_task.await.unwrap();
+    }
+}

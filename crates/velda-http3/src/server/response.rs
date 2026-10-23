@@ -12,7 +12,7 @@ use quinn_proto::{Connection, StreamId};
 use velda_core::{Body, L7Response};
 
 use crate::error::Http3Error;
-use crate::frame::{Http3Frame, encode_frame, encode_varint, frame_id};
+use crate::frame::{Http3Frame, encode_frame, encode_varint, encode_varint_slice, frame_id};
 use crate::qpack::encode_qpack_response;
 use crate::server::connection::OutgoingDatagram;
 
@@ -277,13 +277,13 @@ pub fn send_response(
     transmit_buf: &mut Vec<u8>,
     now: Instant,
 ) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Error> {
-    // 1. Encode QPACK HEADERS frame into small write_buf
-    let mut header_payload = BytesMut::new();
+    // 1. Encode QPACK HEADERS frame with pre-allocated buffer
+    let mut header_payload = BytesMut::with_capacity(256);
     encode_qpack_response(response.status, &response.headers, &mut header_payload);
-    let header_frame = Http3Frame::Headers(header_payload.freeze());
-
-    let mut write_buf = BytesMut::with_capacity(512);
-    encode_frame(&header_frame, &mut write_buf);
+    let mut write_buf = BytesMut::with_capacity(16 + header_payload.len());
+    encode_varint(frame_id::HEADERS, &mut write_buf);
+    encode_varint(header_payload.len() as u64, &mut write_buf);
+    write_buf.extend_from_slice(&header_payload);
 
     let mut written = 0;
     while written < write_buf.len() {
@@ -311,19 +311,22 @@ pub fn send_response(
         && let Body::Bytes(ref b) = response.body
         && !b.is_empty()
     {
-        let mut hdr_buf = BytesMut::with_capacity(16);
-        encode_varint(frame_id::DATA, &mut hdr_buf);
-        encode_varint(b.len() as u64, &mut hdr_buf);
+        let mut hdr_buf = [0u8; 16];
+        let mut hdr_len = encode_varint_slice(frame_id::DATA, &mut hdr_buf);
+        hdr_len += encode_varint_slice(b.len() as u64, &mut hdr_buf[hdr_len..]);
 
         let mut hdr_written = 0;
-        while hdr_written < hdr_buf.len() {
-            match conn.send_stream(stream_id).write(&hdr_buf[hdr_written..]) {
+        while hdr_written < hdr_len {
+            match conn
+                .send_stream(stream_id)
+                .write(&hdr_buf[hdr_written..hdr_len])
+            {
                 Ok(n) if n > 0 => hdr_written += n,
                 Ok(_) => break,
                 Err(e) => return Err(Http3Error::H3(e.to_string())),
             }
         }
-        if hdr_written < hdr_buf.len() {
+        if hdr_written < hdr_len {
             return Err(Http3Error::H3(
                 "Flow control window exhausted for DATA frame header".into(),
             ));
@@ -440,19 +443,41 @@ pub fn send_data_chunk(
     let mut remaining_frame: Option<Bytes> = None;
 
     if !chunk.is_empty() {
-        let full_frame = encode_data_frame(chunk);
+        let mut hdr_buf = [0u8; 16];
+        let mut hdr_len = encode_varint_slice(frame_id::DATA, &mut hdr_buf);
+        hdr_len += encode_varint_slice(chunk.len() as u64, &mut hdr_buf[hdr_len..]);
 
-        let mut written = 0;
-        while written < full_frame.len() {
-            match conn.send_stream(stream_id).write(&full_frame[written..]) {
-                Ok(n) if n > 0 => written += n,
+        let mut hdr_written = 0;
+        while hdr_written < hdr_len {
+            match conn
+                .send_stream(stream_id)
+                .write(&hdr_buf[hdr_written..hdr_len])
+            {
+                Ok(n) if n > 0 => hdr_written += n,
                 Ok(_) => break,
                 Err(quinn_proto::WriteError::Blocked) => break,
                 Err(e) => return Err(Http3Error::H3(e.to_string())),
             }
         }
-        if written < full_frame.len() {
-            remaining_frame = Some(full_frame.slice(written..));
+
+        if hdr_written < hdr_len {
+            let mut fallback = BytesMut::with_capacity((hdr_len - hdr_written) + chunk.len());
+            fallback.extend_from_slice(&hdr_buf[hdr_written..hdr_len]);
+            fallback.extend_from_slice(chunk);
+            remaining_frame = Some(fallback.freeze());
+        } else {
+            let mut body_written = 0;
+            while body_written < chunk.len() {
+                match conn.send_stream(stream_id).write(&chunk[body_written..]) {
+                    Ok(n) if n > 0 => body_written += n,
+                    Ok(_) => break,
+                    Err(quinn_proto::WriteError::Blocked) => break,
+                    Err(e) => return Err(Http3Error::H3(e.to_string())),
+                }
+            }
+            if body_written < chunk.len() {
+                remaining_frame = Some(chunk.slice(body_written..));
+            }
         }
     }
 

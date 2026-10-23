@@ -16,9 +16,11 @@ pub mod api_key_auth;
 pub mod canary;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
+pub mod hmac_auth;
 pub mod http_cache_lookup;
 pub mod http_fault_injection;
 pub mod jwt_auth;
+pub mod oauth2_introspection;
 pub mod rate_limit;
 pub mod request_mirror;
 pub mod request_termination;
@@ -34,12 +36,17 @@ pub use grpc_fault_injection::{
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
 };
+pub use hmac_auth::{HmacAuthConfig, HmacAuthPlugin, HmacCredentialConfig};
 pub use http_cache_lookup::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
 pub use http_fault_injection::{
     HeaderMatchRule, HttpAbortConfig, HttpDelayConfig, HttpFaultCondition,
     HttpFaultInjectionPlugin, IpRangeMatcher,
 };
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
+pub use oauth2_introspection::{
+    ClaimToHeaderConfig, IdpKeepAliveClient, IntrospectionCache, Oauth2IntrospectionConfig,
+    Oauth2IntrospectionPlugin,
+};
 pub use rate_limit::{
     FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
     RateLimitPlugin, TlsSource,
@@ -125,6 +132,8 @@ pub fn instantiate(
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
         "w3c_trace_context" => Ok(Arc::new(W3cTraceContextPlugin::from_config(config)?)),
+        "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
+        "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id

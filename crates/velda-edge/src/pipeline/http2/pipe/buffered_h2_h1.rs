@@ -6,10 +6,13 @@
 
 use std::sync::Arc;
 
+use bytes::Buf;
+
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::AsyncReadExt;
 use velda_core::L7Response;
+use velda_http1::is_connection_close;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
 use crate::pipeline::DownstreamMeta;
@@ -133,7 +136,7 @@ pub async fn serve(
             }
         };
 
-    let conn_close = check_connection_close(&resp_head.headers);
+    let conn_close = is_connection_close(&resp_head.headers);
 
     let body = match framing {
         velda_http1::server::request::Http1BodyFraming::Empty => velda_core::Body::Empty,
@@ -172,7 +175,13 @@ pub async fn serve(
                     lease.mark_closed();
                 }
                 let actual_len = lease.read_buf.len().min(body_len);
-                let body_bytes = lease.read_buf.split_to(actual_len).freeze();
+                let body_bytes = if actual_len <= 4096 && lease.read_buf.capacity() >= 16384 {
+                    let b = bytes::Bytes::copy_from_slice(&lease.read_buf[..actual_len]);
+                    lease.read_buf.advance(actual_len);
+                    b
+                } else {
+                    lease.read_buf.split_to(actual_len).freeze()
+                };
                 velda_core::Body::Bytes(body_bytes)
             } else {
                 velda_core::Body::Empty
@@ -235,13 +244,4 @@ pub async fn serve(
     }
     meta.inject_response_headers(&mut l7_resp.headers);
     let _ = responder.send_response_owned(l7_resp);
-}
-
-/// Helper to check whether upstream backend signaled `Connection: close`.
-#[inline]
-fn check_connection_close(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|val| val.eq_ignore_ascii_case("close"))
 }

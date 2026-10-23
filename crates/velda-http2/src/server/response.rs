@@ -23,11 +23,12 @@ pub fn build_h2_response(
     let mut http_response = Response::new(());
     *http_response.status_mut() = status;
     *http_response.version_mut() = Version::HTTP_2;
+    http_response.headers_mut().reserve(headers.len());
     for (name, val) in headers {
         if !crate::headers::is_disallowed_h2_header(name, val) {
             http_response
                 .headers_mut()
-                .insert(name.clone(), val.clone());
+                .append(name.clone(), val.clone());
         }
     }
     Ok(http_response)
@@ -139,6 +140,25 @@ impl Http2Responder {
         Ok(response)
     }
 
+    #[inline]
+    fn prepare_h2_response_owned(
+        &self,
+        status: StatusCode,
+        mut headers: HeaderMap,
+    ) -> Result<Response<()>, Http2Error> {
+        crate::headers::sanitize_h2_headers(&mut headers);
+        if let Some(ref req_id) = self.request_id
+            && !headers.contains_key(&X_REQUEST_ID)
+        {
+            headers.insert(X_REQUEST_ID, req_id.clone());
+        }
+        let mut response = Response::new(());
+        *response.status_mut() = status;
+        *response.version_mut() = Version::HTTP_2;
+        *response.headers_mut() = headers;
+        Ok(response)
+    }
+
     /// Returns the logical HTTP/2 stream ID associated with this responder.
     #[inline]
     pub fn stream_id(&self) -> h2::StreamId {
@@ -151,25 +171,13 @@ impl Http2Responder {
     }
 
     /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning and header copying.
-    pub fn send_response_owned(&mut self, mut response: L7Response) -> Result<(), Http2Error> {
+    pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
         let is_no_body = response.status.is_informational()
             || response.status == StatusCode::NO_CONTENT
             || response.status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !response.body.is_empty();
-
-        crate::headers::sanitize_h2_headers(&mut response.headers);
-        if let Some(ref req_id) = self.request_id
-            && !response.headers.contains_key(&X_REQUEST_ID)
-        {
-            response.headers.insert(X_REQUEST_ID, req_id.clone());
-        }
-
-        let mut http_response = Response::new(());
-        *http_response.status_mut() = response.status;
-        *http_response.version_mut() = Version::HTTP_2;
-        *http_response.headers_mut() = response.headers;
-
+        let http_response = self.prepare_h2_response_owned(response.status, response.headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
         if has_body {
@@ -282,6 +290,18 @@ impl Http2Responder {
         Ok(send_stream)
     }
 
+    /// Opens a progressive send stream with owned headers, eliminating HeaderMap cloning.
+    pub fn send_head_owned(
+        &mut self,
+        status: StatusCode,
+        headers: HeaderMap,
+        end_stream: bool,
+    ) -> Result<SendStream<Bytes>, Http2Error> {
+        let http_response = self.prepare_h2_response_owned(status, headers)?;
+        let send_stream = self.respond.send_response(http_response, end_stream)?;
+        Ok(send_stream)
+    }
+
     /// Sends the response head and returns a progressive stream sender for streaming response chunks.
     pub fn send_stream_response(
         &mut self,
@@ -289,6 +309,16 @@ impl Http2Responder {
         headers: &HeaderMap,
     ) -> Result<Http2StreamSender, Http2Error> {
         let send_stream = self.send_head(status, headers, false)?;
+        Ok(Http2StreamSender::new(send_stream))
+    }
+
+    /// Sends the response head with owned headers and returns a progressive stream sender.
+    pub fn send_stream_response_owned(
+        &mut self,
+        status: StatusCode,
+        headers: HeaderMap,
+    ) -> Result<Http2StreamSender, Http2Error> {
+        let send_stream = self.send_head_owned(status, headers, false)?;
         Ok(Http2StreamSender::new(send_stream))
     }
 }

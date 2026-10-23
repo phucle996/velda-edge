@@ -37,6 +37,9 @@ pnpm-debug.log*
 /postgres-prod-data/
 /storage/
 
+# ── Benchmarks & Profiling ───────────────────────────────────────────
+/compare/
+
 # ── Logs & Telemetry ─────────────────────────────────────────────────
 *.log
 logs/

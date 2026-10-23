@@ -13,7 +13,7 @@ use std::sync::Arc;
 use bytes::Buf;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::{
     HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
@@ -312,33 +312,42 @@ where
                 // Drop upstream lease immediately before downstream socket write to avoid pool starvation.
                 drop(upstream_lease);
 
-                let body_slice = if total_len > 0 {
-                    Some(&conn.upstream_read_buf[..total_len])
-                } else {
-                    None
-                };
-                let close = velda_http1::send_head_coalesced(
-                    &mut conn.stream,
-                    &mut conn.write_buf,
-                    &server_head,
-                    body_slice,
-                    true,
-                    HeadEncodeOptions {
-                        body_len: None,
-                        force_close: conn.close_requested,
-                        request_id: conn.current_request_id.as_ref(),
-                    },
-                )
-                .await?;
-                if close {
-                    conn.close_requested = true;
-                }
+                conn.write_buf.clear();
+                let force_close = conn.is_closed() || conn.close_requested;
+                conn.encode_response_head(
+                    server_head.version,
+                    server_head.status,
+                    &server_head.headers,
+                    Some(total_len),
+                    force_close,
+                );
+
                 if total_len > 0 {
+                    let mut b1 = &conn.write_buf[..];
+                    let mut b2 = &conn.upstream_read_buf[..total_len];
+                    while !b1.is_empty() || !b2.is_empty() {
+                        let bufs = [std::io::IoSlice::new(b1), std::io::IoSlice::new(b2)];
+                        let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
+                        let n = conn.stream.write_vectored(bufs_slice).await?;
+                        if n == 0 {
+                            return Err(velda_http1::Http1Error::ConnectionClosed);
+                        }
+                        if n < b1.len() {
+                            b1 = &b1[n..];
+                        } else {
+                            let rem = n - b1.len();
+                            b1 = &[];
+                            b2 = &b2[rem..];
+                        }
+                    }
                     conn.upstream_read_buf.advance(total_len);
                     if conn.upstream_read_buf.is_empty() {
                         conn.upstream_read_buf.clear();
                     }
+                } else {
+                    conn.stream.write_all(&conn.write_buf).await?;
                 }
+                conn.write_buf.clear();
                 return Ok(());
             }
 

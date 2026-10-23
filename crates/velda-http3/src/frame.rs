@@ -169,28 +169,41 @@ pub fn decode_varint(buf: &mut BytesMut) -> Option<u64> {
     Some(val)
 }
 
+/// Encodes an RFC 9000 variable-length integer into a stack buffer slice.
+/// Returns the number of bytes written (1, 2, 4, or 8).
+#[inline]
+pub fn encode_varint_slice(val: u64, buf: &mut [u8]) -> usize {
+    if val <= 63 {
+        buf[0] = val as u8;
+        1
+    } else if val <= 16383 {
+        buf[0] = (0x40 | (val >> 8)) as u8;
+        buf[1] = (val & 0xff) as u8;
+        2
+    } else if val <= 1073741823 {
+        buf[0] = (0x80 | (val >> 24)) as u8;
+        buf[1] = ((val >> 16) & 0xff) as u8;
+        buf[2] = ((val >> 8) & 0xff) as u8;
+        buf[3] = (val & 0xff) as u8;
+        4
+    } else {
+        buf[0] = (0xc0 | (val >> 56)) as u8;
+        buf[1] = ((val >> 48) & 0xff) as u8;
+        buf[2] = ((val >> 40) & 0xff) as u8;
+        buf[3] = ((val >> 32) & 0xff) as u8;
+        buf[4] = ((val >> 24) & 0xff) as u8;
+        buf[5] = ((val >> 16) & 0xff) as u8;
+        buf[6] = ((val >> 8) & 0xff) as u8;
+        buf[7] = (val & 0xff) as u8;
+        8
+    }
+}
+
 /// Encodes an RFC 9000 variable-length integer into a byte buffer.
 pub fn encode_varint(val: u64, dst: &mut BytesMut) {
-    if val <= 63 {
-        dst.put_u8(val as u8);
-    } else if val <= 16383 {
-        dst.put_u8((0x40 | (val >> 8)) as u8);
-        dst.put_u8((val & 0xff) as u8);
-    } else if val <= 1073741823 {
-        dst.put_u8((0x80 | (val >> 24)) as u8);
-        dst.put_u8(((val >> 16) & 0xff) as u8);
-        dst.put_u8(((val >> 8) & 0xff) as u8);
-        dst.put_u8((val & 0xff) as u8);
-    } else {
-        dst.put_u8((0xc0 | (val >> 56)) as u8);
-        dst.put_u8(((val >> 48) & 0xff) as u8);
-        dst.put_u8(((val >> 40) & 0xff) as u8);
-        dst.put_u8(((val >> 32) & 0xff) as u8);
-        dst.put_u8(((val >> 24) & 0xff) as u8);
-        dst.put_u8(((val >> 16) & 0xff) as u8);
-        dst.put_u8(((val >> 8) & 0xff) as u8);
-        dst.put_u8((val & 0xff) as u8);
-    }
+    let mut buf = [0u8; 8];
+    let len = encode_varint_slice(val, &mut buf);
+    dst.put_slice(&buf[..len]);
 }
 
 /// Decodes the next HTTP/3 frame from the buffer.

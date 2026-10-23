@@ -336,14 +336,9 @@ pub fn encode_chunked_head(
         request_id,
         ..
     } = opts;
-    let mut needed = 64;
-    for (name, val) in headers {
-        needed += name.as_str().len() + val.as_bytes().len() + 4;
-    }
-    if request_id.is_some() {
-        needed += 64;
-    }
-    dst.reserve(needed);
+    // Fast O(1) capacity estimation: avoids redundant pass over all response headers
+    let extra_req_id_len = if request_id.is_some() { 64 } else { 0 };
+    dst.reserve(128 + headers.len() * 48 + extra_req_id_len);
 
     encode_status_line(version, status, dst);
 

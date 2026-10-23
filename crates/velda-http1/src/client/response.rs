@@ -368,7 +368,13 @@ pub fn decode_response(
                 }
                 buf.advance(header_len);
                 let body = if body_len > 0 {
-                    Body::Bytes(buf.split_to(body_len).freeze())
+                    if body_len <= 4096 && buf.capacity() >= 16384 {
+                        let b = bytes::Bytes::copy_from_slice(&buf[..body_len]);
+                        buf.advance(body_len);
+                        Body::Bytes(b)
+                    } else {
+                        Body::Bytes(buf.split_to(body_len).freeze())
+                    }
                 } else {
                     Body::Empty
                 };
@@ -430,13 +436,27 @@ where
         if n == 0 {
             if !read_buf.is_empty() {
                 let available = read_buf.len().min(needed);
-                return Ok(Some(read_buf.split_to(available).freeze()));
+                let chunk = if available <= 4096 && read_buf.capacity() >= 16384 {
+                    let b = bytes::Bytes::copy_from_slice(&read_buf[..available]);
+                    read_buf.advance(available);
+                    b
+                } else {
+                    read_buf.split_to(available).freeze()
+                };
+                return Ok(Some(chunk));
             }
             return Ok(None);
         }
     }
 
-    Ok(Some(read_buf.split_to(needed).freeze()))
+    let chunk = if needed <= 4096 && read_buf.capacity() >= 16384 {
+        let b = bytes::Bytes::copy_from_slice(&read_buf[..needed]);
+        read_buf.advance(needed);
+        b
+    } else {
+        read_buf.split_to(needed).freeze()
+    };
+    Ok(Some(chunk))
 }
 
 /// Reads the next chunk from a chunked response stream.

@@ -155,7 +155,7 @@ pub async fn serve(
         meta.inject_response_headers(&mut clean_headers);
 
         let mut stream_sender = responder
-            .send_stream_response(resp_head.status, &clean_headers)
+            .send_stream_response_owned(resp_head.status, clean_headers)
             .map_err(std::io::Error::other)?;
 
         match framing {

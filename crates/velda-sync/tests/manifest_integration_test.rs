@@ -82,7 +82,7 @@ async fn test_end_to_end_manifest_sync_composition() {
     let plugins_bytes = fs::read(&plugins_bin).unwrap();
     let (p_header, p_list) = plugin::unpack_plugins_from_binary(&plugins_bytes).unwrap();
     assert_eq!(p_header.revision, 42);
-    assert_eq!(p_list.len(), 10);
+    assert_eq!(p_list.len(), 12);
 
     // TLS
     let tls_bin = storage_dir.path().join("runtime/tls.bin");

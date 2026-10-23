@@ -6,20 +6,15 @@
 use std::sync::Arc;
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
+use velda_http1::is_connection_close;
 use velda_http1::server::request::Http1BodyFraming;
 
 use velda_plugin::RoutePluginPlan;
 
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http1Upstream;
-
-/// Minimum buffer capacity for reading upstream HTTP/1.1 response headers (16 KB).
-const MIN_UPSTREAM_READ_BUF_SIZE: usize = 16 * 1024;
-
-/// Maximum buffer capacity for reading upstream HTTP/1.1 response headers (64 KB).
-const MAX_UPSTREAM_READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Minimum progressive chunk size for downstream HTTP/3 DATA streaming (32 KB).
 /// Avoids syscall amplification and frame overhead on high-bandwidth streams.
@@ -67,16 +62,16 @@ pub async fn serve(
         }
     };
 
-    let mut write_buf = bytes::BytesMut::with_capacity(1024);
-
-    // Send HTTP/1.1 request head and body
+    // Send HTTP/1.1 request head and body using pooled write buffer
+    lease.write_buf.clear();
+    let (stream, write_buf) = lease.split_write();
     let send_res = velda_http1::client::send_request_parts(
         &req.method,
         &req.uri,
         &headers,
         &req.body,
-        &mut *lease,
-        &mut write_buf,
+        stream,
+        write_buf,
     )
     .await;
 
@@ -99,16 +94,11 @@ pub async fn serve(
         return;
     }
 
-    // Read HTTP/1.1 response head from upstream
-    let read_cap = upstream
-        .config
-        .client_body_buffer_size
-        .clamp(MIN_UPSTREAM_READ_BUF_SIZE, MAX_UPSTREAM_READ_BUF_SIZE);
-    let mut read_buf = bytes::BytesMut::with_capacity(read_cap);
-    let (resp_head, framing) =
-        match velda_http1::client::read_response_head(&mut *lease, &mut read_buf, &upstream.config)
-            .await
-        {
+    // Read HTTP/1.1 response head from upstream using pooled read buffer
+    lease.read_buf.clear();
+    let (resp_head, framing) = {
+        let (stream, read_buf) = lease.split_read();
+        match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
             Ok(parts) => parts,
             Err(e) => {
                 lease.mark_closed();
@@ -128,9 +118,10 @@ pub async fn serve(
                 let _ = responder.send_response(err_resp).await;
                 return;
             }
-        };
+        }
+    };
 
-    let conn_close = check_connection_close(&resp_head.headers);
+    let conn_close = is_connection_close(&resp_head.headers);
 
     // Strip hop-by-hop headers before sending over HTTP/3
     let mut clean_headers = resp_head.headers;
@@ -164,68 +155,64 @@ pub async fn serve(
     };
 
     // Stream response chunks based on HTTP/1.1 framing
-    let stream_res = match framing {
-        Http1BodyFraming::Empty => Ok(()),
-        Http1BodyFraming::Chunked => loop {
-            match velda_http1::client::read_next_chunk(&mut *lease, &mut read_buf).await {
-                Ok(Some(chunk)) => {
-                    if let Err(e) = stream_sender.send_chunk(chunk).await {
-                        break Err(e);
+    let mut lease_closed = false;
+    let stream_res = {
+        let (stream, read_buf) = lease.split_read();
+        match framing {
+            Http1BodyFraming::Empty => Ok(()),
+            Http1BodyFraming::Chunked => loop {
+                match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                    Ok(Some(chunk)) => {
+                        if let Err(e) = stream_sender.send_chunk(chunk).await {
+                            break Err(e);
+                        }
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(_) => {
+                        lease_closed = true;
+                        break Ok(());
                     }
                 }
-                Ok(None) => break Ok(()),
-                Err(_) => {
-                    lease.mark_closed();
-                    break Ok(());
-                }
-            }
-        },
-        Http1BodyFraming::ContentLength(total_len) => {
-            let mut remaining = total_len;
-            let mut failed = false;
-            let chunk_limit = upstream
-                .config
-                .client_body_buffer_size
-                .clamp(MIN_STREAMING_CHUNK_SIZE, MAX_STREAMING_CHUNK_SIZE);
-            while remaining > 0 {
-                let to_read = remaining.min(chunk_limit);
-                match velda_http1::client::read_chunk_sized(&mut *lease, &mut read_buf, to_read)
-                    .await
-                {
-                    Ok(Some(chunk)) => {
-                        remaining = remaining.saturating_sub(chunk.len());
-                        if let Err(e) = stream_sender.send_chunk(chunk).await {
-                            tracing::debug!(error = %e, "Downstream client disconnected during H3 streaming");
+            },
+            Http1BodyFraming::ContentLength(total_len) => {
+                let mut remaining = total_len;
+                let mut failed = false;
+                let chunk_limit = upstream
+                    .config
+                    .client_body_buffer_size
+                    .clamp(MIN_STREAMING_CHUNK_SIZE, MAX_STREAMING_CHUNK_SIZE);
+                while remaining > 0 {
+                    let to_read = remaining.min(chunk_limit);
+                    match velda_http1::client::read_chunk_sized(stream, read_buf, to_read).await {
+                        Ok(Some(chunk)) => {
+                            remaining = remaining.saturating_sub(chunk.len());
+                            if let Err(e) = stream_sender.send_chunk(chunk).await {
+                                tracing::debug!(error = %e, "Downstream client disconnected during H3 streaming");
+                                failed = true;
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
                             failed = true;
                             break;
                         }
                     }
-                    Ok(None) => break,
-                    Err(_) => {
-                        lease.mark_closed();
-                        failed = true;
-                        break;
-                    }
                 }
+                if failed {
+                    lease_closed = true;
+                }
+                Ok(())
             }
-            if failed {
-                lease.mark_closed();
-            }
-            Ok(())
         }
     };
 
-    if conn_close || stream_res.is_err() {
+    if conn_close || stream_res.is_err() || lease_closed {
         lease.mark_closed();
     }
 
-    let _ = stream_sender.finish().await;
-}
+    lease.read_buf.clear();
+    drop(lease);
 
-#[inline]
-fn check_connection_close(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|val| val.eq_ignore_ascii_case("close"))
+    let _ = stream_sender.finish().await;
 }

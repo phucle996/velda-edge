@@ -106,9 +106,10 @@ impl ServerTlsConfig {
     ) -> Result<Arc<ServerConfig>, TlsError> {
         let mut sni_resolver = SniResolver::new();
         let mut client_root_store = rustls::RootCertStore::empty();
-        // Note: rustls enforces client_cert_verifier at the ServerConfig level.
-        // In multi-tenant setups, listeners with distinct mTLS policies should compile separate ServerConfigs.
-        let mut requires_client_auth = false;
+        // The composite/default ServerConfig only requires client auth if the default/primary
+        // domain (servers[0]) configures client_ca_pem. In multi-domain setups with mixed
+        // standard TLS and mTLS, individual domains are isolated via SniConfigResolver.
+        let requires_client_auth = servers.first().is_some_and(|s| s.client_ca_pem.is_some());
         let mut alpn_protocols = Vec::new();
         let mut all_versions = Vec::new();
 
@@ -124,7 +125,6 @@ impl ServerTlsConfig {
                         .add(cert)
                         .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
                 }
-                requires_client_auth = true;
             }
 
             for alpn in &server.alpn {

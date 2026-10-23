@@ -87,6 +87,8 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
         "api_key_auth" => Some("pre_upstream"),
         "jwt_auth" => Some("pre_upstream"),
+        "hmac_auth" => Some("pre_upstream"),
+        "oauth2_introspection" => Some("pre_upstream"),
         "ip_filter" => Some("pre_route"),
         "cors_preflight" => Some("pre_route"),
         "resource_limit" => Some("pre_route"),
@@ -378,6 +380,24 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     });
                 }
                 pre_upstream::validate_header_mutation_config(&plugin.id, &plugin.config)?;
+            }
+            "hmac_auth" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_hmac_auth_config(&plugin.id, &plugin.config)?;
+            }
+            "oauth2_introspection" => {
+                if plugin.phase != "pre_upstream" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
+                    });
+                }
+                pre_upstream::validate_oauth2_introspection_config(&plugin.id, &plugin.config)?;
             }
             "prometheus_exporter" => {
                 if plugin.phase != "background" {

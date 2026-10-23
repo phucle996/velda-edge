@@ -278,12 +278,8 @@ pub async fn send_chunk_vectored<IO>(stream: &mut IO, chunk: &[u8]) -> Result<()
 where
     IO: AsyncWrite + Unpin,
 {
-    use std::io::Write;
-    let mut header_buf = [0u8; 16];
-    let mut cursor = std::io::Cursor::new(&mut header_buf[..]);
-    write!(cursor, "{:x}\r\n", chunk.len())
-        .map_err(|e| Http1Error::Io(std::io::Error::other(e)))?;
-    let header_len = cursor.position() as usize;
+    let mut header_buf = [0u8; 32];
+    let header_len = crate::wire::format_hex_crlf(chunk.len(), &mut header_buf);
 
     let mut h_slice = &header_buf[..header_len];
     let mut c_slice = chunk;
@@ -350,6 +346,7 @@ where
 #[inline]
 pub fn encode_request_head_chunked(head: &Http1ServerRequestHead, write_buf: &mut BytesMut) {
     write_buf.clear();
+    write_buf.reserve(128 + head.headers.len() * 48);
     encode_request_line(&head.method, &head.uri, write_buf);
 
     let mut has_te = false;
