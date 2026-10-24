@@ -66,7 +66,6 @@ Velda Edge is built around **The Hourglass Architecture** (Top cone: pre-bound I
 
 > [!NOTE]
 > For the comprehensive mental model, design philosophy, and anti-pattern breakdown, see [Hourglass Architecture](docs/HOURGLASS_MODEL.md).
-> For an in-depth comparative breakdown of architectural bottlenecks in Envoy, NGINX, Kong, and Pingora and how Velda Edge resolves them, see [Proxy Architectural Issues](docs/PROXY_ARCHITECTURAL_ISSUES.md).
 
 ### 2.1 The Hot-Path Invariant (Zero-IO in Serving)
 Request processing in the Data Plane hot path (`crates/`) **never**:

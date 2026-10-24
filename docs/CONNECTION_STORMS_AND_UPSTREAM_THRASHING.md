@@ -1,6 +1,6 @@
 # Velda Edge — Downstream Connection Storms & Cold Upstream Thrashing
 
-This document analyzes the engineering mechanics of **Downstream Connection Storms**, the destructive phenomenon of **Cold Upstream Thrashing**, and specifies how **Velda Edge** architecturally insulates backend infrastructure from high-churn downstream traffic.
+This document analyzes the engineering mechanics of **Downstream Connection Storms**, the destructive phenomenon of **Cold Upstream Thrashing**, how traditional proxies (**NGINX**, **Envoy**, **HAProxy**) fall short under extreme churn, and specifies how **Velda Edge** architecturally insulates backend infrastructure.
 
 ---
 
@@ -8,7 +8,7 @@ This document analyzes the engineering mechanics of **Downstream Connection Stor
 
 Edge proxies and API gateways are deployed on the frontline of the public Internet. While internal backend services operate in a controlled, low-latency, keep-alive environment, the public edge is chaotic:
 - Web browsers aggressively open and close ephemeral connections.
-- Mobile devices, IoT hardware, and flaky cellular networks disconnect abruptly.
+- Mobile devices, IoT hardware, and cellular networks disconnect abruptly.
 - Microservices and serverless functions scale from zero, spawning short-lived bursts of requests without connection reuse.
 - Adversarial traffic (Layer 7 DDoS, credential stuffing, scraping botnets) deliberately disables HTTP keep-alive to exhaust gateway resources.
 
@@ -63,9 +63,29 @@ The backend application server is designed to process application business logic
 
 ---
 
-## 3. The Velda Edge Solution: Complete Connection Decoupling
+## 3. How Traditional Proxies Handle Connection Storms (And Why They Fail)
 
-Velda Edge resolves this problem through **Strict Connection Decoupling**: Downstream connection lifecycle and upstream connection lifecycle are completely isolated by an autonomous in-memory pooling layer.
+Before designing Velda Edge, we examined the connection pooling and churn handling mechanisms of industry-standard proxies:
+
+### 3.1 NGINX: Per-Worker Slabs & Configuration Traps
+- **Per-Worker Isolation**: In NGINX's multi-process model (`fork()`), upstream keepalive connections (`upstream { keepalive N; }`) are stored in per-worker process caches. Connections cannot be shared across worker processes without complex shared memory slabs (`ngx_slab`).
+- **Uneven Pool Depletion**: When traffic spikes, one worker process may deplete its local keepalive cache and begin opening cold sockets to the backend, even while other worker processes hold idle connections.
+- **The Close Trap**: By default, NGINX uses HTTP/1.0 without keepalive for upstream requests unless explicitly configured with `proxy_http_version 1.1; proxy_set_header Connection "";`. Inexperienced operators inadvertently subject backends to complete cold thrashing under normal loads.
+
+### 3.2 Envoy: Thread-Local Cluster Overflows & Dispatcher Queue Delays
+- **Thread-Local Clusters (TLC)**: Envoy assigns connection pools to worker threads. When downstream connection churn spikes, requests must be queued onto the worker's thread dispatcher.
+- **Upstream Overflow (`UO` / `UF`)**: When downstream churn exceeds upstream connection limits (`max_connections`, `max_pending_requests`), Envoy sheds load by returning `503 Service Unavailable` with `UO` (Upstream Overflow) flags.
+- **Reactive Establishment**: Envoy establishes connections **reactively** (when a request arrives). Under sudden bursts, incoming requests stall on the hot path waiting for backend handshakes to complete, leading to sudden tail-latency spikes.
+
+### 3.3 HAProxy: Head-of-Line Server Queue Contention
+- **Queue Buildup**: HAProxy uses server connection limits (`maxconn`). When client connection surges arrive, requests queue behind saturated backend connections.
+- **Reactive Handshake Spikes**: Similar to Envoy, HAProxy connects reactively. Without background autonomous pre-warming, bursts of new connections still force the backend to perform batches of cold TCP handshakes.
+
+---
+
+## 4. The Velda Edge Solution: Proactive Decoupling & Autonomous Lane Pooling
+
+Velda Edge resolves connection storms by fundamentally changing the relationship between downstream ingress and upstream egress:
 
 ```mermaid
 sequenceDiagram
@@ -96,39 +116,39 @@ sequenceDiagram
     Note over Backend: Upstream socket remains ESTABLISHED & warm!
 ```
 
-### 3.1 Downstream Ingress vs. Upstream Egress Isolation
-1. **Downstream Termination**: The gateway front-line workers accept client connections, negotiate TLS/ALPN, and decode frames. If the client disconnects or refuses keep-alive, only the downstream socket is torn down.
-2. **Upstream Keep-Alive Shield**: The upstream connection is **never tied to the client socket's lifecycle**. When the downstream request finishes:
-   - The upstream connection handle is retained in the gateway's lane-striped connection pool.
+### 4.1 Complete Downstream vs. Upstream Decoupling
+1. **Downstream Termination**: The gateway accepts client connections, negotiates TLS/ALPN, and reads requests. If the client disconnects or sets `Connection: close`, only the downstream socket is torn down.
+2. **Upstream Keep-Alive Shield**: The upstream connection is **never tied to the client socket's lifecycle**. When the request completes:
+   - The upstream connection handle is retained in the gateway's lane pool.
    - The upstream TCP connection to the backend remains permanently established (`ESTABLISHED`) and warm.
 
-### 3.2 Lane-Striped Connection Sharding (Zero Hot-Path Coordination)
-Traditional connection pools utilize global mutexes or shared work queues. Under connection storms across multi-core systems, worker threads spend critical CPU cycles fighting over global pool locks.
+### 4.2 Proactive Autonomous Pre-Warming vs. Reactive Establishment
+While other proxies establish upstream connections *reactively* (after a request arrives and finds the pool empty), Velda Edge establishes connections *proactively*:
+- **Shadow Logistics Workers** running in the background under `SCHED_IDLE` continuously inspect each core lane shard.
+- They pre-establish connections and perform asynchronous TLS/QUIC handshakes **before requests arrive**, depositing warm handles into the lane shards.
+- When an ingress connection storm strikes, incoming requests immediately hit pre-warmed sockets.
+
+### 4.3 Lock-Free Lane-Striped Connection Pooling
+Traditional connection pools utilize global mutexes or shared work queues. Under multi-core connection storms, worker threads spend critical CPU cycles fighting over global pool locks.
 
 Velda Edge eliminates lock contention by partitioning upstream connections into **per-worker lane shards**:
-- Each worker core operates on its assigned lane shard (`lane_id = worker_id`).
+- Worker core $k$ exclusively accesses lane shard $k$.
 - When a worker serves a request, `pool.acquire()` fetches an idle connection directly from its local lane shard without cross-core coordination.
-- Connection acquisition on the hot path takes **less than 10 nanoseconds**.
-
-### 3.3 Autonomous Pre-Warming (Eliminating Cold Fallback)
-To guarantee that workers never stall waiting for a connection to be established when traffic surges:
-- Logistics routines continuously maintain a configured minimum of warm, idle connections per lane.
-- Handshakes and connection replenishments occur asynchronously in the background.
-- When an ingress storm strikes, every incoming request instantly matches an already-warmed upstream connection.
+- Hot-path connection acquisition takes **less than 10 nanoseconds**.
 
 ---
 
-## 4. Empirical Evidence: Real-World Azure Cluster Validation
+## 5. Empirical Evidence: Real-World Azure Cluster Validation
 
 To prove that Velda Edge completely eliminates Cold Upstream Thrashing under extreme conditions, an adversarial benchmark was conducted across two Microsoft Azure Standard D4as_v5 virtual machines (4 vCPUs AMD EPYC 7763, 16 GiB RAM, Accelerated Networking, Linux Kernel 6.8).
 
-### 4.1 Test Architecture
+### 5.1 Test Topology & Methodology
 - **VM1 (Gateway - `172.16.0.4`)**: Running `velda-edge` with 4 worker lanes and lane-striped pooling.
 - **VM2 (Backend & Load Generator - `172.16.0.5`)**: Running `velda-bench-backend` on port `8081` (HTTP/1.1), `8082` (HTTP/2), and `8083` (HTTP/3), simultaneously generating connection storm traffic.
 
 ---
 
-### 4.2 Experiment 1: Sustained 15-Second TCP Handshake Flood
+### 5.2 Experiment 1: Sustained 15-Second TCP Handshake Flood
 - **Workload**: Client generated continuous short-lived connections using `oha -z 15s -c 100 --disable-keepalive http://172.16.0.4/ping`.
 - **Downstream Result**:
   - Total connections executed: **168,398 brand-new TCP connections**.
@@ -163,7 +183,7 @@ T+14.5s: ESTAB=112, TIME-WAIT=0
 
 ---
 
-### 4.3 Experiment 2: Sustained 15-Second TLS 1.3 Asymmetric Crypto Flood
+### 5.3 Experiment 2: Sustained 15-Second TLS 1.3 Asymmetric Crypto Flood
 - **Workload**: Client generated continuous full TLS 1.3 handshakes (X25519 key exchange + certificate verification + cipher negotiation) with `--disable-keepalive` across 15 seconds.
 - **Downstream Result**:
   - Total full TLS 1.3 handshakes: **37,875 connections**.
@@ -185,106 +205,17 @@ The backend remained 100% shielded from the downstream cryptographic and transpo
 
 ---
 
-### 4.4 Summary Comparison: Cold Upstream Proxy vs. Velda Edge
+### 5.4 Summary Comparison Under Connection Storms
 
-| Metric | Naive / Cold Upstream Proxy | Velda Edge Autonomous Decoupling |
-| :--- | :---: | :---: |
-| **Backend `TIME_WAIT` Sockets** | 50,000 – 150,000 (Kernel bloat) | **0** (`TIME-WAIT = 0`) |
-| **Backend Ephemeral Port Depletion** | High risk (`EADDRNOTAVAIL`) | **Zero risk** (Reused persistent pool) |
-| **Backend Handshake CPU Overhead** | 80%+ CPU wasted on handshakes | **< 5%** (Pure business serving) |
-| **Hot-Path Connection Acquire Latency** | 3 – 15 ms (Syscall + SYN RTT) | **< 10 ns** (Local lane RAM hit) |
-| **Tail Latency ($p99$) Under Churn** | Multi-second spikes & timeouts | **17.63 ms** (Flat & predictable) |
-| **Gateway Resident Memory (RSS)** | Memory leaks from tracking states | **87.0 MiB** (Flatline across 350k conns) |
-
----
-
-## 5. Real-World Field Issues & Engineering Resolutions
-
-During stress testing and adversarial benchmark execution on Azure HPC clusters, several critical transport-level edge cases and protocol pitfalls were uncovered. This section documents these real-world issues, root causes, and production resolutions.
-
-### 5.1 Issue 1: Dropping Downstream HTTPS Connections on Missing ALPN (RFC 7301 Non-Compliance)
-- **Symptom**:
-  When executing connection storm benchmarks using HTTP/1.1 over TLS (`oha --disable-keepalive --insecure https://172.16.0.4/ping`) or standard legacy clients, the gateway immediately dropped 100% of connections, logging:
-  ```text
-  WARN velda_edge::pipeline: Dropping connection: ALPN negotiated outside the HTTP protocol family or missing
-  ```
-- **Root Cause**:
-  In `crates/velda-edge/src/pipeline/mod.rs`, the downstream TLS dispatcher performed strict pattern matching solely against explicit protocol strings:
-  ```rust
-  // Vulnerable implementation:
-  match alpn.as_deref() {
-      Some("h2") => http2::run_http2_loop(...).await,
-      Some("http/1.1") => http1::run_http1_loop(...).await,
-      other_alpn => {
-          tracing::warn!("Dropping connection: ALPN negotiated outside HTTP family or missing");
-      }
-  }
-  ```
-  When clients did not send the TLS Application-Layer Protocol Negotiation (ALPN) extension (standard behavior for many HTTP/1.1 clients and benchmarking tools), Rustls completed the TLS handshake with `alpn = None`. The gateway erroneously routed `None` to `other_alpn`, dropping valid connections.
-- **Resolution**:
-  Compliant with **RFC 7301 §3.2** ("In HTTP, a server that supports both HTTP/1.1 and HTTP/2 defaults to HTTP/1.1 if ALPN is omitted"), the dispatcher was updated to default `None` to the HTTP/1.1 pipeline:
-  ```rust
-  match alpn.as_deref() {
-      Some("h2") => {
-          http2::run_http2_loop(tls_stream, meta, config.http2_config, runtime).await;
-      }
-      None | Some("http/1.1") => {
-          http1::run_http1_loop(tls_stream, meta, config.streaming, config.http1_config, runtime).await;
-      }
-      other_alpn => {
-          tracing::warn!(actual = ?other_alpn, "Dropping connection: invalid protocol");
-      }
-  }
-  ```
-  Following this fix, downstream TLS 1.3 handshake throughput scaled to **2,879 handshakes/second** with **100.00% success rate**.
-
----
-
-### 5.2 Issue 2: Cross-Protocol ALPN Collision on Shared Configuration
-- **Symptom**:
-  TCP TLS clients connecting on port 443 intermittently failed with protocol errors immediately following the TLS Finished frame.
-- **Root Cause**:
-  The static configuration file (`tls.json`) declared an aggregated ALPN list:
-  ```json
-  "alpn": ["h3", "h2", "http/1.1"]
-  ```
-  Because `"h3"` was listed first, Rustls server negotiation selected `h3` for incoming TCP connections whenever a client offered a broad cipher suite without strict preference. However, HTTP/3 (RFC 9114) is fundamentally incompatible with TCP byte-streams (it requires QUIC datagram transport over UDP). When the TCP ingress pipeline received `alpn = "h3"`, transport framing aborted.
-- **Resolution**:
-  Enforced strict protocol boundary isolation:
-  - TCP TLS Listeners (`:443 TCP`) exclusively advertise: `["h2", "http/1.1"]`.
-  - UDP QUIC Listeners (`:443 UDP`) exclusively advertise: `["h3"]`.
-  This eliminated cross-protocol negotiation corruption.
-
----
-
-### 5.3 Issue 3: Telemetry Illusions in Multi-Core Async Architectures (The "1.12% CPU" Trap)
-- **Symptom**:
-  During sustained high-throughput HTTP/3 load tests (27,000 req/s), system telemetry tools initially reported an anomalously low CPU utilization of `1.12%`, suggesting a measurement defect.
-- **Root Cause**:
-  1. **Thread Group Leader Trap**: Standard Linux monitoring (`pidstat -p <pid>`) defaults to inspecting only the process thread-group leader (SPID == PID). In Velda Edge, the main thread sleeps waiting for OS shutdown signals (`SIGINT`/`SIGTERM`), while dedicated worker threads (`velda-worker-{0..3}`) execute all packet processing.
-  2. **Short-Burst Tool Exit**: The load generation tool (`h3bench`) supported `-D` or `--duration`, but ignored `-d 15`. As a result, it exited after sending a default burst of 50,000 requests in 1.9 seconds, leaving the gateway idle for the remaining 13.1 seconds of the measurement window.
-- **Resolution**:
-  - Enhanced `h3bench` to support `-d | -D | --duration` uniformly for sustained execution.
-  - Standardized benchmark telemetry to aggregate all CPU cores using `mpstat -P ALL 1` and `top -H -p <pid>`. Real sustained multi-core load was accurately measured at **78.1% CPU across all 4 EPYC cores** (32% user, 26% system, 20.4% softirq for UDP packet handling).
-
----
-
-### 5.4 Issue 4: Asynchronous Deadlock in Logistics Task Initialization
-- **Symptom**:
-  Integration tests for background logistics workers (`test_shadow_worker_0_lifecycle_and_reload`) hung indefinitely, blocking the CI/CD test runner. Kernel tracing (`/proc/<pid>/task/*/wchan`) revealed worker threads stuck in `futex_do_wait`.
-- **Root Cause**:
-  In `crates/velda-edge/src/lifecycle/worker.rs`, the background logistics thread awaited a Tokio runtime handle:
-  ```rust
-  let traffic_handle = traffic_handle_rx.await.ok();
-  ```
-  In test harnesses, the corresponding `oneshot::Sender` (`_traffic_tx`) was created but never transmitted a handle or dropped, holding the channel open. The logistics worker blocked on `.await` before entering its cooperative event loop, preventing it from ever receiving the shutdown signal.
-- **Resolution**:
-  Resolved by ensuring the test harness immediately initializes the channel with the active test runtime handle:
-  ```rust
-  let (traffic_tx, traffic_rx) = tokio::sync::oneshot::channel();
-  let _ = traffic_tx.send(tokio::runtime::Handle::current());
-  ```
-  All 58 test suites now complete in under **0.42 seconds** without race conditions or deadlocks.
+| Metric | Naive Proxy | NGINX | Envoy | **Velda Edge** |
+| :--- | :---: | :---: | :---: | :---: |
+| **Backend `TIME_WAIT` Sockets** | Catastrophic (50k - 150k) | Moderate to High | Low to Moderate | **0 (`TIME-WAIT = 0`)** |
+| **Backend Ephemeral Port Exhaustion**| Frequent (`EADDRNOTAVAIL`) | Possible under churn | Protected by limits | **Zero Risk (Persistent Pool)** |
+| **Hot-Path Acquire Overhead** | 3 – 15 ms (Cold Connect) | Shared slab mutex | Thread dispatcher queue | **< 10 ns (Lane Shard RAM hit)** |
+| **Pre-Warming Mechanism** | None | None | Reactive | **Proactive Autonomous (SCHED_IDLE)** |
+| **Downstream Churn Absorption** | 0% (Propagates to backend) | Requires custom tuning | 503 `UO` on burst | **100% Shielded (Zero Backend Churn)** |
+| **Tail Latency ($p99$) Under Churn** | Multi-second spikes | High jitter | Burst queuing spikes | **17.63 ms (Flat & Predictable)** |
+| **Gateway Resident Memory (RSS)** | Memory leaks from tracking | Low | Moderate to High | **87.0 MiB (Flatline across 350k conns)** |
 
 ---
 
@@ -300,5 +231,3 @@ To ensure Velda Edge maintains this level of resilience as the codebase evolves,
    Hot-path worker threads must never acquire global mutexes, dispatch tasks over unbounded channels, or wait for background logistics tasks during `upstream.acquire()`.
 4. **Lane Independence**:
    Worker $k$ only leases from Lane $k$. No cross-worker stealing or shared locking on the fast path.
-5. **Protocol Family Fallback Compliance**:
-   All L7 protocol ingress dispatchers must handle missing ALPN gracefully by defaulting to RFC-specified fallback protocols rather than dropping client sockets.
