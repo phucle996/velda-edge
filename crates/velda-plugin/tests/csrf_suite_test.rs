@@ -255,3 +255,71 @@ fn test_fetch_metadata_and_origin_enforcement() {
     let action_valid = plugin.on_upstream_request(&mut req_valid, &mut target);
     assert!(matches!(action_valid, Action::Continue));
 }
+
+#[test]
+fn test_csrf_e2e_short_referer_and_empty_tokens() {
+    let csrf_plugin = CsrfPlugin::new(
+        "csrf-hardening",
+        CsrfConfig {
+            cookie_name: "__Host-csrf".to_string(),
+            header_name: "X-CSRF-Token".to_string(),
+            secret_key: None,
+            token_ttl_secs: 3600,
+            safe_methods: vec!["GET".to_string(), "HEAD".to_string()],
+            trusted_origins: vec!["https://app.example.com".to_string()],
+            enforce_fetch_metadata: false,
+            enforce_origin: true,
+        },
+    )
+    .unwrap();
+
+    let mut target: Arc<str> = Arc::from("upstream");
+
+    // 1. Short Referer with 1 byte ("x") must NOT panic
+    let mut headers_short_ref = HeaderMap::new();
+    headers_short_ref.insert(HOST, HeaderValue::from_static("app.example.com"));
+    headers_short_ref.insert(http::header::REFERER, HeaderValue::from_static("x"));
+    headers_short_ref.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));
+    headers_short_ref.insert("X-CSRF-Token", HeaderValue::from_static("tok123"));
+
+    let mut req_short_ref = build_test_request(Method::POST, "/data", headers_short_ref);
+    let action_short_ref = csrf_plugin.on_upstream_request(&mut req_short_ref, &mut target);
+    let Action::Respond(resp_short_ref) = action_short_ref else {
+        panic!("Expected 403 for invalid short referer");
+    };
+    assert_eq!(resp_short_ref.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp_short_ref
+            .headers
+            .get(http::header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "47"
+    );
+    assert_eq!(resp_short_ref.body.len(), 47);
+
+    // 2. Empty tokens must be rejected
+    let mut headers_empty = HeaderMap::new();
+    headers_empty.insert(HOST, HeaderValue::from_static("app.example.com"));
+    headers_empty.insert(ORIGIN, HeaderValue::from_static("https://app.example.com"));
+    headers_empty.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));
+    headers_empty.insert("X-CSRF-Token", HeaderValue::from_static(""));
+
+    let mut req_empty = build_test_request(Method::POST, "/data", headers_empty);
+    let action_empty = csrf_plugin.on_upstream_request(&mut req_empty, &mut target);
+    let Action::Respond(resp_empty) = action_empty else {
+        panic!("Expected 403 for empty tokens");
+    };
+    assert_eq!(resp_empty.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp_empty
+            .headers
+            .get(http::header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "32"
+    );
+    assert_eq!(resp_empty.body.len(), 32);
+}

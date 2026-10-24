@@ -127,6 +127,26 @@ pub fn validate_csrf_config(
         });
     }
 
+    for origin in &cfg.trusted_origins {
+        let trimmed = origin.trim();
+        if trimmed == "*" {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': wildcard '*' is forbidden in 'trusted_origins' for CSRF protection"
+                ),
+            });
+        }
+        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': trusted origin '{origin}' must specify a scheme ('http://' or 'https://')"
+                ),
+            });
+        }
+    }
+
     Ok(cfg)
 }
 
@@ -180,5 +200,37 @@ mod tests {
         });
         let res = validate_csrf_config("csrf_test", &val);
         assert!(res.is_err(), "Must reject secret keys < 16 chars");
+    }
+
+    #[test]
+    fn test_rejects_wildcard_trusted_origins() {
+        let val = serde_json::json!({
+            "cookie_name": "__Host-velda_csrf",
+            "header_name": "X-CSRF-Token",
+            "secret_key": null,
+            "token_ttl_secs": 7200,
+            "safe_methods": ["GET", "HEAD"],
+            "trusted_origins": ["*"],
+            "enforce_fetch_metadata": true,
+            "enforce_origin": true
+        });
+        let res = validate_csrf_config("csrf_test", &val);
+        assert!(res.is_err(), "Must reject '*' in trusted_origins");
+    }
+
+    #[test]
+    fn test_rejects_schemeless_trusted_origins() {
+        let val = serde_json::json!({
+            "cookie_name": "__Host-velda_csrf",
+            "header_name": "X-CSRF-Token",
+            "secret_key": null,
+            "token_ttl_secs": 7200,
+            "safe_methods": ["GET", "HEAD"],
+            "trusted_origins": ["example.com"],
+            "enforce_fetch_metadata": true,
+            "enforce_origin": true
+        });
+        let res = validate_csrf_config("csrf_test", &val);
+        assert!(res.is_err(), "Must reject origin without scheme");
     }
 }

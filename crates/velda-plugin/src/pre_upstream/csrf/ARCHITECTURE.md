@@ -89,5 +89,5 @@ Instead of splitting `Cookie` strings into vectors, [`extract_cookie_value`](fil
 Total Length: 16 + 1 + 32 + 1 + 64 = 114 Bytes
 ```
 1. **Instant Shape Guard**: Validates that `token.len() == 114`, `token[16] == b'.'`, and `token[49] == b'.'`.
-2. **TTL Expiration Check**: Extracts the 16-character timestamp hex directly into registers, confirming `now.saturating_sub(ts) <= token_ttl_secs`.
-3. **Stack-Allocated HMAC-SHA256**: Feeds the first 49 bytes into `ring::hmac::sign`, writes the hex digest into a stack buffer `[u8; 64]`, and executes 128-bit SIMD `constant_time_eq`.
+2. **Branchless Hex Timestamp Decoding**: Decodes the 16-character timestamp hex using a compile-time 256-byte branchless lookup table (`HEX_LUT`), confirming `now.saturating_sub(ts) <= token_ttl_secs` without string allocation or radix branching.
+3. **Stack-Allocated HMAC-SHA256**: Feeds the first 49 bytes into `ring::hmac::sign`, writes the hex digest into a stack buffer `[u8; 64]`, and executes loop-free branchless 128-bit vector constant-time comparison (`constant_time_eq_64`) across four `u128` registers.

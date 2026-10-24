@@ -31,6 +31,7 @@ use ring::hmac;
 use velda_core::{Action, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
+use super::token::{self, constant_time_eq};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_route::OriginPattern;
@@ -72,55 +73,36 @@ impl MethodMask {
 
     #[inline(always)]
     pub fn parse_token(m: &str) -> u16 {
-        match m.as_bytes() {
-            b"GET" | b"get" => Self::GET,
-            b"POST" | b"post" => Self::POST,
-            b"PUT" | b"put" => Self::PUT,
-            b"DELETE" | b"delete" => Self::DELETE,
-            b"HEAD" | b"head" => Self::HEAD,
-            b"OPTIONS" | b"options" => Self::OPTIONS,
-            b"PATCH" | b"patch" => Self::PATCH,
-            b"TRACE" | b"trace" => Self::TRACE,
-            b"CONNECT" | b"connect" => Self::CONNECT,
-            _ => Self::EXTENSION,
+        let trimmed = m.trim();
+        if trimmed.eq_ignore_ascii_case("GET") {
+            Self::GET
+        } else if trimmed.eq_ignore_ascii_case("POST") {
+            Self::POST
+        } else if trimmed.eq_ignore_ascii_case("PUT") {
+            Self::PUT
+        } else if trimmed.eq_ignore_ascii_case("DELETE") {
+            Self::DELETE
+        } else if trimmed.eq_ignore_ascii_case("HEAD") {
+            Self::HEAD
+        } else if trimmed.eq_ignore_ascii_case("OPTIONS") {
+            Self::OPTIONS
+        } else if trimmed.eq_ignore_ascii_case("PATCH") {
+            Self::PATCH
+        } else if trimmed.eq_ignore_ascii_case("TRACE") {
+            Self::TRACE
+        } else if trimmed.eq_ignore_ascii_case("CONNECT") {
+            Self::CONNECT
+        } else {
+            Self::EXTENSION
         }
     }
 }
 
-/// Constant-time byte slice comparison using 128-bit vector words to eliminate timing
-/// side-channel attacks while vectorizing directly into SIMD instructions on modern CPUs.
-#[inline]
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u128;
-    let (chunks_a, remainder_a) = a.as_chunks::<16>();
-    let (chunks_b, remainder_b) = b.as_chunks::<16>();
-
-    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
-        let val_a = u128::from_ne_bytes(*ca);
-        let val_b = u128::from_ne_bytes(*cb);
-        diff |= val_a ^ val_b;
-    }
-
-    let mut rem_diff = 0u8;
-    for (ra, rb) in remainder_a.iter().zip(remainder_b.iter()) {
-        rem_diff |= ra ^ rb;
-    }
-
-    diff == 0 && rem_diff == 0
-}
-
 /// Scans raw HTTP Cookie header bytes for a specific cookie key prefix with zero heap allocations.
-///
-/// Ensures boundary correctness: the key must start at index 0 or be immediately preceded
-/// by `;` or whitespace after `;`, preventing partial prefix collisions (e.g. `other_csrf=`).
 #[inline]
 pub fn extract_cookie_value<'a>(cookie_bytes: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
     let mut offset = 0;
     while offset < cookie_bytes.len() {
-        // Skip leading whitespace or separators
         while offset < cookie_bytes.len()
             && (cookie_bytes[offset] == b' '
                 || cookie_bytes[offset] == b'\t'
@@ -140,7 +122,6 @@ pub fn extract_cookie_value<'a>(cookie_bytes: &'a [u8], prefix: &[u8]) -> Option
             return Some(cookie_bytes[val_start..val_end].trim_ascii());
         }
 
-        // Advance to next cookie entry
         while offset < cookie_bytes.len() && cookie_bytes[offset] != b';' {
             offset += 1;
         }
@@ -148,14 +129,13 @@ pub fn extract_cookie_value<'a>(cookie_bytes: &'a [u8], prefix: &[u8]) -> Option
     None
 }
 
-/// Helper to get current epoch seconds.
-#[inline]
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+const RESP_CROSS_SITE: &[u8] = b"403 Forbidden: CSRF cross-site request disallowed\n";
+const RESP_ORIGIN_FAILED: &[u8] = b"403 Forbidden: CSRF origin verification failed\n";
+const RESP_COOKIE_MISSING: &[u8] = b"403 Forbidden: CSRF cookie missing\n";
+const RESP_HEADER_MISSING: &[u8] = b"403 Forbidden: CSRF token header missing\n";
+const RESP_TOKEN_EMPTY: &[u8] = b"403 Forbidden: CSRF token empty\n";
+const RESP_TOKEN_MISMATCH: &[u8] = b"403 Forbidden: CSRF token mismatch\n";
+const RESP_TOKEN_INVALID: &[u8] = b"403 Forbidden: CSRF signed token invalid or expired\n";
 
 /// Pre-Upstream Cross-Site Request Forgery (CSRF) Protection Plugin.
 #[derive(Debug, Clone)]
@@ -228,88 +208,16 @@ impl CsrfPlugin {
         Self::new(&config.id, cfg)
     }
 
-    /// Generates a valid 114-byte HMAC-SHA256 signed stateless token (`<timestamp_hex>.<nonce_hex>.<hmac_hex>`).
+    /// Generates a valid 114-byte HMAC-SHA256 signed stateless token.
+    #[inline(always)]
     pub fn mint_token(key: &hmac::Key, nonce: &[u8; 16], now_secs: u64) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut buf = [0u8; 114];
-
-        // 1. Timestamp (16 hex chars)
-        for i in (0..16).rev() {
-            let shift = (15 - i) * 4;
-            buf[i] = HEX[((now_secs >> shift) & 0x0f) as usize];
-        }
-        buf[16] = b'.';
-
-        // 2. Nonce (32 hex chars)
-        for (i, &b) in nonce.iter().enumerate() {
-            buf[17 + i * 2] = HEX[(b >> 4) as usize];
-            buf[17 + i * 2 + 1] = HEX[(b & 0x0f) as usize];
-        }
-        buf[49] = b'.';
-
-        // 3. HMAC-SHA256 over "<timestamp_hex>.<nonce_hex>" (49 bytes)
-        let tag = hmac::sign(key, &buf[0..49]);
-        for (i, &b) in tag.as_ref().iter().enumerate() {
-            buf[50 + i * 2] = HEX[(b >> 4) as usize];
-            buf[50 + i * 2 + 1] = HEX[(b & 0x0f) as usize];
-        }
-
-        std::str::from_utf8(&buf)
-            .expect("Valid UTF-8 hex token")
-            .to_string()
+        token::mint_token(key, nonce, now_secs)
     }
 
-    /// Verifies a signed stateless token on the stack with zero heap allocation.
-    #[inline]
-    fn verify_signed_token(&self, key: &hmac::Key, token: &[u8], now_secs: u64) -> bool {
-        // Strict format check: 16 (ts) + 1 (.) + 32 (nonce) + 1 (.) + 64 (sig) = 114 bytes
-        if token.len() != 114 || token[16] != b'.' || token[49] != b'.' {
-            return false;
-        }
-
-        // Parse timestamp hex
-        let Ok(ts_str) = std::str::from_utf8(&token[0..16]) else {
-            return false;
-        };
-        let Ok(timestamp) = u64::from_str_radix(ts_str, 16) else {
-            return false;
-        };
-
-        // TTL validation with 60-second future skew tolerance
-        if timestamp > now_secs + 60
-            || now_secs.saturating_sub(timestamp) > self.config.token_ttl_secs
-        {
-            return false;
-        }
-
-        // Compute expected HMAC-SHA256 signature
-        let expected_tag = hmac::sign(key, &token[0..49]);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut expected_hex = [0u8; 64];
-        for (i, &b) in expected_tag.as_ref().iter().enumerate() {
-            expected_hex[i * 2] = HEX[(b >> 4) as usize];
-            expected_hex[i * 2 + 1] = HEX[(b & 0x0f) as usize];
-        }
-
-        // 128-bit SIMD constant-time signature comparison
-        constant_time_eq(&token[50..114], &expected_hex)
-    }
-
-    /// Checks whether an Origin or Referer matches the request Host header.
-    #[inline]
-    fn matches_host(&self, origin: &str, host_val: &HeaderValue) -> bool {
-        let Ok(host_str) = host_val.to_str() else {
-            return false;
-        };
-
-        // Origin format is "scheme://host[:port]"
-        if let Some(host_part) = origin.strip_prefix("https://") {
-            host_part == host_str
-        } else if let Some(host_part) = origin.strip_prefix("http://") {
-            host_part == host_str
-        } else {
-            origin == host_str
-        }
+    /// Scans raw HTTP Cookie header bytes for this plugin's target cookie prefix with zero heap allocations.
+    #[inline(always)]
+    pub fn extract_cookie_token<'a>(&self, cookie_bytes: &'a [u8]) -> Option<&'a [u8]> {
+        extract_cookie_value(cookie_bytes, &self.cookie_prefix)
     }
 }
 
@@ -325,7 +233,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
         // ─────────────────────────────────────────────────────────────────────
         let req_mask = MethodMask::from_method(&req.method);
         if (self.safe_methods_mask & req_mask) != 0 {
-            return Action::Continue; // GET, HEAD, OPTIONS, TRACE bypass immediately (~0.5ns)
+            return Action::Continue;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -335,33 +243,28 @@ impl PreUpstreamPlugin for CsrfPlugin {
             static SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
             if let Some(site_val) = req.headers.get(&SEC_FETCH_SITE)
                 && let Ok(site_str) = site_val.to_str()
+                && site_str.eq_ignore_ascii_case("cross-site")
             {
-                // If the browser explicitly marks this mutating request as "cross-site",
-                // it MUST match one of the explicitly trusted cross-origin domains.
-                if site_str.eq_ignore_ascii_case("cross-site") {
-                    let mut authorized_cross_site = false;
-                    if let Some(orig) = req.headers.get(ORIGIN)
-                        && let Ok(orig_str) = orig.to_str()
-                    {
-                        authorized_cross_site =
-                            self.trusted_origins.iter().any(|p| p.matches(orig_str));
-                    }
+                let authorized_cross_site = req
+                    .headers
+                    .get(ORIGIN)
+                    .and_then(|orig| orig.to_str().ok())
+                    .is_some_and(|orig_str| {
+                        self.trusted_origins.iter().any(|p| p.matches(orig_str))
+                    });
 
-                    if !authorized_cross_site {
-                        return Action::Respond(
-                            L7Response::from_bytes(
-                                StatusCode::FORBIDDEN,
-                                Bytes::from_static(
-                                    b"403 Forbidden: CSRF cross-site request disallowed\n",
-                                ),
-                            )
-                            .with_header(
-                                CONTENT_TYPE,
-                                HeaderValue::from_static("text/plain; charset=utf-8"),
-                            )
-                            .with_header(CONTENT_LENGTH, HeaderValue::from_static("49")),
-                        );
-                    }
+                if !authorized_cross_site {
+                    return Action::Respond(
+                        L7Response::from_bytes(
+                            StatusCode::FORBIDDEN,
+                            Bytes::from_static(RESP_CROSS_SITE),
+                        )
+                        .with_header(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        )
+                        .with_header(CONTENT_LENGTH, HeaderValue::from_static("50")),
+                    );
                 }
             }
         }
@@ -370,55 +273,57 @@ impl PreUpstreamPlugin for CsrfPlugin {
         // Gate 3: Origin / Referer Verification (RFC 6454 Same-Origin Defense)
         // ─────────────────────────────────────────────────────────────────────
         if self.config.enforce_origin {
-            let host_opt = req.headers.get(HOST);
-            let mut origin_verified = false;
-
-            if let Some(orig_val) = req.headers.get(ORIGIN)
-                && let Ok(orig_str) = orig_val.to_str()
-            {
-                // 1. Check if Origin matches Host
-                if let Some(host_val) = host_opt {
-                    origin_verified = self.matches_host(orig_str, host_val);
-                }
-                // 2. Check if Origin matches trusted_origins
-                if !origin_verified {
-                    origin_verified = self.trusted_origins.iter().any(|p| p.matches(orig_str));
-                }
-            } else if let Some(ref_val) = req.headers.get(REFERER)
-                && let Ok(ref_str) = ref_val.to_str()
-            {
-                // Fallback to Referer: extract "scheme://host[:port]"
-                let origin_portion = if let Some(idx) = ref_str[8..].find('/') {
-                    &ref_str[..8 + idx]
-                } else {
-                    ref_str
-                };
-
-                if let Some(host_val) = host_opt {
-                    origin_verified = self.matches_host(origin_portion, host_val);
-                }
-                if !origin_verified {
-                    origin_verified = self
-                        .trusted_origins
-                        .iter()
-                        .any(|p| p.matches(origin_portion));
-                }
+            let candidate: Option<&str> = if let Some(orig_val) = req.headers.get(ORIGIN) {
+                orig_val.to_str().ok()
+            } else if let Some(ref_val) = req.headers.get(REFERER) {
+                ref_val.to_str().ok().map(|ref_str| {
+                    if let Some(scheme_end) = ref_str.find("://") {
+                        let after_scheme = &ref_str[scheme_end + 3..];
+                        if let Some(path_start) = after_scheme.find('/') {
+                            &ref_str[..scheme_end + 3 + path_start]
+                        } else {
+                            ref_str
+                        }
+                    } else {
+                        ref_str
+                    }
+                })
             } else {
-                // Mutating requests without Origin or Referer are rejected when strict origin is enforced
-                origin_verified = false;
-            }
+                None
+            };
+
+            let origin_verified = match candidate {
+                Some(origin_str) => {
+                    let matches_host = req
+                        .headers
+                        .get(HOST)
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|host_str| {
+                            if let Some(host_part) = origin_str.strip_prefix("https://") {
+                                host_part.eq_ignore_ascii_case(host_str)
+                            } else if let Some(host_part) = origin_str.strip_prefix("http://") {
+                                host_part.eq_ignore_ascii_case(host_str)
+                            } else {
+                                false
+                            }
+                        });
+
+                    matches_host || self.trusted_origins.iter().any(|p| p.matches(origin_str))
+                }
+                None => false,
+            };
 
             if !origin_verified {
                 return Action::Respond(
                     L7Response::from_bytes(
                         StatusCode::FORBIDDEN,
-                        Bytes::from_static(b"403 Forbidden: CSRF origin verification failed\n"),
+                        Bytes::from_static(RESP_ORIGIN_FAILED),
                     )
                     .with_header(
                         CONTENT_TYPE,
                         HeaderValue::from_static("text/plain; charset=utf-8"),
                     )
-                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("46")),
+                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("47")),
                 );
             }
         }
@@ -431,7 +336,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
             return Action::Respond(
                 L7Response::from_bytes(
                     StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CSRF cookie missing\n"),
+                    Bytes::from_static(RESP_COOKIE_MISSING),
                 )
                 .with_header(
                     CONTENT_TYPE,
@@ -441,12 +346,11 @@ impl PreUpstreamPlugin for CsrfPlugin {
             );
         };
 
-        let Some(cookie_token) = extract_cookie_value(cookie_hdr.as_bytes(), &self.cookie_prefix)
-        else {
+        let Some(cookie_token) = self.extract_cookie_token(cookie_hdr.as_bytes()) else {
             return Action::Respond(
                 L7Response::from_bytes(
                     StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CSRF cookie missing\n"),
+                    Bytes::from_static(RESP_COOKIE_MISSING),
                 )
                 .with_header(
                     CONTENT_TYPE,
@@ -461,7 +365,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
             return Action::Respond(
                 L7Response::from_bytes(
                     StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CSRF token header missing\n"),
+                    Bytes::from_static(RESP_HEADER_MISSING),
                 )
                 .with_header(
                     CONTENT_TYPE,
@@ -471,37 +375,54 @@ impl PreUpstreamPlugin for CsrfPlugin {
             );
         };
 
-        // 4.3 128-bit SIMD Constant-Time Equality Check
-        if !constant_time_eq(cookie_token, header_token.as_bytes().trim_ascii()) {
+        let header_token_bytes = header_token.as_bytes().trim_ascii();
+
+        // 4.3 Validate non-empty tokens (Zero-Length token bypass defense)
+        if cookie_token.is_empty() || header_token_bytes.is_empty() {
+            return Action::Respond(
+                L7Response::from_bytes(StatusCode::FORBIDDEN, Bytes::from_static(RESP_TOKEN_EMPTY))
+                    .with_header(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                    )
+                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("32")),
+            );
+        }
+
+        // 4.4 128-bit SIMD Constant-Time Equality Check
+        if !constant_time_eq(cookie_token, header_token_bytes) {
             return Action::Respond(
                 L7Response::from_bytes(
                     StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CSRF token mismatch\n"),
+                    Bytes::from_static(RESP_TOKEN_MISMATCH),
                 )
                 .with_header(
                     CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("36")),
+                .with_header(CONTENT_LENGTH, HeaderValue::from_static("35")),
             );
         }
 
-        // 4.4 Cryptographic HMAC-SHA256 Signature & TTL Check (Neutralizes Subdomain Cookie Tossing)
+        // 4.5 Cryptographic HMAC-SHA256 Signature & TTL Check (Neutralizes Subdomain Cookie Tossing)
         if let Some(key) = &self.hmac_key {
-            let now = current_epoch_secs();
-            if !self.verify_signed_token(key, cookie_token, now) {
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            if !token::verify_signed_token(key, cookie_token, self.config.token_ttl_secs, now_secs)
+            {
                 return Action::Respond(
                     L7Response::from_bytes(
                         StatusCode::FORBIDDEN,
-                        Bytes::from_static(
-                            b"403 Forbidden: CSRF signed token invalid or expired\n",
-                        ),
+                        Bytes::from_static(RESP_TOKEN_INVALID),
                     )
                     .with_header(
                         CONTENT_TYPE,
                         HeaderValue::from_static("text/plain; charset=utf-8"),
                     )
-                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("51")),
+                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("52")),
                 );
             }
         }
@@ -636,7 +557,10 @@ mod tests {
 
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let nonce = [0x42u8; 16];
-        let now = current_epoch_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let valid_token = CsrfPlugin::mint_token(&key, &nonce, now);
 
         // 1. Valid signed token succeeds
@@ -728,5 +652,123 @@ mod tests {
         let mut req_trusted = build_test_request(Method::POST, "/api/action", headers_trusted);
         let action_trusted = plugin.on_upstream_request(&mut req_trusted, &mut target);
         assert!(matches!(action_trusted, Action::Continue));
+    }
+
+    #[test]
+    fn test_short_referer_no_panic() {
+        let config = CsrfConfig {
+            cookie_name: "__Host-csrf".to_string(),
+            header_name: "X-CSRF-Token".to_string(),
+            secret_key: None,
+            token_ttl_secs: 3600,
+            safe_methods: vec!["GET".to_string()],
+            trusted_origins: vec![],
+            enforce_fetch_metadata: false,
+            enforce_origin: true,
+        };
+        let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
+        let mut target: Arc<str> = Arc::from("backend");
+
+        for short_ref in ["x", "http:", "https", "1234567"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, HeaderValue::from_static("api.example.com"));
+            headers.insert(REFERER, HeaderValue::from_str(short_ref).unwrap());
+            headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));
+            headers.insert("X-CSRF-Token", HeaderValue::from_static("tok123"));
+
+            let mut req = build_test_request(Method::POST, "/api/action", headers);
+            let action = plugin.on_upstream_request(&mut req, &mut target);
+            let Action::Respond(resp) = action else {
+                panic!("Expected 403 Forbidden for short invalid referer");
+            };
+            assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn test_mixed_case_safe_methods() {
+        let config = CsrfConfig {
+            cookie_name: "__Host-csrf".to_string(),
+            header_name: "X-CSRF-Token".to_string(),
+            secret_key: None,
+            token_ttl_secs: 3600,
+            safe_methods: vec!["Get".to_string(), "hEaD".to_string(), "oPtIoNs".to_string()],
+            trusted_origins: vec![],
+            enforce_fetch_metadata: true,
+            enforce_origin: true,
+        };
+        let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
+        let mut target: Arc<str> = Arc::from("backend");
+
+        for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            let mut req = build_test_request(m, "/api/data", HeaderMap::new());
+            let action = plugin.on_upstream_request(&mut req, &mut target);
+            assert!(matches!(action, Action::Continue));
+        }
+
+        let mut req_post = build_test_request(Method::POST, "/api/data", HeaderMap::new());
+        let action_post = plugin.on_upstream_request(&mut req_post, &mut target);
+        assert!(matches!(action_post, Action::Respond(_)));
+    }
+
+    #[test]
+    fn test_empty_tokens_rejected() {
+        let config = CsrfConfig {
+            cookie_name: "__Host-csrf".to_string(),
+            header_name: "X-CSRF-Token".to_string(),
+            secret_key: None,
+            token_ttl_secs: 3600,
+            safe_methods: vec!["GET".to_string()],
+            trusted_origins: vec![],
+            enforce_fetch_metadata: false,
+            enforce_origin: false,
+        };
+        let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
+        let mut target: Arc<str> = Arc::from("backend");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));
+        headers.insert("X-CSRF-Token", HeaderValue::from_static(""));
+
+        let mut req = build_test_request(Method::POST, "/api/action", headers);
+        let action = plugin.on_upstream_request(&mut req, &mut target);
+        let Action::Respond(resp) = action else {
+            panic!("Expected Action::Respond(403) for empty tokens");
+        };
+        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers.get(CONTENT_LENGTH).unwrap().to_str().unwrap(),
+            "32"
+        );
+        assert_eq!(resp.body.as_slice(), b"403 Forbidden: CSRF token empty\n");
+    }
+
+    #[test]
+    fn test_schemeless_origin_rejected() {
+        let config = CsrfConfig {
+            cookie_name: "__Host-csrf".to_string(),
+            header_name: "X-CSRF-Token".to_string(),
+            secret_key: None,
+            token_ttl_secs: 3600,
+            safe_methods: vec!["GET".to_string()],
+            trusted_origins: vec![],
+            enforce_fetch_metadata: false,
+            enforce_origin: true,
+        };
+        let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
+        let mut target: Arc<str> = Arc::from("backend");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("api.example.com"));
+        headers.insert(ORIGIN, HeaderValue::from_static("api.example.com"));
+        headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));
+        headers.insert("X-CSRF-Token", HeaderValue::from_static("tok123"));
+
+        let mut req = build_test_request(Method::POST, "/api/action", headers);
+        let action = plugin.on_upstream_request(&mut req, &mut target);
+        let Action::Respond(resp) = action else {
+            panic!("Expected Action::Respond(403) for schemeless origin");
+        };
+        assert_eq!(resp.status, StatusCode::FORBIDDEN);
     }
 }
