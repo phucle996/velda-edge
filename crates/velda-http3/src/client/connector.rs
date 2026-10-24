@@ -266,13 +266,13 @@ fn tune_udp_socket(sock: &socket2::Socket) {
     }
 }
 
-/// Establishes a new persistent, multiplexed HTTP/3 client connection to the target backend endpoint.
-///
-/// Drives the initial QUIC handshake to completion and spawns the background connection driver.
+/// Establishes a persistent, multiplexed HTTP/3 client connection to the target backend endpoint
+/// using explicit QUIC [`ClientConfig`].
 pub async fn connect(
     target: SocketAddr,
     server_name: &str,
     config: &Http3Config,
+    mut client_cfg: ClientConfig,
 ) -> Result<Http3Client, Http3Error> {
     // 1. Bind local UDP egress socket with tuned kernel buffers and graceful acceleration
     let domain = if target.is_ipv4() {
@@ -299,7 +299,6 @@ pub async fn connect(
     let endpoint_config = Arc::new(EndpointConfig::default());
     let mut endpoint = Endpoint::new(endpoint_config, None, false, None);
 
-    let mut client_cfg = default_client_config()?;
     client_cfg.transport_config(Arc::new(config.build_transport_config()));
     let now = Instant::now();
     let (handle, mut conn) = endpoint
@@ -422,7 +421,7 @@ pub async fn forward_request(
 ) -> Result<L7Response, Http3Error> {
     let server_name = extract_sni(req, &target);
     let config = Http3Config::auto();
-    let client = connect(target, &server_name, &config).await?;
+    let client = connect(target, &server_name, &config, default_client_config()?).await?;
     client.send_request_ref(req).await
 }
 

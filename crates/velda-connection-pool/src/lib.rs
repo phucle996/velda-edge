@@ -23,8 +23,9 @@ pub use config::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_LIFETIME, PoolConfig, PoolSta
 pub use container::{
     FastBuildHasher, FastHasher, MAX_IDLE_PER_KEY, MAX_SHARDS, MIN_IDLE_PER_KEY, MIN_SHARDS,
     MultiplexedConnection, MultiplexedPool, MuxShard, PoolShard, ShardTable, SubPool,
-    optimal_max_concurrent_streams, optimal_max_idle_per_key, optimal_shard_count,
-    probed_max_concurrent_streams, probed_max_idle_per_key, probed_shard_count,
+    current_thread_lane, optimal_max_concurrent_streams, optimal_max_idle_per_key,
+    optimal_shard_count, probed_max_concurrent_streams, probed_max_idle_per_key,
+    probed_shard_count, set_current_thread_lane,
 };
 pub use key::ConnectionKey;
 pub use lease::{

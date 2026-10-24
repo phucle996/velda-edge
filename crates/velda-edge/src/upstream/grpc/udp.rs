@@ -52,9 +52,12 @@ pub struct GrpcUdpUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcUdpPipeStrategy,
     /// Lock-sharded persistent gRPC QUIC client connection pool.
-    pool: MultiplexedPool<SocketAddr, GrpcUdpClientResource>,
+    pool: Arc<MultiplexedPool<SocketAddr, GrpcUdpClientResource>>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
+    /// [PRE-COMPILED]: Pre-compiled QUIC client TLS configuration compiled directly
+    /// from upstream `tls` config (custom CA roots, client mTLS cert, verify settings).
+    pub quic_config: Arc<velda_grpc::udp::quinn_proto::ClientConfig>,
 }
 
 impl std::fmt::Debug for GrpcUdpUpstream {
@@ -77,6 +80,7 @@ impl GrpcUdpUpstream {
         streaming: StreamingMode,
         shard_count: usize,
         max_concurrent_streams: u32,
+        quic_config: Arc<velda_grpc::udp::quinn_proto::ClientConfig>,
     ) -> Self {
         let strategy = GrpcUdpPipeStrategy::from_streaming(streaming);
         Self {
@@ -84,8 +88,9 @@ impl GrpcUdpUpstream {
             target_sni,
             streaming,
             strategy,
-            pool: MultiplexedPool::with_shards(shard_count),
+            pool: Arc::new(MultiplexedPool::with_shards(shard_count)),
             max_concurrent_streams,
+            quic_config,
         }
     }
 
@@ -105,30 +110,42 @@ impl GrpcUdpUpstream {
         let max_streams = self.max_concurrent_streams;
         let server_name: &str = &self.target_sni;
         let idle_timeout = self.inner.timeouts().idle;
+        let quic_tls = Arc::clone(&self.quic_config);
 
-        self.inner
-            .execute(|endpoint| async move {
-                if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    if !lease.client.is_closed() {
-                        return Ok::<_, String>(lease.client.clone());
+        let (fresh, _endpoint) = self
+            .inner
+            .execute(|endpoint| {
+                let quic_tls = Arc::clone(&quic_tls);
+                async move {
+                    if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
+                        if !lease.client.is_closed() {
+                            return Ok::<_, String>((lease.client.clone(), endpoint));
+                        }
+                        lease.mark_goaway();
                     }
-                    lease.mark_goaway();
-                }
 
-                let fresh = velda_grpc::udp::connect_udp(endpoint, server_name, config)
+                    let fresh = velda_grpc::udp::connect_udp(
+                        endpoint,
+                        server_name,
+                        config,
+                        (*quic_tls).clone(),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let _ = self.pool.register(
-                    endpoint,
-                    GrpcUdpClientResource::new(fresh.clone()),
-                    max_streams,
-                );
+                    let _ = self.pool.register(
+                        endpoint,
+                        GrpcUdpClientResource::new(fresh.clone()),
+                        max_streams,
+                    );
 
-                Ok::<_, String>(fresh)
+                    Ok::<_, String>((fresh, endpoint))
+                }
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(fresh)
     }
 
     /// Connects a brand new gRPC over UDP client directly, bypassing existing pool leases.
@@ -140,22 +157,77 @@ impl GrpcUdpUpstream {
     ) -> Result<GrpcUdpClient, EdgeError> {
         let max_streams = self.max_concurrent_streams;
         let server_name: &str = &self.target_sni;
+        let quic_tls = Arc::clone(&self.quic_config);
 
-        self.inner
-            .execute(|endpoint| async move {
-                let fresh = velda_grpc::udp::connect_udp(endpoint, server_name, config)
+        let (fresh, _endpoint) = self
+            .inner
+            .execute(|endpoint| {
+                let quic_tls = Arc::clone(&quic_tls);
+                async move {
+                    let fresh = velda_grpc::udp::connect_udp(
+                        endpoint,
+                        server_name,
+                        config,
+                        (*quic_tls).clone(),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
 
-                let _ = self.pool.register(
-                    endpoint,
-                    GrpcUdpClientResource::new(fresh.clone()),
-                    max_streams,
-                );
+                    let _ = self.pool.register(
+                        endpoint,
+                        GrpcUdpClientResource::new(fresh.clone()),
+                        max_streams,
+                    );
 
-                Ok::<_, String>(fresh)
+                    Ok::<_, String>((fresh, endpoint))
+                }
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(fresh)
+    }
+
+    /// Pre-warms gRPC UDP client connections for the specified worker lane.
+    ///
+    /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) whenever
+    /// lane capacity drops below available headroom.
+    pub async fn prewarm_lane(&self, lane: usize, config: &velda_grpc::GrpcConfig) {
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            if !self.inner.health().is_healthy(&addr) {
+                continue;
+            }
+
+            if !self
+                .pool
+                .has_headroom_for_lane(&addr, lane, self.max_concurrent_streams)
+            {
+                let sni = Arc::clone(&self.target_sni);
+                let quic_tls = Arc::clone(&self.quic_config);
+
+                match velda_grpc::udp::connect_udp(addr, &sni, config, (*quic_tls).clone()).await {
+                    Ok(fresh) => {
+                        let res = GrpcUdpClientResource::new(fresh);
+                        self.pool.register_warmed_to_lane(
+                            addr,
+                            lane,
+                            res,
+                            self.max_concurrent_streams,
+                        );
+                        tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed gRPC UDP connection");
+                    }
+                    Err(e) => {
+                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC UDP");
+                    }
+                }
+            }
+        }
     }
 }

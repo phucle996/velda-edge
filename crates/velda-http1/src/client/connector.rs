@@ -464,16 +464,30 @@ pub async fn connect(
     }
 
     if let Some((engine, sni)) = tls {
-        let tls_stream = engine
-            .connect(sni, tcp_stream)
-            .await
-            .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?;
-        if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
-            && alpn != b"http/1.1"
-        {
+        // Enforce connect timeout on upstream TLS handshake to eliminate indefinite task hangs (tarpit / slowloris defense)
+        let tls_connect_fut = engine.connect(sni, tcp_stream);
+        let tls_stream = if let Some(to) = timeout {
+            tokio::time::timeout(to, tls_connect_fut)
+                .await
+                .map_err(|_| {
+                    Http1Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "TLS handshake timed out",
+                    ))
+                })?
+                .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?
+        } else {
+            tls_connect_fut
+                .await
+                .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?
+        };
+
+        // RFC 9112 Section 2: HTTP/1.1 over TLS strictly requires ALPN "http/1.1"
+        let alpn = tls_stream.get_ref().1.alpn_protocol();
+        if alpn != Some(b"http/1.1") {
             return Err(Http1Error::Io(std::io::Error::other(format!(
-                "upstream negotiated ALPN {:?}, expected \"http/1.1\"",
-                String::from_utf8_lossy(alpn)
+                "upstream negotiated ALPN {:?}, strictly expected \"http/1.1\"",
+                alpn.map(String::from_utf8_lossy)
             ))));
         }
         Ok(UpstreamHttp1Stream::Tls(Box::new(tls_stream)))

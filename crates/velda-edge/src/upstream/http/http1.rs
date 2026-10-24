@@ -370,4 +370,66 @@ impl Http1Upstream {
             proxy_buffer_size: self.proxy_buffer_size,
         })
     }
+
+    /// Returns the number of idle keep-alive connections for `endpoint` in `lane`.
+    #[inline]
+    pub fn idle_conns_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+        self.pool.idle_conns_for_lane(endpoint, lane)
+    }
+
+    /// Pre-warms idle keep-alive connections for the specified worker lane.
+    ///
+    /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) to ensure
+    /// the frontline traffic worker always encounters ready connections in its lane.
+    pub async fn prewarm_lane(&self, lane: usize, min_idle: usize) {
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            if !self.inner.health().is_healthy(&addr) {
+                continue;
+            }
+
+            let idle = self.pool.idle_conns_for_lane(&addr, lane);
+            if idle < min_idle {
+                let needed = min_idle - idle;
+                for _ in 0..needed {
+                    let tls_ref = self
+                        .tls
+                        .as_ref()
+                        .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+                    let connect_timeout = self.inner.timeouts().connect;
+
+                    match velda_http1::client::connect(
+                        addr,
+                        tls_ref,
+                        Some(&self.acceleration),
+                        Some(connect_timeout),
+                    )
+                    .await
+                    {
+                        Ok(stream) => {
+                            let res = Http1ClientResource {
+                                stream,
+                                read_buf: bytes::BytesMut::with_capacity(4096),
+                                write_buf: bytes::BytesMut::with_capacity(4096),
+                                created_at: Instant::now(),
+                                last_used_at: Instant::now(),
+                            };
+                            self.pool.release_to_lane(&addr, lane, res);
+                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed HTTP/1.1 connection");
+                        }
+                        Err(e) => {
+                            tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/1.1");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

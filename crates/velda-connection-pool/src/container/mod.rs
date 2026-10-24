@@ -12,7 +12,9 @@ pub mod subpool;
 
 pub use hasher::{FastBuildHasher, FastHasher};
 pub use multiplexed::{MultiplexedConnection, MultiplexedPool, MuxShard};
-pub use shard::{PoolShard, ShardMetrics, ShardTable, current_thread_lane};
+pub use shard::{
+    PoolShard, ShardMetrics, ShardTable, current_thread_lane, set_current_thread_lane,
+};
 pub use subpool::SubPool;
 
 /// Minimum number of idle connections retained per key container.

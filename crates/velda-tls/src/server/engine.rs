@@ -8,7 +8,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
 use super::config::{ServerTlsConfig, TlsServerParams};
-use super::handshake::{TlsHandshakeInfo, extract_handshake_info};
+use super::handshake::{TlsHandshakeInfo, extract_alpn, extract_handshake_info};
 use super::resolver::SniConfigResolver;
 use crate::error::TlsError;
 
@@ -176,6 +176,12 @@ impl TlsServerEngine {
     /// certificates, and unified session resumption cache / 0-RTT tickets.
     pub fn build_quic_config(&self) -> Result<quinn_proto::ServerConfig, TlsError> {
         crate::server::quic::build_quic_server_config(self.config.clone())
+    }
+
+    /// Extracts negotiated ALPN protocol string with zero heap allocation on the hot path.
+    #[inline]
+    pub fn extract_alpn<IO>(stream: &TlsStream<IO>) -> Option<std::borrow::Cow<'static, str>> {
+        extract_alpn(stream)
     }
 
     /// Extracts connection metadata after a successful downstream TLS handshake.

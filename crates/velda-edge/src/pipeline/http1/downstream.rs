@@ -56,27 +56,26 @@ pub async fn handle_http1_stream(
 
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
-                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
-                tracing::debug!(
-                    listener = %listener_id,
-                    peer = %peer,
-                    sni = ?handshake_info.sni,
-                    alpn = ?handshake_info.alpn,
-                    "Downstream TLS handshake succeeded"
-                );
+                // RFC 9112 Section 2: Dedicated HTTP/1.1 over TLS listener strictly requires ALPN "http/1.1".
+                let alpn = TlsServerEngine::extract_alpn(&tls_stream);
 
-                if let Some(alpn) = handshake_info.alpn.as_deref()
-                    && alpn != "http/1.1"
-                {
+                if alpn.as_deref() != Some("http/1.1") {
                     tracing::warn!(
                         listener = %listener_id,
                         peer = %peer,
                         expected = "http/1.1",
-                        actual = alpn,
-                        "Dropping connection due to protocol ALPN mismatch"
+                        actual = ?alpn,
+                        "Dropping connection: HTTP/1.1 over TLS strictly requires ALPN 'http/1.1'"
                     );
                     return;
                 }
+
+                tracing::debug!(
+                    listener = %listener_id,
+                    peer = %peer,
+                    alpn = ?alpn,
+                    "Downstream TLS handshake succeeded for HTTP/1.1"
+                );
 
                 let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
                 run_http1_loop(tls_stream, meta, streaming, config, runtime).await;

@@ -86,13 +86,13 @@ pub fn default_client_config() -> Result<ClientConfig, GrpcError> {
         .map_err(|e| GrpcError::Internal(format!("QUIC crypto config error: {e}")))
 }
 
-/// Establishes a new persistent, multiplexed gRPC client connection over QUIC / UDP to the target backend endpoint.
-///
-/// Drives the initial QUIC handshake to completion and spawns the background connection driver.
+/// Establishes a persistent, multiplexed gRPC client connection over QUIC / UDP to the target backend endpoint
+/// using explicit QUIC [`ClientConfig`].
 pub async fn connect(
     target: SocketAddr,
     server_name: &str,
     config: &GrpcConfig,
+    client_cfg: ClientConfig,
 ) -> Result<GrpcUdpClient, GrpcError> {
     // 1. Bind local UDP egress socket
     let bind_addr: SocketAddr = if target.is_ipv4() {
@@ -106,7 +106,6 @@ pub async fn connect(
     let endpoint_config = Arc::new(EndpointConfig::default());
     let mut endpoint = Endpoint::new(endpoint_config, None, false, None);
 
-    let client_cfg = default_client_config()?;
     let now = Instant::now();
     let (handle, mut conn) = endpoint
         .connect(now, client_cfg, target, server_name)

@@ -101,6 +101,21 @@ Across **ALL protocols** (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) wi
     - Protocol connectors expose a narrow, uniform asynchronous contract: `connect(target: SocketAddr, ...)` returning an active client connection handle (`UpstreamHttp1Stream`, `SendRequest<Bytes>`, `Http3Client`, `GrpcUpstreamConnector`, `GrpcUdpClient`), which Upstream registers into its pool.
     - Protocol pipe strategies execute purely on established protocol connection/stream handles, never creating or binding sockets ad-hoc per request.
 
+### 2.9 Frontline Traffic Worker vs Shadow Logistics Invariant
+Velda Edge strictly separates serving execution from background connection logistics across two distinct worker threads pinned to each CPU core:
+- **Frontline Traffic Worker (`velda-worker-{id}`)**:
+  - Exclusively serves downstream traffic on the request hot path.
+  - Hot-path connection acquisition (`acquire()`) MUST remain flat, sequential, and zero-coordination.
+  - **Strictly Forbidden**:
+    - Spawning or dispatching warmup tasks from within `acquire()`.
+    - Boxing future closures or sending tasks over `mpsc` channels during request serving.
+    - Introducing coordination state machines, lock flags (e.g. `is_warming`), or waiting on logistics tasks on the hot path.
+  - If a connection is available in the core's local lane shard $\to$ instant reuse (< 10 ns). If empty $\to$ direct connect fallback.
+- **Shadow Logistics Worker (`velda-shadow-{id}`)**:
+  - Autonomous background companion thread pinned to the same core, running under `SCHED_IDLE`.
+  - Operates sequentially on its assigned core lane (`lane = worker_id`), executing `prewarm_lane(worker_id)` at startup, upon config reload, and periodically (every 2s).
+  - Sole owner of connection replenishment, proactive TLS/QUIC handshakes, and depositing warm connection handles into the lane shard via `release_to_lane()` or `register_warmed_to_lane()`.
+
 ---
 
 ## 3. Subsystem Invariants & Crate Boundaries

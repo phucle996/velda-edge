@@ -71,7 +71,7 @@ impl SniResolver {
         }
 
         for sni in snis {
-            let s = sni.trim().to_ascii_lowercase();
+            let s = sni.trim();
             if s.is_empty() {
                 continue;
             }
@@ -81,7 +81,8 @@ impl SniResolver {
                 let suffix = s.trim_start_matches(WILDCARD_PREFIX).to_string();
                 self.wildcard_matches.insert(suffix, certified_key.clone());
             } else {
-                self.exact_matches.insert(s, certified_key.clone());
+                self.exact_matches
+                    .insert(s.to_string(), certified_key.clone());
             }
         }
 
@@ -89,35 +90,20 @@ impl SniResolver {
     }
 
     /// Resolves certified key for a given SNI string.
+    ///
+    /// Performs strictly case-sensitive matching on the exact target domain name,
+    /// falling back to single-label wildcard subdomain match (RFC 6125 Section 6.4.3).
     pub fn lookup(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
         let trimmed = sni.trim();
 
-        // Zero-allocation fast-path: ClientHello SNIs are almost universally lowercase ASCII.
-        // Validating ASCII in-place directly on registers avoids allocating a String on the hot path.
-        if !trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-            // 1. Exact match
-            if let Some(key) = self.exact_matches.get(trimmed) {
-                return Some(key.clone());
-            }
-
-            // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only)
-            if let Some(idx) = trimmed.find('.') {
-                let parent_domain = &trimmed[idx + 1..];
-                if let Some(key) = self.wildcard_matches.get(parent_domain) {
-                    return Some(key.clone());
-                }
-            }
-
-            return None;
-        }
-
-        // Slow-path: client sent uppercase SNI, allocate once to normalize
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(key) = self.exact_matches.get(&lower) {
+        // 1. Exact case-sensitive match
+        if let Some(key) = self.exact_matches.get(trimmed) {
             return Some(key.clone());
         }
-        if let Some(idx) = lower.find('.') {
-            let parent_domain = &lower[idx + 1..];
+
+        // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only)
+        if let Some(idx) = trimmed.find('.') {
+            let parent_domain = &trimmed[idx + 1..];
             if let Some(key) = self.wildcard_matches.get(parent_domain) {
                 return Some(key.clone());
             }
@@ -167,7 +153,7 @@ impl SniConfigResolver {
     /// Adds an `Arc<ServerConfig>` mapped under the given SNI domain names.
     pub fn add_config(&mut self, snis: &[String], config: Arc<rustls::ServerConfig>) {
         for sni in snis {
-            let s = sni.trim().to_ascii_lowercase();
+            let s = sni.trim();
             if s.is_empty() {
                 continue;
             }
@@ -175,34 +161,24 @@ impl SniConfigResolver {
                 let suffix = s.trim_start_matches(WILDCARD_PREFIX).to_string();
                 self.wildcard_configs.insert(suffix, config.clone());
             } else {
-                self.exact_configs.insert(s, config.clone());
+                self.exact_configs.insert(s.to_string(), config.clone());
             }
         }
     }
 
     /// Resolves the specific `ServerConfig` for the given SNI name.
+    ///
+    /// Performs strictly case-sensitive matching on the exact target domain name,
+    /// falling back to single-label wildcard subdomain match (RFC 6125 Section 6.4.3).
     pub fn lookup(&self, sni: &str) -> Option<&Arc<rustls::ServerConfig>> {
         let trimmed = sni.trim();
-        if !trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-            if let Some(cfg) = self.exact_configs.get(trimmed) {
+        if let Some(cfg) = self.exact_configs.get(trimmed) {
+            return Some(cfg);
+        }
+        if let Some(idx) = trimmed.find('.') {
+            let parent = &trimmed[idx + 1..];
+            if let Some(cfg) = self.wildcard_configs.get(parent) {
                 return Some(cfg);
-            }
-            if let Some(idx) = trimmed.find('.') {
-                let parent = &trimmed[idx + 1..];
-                if let Some(cfg) = self.wildcard_configs.get(parent) {
-                    return Some(cfg);
-                }
-            }
-        } else {
-            let lower = trimmed.to_ascii_lowercase();
-            if let Some(cfg) = self.exact_configs.get(&lower) {
-                return Some(cfg);
-            }
-            if let Some(idx) = lower.find('.') {
-                let parent = &lower[idx + 1..];
-                if let Some(cfg) = self.wildcard_configs.get(parent) {
-                    return Some(cfg);
-                }
             }
         }
         None
@@ -223,5 +199,49 @@ impl SniConfigResolver {
     /// Returns the number of wildcard configurations.
     pub fn wildcard_len(&self) -> usize {
         self.wildcard_configs.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_config() -> Arc<rustls::ServerConfig> {
+        let resolver = SniResolver::new();
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(resolver)),
+        )
+    }
+
+    #[test]
+    fn test_sni_config_resolver_strict_case_sensitive() {
+        let default_cfg = dummy_config();
+        let mut resolver = SniConfigResolver::new(default_cfg.clone());
+
+        let cfg1 = dummy_config();
+        resolver.add_config(&["Api.Example.Com".to_string()], cfg1.clone());
+
+        // Exact case match succeeds
+        assert!(resolver.lookup("Api.Example.Com").is_some());
+
+        // Different case does NOT match, ensuring exact domain matching without lossy case folding
+        assert!(resolver.lookup("api.example.com").is_none());
+        assert!(resolver.lookup("API.EXAMPLE.COM").is_none());
+
+        // resolve() returns specific config on exact match and fallback default otherwise
+        assert!(Arc::ptr_eq(
+            &resolver.resolve(Some("Api.Example.Com")),
+            &cfg1
+        ));
+        assert!(Arc::ptr_eq(
+            &resolver.resolve(Some("api.example.com")),
+            &default_cfg
+        ));
     }
 }

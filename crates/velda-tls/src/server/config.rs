@@ -114,6 +114,16 @@ impl ServerTlsConfig {
         let mut all_versions = Vec::new();
 
         for server in servers {
+            // mTLS security boundary: In multi-domain configurations, never bundle certificates
+            // from mTLS-enforced domains into the default composite config if the default config
+            // does not mandate client certificate authentication (and vice-versa).
+            // mTLS domains must resolve strictly via domain-isolated SniConfigResolver,
+            // eliminating any unintended client-auth bypass on fallback paths or QUIC handshakes.
+            let has_mtls = server.client_ca_pem.is_some();
+            if servers.len() > 1 && has_mtls != requires_client_auth {
+                continue;
+            }
+
             let certs = parse_certs_pem(&server.cert_pem)?;
             let key = parse_private_key_pem(&server.key_pem)?;
             sni_resolver.add_certificate(&server.sni, certs, key)?;

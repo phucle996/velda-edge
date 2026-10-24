@@ -280,6 +280,22 @@ pub fn build_upstreams(
             "grpc" => {
                 if transport == "udp" {
                     let Some(sni) = target_sni else { continue };
+                    let quic_client_config = match compile_quic_config(
+                        config,
+                        &sni,
+                        &["grpc-exp", "h3"],
+                    ) {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            tracing::error!(
+                                upstream = %config.id,
+                                application = %app,
+                                error = %e,
+                                "Upstream rejected: Failed to compile QUIC TLS client configuration"
+                            );
+                            continue;
+                        }
+                    };
                     grpc_map.insert(
                         config.id.clone(),
                         Arc::new(GrpcUpstream::Udp(Arc::new(GrpcUdpUpstream::new(
@@ -288,6 +304,7 @@ pub fn build_upstreams(
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
+                            quic_client_config,
                         )))),
                     );
                 } else {
@@ -313,6 +330,18 @@ pub fn build_upstreams(
             }
             "http3" => {
                 let Some(sni) = target_sni else { continue };
+                let quic_client_config = match compile_quic_config(config, &sni, &["h3"]) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        tracing::error!(
+                            upstream = %config.id,
+                            application = %app,
+                            error = %e,
+                            "Upstream rejected: Failed to compile QUIC TLS client configuration"
+                        );
+                        continue;
+                    }
+                };
                 http_map.insert(
                     config.id.clone(),
                     Arc::new(HttpUpstream::Http3(Arc::new(Http3Upstream::new(
@@ -322,6 +351,7 @@ pub fn build_upstreams(
                         shard_count,
                         mux_conns,
                         max_streams.min(512),
+                        quic_client_config,
                     )))),
                 );
             }
@@ -411,6 +441,47 @@ pub fn build_upstreams_default(
     let topo = velda_core::global_hardware_topology();
     let dns_config = DnsResolverConfig::for_topology(topo);
     build_upstreams(configs, tls_client, &dns_config)
+}
+
+/// Compiles QUIC TLS client configuration for an upstream backend.
+fn compile_quic_config(
+    config: &UpstreamConfig,
+    sni: &str,
+    default_alpn: &[&str],
+) -> Result<Arc<velda_http3::quinn_proto::ClientConfig>, velda_tls::TlsError> {
+    let client_cfg = if let Some(tls_cfg) = &config.tls {
+        velda_tls::ClientTlsConfig {
+            sni: tls_cfg.sni.clone(),
+            versions: if tls_cfg.versions.is_empty() {
+                vec!["tls1.3".into()]
+            } else {
+                tls_cfg.versions.clone()
+            },
+            alpn: if tls_cfg.alpn.is_empty() {
+                default_alpn.iter().map(|s| s.to_string()).collect()
+            } else {
+                tls_cfg.alpn.clone()
+            },
+            ca_pem: tls_cfg.ca_pem.clone(),
+            client_cert_pem: tls_cfg.client_cert_pem.clone(),
+            client_key_pem: tls_cfg.client_key_pem.clone(),
+            insecure_skip_verify: tls_cfg.insecure_skip_verify,
+        }
+    } else {
+        velda_tls::ClientTlsConfig {
+            sni: vec![sni.to_string()],
+            versions: vec!["tls1.3".into()],
+            alpn: default_alpn.iter().map(|s| s.to_string()).collect(),
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            insecure_skip_verify: false,
+        }
+    };
+    client_cfg
+        .build()
+        .and_then(velda_tls::client::build_quic_client_config)
+        .map(Arc::new)
 }
 
 #[cfg(test)]

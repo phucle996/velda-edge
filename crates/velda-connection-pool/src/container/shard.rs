@@ -11,16 +11,28 @@ use crate::container::subpool::SubPool;
 use crate::resource::PoolableResource;
 
 thread_local! {
-    static THREAD_LANE: usize = {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    };
+    static THREAD_LANE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+static LANE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Sets the explicit zero-based lane identifier for the calling thread.
+#[inline]
+pub fn set_current_thread_lane(lane: usize) {
+    THREAD_LANE.with(|cell| cell.set(Some(lane)));
 }
 
 /// Returns the zero-based lane identifier for the current calling thread.
 #[inline]
 pub fn current_thread_lane() -> usize {
-    THREAD_LANE.with(|&lane| lane)
+    THREAD_LANE.with(|cell| match cell.get() {
+        Some(lane) => lane,
+        None => {
+            let lane = LANE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            cell.set(Some(lane));
+            lane
+        }
+    })
 }
 
 /// Cache-line isolated atomic performance counters for a pool shard.

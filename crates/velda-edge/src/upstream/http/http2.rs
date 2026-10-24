@@ -48,7 +48,7 @@ pub struct Http2Upstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: Http2PipeStrategy,
     /// Lock-sharded persistent HTTP/2 multiplexed client connection pool.
-    pool: MultiplexedPool<SocketAddr, Http2ClientResource>,
+    pool: Arc<MultiplexedPool<SocketAddr, Http2ClientResource>>,
     /// Maximum parallel TCP connections maintained per physical endpoint.
     pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
@@ -91,8 +91,10 @@ impl Http2Upstream {
             tls,
             streaming,
             strategy,
-            pool: MultiplexedPool::with_shards(shard_count)
-                .with_max_connections_per_key(max_connections_per_key),
+            pool: Arc::new(
+                MultiplexedPool::with_shards(shard_count)
+                    .with_max_connections_per_key(max_connections_per_key),
+            ),
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
             acceleration,
@@ -146,7 +148,8 @@ impl Http2Upstream {
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
 
-        self.inner
+        let (client_and_lease, _endpoint) = self
+            .inner
             .execute(|endpoint| async move {
                 // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
@@ -159,7 +162,7 @@ impl Http2Upstream {
                     .await;
 
                     match ready_res {
-                        Some(true) => return Ok::<_, String>((client, lease)),
+                        Some(true) => return Ok::<_, String>(((client, lease), endpoint)),
                         Some(false) => {
                             lease.mark_goaway();
                         }
@@ -167,7 +170,7 @@ impl Http2Upstream {
                             if let Ok(Ok(ready_client)) =
                                 tokio::time::timeout(connect_timeout, client.ready()).await
                             {
-                                return Ok::<_, String>((ready_client, lease));
+                                return Ok::<_, String>(((ready_client, lease), endpoint));
                             } else {
                                 lease.mark_goaway();
                             }
@@ -189,7 +192,7 @@ impl Http2Upstream {
                     .await;
 
                     match ready_res {
-                        Some(true) => return Ok::<_, String>((client, lease)),
+                        Some(true) => return Ok::<_, String>(((client, lease), endpoint)),
                         Some(false) => {
                             lease.mark_goaway();
                         }
@@ -197,7 +200,7 @@ impl Http2Upstream {
                             if let Ok(Ok(ready_client)) =
                                 tokio::time::timeout(connect_timeout, client.ready()).await
                             {
-                                return Ok::<_, String>((ready_client, lease));
+                                return Ok::<_, String>(((ready_client, lease), endpoint));
                             } else {
                                 lease.mark_goaway();
                             }
@@ -227,10 +230,12 @@ impl Http2Upstream {
                     })?
                     .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
 
-                Ok::<_, String>((ready_client, lease))
+                Ok::<_, String>(((ready_client, lease), endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(client_and_lease)
     }
 
     /// Acquires a fresh, dedicated HTTP/2 client connection, bypassing existing connections in the pool.
@@ -254,7 +259,8 @@ impl Http2Upstream {
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
 
-        self.inner
+        let (client_and_lease, _endpoint) = self
+            .inner
             .execute(|endpoint| async move {
                 let fresh = velda_http2::client::connect(
                     endpoint,
@@ -277,9 +283,75 @@ impl Http2Upstream {
                     })?
                     .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
 
-                Ok::<_, String>((ready_client, lease))
+                Ok::<_, String>(((ready_client, lease), endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(client_and_lease)
+    }
+
+    /// Returns the number of physical multiplexed connections for `endpoint` in `lane`.
+    #[inline]
+    pub fn connection_count_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+        self.pool.connection_count_for_lane(endpoint, lane)
+    }
+
+    /// Pre-warms multiplexed client connections for the specified worker lane.
+    ///
+    /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) whenever
+    /// lane capacity drops below available headroom.
+    pub async fn prewarm_lane(&self, lane: usize, config: &velda_http2::Http2Config) {
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            if !self.inner.health().is_healthy(&addr) {
+                continue;
+            }
+
+            if !self
+                .pool
+                .has_headroom_for_lane(&addr, lane, self.max_concurrent_streams)
+            {
+                let tls = self
+                    .tls
+                    .as_ref()
+                    .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+                let acceleration = self.acceleration;
+                let connect_timeout = self.inner.timeouts().connect;
+
+                match velda_http2::client::connect(
+                    addr,
+                    tls,
+                    config,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                {
+                    Ok(fresh) => {
+                        let ready_res = tokio::time::timeout(connect_timeout, fresh.ready()).await;
+                        if let Ok(Ok(ready_client)) = ready_res {
+                            let res = Http2ClientResource::new(ready_client);
+                            self.pool.register_warmed_to_lane(
+                                addr,
+                                lane,
+                                res,
+                                self.max_concurrent_streams,
+                            );
+                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed HTTP/2 connection");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/2");
+                    }
+                }
+            }
+        }
     }
 }

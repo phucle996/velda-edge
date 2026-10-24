@@ -70,6 +70,7 @@ impl RunningWorkerPool {
             registry.register(w_id, core_id, WorkerRole::Shadow, &shadow_thread_name);
 
             // 1. Core-local task hook & Shadow Worker (SCHED_IDLE)
+            let (traffic_handle_tx, traffic_handle_rx) = tokio::sync::oneshot::channel();
             let (shadow_tx, shadow_rx) = tokio::sync::mpsc::channel(1024);
             let shadow_handle = spawn_shadow_worker(
                 worker_id,
@@ -78,6 +79,7 @@ impl RunningWorkerPool {
                 rt_shared.clone(),
                 worker_shutdown.clone(),
                 shadow_rx,
+                traffic_handle_rx,
             );
             registry.set_state(w_id, WorkerRole::Shadow, WorkerState::Running);
             worker_threads.push(shadow_handle);
@@ -87,6 +89,7 @@ impl RunningWorkerPool {
                 .name(traffic_thread_name)
                 .spawn(move || {
                     velda_plugin::set_core_shadow_sender(shadow_tx);
+                    velda_connection_pool::set_current_thread_lane(worker_id);
                     let reg = global_worker_registry();
 
                     if cpu_pinning {
@@ -114,6 +117,8 @@ impl RunningWorkerPool {
                         .thread_stack_size(1024 * 1024)
                         .build()
                         .expect("Failed to build worker current_thread Tokio runtime");
+
+                    let _ = traffic_handle_tx.send(rt.handle().clone());
 
                     rt.block_on(async move {
                         let rt_tcp = rt_shared.clone();
@@ -183,6 +188,23 @@ impl RunningWorkerPool {
     }
 }
 
+struct WithTrafficHandle {
+    handle: tokio::runtime::Handle,
+    inner: ShadowTask,
+}
+
+impl std::future::Future for WithTrafficHandle {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let _guard = self.handle.enter();
+        self.inner.as_mut().poll(cx)
+    }
+}
+
 /// Spawns a dedicated Shadow Auxiliary Worker thread pinned to `core_id`.
 ///
 /// Drives the core-local Shadow Hook receiver and, for Worker 0, hosts process-wide
@@ -194,10 +216,12 @@ pub fn spawn_shadow_worker(
     shared_runtime: SharedRuntime,
     mut shutdown: watch::Receiver<bool>,
     mut shadow_rx: mpsc::Receiver<ShadowTask>,
+    traffic_handle_rx: tokio::sync::oneshot::Receiver<tokio::runtime::Handle>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("velda-shadow-{worker_id}"))
         .spawn(move || {
+            velda_connection_pool::set_current_thread_lane(worker_id);
             if cpu_pinning {
                 let _ = pin_current_thread_to_core(core_id);
             }
@@ -211,6 +235,7 @@ pub fn spawn_shadow_worker(
                 .expect("Failed to build shadow worker Tokio runtime");
 
             rt.block_on(async move {
+                let traffic_handle = traffic_handle_rx.await.ok();
                 // Unified JoinSet for process-wide background services on Worker 0
                 let mut bg_tasks = JoinSet::new();
                 let mut shadow_tasks = JoinSet::new();
@@ -256,27 +281,59 @@ pub fn spawn_shadow_worker(
                     });
                 }
 
+                // Initial upstream connection pre-warming on bootstrap
+                {
+                    let upstreams = shared_runtime.load().upstreams.clone();
+                    if let Some(ref th) = traffic_handle {
+                        let _guard = th.enter();
+                        upstreams.prewarm_lane(worker_id).await;
+                    } else {
+                        upstreams.prewarm_lane(worker_id).await;
+                    }
+                }
+
+                let mut prewarm_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                prewarm_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
+                        // Autonomous background upstream pre-warming on SCHED_IDLE
+                        _ = prewarm_interval.tick() => {
+                            let upstreams = shared_runtime.load().upstreams.clone();
+                            if let Some(ref th) = traffic_handle {
+                                let _guard = th.enter();
+                                upstreams.prewarm_lane(worker_id).await;
+                            } else {
+                                upstreams.prewarm_lane(worker_id).await;
+                            }
+                        }
+
                         // Core-local Hook: receive generic task from Traffic Worker or registered plugins
                         item = shadow_rx.recv() => {
                             let Some(task) = item else { break };
                             if shadow_tasks.len() >= 1024 {
                                 let _ = shadow_tasks.join_next().await;
                             }
-                            shadow_tasks.spawn(task);
+                            if let Some(ref th) = traffic_handle {
+                                shadow_tasks.spawn(WithTrafficHandle {
+                                    handle: th.clone(),
+                                    inner: task,
+                                });
+                            } else {
+                                shadow_tasks.spawn(task);
+                            }
                         }
 
                         // Drive active shadow tasks and reap finished tasks
                         Some(_) = shadow_tasks.join_next(), if !shadow_tasks.is_empty() => {}
                         Some(_) = bg_tasks.join_next(), if !bg_tasks.is_empty() => {}
 
-                        // Runtime revision update: reload background plugins on Worker 0
-                        res = reload_rx.changed(), if worker_id == 0 => {
+                        // Runtime revision update: reload plugins and top up pre-warmed upstreams
+                        res = reload_rx.changed() => {
                             if res.is_ok() {
                                 let current_rt = shared_runtime.load();
-                                if current_rt.revision != last_revision {
+                                if worker_id == 0 && current_rt.revision != last_revision {
                                     tracing::info!(
                                         old_rev = last_revision,
                                         new_rev = current_rt.revision,
@@ -289,6 +346,14 @@ pub fn spawn_shadow_worker(
                                         shutdown.clone(),
                                     );
                                     last_revision = current_rt.revision;
+                                }
+
+                                let upstreams = current_rt.upstreams.clone();
+                                if let Some(ref th) = traffic_handle {
+                                    let _guard = th.enter();
+                                    upstreams.prewarm_lane(worker_id).await;
+                                } else {
+                                    upstreams.prewarm_lane(worker_id).await;
                                 }
                             }
                         }

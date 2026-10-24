@@ -173,9 +173,14 @@ async fn test_http3_roundtrip_requests() {
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
     let config = velda_http3::Http3Config::auto();
-    let client = velda_http3::connect(server_addr, "localhost", &config)
-        .await
-        .expect("Client failed to connect to HTTP/3 server");
+    let client = velda_http3::connect(
+        server_addr,
+        "localhost",
+        &config,
+        velda_http3::default_client_config().unwrap(),
+    )
+    .await
+    .expect("Client failed to connect to HTTP/3 server");
 
     // 1. Unary GET request
     let get_req = velda_core::L7Request {
@@ -273,9 +278,14 @@ async fn test_http3_payload_limit_enforced() {
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
     let client_cfg = velda_http3::Http3Config::auto();
-    let client = velda_http3::connect(server_addr, "localhost", &client_cfg)
-        .await
-        .expect("Client failed to connect to HTTP/3 server");
+    let client = velda_http3::connect(
+        server_addr,
+        "localhost",
+        &client_cfg,
+        velda_http3::default_client_config().unwrap(),
+    )
+    .await
+    .expect("Client failed to connect to HTTP/3 server");
 
     // 1. Send oversized bomb payload exceeding max_body_size
     let bomb_payload = vec![0x42u8; 128 * 1024];

@@ -101,6 +101,29 @@ Generic, protocol-agnostic, sharded connection pooling provider for the Velda Ed
 
 ---
 
+## Multi-Lane Striping & Autonomous Warmup Design
+
+To support the **Dual-Worker Core Pinning Model** and eliminate lock contention across cores:
+
+```text
+ Worker Thread (Lane K)                 Shadow Worker (Lane K)
+          │                                        │
+          ▼                                        ▼
+  acquire_lease() (Hot Path)               prewarm_lane() (Logistics)
+          │                                        │
+          ├─► 1. Query Shard[Lane K] (HIT < 10ns)  ├─► Check idle_conns_for_lane(K)
+          │                                        │
+          └─► 2. Work-steal Shards if empty        └─► release_to_lane(K, conn) /
+                                                       register_warmed_to_lane(K, conn)
+```
+
+- **Thread-Local Lane Binding**: `set_current_thread_lane(worker_id)` pairs each Traffic Worker and its companion Shadow Worker to the same shard index.
+- **Sequential Keep-Alive Inspection**: `idle_conns_for_lane(key, lane)` and `release_to_lane(key, lane, conn)` enable background logistics without hot-path locks.
+- **Multiplexed Headroom Inspection**: `has_headroom_for_lane(key, lane, max_streams)` detects when multiplexed saturation exceeds 75%, allowing `register_warmed_to_lane(key, lane, conn, max_streams)` to proactively replenish capacity.
+- **Zero Race Conditions**: Because only one Shadow Worker thread maintains each lane sequentially, state flags like `is_warming` are completely eliminated.
+
+---
+
 ## Verification
 
 ```bash

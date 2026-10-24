@@ -466,22 +466,58 @@ pub async fn connect(
     }
 
     let Some((engine, sni)) = tls else {
-        return connect_stream(stream, config).await;
+        // Enforce connect timeout on cleartext HTTP/2 handshake
+        let h2_fut = connect_stream(stream, config);
+        return if let Some(to) = timeout {
+            tokio::time::timeout(to, h2_fut).await.map_err(|_| {
+                Http2Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP/2 cleartext handshake timed out",
+                ))
+            })?
+        } else {
+            h2_fut.await
+        };
     };
 
-    let tls_stream = engine
-        .connect(sni, stream)
-        .await
-        .map_err(|e| Http2Error::Tls(e.to_string()))?;
-    if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
-        && alpn != b"h2"
-    {
+    // Enforce connect timeout on upstream TLS handshake to eliminate indefinite task hangs
+    let tls_fut = engine.connect(sni, stream);
+    let tls_stream = if let Some(to) = timeout {
+        tokio::time::timeout(to, tls_fut)
+            .await
+            .map_err(|_| {
+                Http2Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Upstream TLS handshake timed out",
+                ))
+            })?
+            .map_err(|e| Http2Error::Tls(e.to_string()))?
+    } else {
+        tls_fut.await.map_err(|e| Http2Error::Tls(e.to_string()))?
+    };
+
+    // RFC 9113 Section 3.3 mandate: HTTP/2 over TLS MUST negotiate ALPN identification "h2".
+    // Missing (None) or non-h2 ALPN is strictly rejected to prevent protocol desynchronization.
+    let alpn = tls_stream.get_ref().1.alpn_protocol();
+    if alpn != Some(b"h2") {
         return Err(Http2Error::Tls(format!(
-            "upstream negotiated ALPN {:?}, expected \"h2\"",
-            String::from_utf8_lossy(alpn)
+            "upstream negotiated ALPN {:?}, strictly expected \"h2\" (RFC 9113 Section 3.3)",
+            alpn.map(String::from_utf8_lossy)
         )));
     }
-    connect_stream(tls_stream, config).await
+
+    // Enforce connect timeout on initial HTTP/2 SETTINGS frame exchange over TLS
+    let h2_fut = connect_stream(tls_stream, config);
+    if let Some(to) = timeout {
+        tokio::time::timeout(to, h2_fut).await.map_err(|_| {
+            Http2Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Upstream HTTP/2 TLS handshake timed out",
+            ))
+        })?
+    } else {
+        h2_fut.await
+    }
 }
 
 /// Performs the HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. TLS or TCP).

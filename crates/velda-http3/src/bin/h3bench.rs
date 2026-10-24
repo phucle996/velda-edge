@@ -189,7 +189,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn_start = Instant::now();
     let mut clients = Vec::with_capacity(num_conns);
     for _ in 0..num_conns {
-        let client = connect(primary_target.addr, &effective_host, &config).await?;
+        let client = connect(
+            primary_target.addr,
+            &effective_host,
+            &config,
+            velda_http3::client::default_client_config()?,
+        )
+        .await?;
         clients.push(client);
     }
     let connect_time_ms = conn_start.elapsed().as_secs_f64() * 1000.0 / num_conns as f64;

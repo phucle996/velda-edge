@@ -54,27 +54,28 @@ pub async fn handle_http2_stream(
 
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
-                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
-                tracing::debug!(
-                    listener = %listener_id,
-                    peer = %peer,
-                    sni = ?handshake_info.sni,
-                    alpn = ?handshake_info.alpn,
-                    "Downstream TLS handshake succeeded"
-                );
+                // RFC 9113 Section 3.3 mandate: HTTP/2 over TLS MUST negotiate ALPN identification "h2".
+                // Connections presenting no ALPN or an incompatible identification are strictly rejected
+                // to prevent invalid plaintext/framing desynchronization in the downstream state machine.
+                let alpn = TlsServerEngine::extract_alpn(&tls_stream);
 
-                if let Some(alpn) = handshake_info.alpn.as_deref()
-                    && alpn != "h2"
-                {
+                if alpn.as_deref() != Some("h2") {
                     tracing::warn!(
                         listener = %listener_id,
                         peer = %peer,
                         expected = "h2",
-                        actual = alpn,
-                        "Dropping connection due to protocol ALPN mismatch"
+                        actual = ?alpn,
+                        "Dropping connection: HTTP/2 over TLS strictly requires ALPN 'h2'"
                     );
                     return;
                 }
+
+                tracing::debug!(
+                    listener = %listener_id,
+                    peer = %peer,
+                    alpn = ?alpn,
+                    "Downstream TLS handshake succeeded for HTTP/2"
+                );
 
                 let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
                 run_http2_loop(tls_stream, meta, config, runtime).await;

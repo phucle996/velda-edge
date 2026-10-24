@@ -329,6 +329,34 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         shard.record_release();
     }
 
+    /// Returns the number of currently idle connections for `key` in the designated worker lane shard.
+    #[inline]
+    pub fn idle_conns_for_lane(&self, key: &K, lane: usize) -> usize {
+        let shard = self.shards.shard_for_lane(key, lane);
+        let table = shard.lock();
+        table.get(key).map_or(0, |s| s.len())
+    }
+
+    /// Releases a resource into the pool shard designated for a specific worker lane.
+    pub fn release_to_lane(&self, key: &K, lane: usize, mut resource: R) {
+        if !resource.is_healthy() {
+            resource.close();
+            return;
+        }
+
+        let shard = self.shards.shard_for_lane(key, lane);
+        let mut table = shard.lock();
+
+        if let Some(subpool) = table.get_mut(key) {
+            subpool.release(resource);
+        } else {
+            let mut subpool = SubPool::new(self.config.max_idle_per_key);
+            subpool.release(resource);
+            table.insert(key.clone(), subpool);
+        }
+        shard.record_release();
+    }
+
     // ------------------------------------------------------------------------
     // Sweeping, Eviction, and Draining Operations
     // ------------------------------------------------------------------------

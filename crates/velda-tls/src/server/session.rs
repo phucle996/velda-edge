@@ -86,7 +86,9 @@ impl ShardedServerSessionCache {
 impl StoresServerSessions for ShardedServerSessionCache {
     fn put(&self, key: Vec<u8>, val: Vec<u8>) -> bool {
         let shard = self.shard_for(&key);
-        let mut table = shard.lock.lock().unwrap();
+        // Recover poisoned lock gracefully to prevent cascading panics across worker threads
+        // if an individual thread panicked while holding the session shard guard.
+        let mut table = shard.lock.lock().unwrap_or_else(|e| e.into_inner());
         if table.len() >= shard.max_capacity && !table.contains_key(&key) {
             // Evict an arbitrary entry to keep bounded RAM invariant
             if let Some(first_key) = table.keys().next().cloned() {
@@ -99,13 +101,15 @@ impl StoresServerSessions for ShardedServerSessionCache {
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let shard = self.shard_for(key);
-        let table = shard.lock.lock().unwrap();
+        // Poison-resilient lock acquisition ensuring continued session retrieval during faults
+        let table = shard.lock.lock().unwrap_or_else(|e| e.into_inner());
         table.get(key).cloned()
     }
 
     fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
         let shard = self.shard_for(key);
-        let mut table = shard.lock.lock().unwrap();
+        // Poison-resilient lock acquisition ensuring single-use ticket removal
+        let mut table = shard.lock.lock().unwrap_or_else(|e| e.into_inner());
         table.remove(key)
     }
 

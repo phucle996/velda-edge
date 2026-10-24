@@ -11,7 +11,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Http3Config::auto();
     let start = Instant::now();
-    let client = connect(target, "backend.local", &config).await?;
+    let client = connect(
+        target,
+        "backend.local",
+        &config,
+        velda_http3::client::default_client_config()?,
+    )
+    .await?;
     println!("QUIC handshake completed in {:.2?}", start.elapsed());
 
     let mut req = L7Request {

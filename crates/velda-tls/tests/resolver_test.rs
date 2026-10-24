@@ -30,15 +30,15 @@ fn test_exact_and_wildcard_sni_resolution() {
     assert_eq!(resolver.exact_len(), 1);
     assert_eq!(resolver.wildcard_len(), 1);
 
-    // Exact match & case-insensitivity
+    // Exact match & strict case-sensitivity
     assert!(resolver.lookup("api.example.com").is_some());
-    assert!(resolver.lookup("API.EXAMPLE.COM").is_some());
-    assert!(resolver.lookup("aPi.ExAmPlE.cOm").is_some());
+    assert!(resolver.lookup("API.EXAMPLE.COM").is_none());
+    assert!(resolver.lookup("aPi.ExAmPlE.cOm").is_none());
 
-    // Wildcard match (single label)
+    // Wildcard match (single label, case-sensitive)
     assert!(resolver.lookup("svc1.internal.net").is_some());
     assert!(resolver.lookup("auth.internal.net").is_some());
-    assert!(resolver.lookup("AUTH.INTERNAL.NET").is_some());
+    assert!(resolver.lookup("AUTH.INTERNAL.NET").is_none());
 
     // RFC 6125: Wildcard does NOT match multi-level / nested subdomains
     assert!(
@@ -124,8 +124,12 @@ fn test_sni_config_resolver_exact_and_wildcard() {
     let resolved_api = resolver.resolve(Some("api.service.net"));
     assert_eq!(resolved_api.alpn_protocols, vec![b"h2".to_vec()]);
 
+    // Uppercase SNI does not match lowercase config, falls back to default
     let resolved_api_upper = resolver.resolve(Some("API.SERVICE.NET"));
-    assert_eq!(resolved_api_upper.alpn_protocols, vec![b"h2".to_vec()]);
+    assert_eq!(
+        resolved_api_upper.alpn_protocols,
+        vec![b"http/1.1".to_vec()]
+    );
 
     // Wildcard resolution
     let resolved_sub = resolver.resolve(Some("node1.h2.service.net"));

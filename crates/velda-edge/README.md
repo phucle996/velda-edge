@@ -84,6 +84,19 @@ When `velda-sync` publishes updated binary artifacts to LKG, it notifies `velda-
 - **Lock-Free $O(1)$ Read**: Worker tasks load the active `Runtime` snapshot via `shared_runtime.load()` without acquiring Mutex locks.
 - **Zero Traffic Interruption**: Existing connections drain naturally on their snapshot generation while new connections immediately read the updated pointer.
 
+### Core-Pinned Worker Architecture & Autonomous Connection Logistics (`lifecycle/worker.rs`)
+For every CPU core `k`, `velda-edge` spawns a dedicated worker pair pinned to that core:
+- **Traffic Worker (`velda-worker-{k}`)**:
+  - Pinned to CPU core `k` with standard OS scheduling priority.
+  - Drives `TrafficEngine` and serves ingress traffic on the request hot path.
+  - Sets thread lane `velda_connection_pool::set_current_thread_lane(k)`.
+  - Leases connections directly from lane `k` (< 10 ns) without cross-core contention and without warmup hooks.
+- **Shadow Logistics Worker (`velda-shadow-{k}`)**:
+  - Pinned to the same CPU core `k` with Linux `SCHED_IDLE` (idle CPU cycles only).
+  - Sets thread lane `velda_connection_pool::set_current_thread_lane(k)`.
+  - Autonomously executes `upstreams.prewarm_lane(k)` on bootstrap, on config hot-reload, and periodically every 2 seconds.
+  - Establishes connections inside `traffic_handle.enter()`, binding the resulting sockets to the Traffic Worker's reactor while cryptographic handshakes (TLS, ALPN, QUIC) run on `SCHED_IDLE`.
+
 ---
 
 ## 3. Configuration & Environment Variables

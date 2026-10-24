@@ -329,3 +329,62 @@ To eliminate information disclosure vulnerabilities, reflection attacks, and sen
 
 > [!NOTE]
 > For the complete data structures, zero-allocation memory models, and formal invariants, see [`crates/velda-core/ARCHITECTURE.md`](crates/velda-core/ARCHITECTURE.md).
+
+---
+
+## 9. Dual-Worker Core Pinning & Autonomous Connection Logistics
+
+To eliminate connection establishment and TLS handshake latencies on the request serving hot path without introducing synchronization locks or coordination state machines, Velda Edge employs a **Dual-Worker Core Pinning Model** with a strict separation of concerns: **Frontline Traffic Serving** vs **Autonomous Shadow Logistics**.
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │                              CPU CORE K                                │
+ │                                                                        │
+ │  ┌──────────────────────────────┐    ┌──────────────────────────────┐  │
+ │  │      FRONTLINE WORKER        │    │        SHADOW WORKER         │  │
+ │  │    (velda-worker-{k})        │    │      (velda-shadow-{k})      │  │
+ │  │    SCHED_NORMAL / FIFO       │    │          SCHED_IDLE          │  │
+ │  └──────────────┬───────────────┘    └──────────────┬───────────────┘  │
+ │                 │                                   │                  │
+ │      Fast Acquire (Hot Path)             Autonomous Pre-Warming        │
+ │      - Zero Warmup Hooks                 - Bootstrapping & Config Swap │
+ │      - Zero Task Boxing                  - Periodic Scan (Every 2s)    │
+ │      - Zero Channel Dispatch             - TLS Handshake on SCHED_IDLE │
+ │                 │                                   │                  │
+ │                 ▼                                   ▼                  │
+ │  ┌──────────────────────────────────────────────────────────────────┐  │
+ │  │                SHARDED CONNECTION POOL (Lane K)                  │  │
+ │  │   [ HTTP/1.1 Keep-Alive Queue  |  HTTP/2 Multiplexed Conns ]    │  │
+ │  │   [ HTTP/3 QUIC Sessions       |  gRPC Stream Multiplexing ]    │  │
+ │  └──────────────────────────────────────────────────────────────────┘  │
+ └────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.1 Architectural Division of Responsibility
+
+1. **Frontline Traffic Worker (`velda-worker-{k}`)**:
+   - **Role**: Pure Request Processing (Tiền tuyến).
+   - **Invariant**: The request hot path (`upstream.acquire()`) is strictly linear, synchronous in memory, and free of coordination glue.
+   - **Behavior**:
+     - Queries its designated core lane shard (`lane = k`) for an existing connection or available multiplexed capacity (< 10 ns, pure RAM).
+     - **HIT**: Instantly returns the reused stream/connection.
+     - **MISS**: If the pool is empty (e.g., initial startup or traffic burst exceeding logistics rate), falls back to connecting transparently. It **never** dispatches warmup tasks, awaits auxiliary locks, or boxes future closures on the serving hot path.
+
+2. **Shadow Logistics Worker (`velda-shadow-{k}`)**:
+   - **Role**: Autonomous Logistics & Background Warmup (Hậu cần).
+   - **Scheduling**: Pinned to the same CPU core `k` but configured with Linux `SCHED_IDLE` (lowest thread priority), ensuring it only consumes spare CPU cycles and never pre-empts active request serving.
+   - **Behavior**:
+     - Periodically (every 2 seconds), upon bootstrap, and immediately after configuration reload (`reload_rx.changed()`), executes `upstreams.prewarm_lane(k)`.
+     - Inspects lane `k` across all configured HTTP and gRPC upstreams:
+       - **HTTP/1.1**: If idle connections < `min_idle`, establishes sequential TCP/TLS connections and deposits them directly into lane `k` via `pool.release_to_lane()`.
+       - **HTTP/2, HTTP/3, gRPC**: If lane `k` lacks headroom (< 75% load capacity), performs asynchronous connection and handshake, registering the resulting multiplexed client handle into lane `k` via `pool.register_warmed_to_lane()`.
+   - **Single-Threaded Lane Invariant**: Because each CPU core has exactly one dedicated Shadow Worker thread maintaining lane `k`, cross-thread race conditions are mathematically eliminated. No atomic flags (`is_warming`) or reservation locks are needed.
+
+### 9.2 Cross-Reactor Handshake Bridging
+
+When the Shadow Worker establishes pre-warmed sockets:
+- It borrows the Traffic Worker's runtime handle via `traffic_handle.enter()`.
+- The physical `TcpStream` is registered directly on the Traffic Worker's epoll reactor.
+- Polling of the connection and CPU-intensive cryptographic handshakes (TLS 1.3, ALPN negotiation, HPACK/QPACK initialization) executes on the Shadow Worker's `SCHED_IDLE` thread.
+- When the Traffic Worker later leases the connection, the socket is already registered on its local I/O driver, ensuring zero cross-reactor event dispatching overhead.
+

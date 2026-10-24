@@ -49,7 +49,7 @@ pub struct GrpcTcpUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcPipeStrategy,
     /// Lock-sharded persistent gRPC HTTP/2 multiplexed client connection pool.
-    pool: MultiplexedPool<SocketAddr, GrpcTcpClientResource>,
+    pool: Arc<MultiplexedPool<SocketAddr, GrpcTcpClientResource>>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
@@ -84,7 +84,7 @@ impl GrpcTcpUpstream {
             tls,
             streaming,
             strategy,
-            pool: MultiplexedPool::with_shards(shard_count),
+            pool: Arc::new(MultiplexedPool::with_shards(shard_count)),
             max_concurrent_streams,
             acceleration,
         }
@@ -107,12 +107,13 @@ impl GrpcTcpUpstream {
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
 
-        self.inner
+        let (connector, _endpoint) = self
+            .inner
             .execute(|endpoint| async move {
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
                     let mut connector = lease.client.clone();
                     match connector.ready().await {
-                        Ok(()) => return Ok::<_, String>(connector),
+                        Ok(()) => return Ok::<_, String>((connector, endpoint)),
                         Err(_) => {
                             lease.mark_goaway();
                         }
@@ -142,10 +143,12 @@ impl GrpcTcpUpstream {
                     max_streams,
                 );
 
-                Ok::<_, String>(fresh)
+                Ok::<_, String>((fresh, endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(connector)
     }
 
     /// Connects a brand new gRPC over TCP client connector directly, bypassing pool leases.
@@ -164,7 +167,8 @@ impl GrpcTcpUpstream {
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
 
-        self.inner
+        let (connector, _endpoint) = self
+            .inner
             .execute(|endpoint| async move {
                 let mut fresh = GrpcUpstreamConnector::connect(
                     endpoint,
@@ -189,9 +193,69 @@ impl GrpcTcpUpstream {
                     max_streams,
                 );
 
-                Ok::<_, String>(fresh)
+                Ok::<_, String>((fresh, endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)
+            .map_err(EdgeError::Upstream)?;
+
+        Ok(connector)
+    }
+
+    /// Pre-warms gRPC TCP client connections for the specified worker lane.
+    ///
+    /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) whenever
+    /// lane capacity drops below available headroom.
+    pub async fn prewarm_lane(&self, lane: usize, config: &GrpcConfig) {
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            if !self.inner.health().is_healthy(&addr) {
+                continue;
+            }
+
+            if !self
+                .pool
+                .has_headroom_for_lane(&addr, lane, self.max_concurrent_streams)
+            {
+                let tls = self
+                    .tls
+                    .as_ref()
+                    .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+                let acceleration = self.acceleration;
+                let connect_timeout = self.inner.timeouts().connect;
+
+                match GrpcUpstreamConnector::connect(
+                    addr,
+                    tls,
+                    config,
+                    Some(&acceleration),
+                    Some(connect_timeout),
+                )
+                .await
+                {
+                    Ok(mut fresh) => {
+                        let ready_res = tokio::time::timeout(connect_timeout, fresh.ready()).await;
+                        if let Ok(Ok(_)) = ready_res {
+                            let res = GrpcTcpClientResource { client: fresh };
+                            self.pool.register_warmed_to_lane(
+                                addr,
+                                lane,
+                                res,
+                                self.max_concurrent_streams,
+                            );
+                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed gRPC TCP connection");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC TCP");
+                    }
+                }
+            }
+        }
     }
 }

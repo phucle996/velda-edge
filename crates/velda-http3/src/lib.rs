@@ -26,8 +26,8 @@ pub mod strategy;
 
 pub use client::{
     Http3Client, Http3ClientRequest, Http3ClientRequestHead, Http3ClientResponse,
-    Http3ClientResponseHead, Http3StreamResponse, Http3StreamSender, connect, extract_sni,
-    forward_request, resolve_sni, strip_port,
+    Http3ClientResponseHead, Http3StreamResponse, Http3StreamSender, connect,
+    default_client_config, extract_sni, forward_request, resolve_sni, strip_port,
 };
 pub use config::Http3Config;
 pub use error::Http3Error;

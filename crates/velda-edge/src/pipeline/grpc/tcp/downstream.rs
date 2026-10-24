@@ -49,27 +49,28 @@ pub async fn handle_grpc_tcp(
 
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
-                let handshake_info = TlsServerEngine::extract_handshake_info(&tls_stream);
-                tracing::debug!(
-                    listener = %listener_id,
-                    peer = %peer,
-                    sni = ?handshake_info.sni,
-                    alpn = ?handshake_info.alpn,
-                    "Downstream TLS handshake succeeded"
-                );
+                // gRPC protocol specification: gRPC over TCP/TLS is strictly framed atop HTTP/2 binary framing.
+                // Clients MUST successfully negotiate ALPN "h2". Missing (None) or non-h2 ALPN is dropped
+                // to prevent raw binary stream misinterpretation in downstream RPC dispatching.
+                let alpn = TlsServerEngine::extract_alpn(&tls_stream);
 
-                if let Some(alpn) = handshake_info.alpn.as_deref()
-                    && alpn != "h2"
-                {
+                if alpn.as_deref() != Some("h2") {
                     tracing::warn!(
                         listener = %listener_id,
                         peer = %peer,
                         expected = "h2",
-                        actual = alpn,
-                        "Dropping connection due to protocol ALPN mismatch"
+                        actual = ?alpn,
+                        "Dropping connection: gRPC over TLS strictly requires ALPN 'h2'"
                     );
                     return;
                 }
+
+                tracing::debug!(
+                    listener = %listener_id,
+                    peer = %peer,
+                    alpn = ?alpn,
+                    "Downstream TLS handshake succeeded for gRPC"
+                );
 
                 let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, None);
                 run_grpc_tcp_loop(tls_stream, meta, config, runtime).await;

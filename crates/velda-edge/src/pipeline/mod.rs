@@ -324,23 +324,23 @@ async fn handle_http_auto_stream(
 
     match tls_server.accept_with_timeout(connection).await {
         Ok(tls_stream) => {
-            let handshake_info = velda_tls::TlsServerEngine::extract_handshake_info(&tls_stream);
+            // Zero-allocation ALPN extraction avoiding SNI String and peer certificate cloning
+            let alpn = velda_tls::TlsServerEngine::extract_alpn(&tls_stream);
             tracing::debug!(
                 listener = %listener_id,
                 peer = %peer,
-                sni = ?handshake_info.sni,
-                alpn = ?handshake_info.alpn,
+                alpn = ?alpn,
                 "Downstream TLS handshake succeeded for HTTP family"
             );
 
             let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, config.alt_svc);
 
             // ALPN demuxing strictly within the HTTP protocol family
-            match handshake_info.alpn.as_deref() {
+            match alpn.as_deref() {
                 Some("h2") => {
                     http2::run_http2_loop(tls_stream, meta, config.http2_config, runtime).await;
                 }
-                Some("http/1.1") | None => {
+                Some("http/1.1") => {
                     http1::run_http1_loop(
                         tls_stream,
                         meta,
@@ -350,12 +350,12 @@ async fn handle_http_auto_stream(
                     )
                     .await;
                 }
-                Some(other_alpn) => {
+                other_alpn => {
                     tracing::warn!(
                         listener = %meta.listener_id,
                         peer = %peer,
-                        alpn = other_alpn,
-                        "Dropping connection: ALPN negotiated outside the HTTP protocol family"
+                        actual = ?other_alpn,
+                        "Dropping connection: ALPN negotiated outside the HTTP protocol family or missing"
                     );
                 }
             }

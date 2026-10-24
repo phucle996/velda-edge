@@ -33,6 +33,16 @@ pub struct TlsHandshakeInfo {
     pub peer_certs: Option<Vec<CertificateDer<'static>>>,
 }
 
+/// Extracts negotiated ALPN directly from an established TLS stream with zero heap allocation.
+///
+/// Bypasses SNI String allocation and peer certificate vector cloning on the accept hot path
+/// when the downstream ingress pipeline solely needs ALPN verification to demux protocol streams.
+#[inline]
+pub fn extract_alpn<IO>(stream: &TlsStream<IO>) -> Option<Cow<'static, str>> {
+    let (_, server_conn) = stream.get_ref();
+    server_conn.alpn_protocol().map(normalize_alpn_bytes)
+}
+
 /// Extracts handshake metadata from an established server TLS stream.
 ///
 /// ### Zero-Allocation Invariant:

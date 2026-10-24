@@ -443,6 +443,28 @@ where
         total
     }
 
+    /// Returns the number of connections for `key` in the designated worker lane shard.
+    #[inline]
+    pub fn connection_count_for_lane(&self, key: &K, lane: usize) -> usize {
+        let shard = self.shard_for_lane(key, lane);
+        let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(key).map_or(0, |c| c.len())
+    }
+
+    /// Checks whether the lane shard has an existing healthy connection with available capacity headroom (< 75% load).
+    #[inline]
+    pub fn has_headroom_for_lane(&self, key: &K, lane: usize, max_streams: u32) -> bool {
+        let shard = self.shard_for_lane(key, lane);
+        let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(conns) = guard.get(key) else {
+            return false;
+        };
+        let high_load_threshold = max_streams.saturating_mul(3) / 4;
+        conns.iter().any(|c| {
+            !c.is_goaway() && c.resource().is_healthy() && c.active_streams() < high_load_threshold
+        })
+    }
+
     /// Acquires a stream slot from an existing available multiplexed connection,
     /// enforcing the safe idle threshold (75% cutoff) on idle connections.
     ///
@@ -536,6 +558,19 @@ where
         let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
         guard.entry(key).or_default().push(conn);
         lease
+    }
+
+    /// Registers a newly established pre-warmed multiplexed connection into the designated lane shard.
+    pub fn register_warmed_to_lane(&self, key: K, lane: usize, resource: R, max_streams: u32) {
+        if !resource.is_healthy() {
+            let mut dead = resource;
+            dead.close();
+            return;
+        }
+        let conn = Arc::new(MultiplexedConnection::new(resource, max_streams));
+        let shard = self.shard_for_lane(&key, lane);
+        let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        guard.entry(key).or_default().push(conn);
     }
 
     /// Returns the total number of physical connections managed across all keys.

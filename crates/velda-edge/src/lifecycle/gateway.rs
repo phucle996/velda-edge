@@ -107,6 +107,7 @@ mod tests {
         let initial_rt = Runtime::empty();
         let shared = new_shared_runtime(initial_rt);
         let (_task_tx, task_rx) = tokio::sync::mpsc::channel(16);
+        let (_traffic_tx, traffic_rx) = tokio::sync::oneshot::channel();
 
         let handle = crate::lifecycle::worker::spawn_shadow_worker(
             0,
@@ -115,6 +116,7 @@ mod tests {
             shared.clone(),
             shutdown_rx,
             task_rx,
+            traffic_rx,
         );
 
         // Update runtime revision to trigger reload branch on Shadow Worker 0

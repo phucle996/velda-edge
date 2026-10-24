@@ -399,32 +399,69 @@ impl GrpcUpstreamConnector {
         builder.max_header_list_size(config.max_header_size as u32);
 
         let send_request = if let Some((engine, sni)) = tls {
-            let tls_stream = engine
-                .connect(sni, stream)
-                .await
-                .map_err(|e| GrpcError::Tls(e.to_string()))?;
-            if let Some(alpn) = tls_stream.get_ref().1.alpn_protocol()
-                && alpn != b"h2"
-            {
+            // Enforce connect timeout on upstream gRPC TLS handshake
+            let tls_fut = engine.connect(sni, stream);
+            let tls_stream = if let Some(to) = timeout {
+                tokio::time::timeout(to, tls_fut)
+                    .await
+                    .map_err(|_| {
+                        GrpcError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Upstream gRPC TLS handshake timed out",
+                        ))
+                    })?
+                    .map_err(|e| GrpcError::Tls(e.to_string()))?
+            } else {
+                tls_fut.await.map_err(|e| GrpcError::Tls(e.to_string()))?
+            };
+
+            // gRPC over TCP/TLS requires HTTP/2 transport framing: ALPN "h2" is strictly enforced
+            let alpn = tls_stream.get_ref().1.alpn_protocol();
+            if alpn != Some(b"h2") {
                 return Err(GrpcError::Tls(format!(
-                    "upstream negotiated ALPN {:?}, expected \"h2\"",
-                    String::from_utf8_lossy(alpn)
+                    "upstream negotiated ALPN {:?}, strictly expected \"h2\"",
+                    alpn.map(String::from_utf8_lossy)
                 )));
             }
-            let (send_request, connection) = builder
-                .handshake::<_, Bytes>(tls_stream)
-                .await
-                .map_err(GrpcError::H2)?;
+
+            // Enforce timeout on gRPC HTTP/2 SETTINGS frame exchange over TLS
+            let h2_fut = builder.handshake::<_, Bytes>(tls_stream);
+            let (send_request, connection) = if let Some(to) = timeout {
+                tokio::time::timeout(to, h2_fut)
+                    .await
+                    .map_err(|_| {
+                        GrpcError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Upstream gRPC H2 handshake timed out",
+                        ))
+                    })?
+                    .map_err(GrpcError::H2)?
+            } else {
+                h2_fut.await.map_err(GrpcError::H2)?
+            };
+
             // Drive background H2 connection management
             tokio::spawn(async move {
                 let _ = connection.await;
             });
             send_request
         } else {
-            let (send_request, connection) = builder
-                .handshake::<_, Bytes>(stream)
-                .await
-                .map_err(GrpcError::H2)?;
+            // Enforce timeout on cleartext gRPC HTTP/2 handshake
+            let h2_fut = builder.handshake::<_, Bytes>(stream);
+            let (send_request, connection) = if let Some(to) = timeout {
+                tokio::time::timeout(to, h2_fut)
+                    .await
+                    .map_err(|_| {
+                        GrpcError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Upstream gRPC cleartext H2 handshake timed out",
+                        ))
+                    })?
+                    .map_err(GrpcError::H2)?
+            } else {
+                h2_fut.await.map_err(GrpcError::H2)?
+            };
+
             // Drive background H2 connection management
             tokio::spawn(async move {
                 let _ = connection.await;

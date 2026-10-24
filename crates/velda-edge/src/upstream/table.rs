@@ -63,6 +63,12 @@ impl<T> SubUpstreamTable<T> {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Returns an iterator over all upstream processors in this sub-table.
+    #[inline]
+    pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
+        self.entries.values()
+    }
 }
 
 /// Upstream variant in the Layer 4 Raw family (TCP byte stream / UDP datagram).
@@ -211,5 +217,37 @@ impl UpstreamTable {
     #[inline]
     pub fn get_grpc(&self, id: &str) -> Option<&Arc<GrpcUpstream>> {
         self.grpc.get(id)
+    }
+
+    /// Autonomous pre-warming across all HTTP and gRPC upstreams for a specific worker lane.
+    ///
+    /// Invoked periodically and on bootstrap/reload by the core-local Shadow Worker (`SCHED_IDLE`)
+    /// to maintain warm connection pools in RAM without hot-path coordination overhead.
+    pub async fn prewarm_lane(&self, lane: usize) {
+        for http_up in self.http.values() {
+            match http_up.as_ref() {
+                HttpUpstream::Http1(u) => {
+                    u.prewarm_lane(lane, 1).await;
+                }
+                HttpUpstream::Http2(u) => {
+                    u.prewarm_lane(lane, &u.config).await;
+                }
+                HttpUpstream::Http3(u) => {
+                    u.prewarm_lane(lane, &u.config).await;
+                }
+            }
+        }
+        for grpc_up in self.grpc.values() {
+            match grpc_up.as_ref() {
+                GrpcUpstream::Tcp(u) => {
+                    let cfg = velda_grpc::GrpcConfig::default();
+                    u.prewarm_lane(lane, &cfg).await;
+                }
+                GrpcUpstream::Udp(u) => {
+                    let cfg = velda_grpc::GrpcConfig::default();
+                    u.prewarm_lane(lane, &cfg).await;
+                }
+            }
+        }
     }
 }
