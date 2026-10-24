@@ -11,7 +11,7 @@ High-throughput request pacing and traffic shaping engine with multi-algorithm s
 | **Plugin ID** | `rate_limit` |
 | **Canonical Phase** | `pre_upstream` |
 | **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Can generate `Action::Respond` 429) |
+| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Generates `Action::Reject(RejectReason::TooManyRequests)`) |
 | **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
 | **Hot-Path Overhead** | ~15ns local in-memory lock-striped concurrency; **Zero Network I/O** on traffic worker cores |
 
@@ -43,10 +43,19 @@ Protects upstream backend services, connection pools, and edge proxy hardware ag
 - Fields listed in `key_headers` (e.g. `x-api-key`, `authorization`).
 - `"client_ip"` extracts the downstream peer IP from socket or `x-forwarded-for`.
 
-### Response Headers Injected on Limit Exceeded (`429 Too Many Requests`)
+### Response Headers Injected on Limit Exceeded (Virtual 3-Column Tagging)
+When rate limit quota is exhausted, `RateLimitPlugin` tags the following headers as **Bit 1 (Bypass on Reject)** via `req.headers.insert_bypass(...)` and returns `Action::Reject(RejectReason::TooManyRequests)`:
 - `Retry-After`: Estimated cooldown period in seconds until capacity becomes available.
-- `x-ratelimit-limit`: Configured `burst_capacity`.
+- `x-ratelimit-reset`: Estimated cooldown period in seconds.
+- `x-ratelimit-limit`: Configured `rate_per_second`.
 - `x-ratelimit-remaining`: `0`.
+- `x-request-id`: Automatically retained from pre-loaded Slot 0 Bit 1 Bypass headers for end-to-end trace correlation.
+
+The downstream ingress engine converts `RejectReason::TooManyRequests` to:
+- **HTTP/1.1, HTTP/2, HTTP/3**: `429 Too Many Requests` early error response containing the Bit 1 bypass headers (including `x-request-id`).
+- **gRPC**: `RESOURCE_EXHAUSTED` status trailer containing the Bit 1 bypass metadata.
+
+All internal Bit 0 request headers are dropped, preventing header reflection or leak of sensitive routing tags.
 
 ---
 

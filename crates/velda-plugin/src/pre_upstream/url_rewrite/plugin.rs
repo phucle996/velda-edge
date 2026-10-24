@@ -16,11 +16,10 @@
 //! 5. **Hot-Path Zero-Allocation Bypass**:
 //!    - If neither path nor query string was modified, no `Uri` or `PathAndQuery` allocations occur.
 
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use http::{HeaderValue, StatusCode, Uri};
+use http::Uri;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::sanitizer::{is_already_normalized, normalize_and_sanitize_path};
@@ -56,30 +55,21 @@ pub struct UrlRewritePlugin {
     strategy: Option<CompiledPathStrategy>,
     query_strategy: QueryStrategy,
     sanitize_path: bool,
-    bad_request_traversal_response: L7Response,
 }
 
 impl UrlRewritePlugin {
-    /// Constructs a new `UrlRewritePlugin` with pre-compiled rules and static error responses.
+    /// Constructs a new `UrlRewritePlugin` with pre-compiled rules.
     pub fn new(id: impl Into<String>, config: UrlRewriteConfig) -> Result<Self, PluginError> {
         let compiled_strategy = match &config.path {
             Some(strat) => Some(CompiledPathStrategy::compile(strat)?),
             None => None,
         };
 
-        let bad_request_traversal_response = L7Response::from_bytes(
-            StatusCode::BAD_REQUEST,
-            "{\"error\":\"Path traversal attempt detected\"}",
-        )
-        .with_header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .with_header(CONTENT_LENGTH, HeaderValue::from_static("41"));
-
         Ok(Self {
             id: id.into(),
             strategy: compiled_strategy,
             query_strategy: config.query,
             sanitize_path: config.sanitize_path,
-            bad_request_traversal_response,
         })
     }
 
@@ -157,7 +147,7 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
                     Ok(normalized) => (std::borrow::Cow::Owned(normalized), true),
                     Err(_) => {
                         // Directory traversal violation: fail-fast 400 Bad Request
-                        return Action::Respond(self.bad_request_traversal_response.clone());
+                        return Action::Reject(RejectReason::BadRequest);
                     }
                 }
             }
@@ -260,11 +250,6 @@ mod tests {
         let mut req = make_test_request("/api/v1/../../etc/shadow");
         let mut target: Arc<str> = Arc::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-            }
-            _ => panic!("Expected Action::Respond(400 Bad Request)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::BadRequest)));
     }
 }

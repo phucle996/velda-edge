@@ -34,7 +34,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::{context::RequestContext, error::Error, l7::response::L7Response};
+use crate::{context::RequestContext, error::RejectReason, l7::response::L7Response};
 
 /// A phase in the Velda request lifecycle.
 ///
@@ -107,10 +107,25 @@ impl Phase {
     }
 }
 
-/// Result returned by an L7 hook.
+/// Bounded execution authority returned by L7 plugin hooks.
 ///
-/// A hook does not directly control the whole proxy pipeline.
-/// It can only request one of the allowed actions below.
+/// # Architectural Invariant: Finite Extension Authority
+/// Hooks in Velda Edge do not have raw access to network sockets, background loops,
+/// or connection pools. They are strictly bounded to this finite state machine:
+///
+/// 1. `Continue`: Advances the request to the subsequent hook or pipeline phase.
+/// 2. `Respond(L7Response)`: Short-circuits immediately with an explicit, caller-provided
+///    HTTP response. Used strictly when the plugin supplies explicit body content, custom
+///    non-error status codes (e.g. CORS `204 No Content`), or cached payloads.
+/// 3. `Reject(RejectReason)`: Canonical edge rejection for policy/security failures.
+///    Synthesizes zero-alloc protocol-native error framing downstream and strips Bit 0 headers.
+/// 4. `Delay { duration, and_then }`: Non-blocking asynchronous sleep (used for chaos fault
+///    injection / artificial latency) before evaluating the boxed `and_then` action.
+///
+/// # Memory Layout
+/// `and_then` is boxed inside `Delay` to ensure that `Action` remains small and cacheline-friendly
+/// across the 99.9% non-delay request path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Action {
     /// Continue processing the request with the next hook or phase.
@@ -122,9 +137,9 @@ pub enum Action {
 
     /// Stop processing because the request cannot continue.
     ///
-    /// The proxy is responsible for translating the error into
-    /// an appropriate client-facing response.
-    Reject(Error),
+    /// The proxy is responsible for translating the canonical rejection
+    /// reason into an appropriate client-facing response.
+    Reject(RejectReason),
 
     /// Delay execution for the specified duration before continuing with `and_then`.
     Delay {
@@ -156,10 +171,10 @@ impl Action {
         Self::Respond(response)
     }
 
-    /// Constructs a `Reject` action with the given core error.
+    /// Constructs a `Reject` action with the given canonical rejection reason.
     #[inline]
-    pub fn reject(error: Error) -> Self {
-        Self::Reject(error)
+    pub const fn reject(reason: RejectReason) -> Self {
+        Self::Reject(reason)
     }
 
     /// Returns `true` when processing should continue.
@@ -232,7 +247,6 @@ impl HookPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorKind;
     use http::StatusCode;
 
     #[test]
@@ -263,7 +277,7 @@ mod tests {
         assert!(r.is_response());
         assert!(!r.is_rejected());
 
-        let rej = Action::reject(Error::new(ErrorKind::Rejected, "blocked by test"));
+        let rej = Action::reject(RejectReason::Forbidden);
         assert!(!rej.is_continue());
         assert!(!rej.is_response());
         assert!(rej.is_rejected());

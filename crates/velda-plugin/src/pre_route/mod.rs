@@ -81,7 +81,7 @@ pub fn instantiate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, StatusCode, Uri, Version};
+    use http::{HeaderMap, Method, Uri, Version};
     use velda_core::Body;
 
     #[test]
@@ -113,10 +113,10 @@ mod tests {
 
         let action = run_pre_route_plugins(&chain, &mut req);
         match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::FORBIDDEN);
+            Action::Reject(reason) => {
+                assert_eq!(reason, velda_core::RejectReason::Forbidden);
             }
-            _ => panic!("Expected Action::Respond(403)"),
+            _ => panic!("Expected Action::Reject(Forbidden)"),
         }
     }
 }

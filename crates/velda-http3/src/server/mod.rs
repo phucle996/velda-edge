@@ -16,11 +16,13 @@
 //! allocations and preserving the flat-workflow, zero-overhead hot path.
 
 pub mod connection;
+pub mod early_response;
 pub mod header;
 pub mod path;
 pub mod response;
 
 pub use connection::{Http3Engine, Http3RequestEvent, OutgoingDatagram};
+pub use early_response::{precompiled_early_response, precompiled_reject_response};
 pub use header::{enrich_headers, extract_host};
 pub use path::{is_clean_path, normalize_path};
 pub use response::{

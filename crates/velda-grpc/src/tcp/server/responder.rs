@@ -218,9 +218,7 @@ impl GrpcResponder {
         mut response: Response<()>,
         end_of_stream: bool,
     ) -> Result<h2::SendStream<Bytes>, h2::Error> {
-        if let Some(ref req_id) = self.request_id
-            && !response.headers().contains_key(&X_REQUEST_ID)
-        {
+        if let Some(ref req_id) = self.request_id {
             response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
         }
         self.respond.send_response(response, end_of_stream)

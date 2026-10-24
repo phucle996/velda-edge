@@ -10,11 +10,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
 use rustc_hash::FxHashMap;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::HmacAuthConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -98,15 +97,6 @@ pub struct HmacAuthPlugin {
     /// Pre-parsed flags to avoid string comparison on hot path
     is_base64_encoding: bool,
     is_sha512: bool,
-    /// Pre-computed 401 static error responses
-    resp_missing_key: L7Response,
-    resp_invalid_key: L7Response,
-    resp_missing_ts: L7Response,
-    resp_skewed_ts: L7Response,
-    resp_missing_nonce: L7Response,
-    resp_replayed_nonce: L7Response,
-    resp_missing_sig: L7Response,
-    resp_invalid_sig: L7Response,
 }
 
 impl HmacAuthPlugin {
@@ -158,19 +148,6 @@ impl HmacAuthPlugin {
 
         let signed_headers = SignedHeadersSpec::compile(&config.signed_headers, &id_str)?;
 
-        let make_resp = |status: StatusCode, err_msg: &'static str| -> L7Response {
-            let body = format!("{{\"error\":\"{err_msg}\"}}");
-            L7Response::from_bytes(status, body)
-                .with_header(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )
-                .with_header(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("HMAC realm=\"velda-edge\""),
-                )
-        };
-
         Ok(Self {
             id: id_str,
             config,
@@ -184,21 +161,16 @@ impl HmacAuthPlugin {
             signed_headers,
             is_base64_encoding,
             is_sha512,
-            resp_missing_key: make_resp(StatusCode::UNAUTHORIZED, "Missing access key"),
-            resp_invalid_key: make_resp(StatusCode::UNAUTHORIZED, "Invalid access key"),
-            resp_missing_ts: make_resp(StatusCode::UNAUTHORIZED, "Missing timestamp header"),
-            resp_skewed_ts: make_resp(
-                StatusCode::UNAUTHORIZED,
-                "Request timestamp expired or clock skew exceeded",
-            ),
-            resp_missing_nonce: make_resp(StatusCode::UNAUTHORIZED, "Missing nonce header"),
-            resp_replayed_nonce: make_resp(
-                StatusCode::UNAUTHORIZED,
-                "Replayed request detected (nonce already used)",
-            ),
-            resp_missing_sig: make_resp(StatusCode::UNAUTHORIZED, "Missing signature header"),
-            resp_invalid_sig: make_resp(StatusCode::UNAUTHORIZED, "Invalid HMAC signature"),
         })
+    }
+
+    #[inline(always)]
+    fn reject_unauthorized(req: &mut L7Request) -> Action {
+        req.headers.insert_bypass(
+            http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("HMAC realm=\"velda-edge\""),
+        );
+        Action::Reject(RejectReason::Unauthorized)
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
@@ -285,29 +257,29 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         // 1. Extract Access Key ID (Pure byte trimming, zero UTF-8 validation overhead!)
         let access_key_id = match req.headers.get(&self.access_key_header) {
             Some(v) => v.as_bytes().trim_ascii(),
-            None => return Action::Respond(self.resp_missing_key.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         // 2. Lookup Pre-Compiled Secret Key in RAM (Zero key-derivation overhead!)
         let (key, consumer_hval_opt) = match self.credentials.get(access_key_id) {
             Some((k, cid)) => (k, cid),
-            None => return Action::Respond(self.resp_invalid_key.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         // 3. Extract and Validate Timestamp (Zero-allocation byte parsing)
         let ts_bytes = match req.headers.get(&self.timestamp_header) {
             Some(v) => v.as_bytes(),
-            None => return Action::Respond(self.resp_missing_ts.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         let req_timestamp = match parse_u64_bytes(ts_bytes) {
             Some(t) => t,
-            None => return Action::Respond(self.resp_missing_ts.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         let diff = now.abs_diff(req_timestamp);
         if diff > self.config.clock_skew_seconds {
-            return Action::Respond(self.resp_skewed_ts.clone());
+            return Self::reject_unauthorized(req);
         }
 
         // 4. Nonce Phase 1 (Peek): Extract Nonce Header & Check Replay in ~10ns BEFORE doing any crypto
@@ -316,15 +288,15 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
                 Some(v) => {
                     let trimmed = v.as_bytes().trim_ascii();
                     if trimmed.is_empty() {
-                        return Action::Respond(self.resp_missing_nonce.clone());
+                        return Self::reject_unauthorized(req);
                     }
                     let fp = super::nonce::nonce_fingerprint_128(trimmed);
                     if self.nonce_cache.is_replayed_fp(fp, now) {
-                        return Action::Respond(self.resp_replayed_nonce.clone());
+                        return Self::reject_unauthorized(req);
                     }
                     Some(fp)
                 }
-                None => return Action::Respond(self.resp_missing_nonce.clone()),
+                None => return Self::reject_unauthorized(req),
             }
         } else {
             None
@@ -335,11 +307,11 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
             Some(v) => {
                 let trimmed = v.as_bytes().trim_ascii();
                 if trimmed.is_empty() {
-                    return Action::Respond(self.resp_missing_sig.clone());
+                    return Self::reject_unauthorized(req);
                 }
                 trimmed
             }
-            None => return Action::Respond(self.resp_missing_sig.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         let expected_sig_len = match (self.is_sha512, self.is_base64_encoding) {
@@ -349,14 +321,14 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
             (true, true) => 88,   // SHA-512 Base64
         };
         if client_sig.len() != expected_sig_len {
-            return Action::Respond(self.resp_invalid_sig.clone());
+            return Self::reject_unauthorized(req);
         }
 
         // 6. Compute and verify Payload Hash (using stack buffer if calculated from raw body)
         let mut payload_buf = [0u8; 64];
         let payload_hash_bytes = match self.compute_payload_hash_bytes(req, &mut payload_buf) {
             Some(h) => h,
-            None => return Action::Respond(self.resp_invalid_sig.clone()),
+            None => return Self::reject_unauthorized(req),
         };
 
         // 7. Extract Authority for HTTP/2 & HTTP/3 (:authority)
@@ -394,14 +366,14 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         };
 
         if !is_valid {
-            return Action::Respond(self.resp_invalid_sig.clone());
+            return Self::reject_unauthorized(req);
         }
 
         // 9. Nonce Phase 2 (Commit): Record Authentic Nonce to Sharded NonceCache
         if let Some(fp) = nonce_fp_opt {
             let expiry = req_timestamp + self.config.clock_skew_seconds;
             if !self.nonce_cache.check_and_record_fp(fp, expiry, now) {
-                return Action::Respond(self.resp_replayed_nonce.clone());
+                return Self::reject_unauthorized(req);
             }
         }
 
@@ -553,7 +525,7 @@ mod tests {
 
         // Second attempt with exact same nonce: MUST FAIL (Replay detected!)
         let replay = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(replay, Action::Respond(resp) if resp.status == StatusCode::UNAUTHORIZED));
+        assert!(matches!(replay, Action::Reject(RejectReason::Unauthorized)));
     }
 
     #[test]
@@ -576,7 +548,7 @@ mod tests {
         // Attacker sends forged signature -> Rejected
         assert!(matches!(
             plugin.on_upstream_request(&mut forged_req, &mut target),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Unauthorized)
         ));
 
         // Legitimate client sends valid signature with SAME nonce -> MUST SUCCEED (nonce not poisoned)
@@ -609,7 +581,7 @@ mod tests {
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":999999}"));
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Respond(resp) if resp.status == StatusCode::UNAUTHORIZED));
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
 
     /// Verifies the security patch for Scenario A3 (Body Tampering Bypass via client-supplied x-content-sha256).
@@ -633,7 +605,7 @@ mod tests {
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":9999999}"));
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Respond(resp) if resp.status == StatusCode::UNAUTHORIZED));
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
 
     /// Verifies that a legitimate request containing x-content-sha256 header (even uppercase) succeeds.

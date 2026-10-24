@@ -24,11 +24,10 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, ORIGIN, REFERER};
-use http::{HeaderName, HeaderValue, Method, StatusCode};
+use http::header::{COOKIE, HOST, ORIGIN, REFERER};
+use http::{HeaderName, Method};
 use ring::hmac;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::token::{self, constant_time_eq};
@@ -129,14 +128,6 @@ pub fn extract_cookie_value<'a>(cookie_bytes: &'a [u8], prefix: &[u8]) -> Option
     None
 }
 
-const RESP_CROSS_SITE: &[u8] = b"403 Forbidden: CSRF cross-site request disallowed\n";
-const RESP_ORIGIN_FAILED: &[u8] = b"403 Forbidden: CSRF origin verification failed\n";
-const RESP_COOKIE_MISSING: &[u8] = b"403 Forbidden: CSRF cookie missing\n";
-const RESP_HEADER_MISSING: &[u8] = b"403 Forbidden: CSRF token header missing\n";
-const RESP_TOKEN_EMPTY: &[u8] = b"403 Forbidden: CSRF token empty\n";
-const RESP_TOKEN_MISMATCH: &[u8] = b"403 Forbidden: CSRF token mismatch\n";
-const RESP_TOKEN_INVALID: &[u8] = b"403 Forbidden: CSRF signed token invalid or expired\n";
-
 /// Pre-Upstream Cross-Site Request Forgery (CSRF) Protection Plugin.
 #[derive(Debug, Clone)]
 pub struct CsrfPlugin {
@@ -150,7 +141,7 @@ pub struct CsrfPlugin {
 }
 
 impl CsrfPlugin {
-    /// Constructs a new [`CsrfPlugin`] with pre-compiled method bitmasks and cryptographic keys.
+    /// Constructs a new [`CsrfPlugin`] with pre-compiled method bitmasks, cryptographic keys, and trusted origin patterns.
     pub fn new(id: impl Into<String>, config: CsrfConfig) -> Result<Self, PluginError> {
         // 1. Compile safe methods bitmask
         let mut safe_methods_mask = 0u16;
@@ -254,17 +245,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
                     });
 
                 if !authorized_cross_site {
-                    return Action::Respond(
-                        L7Response::from_bytes(
-                            StatusCode::FORBIDDEN,
-                            Bytes::from_static(RESP_CROSS_SITE),
-                        )
-                        .with_header(
-                            CONTENT_TYPE,
-                            HeaderValue::from_static("text/plain; charset=utf-8"),
-                        )
-                        .with_header(CONTENT_LENGTH, HeaderValue::from_static("50")),
-                    );
+                    return Action::Reject(RejectReason::Forbidden);
                 }
             }
         }
@@ -314,17 +295,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
             };
 
             if !origin_verified {
-                return Action::Respond(
-                    L7Response::from_bytes(
-                        StatusCode::FORBIDDEN,
-                        Bytes::from_static(RESP_ORIGIN_FAILED),
-                    )
-                    .with_header(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("text/plain; charset=utf-8"),
-                    )
-                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("47")),
-                );
+                return Action::Reject(RejectReason::Forbidden);
             }
         }
 
@@ -333,75 +304,28 @@ impl PreUpstreamPlugin for CsrfPlugin {
         // ─────────────────────────────────────────────────────────────────────
         // 4.1 Extract Cookie Value (Zero-Allocation Byte Slice)
         let Some(cookie_hdr) = req.headers.get(COOKIE) else {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(RESP_COOKIE_MISSING),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("35")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         };
 
         let Some(cookie_token) = self.extract_cookie_token(cookie_hdr.as_bytes()) else {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(RESP_COOKIE_MISSING),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("35")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         };
 
         // 4.2 Extract Header Value
         let Some(header_token) = req.headers.get(&self.header_name) else {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(RESP_HEADER_MISSING),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("41")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         };
 
         let header_token_bytes = header_token.as_bytes().trim_ascii();
 
         // 4.3 Validate non-empty tokens (Zero-Length token bypass defense)
         if cookie_token.is_empty() || header_token_bytes.is_empty() {
-            return Action::Respond(
-                L7Response::from_bytes(StatusCode::FORBIDDEN, Bytes::from_static(RESP_TOKEN_EMPTY))
-                    .with_header(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("text/plain; charset=utf-8"),
-                    )
-                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("32")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         }
 
         // 4.4 128-bit SIMD Constant-Time Equality Check
         if !constant_time_eq(cookie_token, header_token_bytes) {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(RESP_TOKEN_MISMATCH),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("35")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         }
 
         // 4.5 Cryptographic HMAC-SHA256 Signature & TTL Check (Neutralizes Subdomain Cookie Tossing)
@@ -413,17 +337,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
 
             if !token::verify_signed_token(key, cookie_token, self.config.token_ttl_secs, now_secs)
             {
-                return Action::Respond(
-                    L7Response::from_bytes(
-                        StatusCode::FORBIDDEN,
-                        Bytes::from_static(RESP_TOKEN_INVALID),
-                    )
-                    .with_header(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("text/plain; charset=utf-8"),
-                    )
-                    .with_header(CONTENT_LENGTH, HeaderValue::from_static("52")),
-                );
+                return Action::Reject(RejectReason::Forbidden);
             }
         }
 
@@ -444,7 +358,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Uri, Version};
+    use http::{HeaderMap, HeaderValue, Uri, Version};
     use velda_core::Body;
 
     fn build_test_request(method: Method, uri_str: &str, headers: HeaderMap) -> L7Request {
@@ -533,10 +447,7 @@ mod tests {
 
         let mut req = build_test_request(Method::POST, "/api/transfer", headers);
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        let Action::Respond(resp) = action else {
-            panic!("Expected Action::Respond(403)");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -583,10 +494,10 @@ mod tests {
 
         let mut req_tossed = build_test_request(Method::POST, "/transfer", headers_tossed);
         let action_tossed = plugin.on_upstream_request(&mut req_tossed, &mut target);
-        let Action::Respond(resp) = action_tossed else {
-            panic!("Expected Action::Respond(403)");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(matches!(
+            action_tossed,
+            Action::Reject(RejectReason::Forbidden)
+        ));
 
         // 3. Expired token rejected
         let expired_ts = now - 7201; // Past 7200s TTL
@@ -603,10 +514,10 @@ mod tests {
 
         let mut req_expired = build_test_request(Method::POST, "/transfer", headers_expired);
         let action_expired = plugin.on_upstream_request(&mut req_expired, &mut target);
-        let Action::Respond(resp_expired) = action_expired else {
-            panic!("Expected Action::Respond(403)");
-        };
-        assert_eq!(resp_expired.status, StatusCode::FORBIDDEN);
+        assert!(matches!(
+            action_expired,
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -634,10 +545,7 @@ mod tests {
 
         let mut req = build_test_request(Method::POST, "/api/action", headers);
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        let Action::Respond(resp) = action else {
-            panic!("Expected 403 for cross-site fetch metadata");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
 
         // Case 2: Cross-site from explicitly trusted partner -> Proceeds to token check
         let mut headers_trusted = HeaderMap::new();
@@ -678,10 +586,7 @@ mod tests {
 
             let mut req = build_test_request(Method::POST, "/api/action", headers);
             let action = plugin.on_upstream_request(&mut req, &mut target);
-            let Action::Respond(resp) = action else {
-                panic!("Expected 403 Forbidden for short invalid referer");
-            };
-            assert_eq!(resp.status, StatusCode::FORBIDDEN);
+            assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
         }
     }
 
@@ -708,7 +613,10 @@ mod tests {
 
         let mut req_post = build_test_request(Method::POST, "/api/data", HeaderMap::new());
         let action_post = plugin.on_upstream_request(&mut req_post, &mut target);
-        assert!(matches!(action_post, Action::Respond(_)));
+        assert!(matches!(
+            action_post,
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -732,15 +640,7 @@ mod tests {
 
         let mut req = build_test_request(Method::POST, "/api/action", headers);
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        let Action::Respond(resp) = action else {
-            panic!("Expected Action::Respond(403) for empty tokens");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
-        assert_eq!(
-            resp.headers.get(CONTENT_LENGTH).unwrap().to_str().unwrap(),
-            "32"
-        );
-        assert_eq!(resp.body.as_slice(), b"403 Forbidden: CSRF token empty\n");
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -766,9 +666,6 @@ mod tests {
 
         let mut req = build_test_request(Method::POST, "/api/action", headers);
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        let Action::Respond(resp) = action else {
-            panic!("Expected Action::Respond(403) for schemeless origin");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 }

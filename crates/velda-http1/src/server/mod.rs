@@ -9,12 +9,16 @@
 //! - `path`: Downstream URI path normalization and security validation.
 
 pub mod connection;
+pub mod early_response;
 pub mod header;
 pub mod path;
 pub mod request;
 pub mod response;
 
 pub use connection::Http1ServerConnection;
+pub use early_response::{
+    encode_early_error, precompiled_early_response, precompiled_reject_response, send_early_error,
+};
 pub use header::{enrich_headers, extract_host, match_header_name};
 pub use path::{is_clean_path, normalize_path};
 pub use request::{

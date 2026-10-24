@@ -8,9 +8,9 @@
 //! See [`README.md`](./README.md).
 
 use http::header::RETRY_AFTER;
-use http::{HeaderName, HeaderValue, StatusCode};
+use http::{HeaderName, HeaderValue};
 use std::sync::Arc;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 
 use super::algorithm::{RateLimitAlgorithm, ShardedState};
 use super::key::KeyStrategy;
@@ -96,6 +96,7 @@ pub struct RateLimitPlugin {
     pub config: RateLimitConfig,
     state: ShardedState,
     pub redis_pool: RedisConnectionPool,
+    limit_val: HeaderValue,
 }
 
 impl std::fmt::Debug for RateLimitPlugin {
@@ -128,11 +129,17 @@ impl RateLimitPlugin {
             redis_pool.start_auxiliary_worker();
         }
 
+        let mut itoa_buf = itoa::Buffer::new();
+        let limit_str = itoa_buf.format(config.rate_per_second);
+        let limit_val =
+            HeaderValue::from_str(limit_str).unwrap_or_else(|_| HeaderValue::from_static("0"));
+
         Self {
             id: id.into(),
             config,
             state: ShardedState::new(),
             redis_pool,
+            limit_val,
         }
     }
 
@@ -347,34 +354,24 @@ impl PreUpstreamPlugin for RateLimitPlugin {
         if allowed {
             Action::Continue
         } else {
-            let retry_str = retry_after.to_string();
-            let limit_str = self.config.rate_per_second.to_string();
+            let mut itoa_buf = itoa::Buffer::new();
+            let retry_str = itoa_buf.format(retry_after);
+            let retry_val =
+                HeaderValue::from_str(retry_str).unwrap_or_else(|_| HeaderValue::from_static("1"));
 
-            Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "Too Many Requests: rate limit exceeded on upstream target",
-                )
-                .with_header(
-                    RETRY_AFTER,
-                    HeaderValue::from_str(&retry_str)
-                        .unwrap_or_else(|_| HeaderValue::from_static("1")),
-                )
-                .with_header(
-                    HeaderName::from_static("x-ratelimit-limit"),
-                    HeaderValue::from_str(&limit_str)
-                        .unwrap_or_else(|_| HeaderValue::from_static("0")),
-                )
-                .with_header(
-                    HeaderName::from_static("x-ratelimit-remaining"),
-                    HeaderValue::from_static("0"),
-                )
-                .with_header(
-                    HeaderName::from_static("x-ratelimit-reset"),
-                    HeaderValue::from_str(&retry_str)
-                        .unwrap_or_else(|_| HeaderValue::from_static("1")),
-                ),
-            )
+            req.headers.insert_bypass(RETRY_AFTER, retry_val.clone());
+            req.headers
+                .insert_bypass(HeaderName::from_static("x-ratelimit-reset"), retry_val);
+            req.headers.insert_bypass(
+                HeaderName::from_static("x-ratelimit-limit"),
+                self.limit_val.clone(),
+            );
+            req.headers.insert_bypass(
+                HeaderName::from_static("x-ratelimit-remaining"),
+                HeaderValue::from_static("0"),
+            );
+
+            Action::Reject(RejectReason::TooManyRequests)
         }
     }
 
@@ -426,12 +423,14 @@ mod tests {
         ));
         // 3rd request -> 429 TOO_MANY_REQUESTS
         match plugin.on_upstream_request(&mut req, &mut target) {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
-                assert_eq!(resp.headers.get("x-ratelimit-remaining").unwrap(), "0");
-                assert!(resp.headers.contains_key("retry-after"));
+            Action::Reject(reason) => {
+                assert_eq!(reason, RejectReason::TooManyRequests);
+                assert_eq!(req.headers.get("x-ratelimit-remaining").unwrap(), "0");
+                assert_eq!(req.headers.get("x-ratelimit-limit").unwrap(), "2");
+                assert!(req.headers.contains_key("retry-after"));
+                assert!(req.headers.has_bypass_headers());
             }
-            _ => panic!("Expected Action::Respond(429)"),
+            _ => panic!("Expected Action::Reject(TooManyRequests)"),
         }
     }
 
@@ -455,7 +454,7 @@ mod tests {
         // 2nd request in same window -> REJECT 429
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
-            Action::Respond(_)
+            Action::Reject(RejectReason::TooManyRequests)
         ));
     }
 
@@ -540,7 +539,7 @@ mod tests {
         // 2nd request -> REJECT 429 via memory fallback
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
-            Action::Respond(_)
+            Action::Reject(RejectReason::TooManyRequests)
         ));
     }
 

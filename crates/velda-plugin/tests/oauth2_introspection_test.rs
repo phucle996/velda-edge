@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::header::HeaderValue;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
-use velda_core::{Action, Body, L7Request, L7Response};
+use http::{HeaderMap, Method, Uri, Version};
+use velda_core::{Action, Body, L7Request, RejectReason};
 use velda_plugin::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::{
     ClaimToHeaderConfig, Oauth2IntrospectionConfig, Oauth2IntrospectionPlugin,
@@ -21,10 +21,6 @@ fn current_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn extract_body_str(resp: &L7Response) -> String {
-    String::from_utf8_lossy(resp.body.as_slice()).to_string()
 }
 
 fn test_req(method: Method, uri: &str, headers: &[(&str, &str)]) -> L7Request {
@@ -293,13 +289,11 @@ fn test_oauth2_introspection_e2e_missing_token_rejected() {
 
     let mut req = test_req(Method::GET, "/v1/secure", &[]);
     let action = plugin.on_upstream_request(&mut req, &mut target);
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("missing_token"));
-        }
-        _ => panic!("Expected missing token to be rejected with 401"),
-    }
+    assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+    assert_eq!(
+        req.headers.get("www-authenticate").unwrap(),
+        "Bearer realm=\"velda-edge\""
+    );
 }
 
 #[test]
@@ -314,13 +308,14 @@ fn test_oauth2_introspection_e2e_revoked_token_negative_caching() {
         &[("x-access-token", "tok_revoked_nonexistent")],
     );
     let action1 = plugin.on_upstream_request(&mut req1, &mut target);
-    match action1 {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("invalid_token"));
-        }
-        _ => panic!("Expected revoked token to be rejected with 401"),
-    }
+    assert!(matches!(
+        action1,
+        Action::Reject(RejectReason::Unauthorized)
+    ));
+    assert_eq!(
+        req1.headers.get("www-authenticate").unwrap(),
+        "Bearer error=\"invalid_token\""
+    );
     assert_eq!(idp.request_count.load(Ordering::Relaxed), 1);
 
     // 2nd Request: MUST HIT NEGATIVE CACHE
@@ -330,10 +325,10 @@ fn test_oauth2_introspection_e2e_revoked_token_negative_caching() {
         &[("x-access-token", "tok_revoked_nonexistent")],
     );
     let action2 = plugin.on_upstream_request(&mut req2, &mut target);
-    match action2 {
-        Action::Respond(resp) => assert_eq!(resp.status, StatusCode::UNAUTHORIZED),
-        _ => panic!("Expected cached negative token to be rejected"),
-    }
+    assert!(matches!(
+        action2,
+        Action::Reject(RejectReason::Unauthorized)
+    ));
     assert_eq!(
         idp.request_count.load(Ordering::Relaxed),
         1,
@@ -358,13 +353,11 @@ fn test_oauth2_introspection_e2e_insufficient_scopes_forbidden() {
         &[("x-access-token", "tok_read_only")],
     );
     let action = plugin.on_upstream_request(&mut req, &mut target);
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::FORBIDDEN);
-            assert!(extract_body_str(&resp).contains("insufficient_scope"));
-        }
-        _ => panic!("Expected insufficient scopes to be rejected with 403 Forbidden"),
-    }
+    assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
+    assert_eq!(
+        req.headers.get("www-authenticate").unwrap(),
+        "Bearer error=\"insufficient_scope\""
+    );
 }
 
 #[test]
@@ -379,13 +372,11 @@ fn test_oauth2_introspection_e2e_expired_token_rejected() {
         &[("x-access-token", "tok_expired_02")],
     );
     let action = plugin.on_upstream_request(&mut req, &mut target);
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("token_expired"));
-        }
-        _ => panic!("Expected expired token to be rejected with 401"),
-    }
+    assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+    assert_eq!(
+        req.headers.get("www-authenticate").unwrap(),
+        "Bearer error=\"invalid_token\""
+    );
 }
 
 #[test]
@@ -401,13 +392,7 @@ fn test_oauth2_introspection_e2e_idp_down_fallback_behavior() {
         &[("x-access-token", "tok_some_token")],
     );
     let action1 = plugin_reject.on_upstream_request(&mut req1, &mut target);
-    match action1 {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
-            assert!(extract_body_str(&resp).contains("idp_unavailable"));
-        }
-        _ => panic!("Expected IdP failure to return 502 with fallback_behavior = reject"),
-    }
+    assert!(matches!(action1, Action::Reject(RejectReason::BadGateway)));
 
     // 2. Fail-Open: fallback_behavior = "allow"
     let plugin_allow = build_test_plugin(dummy_addr, vec![], "allow", true);

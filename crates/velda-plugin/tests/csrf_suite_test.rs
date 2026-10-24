@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN};
-use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderMap, HeaderValue, Method, Uri, Version};
 use ring::hmac;
 use rustc_hash::FxHashMap;
-use velda_core::{Action, Body, L7Request, ProtocolFamily, StreamingMode};
+use velda_core::{Action, Body, L7Request, ProtocolFamily, RejectReason, StreamingMode};
 use velda_plugin::PreUpstreamPlugin;
 use velda_plugin::factory::{LoadedPlugin, build_route_plugin_plan};
 use velda_plugin::pre_route::{CorsPreflightPlugin, OriginPattern};
@@ -32,13 +32,6 @@ fn build_test_request(method: Method, uri_str: &str, headers: HeaderMap) -> L7Re
         headers,
         Body::Empty,
     )
-}
-
-fn extract_body_str(action: &Action) -> String {
-    match action {
-        Action::Respond(resp) => String::from_utf8_lossy(resp.body.as_slice()).to_string(),
-        _ => String::new(),
-    }
 }
 
 #[test]
@@ -128,15 +121,9 @@ fn test_csrf_neutralizes_w3c_simple_request_trap() {
         &mut attacker_req,
         &mut target,
     );
-    let Action::Respond(resp) = pre_upstream_action else {
-        panic!("Expected CSRF plugin to block Simple Request form bypass!");
-    };
-
-    assert_eq!(resp.status, StatusCode::FORBIDDEN);
-    let body_str = String::from_utf8_lossy(resp.body.as_slice());
     assert!(
-        body_str.contains("CSRF"),
-        "Body must state CSRF verification failed: {body_str}"
+        matches!(pre_upstream_action, Action::Reject(RejectReason::Forbidden)),
+        "Expected CSRF plugin to block Simple Request form bypass with 403 Forbidden!"
     );
 
     // 2. Legitimate SPA request: Sends Origin, Cookie, and matching valid X-CSRF-Token
@@ -206,12 +193,7 @@ fn test_subdomain_cookie_tossing_defense() {
 
     let mut req = build_test_request(Method::POST, "/account/delete", headers);
     let action = plugin.on_upstream_request(&mut req, &mut target);
-
-    let Action::Respond(resp) = &action else {
-        panic!("Expected 403 Forbidden for forged HMAC signature");
-    };
-    assert_eq!(resp.status, StatusCode::FORBIDDEN);
-    assert!(extract_body_str(&action).contains("signed token invalid"));
+    assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
 }
 
 #[test]
@@ -242,7 +224,10 @@ fn test_fetch_metadata_and_origin_enforcement() {
 
     let mut req_mismatch = build_test_request(Method::POST, "/data", headers_mismatch);
     let action_mismatch = plugin.on_upstream_request(&mut req_mismatch, &mut target);
-    assert!(matches!(action_mismatch, Action::Respond(_)));
+    assert!(matches!(
+        action_mismatch,
+        Action::Reject(RejectReason::Forbidden)
+    ));
 
     // Case 2: Origin matching Host header -> Passes origin gate
     let mut headers_valid = HeaderMap::new();
@@ -284,20 +269,10 @@ fn test_csrf_e2e_short_referer_and_empty_tokens() {
 
     let mut req_short_ref = build_test_request(Method::POST, "/data", headers_short_ref);
     let action_short_ref = csrf_plugin.on_upstream_request(&mut req_short_ref, &mut target);
-    let Action::Respond(resp_short_ref) = action_short_ref else {
-        panic!("Expected 403 for invalid short referer");
-    };
-    assert_eq!(resp_short_ref.status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        resp_short_ref
-            .headers
-            .get(http::header::CONTENT_LENGTH)
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "47"
+    assert!(
+        matches!(action_short_ref, Action::Reject(RejectReason::Forbidden)),
+        "Expected 403 Forbidden for invalid short referer"
     );
-    assert_eq!(resp_short_ref.body.len(), 47);
 
     // 2. Empty tokens must be rejected
     let mut headers_empty = HeaderMap::new();
@@ -308,18 +283,8 @@ fn test_csrf_e2e_short_referer_and_empty_tokens() {
 
     let mut req_empty = build_test_request(Method::POST, "/data", headers_empty);
     let action_empty = csrf_plugin.on_upstream_request(&mut req_empty, &mut target);
-    let Action::Respond(resp_empty) = action_empty else {
-        panic!("Expected 403 for empty tokens");
-    };
-    assert_eq!(resp_empty.status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        resp_empty
-            .headers
-            .get(http::header::CONTENT_LENGTH)
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "32"
+    assert!(
+        matches!(action_empty, Action::Reject(RejectReason::Forbidden)),
+        "Expected 403 Forbidden for empty tokens"
     );
-    assert_eq!(resp_empty.body.len(), 32);
 }

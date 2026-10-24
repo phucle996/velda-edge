@@ -11,9 +11,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::Oauth2IntrospectionConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -80,11 +79,6 @@ pub struct Oauth2IntrospectionPlugin {
     token_headers_preparsed: Vec<HeaderName>,
     claims_to_headers_preparsed: Arc<[(String, HeaderName)]>,
     required_scopes_preparsed: Arc<[String]>,
-    resp_missing_token: L7Response,
-    resp_invalid_token: L7Response,
-    resp_expired_token: L7Response,
-    resp_insufficient_scope: L7Response,
-    resp_idp_error: L7Response,
 }
 
 impl Oauth2IntrospectionPlugin {
@@ -124,19 +118,6 @@ impl Oauth2IntrospectionPlugin {
         let client = Arc::new(IdpKeepAliveClient::new(&config)?);
         let cache = Arc::new(IntrospectionCache::new(config.max_cache_entries));
 
-        let make_resp = |status: StatusCode, err_msg: &'static str| -> L7Response {
-            let body = format!("{{\"error\":\"{err_msg}\"}}");
-            L7Response::from_bytes(status, body)
-                .with_header(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )
-                .with_header(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("Bearer realm=\"velda-edge\""),
-                )
-        };
-
         Ok(Self {
             id: id_str,
             config,
@@ -145,11 +126,6 @@ impl Oauth2IntrospectionPlugin {
             token_headers_preparsed,
             claims_to_headers_preparsed,
             required_scopes_preparsed,
-            resp_missing_token: make_resp(StatusCode::UNAUTHORIZED, "missing_token"),
-            resp_invalid_token: make_resp(StatusCode::UNAUTHORIZED, "invalid_token"),
-            resp_expired_token: make_resp(StatusCode::UNAUTHORIZED, "token_expired"),
-            resp_insufficient_scope: make_resp(StatusCode::FORBIDDEN, "insufficient_scope"),
-            resp_idp_error: make_resp(StatusCode::BAD_GATEWAY, "idp_unavailable"),
         })
     }
 
@@ -277,7 +253,13 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
         let (token, matched_header) = match self.extract_token(req) {
             Some(res) => res,
-            None => return Action::Respond(self.resp_missing_token.clone()),
+            None => {
+                req.headers.insert_bypass(
+                    http::header::WWW_AUTHENTICATE,
+                    HeaderValue::from_static("Bearer realm=\"velda-edge\""),
+                );
+                return Action::Reject(RejectReason::Unauthorized);
+            }
         };
 
         let now = current_epoch_secs();
@@ -290,7 +272,11 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
             // Tier 2: Check Hardware-Sharded L2 Cache
             match self.cache.lookup(fp, now) {
                 CacheLookup::NegativeHit => {
-                    return Action::Respond(self.resp_invalid_token.clone());
+                    req.headers.insert_bypass(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("Bearer error=\"invalid_token\""),
+                    );
+                    return Action::Reject(RejectReason::Unauthorized);
                 }
                 CacheLookup::Hit(claims) => {
                     let l1_exp = claims
@@ -319,13 +305,21 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
                                     self.config.negative_cache_ttl_seconds,
                                     now,
                                 );
-                                return Action::Respond(self.resp_invalid_token.clone());
+                                req.headers.insert_bypass(
+                                    http::header::WWW_AUTHENTICATE,
+                                    HeaderValue::from_static("Bearer error=\"invalid_token\""),
+                                );
+                                return Action::Reject(RejectReason::Unauthorized);
                             }
 
                             if let Some(exp) = resp.exp
                                 && now >= exp
                             {
-                                return Action::Respond(self.resp_expired_token.clone());
+                                req.headers.insert_bypass(
+                                    http::header::WWW_AUTHENTICATE,
+                                    HeaderValue::from_static("Bearer error=\"invalid_token\""),
+                                );
+                                return Action::Reject(RejectReason::Unauthorized);
                             }
 
                             let cached_claims = build_cached_claims(
@@ -352,7 +346,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
                             if self.config.fallback_behavior == "allow" {
                                 return Action::Continue;
                             }
-                            return Action::Respond(self.resp_idp_error.clone());
+                            return Action::Reject(RejectReason::BadGateway);
                         }
                     }
                 }
@@ -361,7 +355,11 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
 
         // 1. Fast Scope Check (Single boolean check pre-evaluated by build_cached_claims)
         if !claims_result.has_required_scopes {
-            return Action::Respond(self.resp_insufficient_scope.clone());
+            req.headers.insert_bypass(
+                http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
+            );
+            return Action::Reject(RejectReason::Forbidden);
         }
 
         // 2. Zero-clone remove credentials if configured (using borrowed &HeaderName)

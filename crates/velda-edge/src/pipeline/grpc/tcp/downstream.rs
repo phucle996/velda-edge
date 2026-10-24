@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{Action, ErrorKind, L7Request};
+use velda_core::{Action, L7Request};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
@@ -202,14 +202,27 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(err) => {
-                        let grpc_status = match err.kind() {
-                            ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                            ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                            _ => GrpcStatus::Internal,
-                        };
-                        short_circuit_resp =
-                            Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                    Action::Reject(reason) => {
+                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                        // preserving only Bit-1 bypass headers and grpc-status trailers.
+                        let grpc_status = GrpcStatus::from_reject_reason(reason);
+                        let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
+                        for (name, val) in l7_req.headers.bypass_headers() {
+                            resp.headers.insert(name.clone(), val.clone());
+                        }
+                        resp.headers
+                            .set_request_id(l7_req.headers.request_id().clone());
+                        let mut builder = http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .version(http::Version::HTTP_2);
+                        for (name, val) in &resp.headers {
+                            builder = builder.header(name, val);
+                        }
+                        if let Ok(r) = builder.body(()) {
+                            let _ = server_stream.respond.send_response(r, true);
+                        }
+                        return;
                     }
                     Action::Delay { .. } => unreachable!(),
                 }
@@ -233,43 +246,53 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(err) => {
-                        let grpc_status = match err.kind() {
-                            ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                            ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                            _ => GrpcStatus::Internal,
-                        };
-                        short_circuit_resp =
-                            Some(grpc_status.to_l7_response(Some("rejected by plugin")));
+                    Action::Reject(reason) => {
+                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                        // preserving only Bit-1 bypass headers and grpc-status trailers.
+                        let grpc_status = GrpcStatus::from_reject_reason(reason);
+                        let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
+                        for (name, val) in l7_req.headers.bypass_headers() {
+                            resp.headers.insert(name.clone(), val.clone());
+                        }
+                        resp.headers
+                            .set_request_id(l7_req.headers.request_id().clone());
+                        let mut builder = http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .version(http::Version::HTTP_2);
+                        for (name, val) in &resp.headers {
+                            builder = builder.header(name, val);
+                        }
+                        if let Ok(r) = builder.body(()) {
+                            let _ = server_stream.respond.send_response(r, true);
+                        }
+                        return;
                     }
                     Action::Delay { .. } => unreachable!(),
                 }
             }
 
+            if let Some(mut resp) = short_circuit_resp {
+                resp.headers
+                    .set_request_id(l7_req.headers.request_id().clone());
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
+                }
+                let mut builder = http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .version(http::Version::HTTP_2);
+                for (name, val) in &resp.headers {
+                    builder = builder.header(name, val);
+                }
+                if let Ok(r) = builder.body(()) {
+                    let _ = server_stream.respond.send_response(r, true);
+                }
+                return;
+            }
+
             server_stream.parts.headers = l7_req.headers.into();
             server_stream.parts.uri = l7_req.uri;
             server_stream.parts.method = l7_req.method;
-        }
-
-        if let Some(mut resp) = short_circuit_resp {
-            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-            // server_stream reaches end of life here -> mem::take transfers ownership with zero allocations.
-            if let Some(post_hooks) = &plan.post_response_hooks {
-                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
-                    &mut server_stream.parts.headers,
-                ));
-                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
-            }
-            let mut builder = http::Response::builder()
-                .status(http::StatusCode::OK)
-                .version(http::Version::HTTP_2);
-            for (name, val) in &resp.headers {
-                builder = builder.header(name, val);
-            }
-            if let Ok(r) = builder.body(()) {
-                let _ = server_stream.respond.send_response(r, true);
-            }
-            return;
         }
     }
 

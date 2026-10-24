@@ -40,7 +40,8 @@ pub mod worker;
 
 pub use buffer::{
     AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderWorkspace, HeaderWorkspaceLease,
-    PayloadSlab, PayloadSlabLease, PayloadSlabPool, ShardedBufferPool, SlabClass,
+    MAX_BYPASS_HEADERS, PayloadSlab, PayloadSlabLease, PayloadSlabPool, ShardedBufferPool,
+    SlabClass, X_REQUEST_ID,
 };
 pub use hardware::AdaptiveBufferDimensions;
 
@@ -76,7 +77,7 @@ pub use context::{ConnectionContext, RequestContext, RequestState};
 // Errors
 // -----------------------------------------------------------------------------
 
-pub use error::{Error, ErrorKind, Result};
+pub use error::{Error, ErrorKind, RejectReason, Result};
 
 // -----------------------------------------------------------------------------
 // Lifecycle

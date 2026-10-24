@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderValue};
+use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::{
     Http1BodyFraming, Http1Config, Http1Error, Http1PipeStrategy, Http1ServerConnection,
@@ -22,7 +22,7 @@ use super::pipe;
 use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
-use velda_core::{Action, ErrorKind, L7Request, L7Response};
+use velda_core::{Action, L7Request};
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 
@@ -107,6 +107,7 @@ pub async fn run_http1_loop<IO>(
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut conn = Http1ServerConnection::new(stream, config);
+    conn.set_alt_svc(meta.alt_svc_header.clone());
     let mut requests_served: u32 = 0;
 
     loop {
@@ -122,13 +123,8 @@ pub async fn run_http1_loop<IO>(
                 );
                 let (_req_id, req_id_header) = velda_core::next_request_id();
                 conn.set_request_id(Some(req_id_header));
-                let mut err_resp = Http1ServerResponse::from_bytes(
-                    StatusCode::REQUEST_TIMEOUT,
-                    b"408 Request Timeout: header read timeout exceeded\n".to_vec(),
-                );
-                meta.inject_response_headers(&mut err_resp.headers);
                 conn.mark_close();
-                let _ = conn.send_response(&err_resp).await;
+                let _ = conn.send_early_error(StatusCode::REQUEST_TIMEOUT).await;
                 conn.lingering_close().await;
                 break;
             }
@@ -143,11 +139,8 @@ pub async fn run_http1_loop<IO>(
                 };
                 let (_req_id, req_id_header) = velda_core::next_request_id();
                 conn.set_request_id(Some(req_id_header));
-                let mut err_resp =
-                    Http1ServerResponse::from_bytes(status, format!("{status}\n").into_bytes());
-                meta.inject_response_headers(&mut err_resp.headers);
                 conn.mark_close();
-                let _ = conn.send_response(&err_resp).await;
+                let _ = conn.send_early_error(status).await;
                 conn.lingering_close().await;
                 break;
             }
@@ -175,18 +168,8 @@ pub async fn run_http1_loop<IO>(
                 listener = %meta.listener_id,
                 "Rejecting chunked request: streaming upload is disabled on this listener"
             );
-            let mut rejected = Http1ServerResponse::from_bytes(
-                StatusCode::FORBIDDEN,
-                b"403 Forbidden: streaming upload is disabled on this listener\n".to_vec(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut rejected.headers);
             conn.mark_close();
-            let _ = conn.send_response(&rejected).await;
+            let _ = conn.send_early_error(StatusCode::FORBIDDEN).await;
             conn.lingering_close().await;
             break;
         }
@@ -198,18 +181,8 @@ pub async fn run_http1_loop<IO>(
                 path = %req_head.uri.path(),
                 "Rejecting HTTP/1.1 request with unsafe URI path"
             );
-            let mut bad_req = Http1ServerResponse::from_bytes(
-                StatusCode::BAD_REQUEST,
-                b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut bad_req.headers);
             conn.mark_close();
-            let _ = conn.send_response(&bad_req).await;
+            let _ = conn.send_early_error(StatusCode::BAD_REQUEST).await;
             conn.lingering_close().await;
             break;
         }
@@ -247,18 +220,8 @@ pub async fn run_http1_loop<IO>(
                 method = %req_head.method,
                 "No HTTP/1.1 route matched"
             );
-            let mut not_found = Http1ServerResponse::from_bytes(
-                StatusCode::NOT_FOUND,
-                b"404 Not Found: no matching route\n".to_vec(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut not_found.headers);
             conn.mark_close();
-            let _ = conn.send_response(&not_found).await;
+            let _ = conn.send_early_error(StatusCode::NOT_FOUND).await;
             conn.lingering_close().await;
             break;
         };
@@ -292,18 +255,34 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::Reject(err) => {
-                            let (status, body): (StatusCode, &'static [u8]) = match err.kind() {
-                                ErrorKind::Rejected => (StatusCode::FORBIDDEN, b"403 Forbidden\n"),
-                                ErrorKind::InvalidRequest => {
-                                    (StatusCode::BAD_REQUEST, b"400 Bad Request\n")
-                                }
-                                _ => (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    b"500 Internal Server Error\n",
-                                ),
-                            };
-                            short_circuit_resp = Some(L7Response::from_bytes(status, body));
+                        Action::Reject(reason) => {
+                            // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                            // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                            // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                            let mut resp = velda_http1::server::precompiled_reject_response(
+                                reason,
+                                Some(&req_id_header),
+                            );
+                            for (name, val) in l7_req.headers.bypass_headers() {
+                                resp.headers.insert(name.clone(), val.clone());
+                            }
+                            resp.headers.set_request_id(req_id_header.clone());
+                            resp.headers.insert(
+                                http::header::CACHE_CONTROL,
+                                HeaderValue::from_static("no-store"),
+                            );
+
+                            let mut server_resp = Http1ServerResponse::from_l7_response(resp);
+                            meta.inject_response_headers(&mut server_resp.headers);
+                            if framing == Http1BodyFraming::Empty && !conn.close_requested {
+                                let _ = conn.send_response(&server_resp).await;
+                                continue;
+                            } else {
+                                conn.mark_close();
+                                let _ = conn.send_response(&server_resp).await;
+                                conn.lingering_close().await;
+                                break;
+                            }
                         }
                         Action::Delay { .. } => unreachable!(),
                     }
@@ -327,53 +306,72 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::Reject(err) => {
-                            let (status, body): (StatusCode, &'static [u8]) = match err.kind() {
-                                ErrorKind::Rejected => (StatusCode::FORBIDDEN, b"403 Forbidden\n"),
-                                ErrorKind::InvalidRequest => {
-                                    (StatusCode::BAD_REQUEST, b"400 Bad Request\n")
-                                }
-                                _ => (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    b"500 Internal Server Error\n",
-                                ),
-                            };
-                            short_circuit_resp = Some(L7Response::from_bytes(status, body));
+                        Action::Reject(reason) => {
+                            // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                            // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                            // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                            let mut resp = velda_http1::server::precompiled_reject_response(
+                                reason,
+                                Some(&req_id_header),
+                            );
+                            for (name, val) in l7_req.headers.bypass_headers() {
+                                resp.headers.insert(name.clone(), val.clone());
+                            }
+                            resp.headers.set_request_id(req_id_header.clone());
+                            resp.headers.insert(
+                                http::header::CACHE_CONTROL,
+                                HeaderValue::from_static("no-store"),
+                            );
+
+                            let mut server_resp = Http1ServerResponse::from_l7_response(resp);
+                            meta.inject_response_headers(&mut server_resp.headers);
+                            if framing == Http1BodyFraming::Empty && !conn.close_requested {
+                                let _ = conn.send_response(&server_resp).await;
+                                continue;
+                            } else {
+                                conn.mark_close();
+                                let _ = conn.send_response(&server_resp).await;
+                                conn.lingering_close().await;
+                                break;
+                            }
                         }
                         Action::Delay { .. } => unreachable!(),
+                    }
+                }
+
+                if let Some(mut resp) = short_circuit_resp {
+                    resp.headers.set_request_id(req_id_header.clone());
+                    // Edge Authority Caching: Pre-load Cache-Control: no-store if unconfigured,
+                    // allowing post_response_hooks (http_cache_store) to override if permitted.
+                    if resp.headers.get(http::header::CACHE_CONTROL).is_none() {
+                        resp.headers.insert(
+                            http::header::CACHE_CONTROL,
+                            HeaderValue::from_static("no-store"),
+                        );
+                    }
+                    if let Some(post_hooks) = &plan.post_response_hooks {
+                        velda_plugin::run_post_response_plugins(
+                            post_hooks,
+                            &l7_req.headers,
+                            &mut resp,
+                        );
+                    }
+                    let mut server_resp = Http1ServerResponse::from_l7_response(resp);
+                    meta.inject_response_headers(&mut server_resp.headers);
+                    if framing == Http1BodyFraming::Empty && !conn.close_requested {
+                        let _ = conn.send_response(&server_resp).await;
+                        continue;
+                    } else {
+                        conn.mark_close();
+                        let _ = conn.send_response(&server_resp).await;
+                        conn.lingering_close().await;
+                        break;
                     }
                 }
 
                 req_head.headers = l7_req.headers.into();
                 req_head.uri = l7_req.uri;
                 req_head.method = l7_req.method;
-            }
-
-            if let Some(mut resp) = short_circuit_resp {
-                // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-                // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
-                if let Some(post_hooks) = &plan.post_response_hooks {
-                    let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
-                        &mut req_head.headers,
-                    ));
-                    velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
-                }
-                let mut server_resp = Http1ServerResponse::from_l7_response(resp);
-                if !server_resp.headers.contains_key(&X_REQUEST_ID) {
-                    server_resp
-                        .headers
-                        .insert(X_REQUEST_ID, req_id_header.clone());
-                }
-                meta.inject_response_headers(&mut server_resp.headers);
-                if framing == Http1BodyFraming::Empty && !conn.close_requested {
-                    let _ = conn.send_response(&server_resp).await;
-                    continue;
-                } else {
-                    conn.mark_close();
-                    let _ = conn.send_response(&server_resp).await;
-                    conn.lingering_close().await;
-                    break;
-                }
             }
         }
 
@@ -384,18 +382,8 @@ pub async fn run_http1_loop<IO>(
                 upstream = %target_upstream,
                 "No HTTP upstream configured"
             );
-            let mut no_backend = Http1ServerResponse::from_bytes(
-                StatusCode::SERVICE_UNAVAILABLE,
-                b"503 Service Unavailable: upstream not configured\n".to_vec(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut no_backend.headers);
             conn.mark_close();
-            let _ = conn.send_response(&no_backend).await;
+            let _ = conn.send_early_error(StatusCode::SERVICE_UNAVAILABLE).await;
             conn.lingering_close().await;
             break;
         };
@@ -409,19 +397,8 @@ pub async fn run_http1_loop<IO>(
                 overload = ?overload_lvl,
                 "Shedding HTTP/1.1 request due to memory saturation"
             );
-            let mut shed_resp = Http1ServerResponse::from_bytes(
-                StatusCode::TOO_MANY_REQUESTS,
-                b"429 Too Many Requests\n".to_vec(),
-            )
-            .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut shed_resp.headers);
             conn.mark_close();
-            let _ = conn.send_response(&shed_resp).await;
+            let _ = conn.send_early_error(StatusCode::TOO_MANY_REQUESTS).await;
             conn.lingering_close().await;
             break;
         }
@@ -529,18 +506,8 @@ pub async fn run_http1_loop<IO>(
                 upstream = %route.upstream_name,
                 "HTTP/1.1 upstream stream pipe failed"
             );
-            let mut err_resp = Http1ServerResponse::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )
-            .with_header(X_REQUEST_ID, req_id_header.clone());
-            meta.inject_response_headers(&mut err_resp.headers);
             conn.mark_close();
-            let _ = conn.send_response(&err_resp).await;
+            let _ = conn.send_early_error(StatusCode::BAD_GATEWAY).await;
             conn.lingering_close().await;
             break;
         }

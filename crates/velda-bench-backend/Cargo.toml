@@ -20,6 +20,7 @@ rcgen = "0.14"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 velda-core = { path = "../velda-core" }
+velda-grpc = { path = "../velda-grpc" }
 velda-http3 = { path = "../velda-http3" }
 ring = "0.17"
 base64 = "0.22"

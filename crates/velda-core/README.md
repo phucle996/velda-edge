@@ -2,6 +2,8 @@
 
 `velda-core` is the foundational vocabulary crate of the entire Velda Edge Data Plane. This crate strictly defines **data models**, **strongly typed IDs**, **lifecycle contracts**, **hardware topologies**, and the **canonical error taxonomy** shared across all subsystems.
 
+> **Documentation Suite**: [Architecture Specification](ARCHITECTURE.md) • [Buffer & Memory Model](BUFFER_MODEL.md) • [Error & Rejection Model](ERROR_MODEL.md)
+>
 > **Core Invariant**: `velda-core` **does not process requests**; `velda-core` strictly **defines requests and the communication contracts** between components that process them.
 
 ---
@@ -93,15 +95,48 @@ Defines pipeline lifecycle phases and bounded execution authority for plugin hoo
   ```rust
   pub enum Action {
       Continue,              // Proceed to next pipeline stage
-      Respond(L7Response),   // Short-circuit pipeline and return early response (401, 403, 429...)
-      Reject(Error),         // Terminate request with a specific error
+      Respond(L7Response),   // Short-circuit pipeline and return custom response
+      Reject(RejectReason),  // Canonical pipeline rejection (protocol-agnostic early error)
+      Delay { duration: Duration, and_then: Box<Action> }, // Non-blocking delay injection
+  }
+  ```
+- **`RejectReason` (`src/error.rs`)**: Canonical semantic rejection taxonomy completely decoupled from HTTP status numbers or wire framing:
+  ```rust
+  pub enum RejectReason {
+      BadRequest,            // 400 / INVALID_ARGUMENT
+      Unauthorized,          // 401 / UNAUTHENTICATED
+      Forbidden,             // 403 / PERMISSION_DENIED
+      NotFound,              // 404 / NOT_FOUND
+      PayloadTooLarge,       // 413 / FAILED_PRECONDITION
+      UriTooLong,            // 414 / INVALID_ARGUMENT
+      HeaderFieldsTooLarge,  // 431 / RESOURCE_EXHAUSTED
+      TooManyRequests,       // 429 / RESOURCE_EXHAUSTED
+      InternalError,         // 500 / INTERNAL
+      ServiceUnavailable,    // 503 / UNAVAILABLE
+      GatewayTimeout,        // 504 / DEADLINE_EXCEEDED
   }
   ```
 - **`Hook` trait**: Thread-safe (`Send + Sync`) contract for plugin implementations.
 
 ---
 
-### 2.6 Canonical Error Taxonomy (`src/error.rs`)
+### 2.6 HeaderWorkspace & Virtual 3-Column Bypass Tagging (`src/buffer/header.rs`)
+Encapsulates high-performance header manipulation with **Virtual 3-Column Visibility Bit Tagging** (`Name`, `Value`, `VisibilityBit`) to eliminate header reflection leaks on short-circuit error responses:
+
+- **Dual-State Visibility**:
+  - **Bit 0 (Default - Normal/Upstream)**: Standard incoming headers and internal mutations intended solely for backend upstreams. On successful request pass-through (99% path), all headers are forwarded zero-copy ($0$ ns overhead, $0$ heap allocations).
+  - **Bit 1 (Bypass on Reject)**: Tagged headers intended to escape short-circuit error responses (e.g. `Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`). Added via `insert_bypass(name, value)`.
+  - **Invariant: `x-request-id` is ALWAYS Bit 1**: In accordance with the Edge tracing contract, `x-request-id` is unconditionally registered as a Bit 1 Bypass header upon ingestion and insertion, guaranteeing client-side trace correlation across 100% of rejection paths.
+- **Stack-Sidecar Optimization**:
+  - Instead of altering the memory layout of `HeaderMap` (which would break zero-copy wire forwarding), `HeaderWorkspace` stores Bit 1 bypass keys in a fixed stack-allocated sidecar `[Option<HeaderName>; 8]` (`bypass_len: u8`).
+  - **Zero Allocations & Cacheline-Aligned**: Adds zero heap allocations and fits neatly within the workspace layout.
+- **Fail-Safe Downstream Rejection (1% Error Path)**:
+  - When a plugin triggers `Action::Reject(reason)`, the pipeline constructs a precompiled protocol-native error frame and queries `ws.bypass_headers()`.
+  - Only Bit 1 bypass headers are copied into the downstream rejection response. 100% of Bit 0 internal headers and client-reflected payload headers are safely dropped.
+
+---
+
+### 2.7 Canonical Error Taxonomy (`src/error.rs`)
 Provides a unified error classification (`ErrorKind`, 1 byte) allowing inter-crate communication without leaking transport-specific status code mappings:
 
 ```rust

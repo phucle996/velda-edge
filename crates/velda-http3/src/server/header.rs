@@ -4,19 +4,20 @@ use std::net::SocketAddr;
 
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
+use velda_core::HeaderWorkspace;
 
 /// Enriches headers in-place with authoritative proxy forwarding headers
 /// and sanitizes RFC 9114 prohibited hop-by-hop headers.
 ///
 /// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`, `forwarded`) directly with authoritative values.
 pub fn enrich_headers(
-    headers: &mut HeaderMap,
+    headers: &mut HeaderWorkspace,
     uri: &Uri,
     peer: SocketAddr,
     local_addr: SocketAddr,
 ) {
     // 1. Strip prohibited connection-specific headers per RFC 9114 Section 4.2
-    crate::headers::sanitize_headers(headers);
+    crate::headers::sanitize_header_workspace(headers);
 
     // 2. Inject authoritative client IP (directly overwriting spoofed headers)
     let client_ip = peer.ip();
@@ -112,15 +113,33 @@ mod tests {
 
     #[test]
     fn test_enrich_h3_forwarded_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        headers.insert("x-forwarded-proto", "http".parse().unwrap());
-        headers.insert("x-forwarded-ssl", "off".parse().unwrap());
-        headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+        let mut headers = HeaderWorkspace::default();
+        headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            "203.0.113.195".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-real-ip"),
+            "203.0.113.195".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            "evil.attacker.com".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-forwarded-proto"),
+            "http".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-forwarded-ssl"),
+            "off".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("forwarded"),
+            "for=203.0.113.195;proto=http".parse().unwrap(),
+        );
         // RFC 9114 connection header to strip
-        headers.insert("connection", "keep-alive".parse().unwrap());
+        headers.insert(http::header::CONNECTION, "keep-alive".parse().unwrap());
 
         let uri: Uri = "https://secure.example.com/api".parse().unwrap();
         let peer: SocketAddr = "192.0.2.20:54321".parse().unwrap();

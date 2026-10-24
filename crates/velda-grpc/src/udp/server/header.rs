@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
+use velda_core::HeaderWorkspace;
 
 /// Prohibited connection-specific hop-by-hop headers per RFC 9114 Section 4.2.
 pub const HOP_BY_HOP: [HeaderName; 5] = [
@@ -19,7 +20,7 @@ pub const HOP_BY_HOP: [HeaderName; 5] = [
 ///
 /// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
 pub fn enrich_headers(
-    headers: &mut HeaderMap,
+    headers: &mut HeaderWorkspace,
     peer: SocketAddr,
     local_addr: SocketAddr,
     authority: Option<&str>,
@@ -120,9 +121,15 @@ mod tests {
 
     #[test]
     fn test_enrich_grpc_udp_forwarded_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert("connection", "keep-alive".parse().unwrap());
-        headers.insert("x-forwarded-for", "10.0.0.99".parse().unwrap());
+        let mut headers = HeaderWorkspace::default();
+        headers.insert(
+            HeaderName::from_static("connection"),
+            "keep-alive".parse().unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            "10.0.0.99".parse().unwrap(),
+        );
 
         let peer: SocketAddr = "192.168.1.1:1000".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:443".parse().unwrap();

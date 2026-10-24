@@ -130,6 +130,7 @@ src/
 │   ├── request.rs          Http1Request, Http1RequestHead, Http1BodyFraming (Ingress entity)
 │   ├── decode.rs           Wire parsing (RFC 9112) and stream decoding (&mut BytesMut)
 │   ├── encode.rs           encode_status_line, encode_response, send_response_parts
+│   ├── early_response.rs   Pre-compiled early error responses & canonical RejectReason synthesis
 │   └── connection.rs       Http1ServerConnection (downstream loop, keep-alive RFC 9112)
 │
 ├── client/                 Upstream Ingress (Gateway <-> Backend Microservice)

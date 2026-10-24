@@ -7,10 +7,7 @@
 //! Full schema specification, allowed values, and configuration examples:
 //! See [`README.md`](./README.md).
 
-use bytes::Bytes;
-use http::StatusCode;
-use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
-use velda_core::{Action, HeaderWorkspace, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::network::{
@@ -63,10 +60,6 @@ pub struct IpFilterPlugin {
     deny_v4: Vec<(u32, u32)>,
     allow_v6: Vec<(u128, u128)>,
     deny_v6: Vec<(u128, u128)>,
-    // Pre-baked zero-allocation responses
-    resp_denied: L7Response,
-    resp_not_allowed: L7Response,
-    resp_unresolved: L7Response,
 }
 
 impl IpFilterPlugin {
@@ -113,29 +106,6 @@ impl IpFilterPlugin {
         let allow_v6 = compact_and_sort_v6(&raw_allow_v6);
         let deny_v6 = compact_and_sort_v6(&raw_deny_v6);
 
-        let make_static_resp = |body: &'static [u8]| -> L7Response {
-            let mut ws = HeaderWorkspace::empty();
-            ws.insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-            ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            L7Response::new(
-                StatusCode::FORBIDDEN,
-                http::Version::HTTP_11,
-                ws,
-                velda_core::Body::Bytes(Bytes::from_static(body)),
-            )
-        };
-
-        let resp_denied =
-            make_static_resp(b"Forbidden: client IP address rejected by edge policy\n");
-        let resp_not_allowed =
-            make_static_resp(b"Forbidden: client IP address is not permitted by edge policy\n");
-        let resp_unresolved = make_static_resp(
-            b"Forbidden: unable to verify client IP address for protected resource\n",
-        );
-
         Self {
             id: id.into(),
             mode: config.mode,
@@ -146,9 +116,6 @@ impl IpFilterPlugin {
             deny_v4,
             allow_v6,
             deny_v6,
-            resp_denied,
-            resp_not_allowed,
-            resp_unresolved,
         }
     }
 
@@ -240,13 +207,13 @@ impl PreRoutePlugin for IpFilterPlugin {
             Ok(ips) => ips,
             Err(IpExtractionError::Missing) => {
                 return match self.mode {
-                    IpFilterMode::AllowList => Action::Respond(self.resp_unresolved.clone()),
+                    IpFilterMode::AllowList => Action::Reject(RejectReason::Forbidden),
                     IpFilterMode::DenyList => Action::Continue,
                 };
             }
             Err(IpExtractionError::Malformed) => {
                 // Anti-evasion: Malformed forwarding header, spoofed multi-header, or hop flood is strictly rejected
-                return Action::Respond(self.resp_unresolved.clone());
+                return Action::Reject(RejectReason::Forbidden);
             }
         };
 
@@ -261,12 +228,12 @@ impl PreRoutePlugin for IpFilterPlugin {
                 let mut unallowed = false;
                 for &hop_ip in hops {
                     if has_deny && self.matches_deny(hop_ip) {
-                        return Action::Respond(self.resp_denied.clone());
+                        return Action::Reject(RejectReason::Forbidden);
                     }
                     unallowed |= !self.matches_allow(hop_ip);
                 }
                 if unallowed {
-                    Action::Respond(self.resp_not_allowed.clone())
+                    Action::Reject(RejectReason::Forbidden)
                 } else {
                     Action::Continue
                 }
@@ -276,7 +243,7 @@ impl PreRoutePlugin for IpFilterPlugin {
                 for &hop_ip in hops {
                     let excused = has_allow && self.matches_allow(hop_ip);
                     if !excused && self.matches_deny(hop_ip) {
-                        return Action::Respond(self.resp_denied.clone());
+                        return Action::Reject(RejectReason::Forbidden);
                     }
                 }
                 Action::Continue
@@ -345,7 +312,7 @@ impl IpFilterPlugin {
 mod tests {
     use super::*;
     use http::{HeaderValue, Method, Uri, Version};
-    use velda_core::Body;
+    use velda_core::{Body, RejectReason};
 
     fn make_request_with_ip(ip: &str) -> L7Request {
         let mut req = L7Request::new(
@@ -379,7 +346,10 @@ mod tests {
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
 
         let mut req3 = make_request_with_ip("172.16.0.1");
-        assert!(matches!(plugin.on_request(&mut req3), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req3),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -408,7 +378,10 @@ mod tests {
         );
 
         let mut req1 = make_request_with_ip("203.0.113.5");
-        assert!(matches!(plugin.on_request(&mut req1), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req1),
+            Action::Reject(RejectReason::Forbidden)
+        ));
 
         let mut req2 = make_request_with_ip("8.8.8.8");
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
@@ -425,7 +398,10 @@ mod tests {
 
         // Attacker attempting bypass via IPv4-mapped IPv6 address
         let mut req = make_request_with_ip("::ffff:203.0.113.5");
-        assert!(matches!(plugin.on_request(&mut req), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -439,7 +415,10 @@ mod tests {
 
         // Attacker attempting evasion with malformed header
         let mut req = make_request_with_ip("invalid_ip_format");
-        assert!(matches!(plugin.on_request(&mut req), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -493,14 +472,14 @@ mod tests {
         let mut spoofed_external = make_request_with_ip("10.1.2.3, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_external),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
 
         // Attacker at denied subnet 10.99.1.5 spoofs X-Forwarded-For: 10.1.2.3
         let mut spoofed_denied_hop = make_request_with_ip("10.1.2.3, 10.99.1.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_denied_hop),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
     }
 
@@ -525,14 +504,14 @@ mod tests {
         let mut smuggled_exception = make_request_with_ip("203.0.113.10, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut smuggled_exception),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
 
         // Blacklisted attacker (203.0.113.5) behind a benign public IP (8.8.8.8)
         let mut hidden_second_hop = make_request_with_ip("8.8.8.8, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut hidden_second_hop),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
     }
 
@@ -553,7 +532,10 @@ mod tests {
         let mut req = make_request_with_ip("malformed_poison_payload");
         req.headers
             .insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
-        assert!(matches!(plugin.on_request(&mut req), Action::Respond(_)));
+        assert!(matches!(
+            plugin.on_request(&mut req),
+            Action::Reject(RejectReason::Forbidden)
+        ));
     }
 
     #[test]
@@ -584,7 +566,7 @@ mod tests {
             .append("x-real-ip", HeaderValue::from_static("203.0.113.5"));
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_dup),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
 
         // Comma-separated list inside single-value X-Real-IP must be rejected
@@ -601,7 +583,7 @@ mod tests {
         );
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_comma),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
     }
 
@@ -619,7 +601,10 @@ mod tests {
         for octal_payload in ["010.0.0.1", "10.00.0.1", "10.0.0.01", "0177.0.0.1"] {
             let mut req = make_request_with_ip(octal_payload);
             assert!(
-                matches!(plugin.on_request(&mut req), Action::Respond(_)),
+                matches!(
+                    plugin.on_request(&mut req),
+                    Action::Reject(RejectReason::Forbidden)
+                ),
                 "Octal / leading-zero IPv4 payload '{octal_payload}' must be rejected"
             );
         }
@@ -651,7 +636,10 @@ mod tests {
         ] {
             let mut req = make_request_with_ip(bad_port_payload);
             assert!(
-                matches!(plugin.on_request(&mut req), Action::Respond(_)),
+                matches!(
+                    plugin.on_request(&mut req),
+                    Action::Reject(RejectReason::Forbidden)
+                ),
                 "Port smuggling payload '{bad_port_payload}' must be rejected"
             );
         }
@@ -687,7 +675,10 @@ mod tests {
         ] {
             let mut req = make_request_with_ip(tunneled_payload);
             assert!(
-                matches!(plugin.on_request(&mut req), Action::Respond(_)),
+                matches!(
+                    plugin.on_request(&mut req),
+                    Action::Reject(RejectReason::Forbidden)
+                ),
                 "IPv6-tunneled IPv4 payload '{tunneled_payload}' must be canonicalized and blocked"
             );
         }
@@ -710,7 +701,7 @@ mod tests {
         let mut req_flood = make_request_with_ip(&flood_17);
         assert!(matches!(
             plugin.on_request(&mut req_flood),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Forbidden)
         ));
 
         // Trailing comma or empty hop ("10.0.0.1, ") or trailing garbage ("10.0.0.1, garbage")
@@ -722,7 +713,10 @@ mod tests {
         ] {
             let mut req = make_request_with_ip(malformed_chain);
             assert!(
-                matches!(plugin.on_request(&mut req), Action::Respond(_)),
+                matches!(
+                    plugin.on_request(&mut req),
+                    Action::Reject(RejectReason::Forbidden)
+                ),
                 "Malformed XFF chain '{malformed_chain}' must be rejected"
             );
         }

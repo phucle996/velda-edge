@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderValue};
+use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{Action, ErrorKind, L7Request, L7Response};
+use velda_core::{Action, L7Request};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2Error;
 use velda_http2::Http2PipeStrategy;
@@ -149,7 +149,9 @@ pub async fn run_http2_loop<IO>(
 
                     let (_request_id, req_id_header) = velda_core::next_request_id();
                     req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
-                    responder = responder.with_request_id(Some(req_id_header.clone()));
+                    responder = responder
+                        .with_request_id(Some(req_id_header.clone()))
+                        .with_alt_svc(meta.alt_svc_header.clone());
 
                     if let Err(e) = velda_http2::server::path::normalize_path(&mut req_head.uri) {
                         tracing::warn!(
@@ -158,17 +160,12 @@ pub async fn run_http2_loop<IO>(
                             path = %req_head.uri.path(),
                             "Rejecting HTTP/2 request with unsafe URI path"
                         );
-                        let mut bad_req = L7Response::from_bytes(
-                            StatusCode::BAD_REQUEST,
-                            b"400 Bad Request: unsafe or invalid URI path\n".to_vec(),
-                        )
-                        .with_header(
-                            CONTENT_TYPE,
-                            HeaderValue::from_static("text/plain; charset=utf-8"),
-                        )
-                        .with_header(X_REQUEST_ID, req_id_header.clone());
-                        meta.inject_response_headers(&mut bad_req.headers);
-                        let _ = responder.send_response(&bad_req);
+                        if !receiver.is_end_stream() {
+                            let _ = responder
+                                .send_early_error_and_cancel_upload(StatusCode::BAD_REQUEST);
+                        } else {
+                            let _ = responder.send_early_error(StatusCode::BAD_REQUEST);
+                        }
                         continue;
                     }
 
@@ -196,30 +193,11 @@ pub async fn run_http2_loop<IO>(
                             break;
                         }
 
-                        let is_grpc = req_head
-                            .headers
-                            .get(CONTENT_TYPE)
-                            .is_some_and(|ct| ct.as_bytes().starts_with(b"application/grpc"));
-
-                        let body_text = if is_grpc {
-                            b"404 Not Found: no matching HTTP/2 route (this listener serves HTTP/2 web traffic, not gRPC)\n".as_slice()
-                        } else {
-                            b"404 Not Found: no matching route\n".as_slice()
-                        };
-
-                        let mut not_found =
-                            L7Response::from_bytes(StatusCode::NOT_FOUND, body_text.to_vec())
-                                .with_header(
-                                    CONTENT_TYPE,
-                                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                                )
-                                .with_header(X_REQUEST_ID, req_id_header.clone());
-                        meta.inject_response_headers(&mut not_found.headers);
-
                         if !receiver.is_end_stream() {
-                            let _ = responder.send_response_and_cancel_upload(&not_found);
+                            let _ =
+                                responder.send_early_error_and_cancel_upload(StatusCode::NOT_FOUND);
                         } else {
-                            let _ = responder.send_response(&not_found);
+                            let _ = responder.send_early_error(StatusCode::NOT_FOUND);
                         }
                         continue;
                     };
@@ -235,20 +213,12 @@ pub async fn run_http2_loop<IO>(
                             upstream = %route.upstream_name,
                             "No healthy backend endpoints available for HTTP upstream"
                         );
-                        let mut no_backend = L7Response::from_bytes(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            b"503 Service Unavailable: no healthy upstream endpoints\n".to_vec(),
-                        )
-                        .with_header(
-                            CONTENT_TYPE,
-                            HeaderValue::from_static("text/plain; charset=utf-8"),
-                        )
-                        .with_header(X_REQUEST_ID, req_id_header.clone());
-                        meta.inject_response_headers(&mut no_backend.headers);
                         if !receiver.is_end_stream() {
-                            let _ = responder.send_response_and_cancel_upload(&no_backend);
+                            let _ = responder.send_early_error_and_cancel_upload(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                            );
                         } else {
-                            let _ = responder.send_response(&no_backend);
+                            let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
                         }
                         continue;
                     };
@@ -262,21 +232,11 @@ pub async fn run_http2_loop<IO>(
                             overload = ?overload_lvl,
                             "Shedding HTTP/2 request due to memory saturation"
                         );
-                        let mut shed_resp = L7Response::from_bytes(
-                            StatusCode::TOO_MANY_REQUESTS,
-                            b"429 Too Many Requests\n".to_vec(),
-                        )
-                        .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
-                        .with_header(
-                            CONTENT_TYPE,
-                            HeaderValue::from_static("text/plain; charset=utf-8"),
-                        )
-                        .with_header(X_REQUEST_ID, req_id_header.clone());
-                        meta.inject_response_headers(&mut shed_resp.headers);
                         if !receiver.is_end_stream() {
-                            let _ = responder.send_response_and_cancel_upload(&shed_resp);
+                            let _ = responder
+                                .send_early_error_and_cancel_upload(StatusCode::TOO_MANY_REQUESTS);
                         } else {
-                            let _ = responder.send_response(&shed_resp);
+                            let _ = responder.send_early_error(StatusCode::TOO_MANY_REQUESTS);
                         }
                         if overload_lvl.is_critical() && !is_draining {
                             is_draining = true;
@@ -393,18 +353,31 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(err) => {
-                        let (status, body): (StatusCode, &'static [u8]) = match err.kind() {
-                            ErrorKind::Rejected => (StatusCode::FORBIDDEN, b"403 Forbidden\n"),
-                            ErrorKind::InvalidRequest => {
-                                (StatusCode::BAD_REQUEST, b"400 Bad Request\n")
-                            }
-                            _ => (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                b"500 Internal Server Error\n",
-                            ),
-                        };
-                        short_circuit_resp = Some(L7Response::from_bytes(status, body));
+                    Action::Reject(reason) => {
+                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                        // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                        let mut resp = velda_http2::server::precompiled_reject_response(
+                            reason,
+                            Some(l7_req.headers.request_id()),
+                        );
+                        for (name, val) in l7_req.headers.bypass_headers() {
+                            resp.headers.insert(name.clone(), val.clone());
+                        }
+                        resp.headers.insert(
+                            http::header::CACHE_CONTROL,
+                            HeaderValue::from_static("no-store"),
+                        );
+                        resp.headers
+                            .set_request_id(l7_req.headers.request_id().clone());
+                        meta.inject_response_headers(&mut resp.headers);
+                        let mut responder = responder;
+                        if !receiver.is_end_stream() {
+                            let _ = responder.send_response_and_cancel_upload(&resp);
+                        } else {
+                            let _ = responder.send_response(&resp);
+                        }
+                        return;
                     }
                     Action::Delay { .. } => unreachable!(),
                 }
@@ -428,45 +401,63 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(err) => {
-                        let (status, body): (StatusCode, &'static [u8]) = match err.kind() {
-                            ErrorKind::Rejected => (StatusCode::FORBIDDEN, b"403 Forbidden\n"),
-                            ErrorKind::InvalidRequest => {
-                                (StatusCode::BAD_REQUEST, b"400 Bad Request\n")
-                            }
-                            _ => (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                b"500 Internal Server Error\n",
-                            ),
-                        };
-                        short_circuit_resp = Some(L7Response::from_bytes(status, body));
+                    Action::Reject(reason) => {
+                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                        // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                        let mut resp = velda_http2::server::precompiled_reject_response(
+                            reason,
+                            Some(l7_req.headers.request_id()),
+                        );
+                        for (name, val) in l7_req.headers.bypass_headers() {
+                            resp.headers.insert(name.clone(), val.clone());
+                        }
+                        resp.headers.insert(
+                            http::header::CACHE_CONTROL,
+                            HeaderValue::from_static("no-store"),
+                        );
+                        resp.headers
+                            .set_request_id(l7_req.headers.request_id().clone());
+                        meta.inject_response_headers(&mut resp.headers);
+                        let mut responder = responder;
+                        if !receiver.is_end_stream() {
+                            let _ = responder.send_response_and_cancel_upload(&resp);
+                        } else {
+                            let _ = responder.send_response(&resp);
+                        }
+                        return;
                     }
                     Action::Delay { .. } => unreachable!(),
                 }
             }
 
+            if let Some(mut resp) = short_circuit_resp {
+                resp.headers
+                    .set_request_id(l7_req.headers.request_id().clone());
+                // Edge Authority Caching: Pre-load Cache-Control: no-store if unconfigured,
+                // allowing post_response_hooks (http_cache_store) to override if permitted.
+                if resp.headers.get(http::header::CACHE_CONTROL).is_none() {
+                    resp.headers.insert(
+                        http::header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store"),
+                    );
+                }
+                if let Some(post_hooks) = &plan.post_response_hooks {
+                    velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
+                }
+                meta.inject_response_headers(&mut resp.headers);
+                let mut responder = responder;
+                if !receiver.is_end_stream() {
+                    let _ = responder.send_response_and_cancel_upload(&resp);
+                } else {
+                    let _ = responder.send_response(&resp);
+                }
+                return;
+            }
+
             req_head.headers = l7_req.headers.into();
             req_head.uri = l7_req.uri;
             req_head.method = l7_req.method;
-        }
-
-        if let Some(mut resp) = short_circuit_resp {
-            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-            // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
-            if let Some(post_hooks) = &plan.post_response_hooks {
-                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
-                    &mut req_head.headers,
-                ));
-                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
-            }
-            meta.inject_response_headers(&mut resp.headers);
-            let mut responder = responder;
-            if !receiver.is_end_stream() {
-                let _ = responder.send_response_and_cancel_upload(&resp);
-            } else {
-                let _ = responder.send_response(&resp);
-            }
-            return;
         }
     }
 
@@ -480,20 +471,11 @@ async fn serve_http2_stream(
             upstream = %target_upstream,
             "No HTTP upstream configured"
         );
-        let mut resp = L7Response::from_bytes(
-            StatusCode::SERVICE_UNAVAILABLE,
-            b"503 Service Unavailable: upstream not configured\n".to_vec(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        meta.inject_response_headers(&mut resp.headers);
         let mut responder = responder;
         if !receiver.is_end_stream() {
-            let _ = responder.send_response_and_cancel_upload(&resp);
+            let _ = responder.send_early_error_and_cancel_upload(StatusCode::SERVICE_UNAVAILABLE);
         } else {
-            let _ = responder.send_response(&resp);
+            let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
         }
         return;
     };
@@ -663,7 +645,7 @@ mod tests {
         assert!(!headers.contains_key(http::header::HOST));
 
         if let Some(host) = velda_http2::server::header::extract_host(&headers, &uri)
-            && let Ok(hv) = HeaderValue::from_str(host)
+            && let Ok(hv) = http::header::HeaderValue::from_str(host)
         {
             headers.insert(http::header::HOST, hv);
         }

@@ -16,14 +16,13 @@
 //!   strictly prohibited; the exact requesting origin is reflected.
 //! - **Flat Workflow**: Entire execution is linear top-to-bottom without helper indirection (Rule 2.2).
 
-use bytes::Bytes;
 use http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS,
-    ACCESS_CONTROL_REQUEST_METHOD, CONTENT_LENGTH, CONTENT_TYPE, ORIGIN, VARY,
+    ACCESS_CONTROL_REQUEST_METHOD, CONTENT_LENGTH, ORIGIN, VARY,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, L7Response, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
@@ -227,17 +226,7 @@ impl PreRoutePlugin for CorsPreflightPlugin {
         // 4. Validate requested HTTP method via bitmask ($O(1)$ single-instruction check)
         let req_mask = MethodMask::parse_token(req_method_str);
         if (self.allowed_methods_mask & req_mask) == 0 {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CORS preflight disallowed\n"),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("41")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         }
 
         // 5. Validate Origin against allowed patterns
@@ -245,17 +234,7 @@ impl PreRoutePlugin for CorsPreflightPlugin {
             self.allow_all_origins || self.allowed_origins.iter().any(|p| p.matches(origin_str));
 
         if !is_allowed {
-            return Action::Respond(
-                L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"403 Forbidden: CORS preflight disallowed\n"),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                )
-                .with_header(CONTENT_LENGTH, HeaderValue::from_static("41")),
-            );
+            return Action::Reject(RejectReason::Forbidden);
         }
 
         // 6. Zero-Branch Response Assembly via Pre-Baked Header Template
@@ -383,14 +362,11 @@ mod tests {
 
         let mut req = build_request(Method::OPTIONS, "/api/v1/orders", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::FORBIDDEN);
-                assert_eq!(resp.headers.get(CONTENT_LENGTH).unwrap(), "41");
-            }
-            _ => panic!("Expected Action::Respond(403 Forbidden), got {:?}", action),
-        }
+        assert!(
+            matches!(action, Action::Reject(RejectReason::Forbidden)),
+            "Expected Action::Reject(Forbidden), got {:?}",
+            action
+        );
     }
 
     #[test]
@@ -412,13 +388,11 @@ mod tests {
 
         let mut req = build_request(Method::OPTIONS, "/api/v1/orders", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::FORBIDDEN);
-            }
-            _ => panic!("Expected Action::Respond(403 Forbidden), got {:?}", action),
-        }
+        assert!(
+            matches!(action, Action::Reject(RejectReason::Forbidden)),
+            "Expected Action::Reject(Forbidden), got {:?}",
+            action
+        );
     }
 
     #[test]

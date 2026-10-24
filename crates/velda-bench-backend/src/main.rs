@@ -8,6 +8,7 @@
 //! Each Protocol Router serves all 8 canonical routes across 4 streaming pipeline strategies
 //! (buffered, server_stream, client_stream, duplex) in Plain and TLS modes.
 
+mod grpc;
 mod http1;
 mod http2;
 mod http3;
@@ -117,8 +118,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
+    // 4. Launch gRPC Router (Port 50051 Cleartext H2C, Port 50052 TLS H2)
+    let grpc_plain: SocketAddr = "0.0.0.0:50051".parse().unwrap();
+    let grpc_tls: SocketAddr = "0.0.0.0:50052".parse().unwrap();
+    let tcp_tls_grpc = tcp_tls.clone();
+    tokio::spawn(async move {
+        if let Err(e) = grpc::GrpcRouter::run(grpc_plain, Some(grpc_tls), Some(tcp_tls_grpc)).await
+        {
+            tracing::error!(error = %e, "gRPC Router crashed");
+        }
+    });
+
     tracing::info!(
-        "✅ All 3 Protocol Routers initialized successfully (8 routes each for 4 streaming pipes)"
+        "✅ All 4 Protocol Routers initialized successfully (HTTP/1, HTTP/2, HTTP/3, and native gRPC)"
     );
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down backend...");

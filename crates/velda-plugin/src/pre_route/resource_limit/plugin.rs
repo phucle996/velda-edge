@@ -4,10 +4,8 @@
 //! and upstream connection leasing by enforcing strict thresholds on URI length,
 //! header counts, and cumulative header bytes.
 
-use bytes::Bytes;
-use http::StatusCode;
-use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue};
-use velda_core::{Action, HeaderWorkspace, L7Request, L7Response};
+use http::header::HeaderName;
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -43,45 +41,14 @@ impl Default for ResourceLimits {
 pub struct ResourceLimitPlugin {
     pub id: String,
     pub limits: ResourceLimits,
-    uri_too_long_response: L7Response,
-    header_fields_too_large_response: L7Response,
 }
 
 impl ResourceLimitPlugin {
-    /// Constructs a new `ResourceLimitPlugin` with pre-computed immutable error responses.
-    ///
-    /// # CPDoS (Cache-Poisoned Denial of Service) Invariant
-    /// Both 414 and 431 responses strictly mandate `Cache-Control: no-store` to prevent
-    /// reverse proxies or CDNs from poisoning normalized URI cache keys with client-induced limit errors.
+    /// Constructs a new `ResourceLimitPlugin`.
     pub fn new(id: impl Into<String>, limits: ResourceLimits) -> Self {
-        let make_static_response = |status: StatusCode, body: &'static [u8]| -> L7Response {
-            let mut ws = HeaderWorkspace::empty();
-            ws.insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            );
-            ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            L7Response::new(
-                status,
-                http::Version::HTTP_11,
-                ws,
-                velda_core::Body::Bytes(Bytes::from_static(body)),
-            )
-        };
-
-        let uri_too_long_response =
-            make_static_response(StatusCode::URI_TOO_LONG, b"{\"error\":\"URI Too Long\"}\n");
-
-        let header_fields_too_large_response = make_static_response(
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            b"{\"error\":\"Request Header Fields Too Large\"}\n",
-        );
-
         Self {
             id: id.into(),
             limits,
-            uri_too_long_response,
-            header_fields_too_large_response,
         }
     }
 
@@ -124,14 +91,14 @@ impl PreRoutePlugin for ResourceLimitPlugin {
             + req.uri.authority().map_or(0, |a| a.as_str().len());
 
         if uri_len > self.limits.max_uri_length {
-            return Action::Respond(self.uri_too_long_response.clone());
+            return Action::Reject(RejectReason::UriTooLong);
         }
 
         // 2. Inspect Header Count
         // Prevents header bombing and guarantees bounded execution time in subsequent loop
         let header_count = req.headers.len();
         if header_count > self.limits.max_headers_count {
-            return Action::Respond(self.header_fields_too_large_response.clone());
+            return Action::Reject(RejectReason::HeaderFieldsTooLarge);
         }
 
         // 3. Branch-Minimized Single-Pass Inspection of Headers:
@@ -167,7 +134,7 @@ impl PreRoutePlugin for ResourceLimitPlugin {
         if (max_single_header_seen > self.limits.max_single_header_bytes)
             | (total_header_bytes > self.limits.max_header_bytes)
         {
-            return Action::Respond(self.header_fields_too_large_response.clone());
+            return Action::Reject(RejectReason::HeaderFieldsTooLarge);
         }
 
         Action::Continue
@@ -225,19 +192,7 @@ mod tests {
         // Path (14) + '?' + Query (20) = 35 bytes > 30 bytes
         let mut req = build_test_request("/api/v1/orders?filter_date=2026-10-19", HeaderMap::new());
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::URI_TOO_LONG);
-                assert_eq!(
-                    resp.headers.get("content-type").unwrap(),
-                    "application/json; charset=utf-8"
-                );
-                // CPDoS mitigation: Cache-Control MUST be no-store
-                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
-            }
-            _ => panic!("Expected Action::Respond(414 URI Too Long)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
     }
 
     #[test]
@@ -254,13 +209,7 @@ mod tests {
             HeaderMap::new(),
         );
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::URI_TOO_LONG);
-            }
-            _ => panic!("Expected Action::Respond(414 URI Too Long) for absolute-form URI"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
     }
 
     #[test]
@@ -278,14 +227,10 @@ mod tests {
 
         let mut req = build_test_request("/api/test", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
-            }
-            _ => panic!("Expected Action::Respond(431 Request Header Fields Too Large)"),
-        }
+        assert!(matches!(
+            action,
+            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+        ));
     }
 
     #[test]
@@ -304,13 +249,10 @@ mod tests {
 
         let mut req = build_test_request("/api/test", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-            }
-            _ => panic!("Expected Action::Respond(431 Request Header Fields Too Large)"),
-        }
+        assert!(matches!(
+            action,
+            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+        ));
     }
 
     #[test]
@@ -330,13 +272,10 @@ mod tests {
 
         let mut req = build_test_request("/api/test", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-            }
-            _ => panic!("Expected Action::Respond(431 Request Header Fields Too Large)"),
-        }
+        assert!(matches!(
+            action,
+            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+        ));
     }
 
     #[test]
@@ -358,13 +297,10 @@ mod tests {
 
         let mut req = build_test_request("/api/test", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-            }
-            _ => panic!("Expected Action::Respond(431) for Header Name Bombing"),
-        }
+        assert!(matches!(
+            action,
+            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+        ));
     }
 
     #[test]
@@ -384,13 +320,10 @@ mod tests {
 
         let mut req = build_test_request("/api/test", headers);
         let action = plugin.on_request(&mut req);
-
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-            }
-            _ => panic!("Expected Action::Respond(431) for fragmented multi-value header bypass"),
-        }
+        assert!(matches!(
+            action,
+            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+        ));
     }
 
     #[test]

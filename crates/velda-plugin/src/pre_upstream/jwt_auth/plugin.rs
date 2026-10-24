@@ -13,9 +13,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::JwtCache;
@@ -206,16 +205,11 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         let token_str = match self.extract_token(req) {
             Some(t) => t,
             None => {
-                return Action::Respond(
-                    L7Response::from_bytes(
-                        StatusCode::UNAUTHORIZED,
-                        "Missing authentication token",
-                    )
-                    .with_header(
-                        http::header::WWW_AUTHENTICATE,
-                        HeaderValue::from_static("Bearer realm=\"velda-edge\""),
-                    ),
+                req.headers.insert_bypass(
+                    http::header::WWW_AUTHENTICATE,
+                    HeaderValue::from_static("Bearer realm=\"velda-edge\""),
                 );
+                return Action::Reject(RejectReason::Unauthorized);
             }
         };
 
@@ -224,13 +218,11 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
 
         // 1. Negative Cache check: fail-fast on known bad tokens
         if self.cache.is_negative(token_hash, now) {
-            return Action::Respond(
-                L7Response::from_bytes(StatusCode::UNAUTHORIZED, "Invalid authentication token")
-                    .with_header(
-                        http::header::WWW_AUTHENTICATE,
-                        HeaderValue::from_static("Bearer error=\"invalid_token\""),
-                    ),
+            req.headers.insert_bypass(
+                http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer error=\"invalid_token\""),
             );
+            return Action::Reject(RejectReason::Unauthorized);
         }
 
         // 2. Positive Cache check: ultra-fast (~20ns) zero-allocation claims injection
@@ -268,19 +260,15 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
             }
             Err("Claim assertion failed") => {
                 // Claim mismatch results in 403 Forbidden
-                Action::Respond(L7Response::from_bytes(
-                    StatusCode::FORBIDDEN,
-                    "Access denied: claim assertion failed",
-                ))
+                Action::Reject(RejectReason::Forbidden)
             }
-            Err(err_msg) => {
+            Err(_err_msg) => {
                 self.cache.insert_invalid(token_hash, now);
-                Action::Respond(
-                    L7Response::from_bytes(StatusCode::UNAUTHORIZED, err_msg).with_header(
-                        http::header::WWW_AUTHENTICATE,
-                        HeaderValue::from_static("Bearer error=\"invalid_token\""),
-                    ),
-                )
+                req.headers.insert_bypass(
+                    http::header::WWW_AUTHENTICATE,
+                    HeaderValue::from_static("Bearer error=\"invalid_token\""),
+                );
+                Action::Reject(RejectReason::Unauthorized)
             }
         }
     }
@@ -367,16 +355,11 @@ mod tests {
 
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-                assert_eq!(
-                    resp.headers.get("www-authenticate").unwrap(),
-                    "Bearer realm=\"velda-edge\""
-                );
-            }
-            _ => panic!("Expected Action::Respond(401)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "Bearer realm=\"velda-edge\""
+        );
     }
 
     #[test]
@@ -469,17 +452,26 @@ mod tests {
         // First attempt: validation fails and gets added to negative cache
         let mut target1 = Arc::from("default-upstream");
         let action1 = plugin.on_upstream_request(&mut req, &mut target1);
-        assert!(matches!(action1, Action::Respond(_)));
+        assert!(matches!(
+            action1,
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "Bearer error=\"invalid_token\""
+        );
 
         // Second attempt: hits negative cache immediately
         let mut target2 = Arc::from("default-upstream");
         let action2 = plugin.on_upstream_request(&mut req, &mut target2);
-        match action2 {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            }
-            _ => panic!("Expected Action::Respond(401)"),
-        }
+        assert!(matches!(
+            action2,
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "Bearer error=\"invalid_token\""
+        );
     }
 
     #[test]
@@ -586,11 +578,10 @@ mod tests {
         // Must reject cleanly with 401 without panicking!
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            }
-            _ => panic!("Expected Action::Respond(401)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "Bearer realm=\"velda-edge\""
+        );
     }
 }

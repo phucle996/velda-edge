@@ -49,6 +49,7 @@ pub const TIMER_IDLE_FALLBACK: Duration = Duration::from_millis(10);
 
 /// A response or progressive streaming message queued from upstream processing
 /// to be written to the HTTP/3 QUIC connection.
+#[allow(clippy::large_enum_variant)]
 pub enum Http3ResponseMsg {
     /// Full 1-shot HTTP/3 response (QPACK HEADERS + optional single-flight DATA frame).
     Full {
@@ -108,11 +109,7 @@ impl Http3Responder {
     /// Sends a 1-shot full response (buffered).
     #[inline]
     pub async fn send_response(self, mut response: L7Response) -> Result<(), EdgeError> {
-        if let Some(ref req_id) = self.request_id
-            && !response
-                .headers
-                .contains_key(&crate::pipeline::X_REQUEST_ID)
-        {
+        if let Some(ref req_id) = self.request_id {
             response
                 .headers
                 .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
@@ -135,9 +132,7 @@ impl Http3Responder {
         headers: &http::HeaderMap,
     ) -> Result<Http3StreamSender, EdgeError> {
         let mut final_headers = headers.clone();
-        if let Some(ref req_id) = self.request_id
-            && !final_headers.contains_key(&crate::pipeline::X_REQUEST_ID)
-        {
+        if let Some(ref req_id) = self.request_id {
             final_headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
         self.response_tx

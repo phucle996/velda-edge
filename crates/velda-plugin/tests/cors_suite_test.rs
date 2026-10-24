@@ -11,7 +11,7 @@ use http::header::{
     ORIGIN, VARY,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
-use velda_core::{Action, Body, L7Request, L7Response};
+use velda_core::{Action, Body, L7Request, L7Response, RejectReason};
 use velda_plugin::post_response::{CorsConfig, CorsResponsePlugin, PostResponsePlugin};
 use velda_plugin::pre_route::{CorsPreflightPlugin, OriginPattern, PreRoutePlugin};
 
@@ -46,10 +46,6 @@ fn make_test_request(
         headers,
         Body::Empty,
     )
-}
-
-fn extract_body_str(resp: &L7Response) -> String {
-    String::from_utf8_lossy(resp.body.as_slice()).to_string()
 }
 
 /// Helper to build standard production preflight plugin with credentials and subdomain support.
@@ -233,19 +229,7 @@ fn test_preflight_method_bitmask_rejection() {
     );
 
     let action = plugin.on_request(&mut preflight_req);
-    let Action::Respond(resp) = action else {
-        panic!("Expected Action::Respond with 403 Forbidden");
-    };
-
-    assert_eq!(resp.status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        extract_body_str(&resp),
-        "403 Forbidden: CORS preflight disallowed\n"
-    );
-    assert_eq!(
-        resp.headers.get(CONTENT_TYPE).unwrap(),
-        "text/plain; charset=utf-8"
-    );
+    assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
 }
 
 #[test]
@@ -261,15 +245,7 @@ fn test_preflight_unauthorized_origin_rejection() {
     );
 
     let action = plugin.on_request(&mut preflight_req);
-    let Action::Respond(resp) = action else {
-        panic!("Expected Action::Respond with 403 Forbidden");
-    };
-
-    assert_eq!(resp.status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        extract_body_str(&resp),
-        "403 Forbidden: CORS preflight disallowed\n"
-    );
+    assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
 }
 
 #[test]
@@ -312,10 +288,10 @@ fn test_subdomain_pattern_and_cve_2020_7662_defense() {
         // Preflight probe rejection
         let mut req = make_test_request(Method::OPTIONS, "/api", Some(attack), Some("GET"), None);
         let action = preflight_plugin.on_request(&mut req);
-        let Action::Respond(resp) = action else {
-            panic!("Expected 403 for attack origin '{attack}'");
-        };
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(
+            matches!(action, Action::Reject(RejectReason::Forbidden)),
+            "Expected 403 for attack origin '{attack}'"
+        );
 
         // Actual request probe: post_response must inject ZERO CORS headers
         let actual_req = make_test_request(Method::GET, "/api", Some(attack), None, None);

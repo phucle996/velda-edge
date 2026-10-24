@@ -31,10 +31,7 @@ pub mod w3c_trace_context;
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HashStrategy, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
-pub use grpc_fault_injection::{
-    GrpcAbortConfig, GrpcDelayConfig, GrpcFaultCondition, GrpcFaultInjectionPlugin,
-    GrpcTargetMatcher,
-};
+pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
 };
@@ -149,7 +146,7 @@ mod tests {
     use super::*;
     use http::header::HeaderName;
     use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
-    use velda_core::Body;
+    use velda_core::{Body, RejectReason};
 
     #[test]
     fn test_pre_upstream_header_mutation() {
@@ -223,11 +220,13 @@ mod tests {
         let mut target2 = Arc::from("default-upstream");
         let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
         match action2 {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
-                assert_eq!(resp.headers.get("retry-after").unwrap(), "1");
+            Action::Reject(reason) => {
+                assert_eq!(reason, RejectReason::TooManyRequests);
+                assert_eq!(req2.headers.get("retry-after").unwrap(), "1");
+                assert_eq!(req2.headers.get("x-ratelimit-remaining").unwrap(), "0");
+                assert!(req2.headers.has_bypass_headers());
             }
-            _ => panic!("Expected Action::Respond(429)"),
+            _ => panic!("Expected Action::Reject(TooManyRequests)"),
         }
     }
 

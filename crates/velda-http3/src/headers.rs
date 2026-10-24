@@ -36,6 +36,32 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// Sanitizes a [`velda_core::HeaderWorkspace`] in-place by removing prohibited
+/// connection-specific header fields according to RFC 9114 Section 4.2.
+#[inline]
+pub fn sanitize_header_workspace(headers: &mut velda_core::HeaderWorkspace) {
+    static H3_PROHIBITED_NAMES: [HeaderName; 5] = [
+        http::header::CONNECTION,
+        HeaderName::from_static("keep-alive"),
+        HeaderName::from_static("proxy-connection"),
+        http::header::TRANSFER_ENCODING,
+        http::header::UPGRADE,
+    ];
+
+    for name in &H3_PROHIBITED_NAMES {
+        headers.remove(name);
+    }
+
+    if let Some(te_val) = headers.get(http::header::TE) {
+        let is_trailers = te_val
+            .to_str()
+            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("trailers"));
+        if !is_trailers {
+            headers.remove(http::header::TE);
+        }
+    }
+}
+
 /// Returns true if a header field is prohibited in HTTP/3 according to RFC 9114 Section 4.2.
 #[inline]
 pub fn is_prohibited_header(name: &HeaderName, val: &http::HeaderValue) -> bool {

@@ -106,6 +106,7 @@ impl Http2ServerResponse {
 pub struct Http2Responder {
     respond: SendResponse<Bytes>,
     request_id: Option<HeaderValue>,
+    alt_svc: Option<HeaderValue>,
 }
 
 impl Http2Responder {
@@ -115,6 +116,7 @@ impl Http2Responder {
         Self {
             respond,
             request_id: None,
+            alt_svc: None,
         }
     }
 
@@ -125,6 +127,13 @@ impl Http2Responder {
         self
     }
 
+    /// Sets an optional Alt-Svc header value to automatically advertise HTTP/3 on downstream responses.
+    #[inline]
+    pub fn with_alt_svc(mut self, alt_svc: Option<HeaderValue>) -> Self {
+        self.alt_svc = alt_svc;
+        self
+    }
+
     #[inline]
     fn prepare_h2_response(
         &self,
@@ -132,10 +141,15 @@ impl Http2Responder {
         headers: &HeaderMap,
     ) -> Result<Response<()>, Http2Error> {
         let mut response = build_h2_response(status, headers)?;
-        if let Some(ref req_id) = self.request_id
-            && !response.headers().contains_key(&X_REQUEST_ID)
-        {
+        if let Some(ref req_id) = self.request_id {
             response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
+        }
+        if let Some(ref alt_svc) = self.alt_svc
+            && !response.headers().contains_key(http::header::ALT_SVC)
+        {
+            response
+                .headers_mut()
+                .insert(http::header::ALT_SVC, alt_svc.clone());
         }
         Ok(response)
     }
@@ -147,10 +161,13 @@ impl Http2Responder {
         mut headers: HeaderMap,
     ) -> Result<Response<()>, Http2Error> {
         crate::headers::sanitize_h2_headers(&mut headers);
-        if let Some(ref req_id) = self.request_id
-            && !headers.contains_key(&X_REQUEST_ID)
-        {
+        if let Some(ref req_id) = self.request_id {
             headers.insert(X_REQUEST_ID, req_id.clone());
+        }
+        if let Some(ref alt_svc) = self.alt_svc
+            && !headers.contains_key(http::header::ALT_SVC)
+        {
+            headers.insert(http::header::ALT_SVC, alt_svc.clone());
         }
         let mut response = Response::new(());
         *response.status_mut() = status;
@@ -168,6 +185,37 @@ impl Http2Responder {
     /// Sends a response using the canonical [`L7Response`] type.
     pub fn send_response(&mut self, response: &L7Response) -> Result<(), Http2Error> {
         self.send_parts(response.status, &response.headers, &response.body)
+    }
+
+    /// Sends a pre-compiled canonical early error response directly over this HTTP/2 stream.
+    ///
+    /// # Protocol Ownership & Zero-Body Invariant (RFC 9113)
+    /// Respects the Single Responsibility Principle (SRP) by keeping HTTP/2 binary wire mechanics
+    /// strictly within `velda-http2`. Emits a single `HEADERS` frame with `END_STREAM = true`,
+    /// completely bypassing `DATA` frame overhead and flow control window calculations.
+    #[inline]
+    pub fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http2Error> {
+        super::early_response::send_early_error(
+            &mut self.respond,
+            status,
+            self.request_id.as_ref(),
+            self.alt_svc.as_ref(),
+        )
+    }
+
+    /// Sends a pre-compiled canonical early error response and immediately resets the incoming stream
+    /// to cancel any pending peer upload without hanging connection buffers.
+    #[inline]
+    pub fn send_early_error_and_cancel_upload(
+        &mut self,
+        status: StatusCode,
+    ) -> Result<(), Http2Error> {
+        super::early_response::send_early_error_and_cancel_upload(
+            &mut self.respond,
+            status,
+            self.request_id.as_ref(),
+            self.alt_svc.as_ref(),
+        )
     }
 
     /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning and header copying.

@@ -59,6 +59,7 @@ pub struct HttpAbortConfig {
     pub body: Bytes,
     /// Pre-compiled response headers to inject.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    default_response: L7Response,
 }
 
 impl HttpAbortConfig {
@@ -112,12 +113,29 @@ impl HttpAbortConfig {
             ((percentage / 100.0) * (u64::MAX as f64)) as u64
         };
 
+        let mut header_map = HeaderMap::with_capacity(headers.len() + 1);
+        for (name, val) in &headers {
+            header_map.insert(name.clone(), val.clone());
+        }
+        let len_str = body.len().to_string();
+        header_map.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&len_str).unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        let default_response = L7Response::new(
+            status,
+            Version::HTTP_11,
+            header_map,
+            Body::Bytes(body.clone()),
+        );
+
         Ok(Self {
             percentage: threshold,
             threshold,
             status,
             body,
             headers,
+            default_response,
         })
     }
 
@@ -130,6 +148,9 @@ impl HttpAbortConfig {
     pub fn evaluate(&self, override_status: Option<u16>) -> Option<L7Response> {
         if let Some(code) = override_status {
             let status = StatusCode::from_u16(code).unwrap_or(self.status);
+            if status == self.status {
+                return Some(self.default_response.clone());
+            }
             return Some(self.build_response(status));
         }
 
@@ -142,7 +163,7 @@ impl HttpAbortConfig {
             return None;
         }
 
-        Some(self.build_response(self.status))
+        Some(self.default_response.clone())
     }
 
     /// Constructs an [`L7Response`] with pre-allocated headers and body.

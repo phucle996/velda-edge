@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::HeaderValue;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use http::{HeaderMap, Method, Uri, Version};
 use ring::hmac;
-use velda_core::{Action, Body, L7Request, L7Response};
+use velda_core::{Action, Body, L7Request, RejectReason};
 use velda_plugin::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::hmac_auth::canonical::{
     CanonicalRequest, SignedHeadersSpec, compute_sha256, sign_canonical_request, to_base64,
@@ -28,10 +28,6 @@ fn current_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn extract_body_str(resp: &L7Response) -> String {
-    String::from_utf8_lossy(resp.body.as_slice()).to_string()
 }
 
 fn build_test_plugin(
@@ -220,14 +216,14 @@ fn test_hmac_auth_missing_access_key() {
 
     let mut target = Arc::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
-
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("Missing access key"));
-        }
-        _ => panic!("Expected Missing access key rejection"),
-    }
+    assert!(
+        matches!(action, Action::Reject(RejectReason::Unauthorized)),
+        "Expected Missing access key rejection"
+    );
+    assert_eq!(
+        req.headers.get("www-authenticate").unwrap(),
+        "HMAC realm=\"velda-edge\""
+    );
 }
 
 #[test]
@@ -249,14 +245,10 @@ fn test_hmac_auth_invalid_access_key() {
 
     let mut target = Arc::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
-
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("Invalid access key"));
-        }
-        _ => panic!("Expected Invalid access key rejection"),
-    }
+    assert!(
+        matches!(action, Action::Reject(RejectReason::Unauthorized)),
+        "Expected Invalid access key rejection"
+    );
 }
 
 #[test]
@@ -276,14 +268,10 @@ fn test_hmac_auth_expired_timestamp() {
 
     let mut target = Arc::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
-
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("clock skew exceeded"));
-        }
-        _ => panic!("Expected Expired timestamp rejection"),
-    }
+    assert!(
+        matches!(action, Action::Reject(RejectReason::Unauthorized)),
+        "Expected Expired timestamp rejection"
+    );
 }
 
 #[test]
@@ -307,14 +295,10 @@ fn test_hmac_auth_tampered_header() {
 
     let mut target = Arc::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
-
-    match action {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("Invalid HMAC signature"));
-        }
-        _ => panic!("Expected Tampered header rejection"),
-    }
+    assert!(
+        matches!(action, Action::Reject(RejectReason::Unauthorized)),
+        "Expected Tampered header rejection"
+    );
 }
 
 #[test]
@@ -342,11 +326,8 @@ fn test_hmac_auth_replay_attack_prevention() {
 
     // Second request: exact replay with same nonce
     let action2 = plugin.on_upstream_request(&mut req, &mut target);
-    match action2 {
-        Action::Respond(resp) => {
-            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-            assert!(extract_body_str(&resp).contains("nonce already used"));
-        }
-        _ => panic!("Expected Replay rejection on repeated nonce"),
-    }
+    assert!(
+        matches!(action2, Action::Reject(RejectReason::Unauthorized)),
+        "Expected Replay rejection on repeated nonce"
+    );
 }

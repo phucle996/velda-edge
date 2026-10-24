@@ -5,6 +5,7 @@
 //! body extraction, keep-alive state transitions, buffer compaction, and response flushing.
 
 use bytes::BytesMut;
+use http::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 
@@ -30,6 +31,7 @@ pub struct Http1ServerConnection<IO> {
     pub upstream_write_buf: BytesMut,
     pub close_requested: bool,
     pub current_request_id: Option<http::header::HeaderValue>,
+    pub alt_svc: Option<http::header::HeaderValue>,
     config: Http1Config,
 }
 
@@ -47,8 +49,15 @@ where
             upstream_write_buf: BytesMut::with_capacity(4096),
             close_requested: false,
             current_request_id: None,
+            alt_svc: None,
             config,
         }
+    }
+
+    /// Sets the Alt-Svc advertisement header for this connection.
+    #[inline]
+    pub fn set_alt_svc(&mut self, alt_svc: Option<http::header::HeaderValue>) {
+        self.alt_svc = alt_svc;
     }
 
     /// Returns a reference to the active configuration used by this connection.
@@ -422,6 +431,22 @@ where
         }
 
         Ok(())
+    }
+
+    /// Sends a pre-compiled, zero-allocation canonical error response directly to the downstream stream.
+    ///
+    /// Respects the Single Responsibility Principle (SRP) by keeping HTTP/1.1 ASCII wire formatting
+    /// strictly within `velda-http1`. Eliminates dynamic HeaderMap heap allocation and string formatting.
+    pub async fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http1Error> {
+        super::early_response::send_early_error(
+            &mut self.stream,
+            &mut self.write_buf,
+            status,
+            self.current_request_id.as_ref(),
+            self.alt_svc.as_ref(),
+            self.close_requested,
+        )
+        .await
     }
 
     /// Serializes and flushes an upstream client response directly downstream.

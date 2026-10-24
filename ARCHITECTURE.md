@@ -315,3 +315,17 @@ The dual-engine health system combines passive inline circuit breaking with acti
 | `crates/velda-edge` | Rust 2024 | Composition root, pipeline integration, pre-compiled upstream tables, hot-reload. |
 | `control-plane/` | Go 1.27 | Declarative state management, PostgreSQL CTE-first persistence, binary compilation. |
 | `ui/` | React 19.3 | Modern administrative operations console. |
+
+---
+
+## 8. Header Isolation & Virtual 3-Column Bypass Model
+
+To eliminate information disclosure vulnerabilities, reflection attacks, and sensitive token leakage during early request rejections (WAF block, IP filter deny, rate limit exhaustion), Velda Edge implements the **Virtual 3-Column Header Workspace** (`Name`, `Value`, `VisibilityBit`) in [`crates/velda-core`](crates/velda-core/):
+
+- **Bit 0 (Default - Normal/Upstream Only)**: Standard incoming headers and internal mutations. Forwarded zero-copy on pass-through (99% path); purged 100% on rejection.
+- **Bit 1 (Bypass on Reject)**: Allowed to escape short-circuit error responses (`Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`, `x-request-id`).
+- **Pre-Loaded Slot 0 Invariant (`x-request-id`)**: Every workspace pre-loads Slot 0 with `(x-request-id, <id>)` Bit 1 upon allocation, eliminating dynamic string sniffing on `insert()` ($0$ ns overhead).
+- **Stack Sidecar**: Stores up to 8 bypass headers in a stack array `[Option<HeaderName>; 8]` (128 bytes, 2 cachelines, zero heap allocation).
+
+> [!NOTE]
+> For the complete data structures, zero-allocation memory models, and formal invariants, see [`crates/velda-core/ARCHITECTURE.md`](crates/velda-core/ARCHITECTURE.md).

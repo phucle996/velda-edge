@@ -9,8 +9,7 @@ pub mod l4;
 pub use l4::{tcp, udp};
 
 /// Canonical request correlation ID header propagated across downstream pipelines.
-pub const X_REQUEST_ID: http::header::HeaderName =
-    http::header::HeaderName::from_static("x-request-id");
+pub use velda_core::X_REQUEST_ID;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -32,6 +31,35 @@ pub struct DownstreamMeta {
     pub client_ip_header: http::HeaderValue,
     pub client_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
+}
+
+/// Trait abstraction allowing in-place injection of connection-level headers
+/// into both native [`http::HeaderMap`] and Edge-authoritative [`velda_core::HeaderWorkspace`].
+pub trait HeaderContainer {
+    fn contains_key(&self, key: &http::header::HeaderName) -> bool;
+    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue);
+}
+
+impl HeaderContainer for http::HeaderMap {
+    #[inline(always)]
+    fn contains_key(&self, key: &http::header::HeaderName) -> bool {
+        self.contains_key(key)
+    }
+    #[inline(always)]
+    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue) {
+        self.insert(key, value);
+    }
+}
+
+impl HeaderContainer for velda_core::HeaderWorkspace {
+    #[inline(always)]
+    fn contains_key(&self, key: &http::header::HeaderName) -> bool {
+        self.headers().contains_key(key)
+    }
+    #[inline(always)]
+    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue) {
+        self.insert_bypass(key, value);
+    }
 }
 
 impl DownstreamMeta {
@@ -59,9 +87,9 @@ impl DownstreamMeta {
 
     /// Injects downstream connection-level headers (e.g. Alt-Svc) into response headers if not already present.
     #[inline]
-    pub fn inject_response_headers(&self, headers: &mut http::HeaderMap) {
+    pub fn inject_response_headers<H: HeaderContainer>(&self, headers: &mut H) {
         if let Some(ref alt_svc) = self.alt_svc_header
-            && !headers.contains_key(http::header::ALT_SVC)
+            && !headers.contains_key(&http::header::ALT_SVC)
         {
             headers.insert(http::header::ALT_SVC, alt_svc.clone());
         }

@@ -69,10 +69,18 @@ Plugins execute across four strictly isolated lifecycle phases:
 
 | Phase | Trait | Primary Hook | Authority Contract |
 | :--- | :--- | :--- | :--- |
-| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `on_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond(401/403)`, `Action::Reject` |
-| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `on_upstream_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond(429)`, `Action::Reject` |
+| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `on_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
+| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `on_upstream_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
 | **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `on_response(&self, resp: &mut L7Response)` | In-place header & status mutation |
 | **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `run(self, shutdown) -> Future<Output = Result<(), PluginError>>` | Auxiliary supervisory execution loop |
+
+### Canonical Rejections & Virtual 3-Column Header Model
+To achieve protocol-agnostic short-circuiting and eliminate header leakage:
+1. **Semantic Rejection ([`RejectReason`])**: Plugins emit `Action::Reject(RejectReason::Forbidden)` or `Action::Reject(RejectReason::TooManyRequests)` instead of synthesizing raw HTTP responses. The underlying protocol driver (HTTP/1, HTTP/2, HTTP/3, gRPC) formats the error natively.
+2. **Virtual 3-Column Header Tagging**:
+   - Headers default to Bit 0 (internal/upstream only). When a request is rejected, all Bit 0 headers are dropped to eliminate information disclosure and header reflection risks.
+   - **Pre-loaded Slot 0 (`x-request-id`)**: Every request has `(x-request-id, <id>)` pre-loaded in Slot 0 with Bit 1 upon workspace allocation (`bypass_len = 1`). Normal `insert()` calls do not sniff or compare strings, running at native `HeaderMap` speed ($0$ ns overhead).
+   - Rejection-critical headers (e.g., `Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`) are tagged with Bit 1 via `req.headers.insert_bypass(name, value)` up to `MAX_BYPASS_HEADERS = 8` sidecar slots and forwarded safely in the short-circuit response.
 
 ---
 

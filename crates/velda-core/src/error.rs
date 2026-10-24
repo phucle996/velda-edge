@@ -68,6 +68,103 @@ impl ErrorKind {
     }
 }
 
+/// Canonical rejection reason emitted by edge plugins, rate limiters, and ingress policies.
+///
+/// # Architectural Invariant: Protocol-Agnostic Semantic Vocabulary
+/// `RejectReason` deliberately contains **zero numeric status codes** (e.g. `403`, `429`) and
+/// **zero gRPC integer trailer codes**. It represents a closed taxonomy of 17 semantic failure modes.
+///
+/// ## Why Numeric Status Codes Are Forbidden in Core:
+/// 1. **Protocol Decoupling**: HTTP is HTTP, gRPC is gRPC. In gRPC, an authentication error requires
+///    returning `:status: 200` with `grpc-status: 16 (UNAUTHENTICATED)` trailers. Forcing an HTTP 401
+///    integer would corrupt binary RPC client stubs.
+/// 2. **Single Responsibility Principle (SRP)**: Plugins decide *WHY* a request cannot proceed
+///    (`RejectReason::Forbidden`); the downstream protocol engine (`velda-http1`, `velda-http2`,
+///    `velda-http3`, `velda-grpc`) decides *HOW* to format that rejection onto the wire.
+/// 3. **Header Isolation on Reject**: When a pipeline handles `Action::Reject(reason)`, it purges
+///    100% of Bit 0 internal/upstream headers, merging only Bit 1 bypass headers (including `x-request-id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RejectReason {
+    // ── Client-side rejections ──────────────────────────────────
+    /// Malformed request line, headers, or frame structure.
+    BadRequest,
+
+    /// Authentication credential missing, expired, or invalid.
+    Unauthorized,
+
+    /// Request denied by security policy, IP filter, or ACL.
+    Forbidden,
+
+    /// Requested resource or path does not exist.
+    NotFound,
+
+    /// Call method or RPC verb is not supported.
+    MethodNotAllowed,
+
+    /// Client failed to produce a request within ingress timeout.
+    RequestTimeout,
+
+    /// Request conflicts with the current resource state.
+    Conflict,
+
+    /// Request body or message exceeds configured size limit.
+    PayloadTooLarge,
+
+    /// Request URI or path exceeds maximum allowable length.
+    UriTooLong,
+
+    /// Request payload format or MIME type is not supported.
+    UnsupportedMediaType,
+
+    /// Rate limit or concurrency quota exceeded.
+    TooManyRequests,
+
+    /// Individual header or header table exceeds limit.
+    HeaderFieldsTooLarge,
+
+    /// Downstream peer closed connection prematurely.
+    ClientClosedRequest,
+
+    // ── Server / Upstream rejections ────────────────────────────
+    /// Unexpected runtime failure on edge hot path.
+    InternalError,
+
+    /// Upstream backend returned an invalid response or reset.
+    BadGateway,
+
+    /// No healthy backend endpoints or circuit breaker open.
+    ServiceUnavailable,
+
+    /// Upstream backend failed to reply within configured deadline.
+    GatewayTimeout,
+}
+
+impl RejectReason {
+    /// Returns the canonical ASCII phrase for this rejection reason.
+    #[inline(always)]
+    pub const fn canonical_phrase(self) -> &'static str {
+        match self {
+            Self::BadRequest => "Bad Request",
+            Self::Unauthorized => "Unauthorized",
+            Self::Forbidden => "Forbidden",
+            Self::NotFound => "Not Found",
+            Self::MethodNotAllowed => "Method Not Allowed",
+            Self::RequestTimeout => "Request Timeout",
+            Self::Conflict => "Conflict",
+            Self::PayloadTooLarge => "Payload Too Large",
+            Self::UriTooLong => "URI Too Long",
+            Self::UnsupportedMediaType => "Unsupported Media Type",
+            Self::TooManyRequests => "Too Many Requests",
+            Self::HeaderFieldsTooLarge => "Request Header Fields Too Large",
+            Self::ClientClosedRequest => "Client Closed Request",
+            Self::InternalError => "Internal Server Error",
+            Self::BadGateway => "Bad Gateway",
+            Self::ServiceUnavailable => "Service Unavailable",
+            Self::GatewayTimeout => "Gateway Timeout",
+        }
+    }
+}
+
 /// Shared Velda error type.
 ///
 /// This is the error contract that can safely cross crate boundaries.

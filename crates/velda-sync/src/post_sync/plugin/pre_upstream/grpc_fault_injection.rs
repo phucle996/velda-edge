@@ -101,12 +101,33 @@ pub fn validate_grpc_fault_injection_config(
     }
 
     if cfg.abort.enabled {
-        if cfg.abort.grpc_status > 16 {
+        if cfg.abort.grpc_status == 0 || cfg.abort.grpc_status > 16 {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
                 reason: format!(
-                    "Plugin '{plugin_id}': abort.grpc_status ({}) must be between 0 and 16 (canonical gRPC status)",
+                    "Plugin '{plugin_id}': abort.grpc_status ({}) must be between 1 and 16 (canonical gRPC error status)",
                     cfg.abort.grpc_status
+                ),
+            });
+        }
+        if cfg.abort.grpc_message.trim().is_empty() {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': abort.grpc_message cannot be empty when abort is enabled"
+                ),
+            });
+        }
+        if !cfg
+            .abort
+            .grpc_message
+            .bytes()
+            .all(|b| (0x20..=0x7E).contains(&b) || b == b'\t')
+        {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}': abort.grpc_message is not a valid ASCII header value (contains control or non-ASCII characters)"
                 ),
             });
         }
@@ -164,7 +185,72 @@ mod tests {
         });
         let res = validate_grpc_fault_injection_config("grpc_fault_bad_status", &val);
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("between 0 and 16"));
+        assert!(res.unwrap_err().to_string().contains("between 1 and 16"));
+
+        // Status 0 (OK) is invalid when abort is enabled
+        let val_zero = json!({
+            "delay": {
+                "enabled": false,
+                "fixed_delay_ms": 0,
+                "percentage": 0
+            },
+            "abort": {
+                "enabled": true,
+                "grpc_status": 0,
+                "grpc_message": "Bad status",
+                "percentage": 10
+            }
+        });
+        let res_zero = validate_grpc_fault_injection_config("grpc_fault_zero_status", &val_zero);
+        assert!(res_zero.is_err());
+        assert!(
+            res_zero
+                .unwrap_err()
+                .to_string()
+                .contains("between 1 and 16")
+        );
+    }
+
+    #[test]
+    fn test_invalid_grpc_message_rejected() {
+        let val_empty = json!({
+            "delay": {
+                "enabled": false,
+                "fixed_delay_ms": 0,
+                "percentage": 0
+            },
+            "abort": {
+                "enabled": true,
+                "grpc_status": 14,
+                "grpc_message": "   ",
+                "percentage": 10
+            }
+        });
+        let res = validate_grpc_fault_injection_config("grpc_fault_empty_msg", &val_empty);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("cannot be empty"));
+
+        let val_crlf = json!({
+            "delay": {
+                "enabled": false,
+                "fixed_delay_ms": 0,
+                "percentage": 0
+            },
+            "abort": {
+                "enabled": true,
+                "grpc_status": 14,
+                "grpc_message": "invalid\r\nheader",
+                "percentage": 10
+            }
+        });
+        let res_crlf = validate_grpc_fault_injection_config("grpc_fault_crlf_msg", &val_crlf);
+        assert!(res_crlf.is_err());
+        assert!(
+            res_crlf
+                .unwrap_err()
+                .to_string()
+                .contains("not a valid ASCII header value")
+        );
     }
 
     #[test]

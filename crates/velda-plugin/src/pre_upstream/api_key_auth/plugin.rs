@@ -7,10 +7,9 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use http::StatusCode;
 use http::header::{HeaderName, HeaderValue};
 use rustc_hash::FxHashMap;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::ApiKeyCache;
@@ -34,10 +33,6 @@ pub struct ApiKeyAuthPlugin {
     pub max_key_len: usize,
     /// Pre-compiled list of all injected header names across keys to sanitize prior to injection
     pub sanitized_headers: Vec<HeaderName>,
-    /// Pre-computed 401 response for missing API key (with Cache-Control: no-store)
-    unauthorized_missing: L7Response,
-    /// Pre-computed 401 response for invalid API key (with Cache-Control: no-store)
-    unauthorized_invalid: L7Response,
 }
 
 impl ApiKeyAuthPlugin {
@@ -78,36 +73,6 @@ impl ApiKeyAuthPlugin {
             min_len = 0;
         }
 
-        let unauthorized_missing =
-            L7Response::from_bytes(StatusCode::UNAUTHORIZED, "{\"error\":\"Missing API key\"}")
-                .with_header(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("ApiKey realm=\"velda-edge\""),
-                )
-                .with_header(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )
-                .with_header(
-                    http::header::CACHE_CONTROL,
-                    HeaderValue::from_static("no-store"),
-                );
-
-        let unauthorized_invalid =
-            L7Response::from_bytes(StatusCode::UNAUTHORIZED, "{\"error\":\"Invalid API key\"}")
-                .with_header(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("ApiKey error=\"invalid_key\""),
-                )
-                .with_header(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )
-                .with_header(
-                    http::header::CACHE_CONTROL,
-                    HeaderValue::from_static("no-store"),
-                );
-
         Self {
             id: id.into(),
             sources,
@@ -117,8 +82,6 @@ impl ApiKeyAuthPlugin {
             min_key_len: min_len,
             max_key_len: max_len,
             sanitized_headers: sanitized,
-            unauthorized_missing,
-            unauthorized_invalid,
         }
     }
 
@@ -200,14 +163,22 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
             let (token_str, location) = match extract_token_ref(&self.sources, req) {
                 Some(res) => res,
                 None => {
-                    return Action::Respond(self.unauthorized_missing.clone());
+                    req.headers.insert_bypass(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("ApiKey realm=\"velda-edge\""),
+                    );
+                    return Action::Reject(RejectReason::Unauthorized);
                 }
             };
 
             // 1. Fast-Reject Length Guard (< 1ns): reject tokens outside valid configured bounds
             let token_len = token_str.len();
             if token_len < self.min_key_len || token_len > self.max_key_len {
-                return Action::Respond(self.unauthorized_invalid.clone());
+                req.headers.insert_bypass(
+                    http::header::WWW_AUTHENTICATE,
+                    HeaderValue::from_static("ApiKey error=\"invalid_key\""),
+                );
+                return Action::Reject(RejectReason::Unauthorized);
             }
 
             // 2. Fast O(1) hash indexing
@@ -223,7 +194,11 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
             let entry = match matched_entry {
                 Some(e) => e,
                 None => {
-                    return Action::Respond(self.unauthorized_invalid.clone());
+                    req.headers.insert_bypass(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("ApiKey error=\"invalid_key\""),
+                    );
+                    return Action::Reject(RejectReason::Unauthorized);
                 }
             };
 
@@ -406,17 +381,11 @@ mod tests {
         let mut req = build_test_request(HeaderMap::new(), None);
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-                assert_eq!(
-                    resp.headers.get("www-authenticate").unwrap(),
-                    "ApiKey realm=\"velda-edge\""
-                );
-                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
-            }
-            _ => panic!("Expected Action::Respond(401)"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "ApiKey realm=\"velda-edge\""
+        );
     }
 
     #[test]
@@ -442,17 +411,11 @@ mod tests {
 
         let mut target = Arc::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::Respond(resp) => {
-                assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
-                assert_eq!(
-                    resp.headers.get("www-authenticate").unwrap(),
-                    "ApiKey error=\"invalid_key\""
-                );
-                assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
-            }
-            _ => panic!("Expected 401 response"),
-        }
+        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert_eq!(
+            req.headers.get("www-authenticate").unwrap(),
+            "ApiKey error=\"invalid_key\""
+        );
     }
 
     #[test]
@@ -628,7 +591,7 @@ mod tests {
         let mut target = Arc::from("default-upstream");
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Unauthorized)
         ));
 
         // 100-character token (> max_key_len) -> rejected
@@ -638,7 +601,7 @@ mod tests {
         let mut target2 = Arc::from("default-upstream");
         assert!(matches!(
             plugin.on_upstream_request(&mut req2, &mut target2),
-            Action::Respond(_)
+            Action::Reject(RejectReason::Unauthorized)
         ));
     }
 

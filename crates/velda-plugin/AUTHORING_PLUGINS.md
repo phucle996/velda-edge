@@ -43,8 +43,7 @@ Define a plain struct holding the compiled, read-only configuration in RAM:
 ```rust
 use std::collections::HashSet;
 use http::header::HeaderName;
-use http::StatusCode;
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -137,18 +136,12 @@ impl PreRoutePlugin for ApiKeyAuthPlugin {
                 Action::Continue
             }
             Some(_) => {
-                // Invalid key: short-circuit with 401 Unauthorized
-                Action::Respond(L7Response::from_bytes(
-                    StatusCode::UNAUTHORIZED,
-                    "{\"error\":\"Invalid API Key\"}",
-                ))
+                // Invalid key: short-circuit with 401 Unauthorized via canonical Reject
+                Action::Reject(RejectReason::Unauthorized)
             }
             None => {
-                // Missing key: short-circuit with 401 Unauthorized
-                Action::Respond(L7Response::from_bytes(
-                    StatusCode::UNAUTHORIZED,
-                    "{\"error\":\"Missing API Key header\"}",
-                ))
+                // Missing key: short-circuit with 401 Unauthorized via canonical Reject
+                Action::Reject(RejectReason::Unauthorized)
             }
         }
     }
@@ -172,8 +165,14 @@ impl PreRoutePlugin for ApiKeyAuthPlugin {
 ### Understanding Authority Contracts ([`Action`](../velda-core/src/lifecycle.rs))
 
 * **`Action::Continue`**: Allows the pipeline to proceed to the next plugin or route matching.
-* **`Action::Respond(response)`**: Short-circuits immediately. The request body is not read, upstream connections are not leased, and `response` is serialized directly downstream.
-* **`Action::Reject(error)`**: Drops and tears down the connection immediately without sending an HTTP response (for severe protocol violations or security attacks).
+* **`Action::Respond(response)`**: Short-circuits immediately with a custom, user-provided [`L7Response`]. Used when the plugin supplies explicit body content, custom non-error status codes (e.g., CORS `204 No Content`), or cached payloads.
+* **`Action::Reject(RejectReason)`**: Canonical pipeline rejection for standard security or rate-limiting violations (e.g., [`RejectReason::Forbidden`], [`RejectReason::TooManyRequests`]).
+  - **Zero-Alloc Hot Path**: The plugin does not construct an HTTP body or allocate an `L7Response`. Downstream ingress protocols (HTTP/1.1, HTTP/2, HTTP/3, gRPC) synthesize their own precompiled protocol-native responses (e.g., gRPC status codes vs HTTP status codes).
+  - **Header Isolation & Virtual 3-Column Tagging**:
+    - By default, all headers in `req.headers` are Bit 0 (normal/upstream only) and are **strictly stripped** on rejection to eliminate information disclosure and header reflection risks.
+    - **Permanent Pre-loaded Slot 0 (`x-request-id`)**: Every workspace is pre-initialized with `(x-request-id, <id>)` in Slot 0 as a Bit 1 Bypass header (`bypass_len = 1`). Normal `insert()` calls do not sniff or inspect headers, operating at native `HeaderMap` speed.
+    - If a plugin must return specific headers upon rejection (e.g., `Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`), mark them with Bit 1 via `req.headers.insert_bypass(name, value)`. Up to `MAX_BYPASS_HEADERS = 8` sidecar slots are supported without heap allocation. The pipeline merges all Bit 1 headers when handling `Action::Reject`.
+* **`Action::Delay { duration, and_then }`**: Non-blocking asynchronous sleep before proceeding to the boxed `and_then` action (used for fault injection / artificial latency).
 
 ---
 

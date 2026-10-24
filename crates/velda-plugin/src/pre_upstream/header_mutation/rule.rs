@@ -3,12 +3,12 @@
 //! Enforces edge hygiene by stripping connection-specific headers before
 //! proxying requests downstream or upstream.
 
-use http::HeaderMap;
 use http::header::HeaderName;
+use velda_core::HeaderWorkspace;
 
 /// Strips RFC 9110 / RFC 7230 hop-by-hop headers from a mutable headers map.
 #[inline]
-pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+pub fn strip_hop_by_hop_headers(headers: &mut HeaderWorkspace) {
     // Collect custom connection-token headers if specified in Connection header
     if let Some(raw) = headers
         .get(http::header::CONNECTION)
@@ -54,17 +54,24 @@ pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
 mod tests {
     use super::*;
     use http::HeaderValue;
+    use velda_core::HeaderWorkspace;
 
     #[test]
     fn test_strip_standard_hop_by_hop() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::default();
         headers.insert(
             http::header::CONNECTION,
             HeaderValue::from_static("keep-alive"),
         );
         headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
-        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
-        headers.insert("x-custom-header", HeaderValue::from_static("preserve-me"));
+        headers.insert(
+            HeaderName::from_static("keep-alive"),
+            HeaderValue::from_static("timeout=5"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-custom-header"),
+            HeaderValue::from_static("preserve-me"),
+        );
 
         strip_hop_by_hop_headers(&mut headers);
 
@@ -76,14 +83,23 @@ mod tests {
 
     #[test]
     fn test_strip_custom_connection_tokens() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::default();
         headers.insert(
             http::header::CONNECTION,
             HeaderValue::from_static("close, X-Foo, X-Bar"),
         );
-        headers.insert("x-foo", HeaderValue::from_static("value1"));
-        headers.insert("x-bar", HeaderValue::from_static("value2"));
-        headers.insert("x-baz", HeaderValue::from_static("value3"));
+        headers.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("value1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-bar"),
+            HeaderValue::from_static("value2"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-baz"),
+            HeaderValue::from_static("value3"),
+        );
 
         strip_hop_by_hop_headers(&mut headers);
 

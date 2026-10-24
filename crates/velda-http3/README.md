@@ -50,3 +50,5 @@ Downstream Peer                        Velda Edge                        Upstrea
    QUIC engines are sharded by remote client socket address (`peer_addr`) to eliminate lock contention across worker threads.
 3. **Strict UDP Transport**:
    HTTP/3 strictly requires UDP transport. Declaring HTTP/3 over TCP is validated and rejected during bootstrap.
+4. **Canonical Rejection Early Responses**:
+   Provides `precompiled_reject_response` and `precompiled_early_response` in `server/early_response.rs` to format immediate HTTP/3 rejection responses for `velda_core::RejectReason` (e.g. 429 Too Many Requests, 403 Forbidden) and forward tagged Bit 1 bypass headers (including `x-request-id`).

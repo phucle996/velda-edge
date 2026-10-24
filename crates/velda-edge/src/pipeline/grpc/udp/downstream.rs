@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use velda_core::{Action, ErrorKind, L7Request, L7Response};
+use velda_core::{Action, L7Request, L7Response};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
@@ -72,27 +72,17 @@ pub async fn handle_grpc_udp(
                 "Decoded gRPC request from UDP"
             );
 
-            // [INGRESS W3C REQUEST ID GENERATION]
-            // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
-            // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-            let (_request_id, req_id_header) = velda_core::next_request_id();
-            let mut req = req_event.request;
-            req.headers
-                .insert(crate::pipeline::X_REQUEST_ID, req_id_header.clone());
+            // [INGRESS W3C REQUEST ID]
+            // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
+            let req = req_event.request;
+            let req_id_header = req.headers.request_id().clone();
 
             let mut stream =
                 GrpcUdpServerStream::new(req_event.handle, req_event.stream_id, req, peer);
             stream.enrich_forwarded_headers(local_addr);
 
             let mut response = process_grpc_udp_request(stream.request, &lid, &cfg, &runtime).await;
-            if !response
-                .headers
-                .contains_key(&crate::pipeline::X_REQUEST_ID)
-            {
-                response
-                    .headers
-                    .insert(crate::pipeline::X_REQUEST_ID, req_id_header);
-            }
+            response.headers.set_request_id(req_id_header);
 
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
@@ -154,14 +144,18 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(err) => {
-                    let grpc_status = match err.kind() {
-                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                        _ => GrpcStatus::Internal,
-                    };
-                    short_circuit_resp =
-                        Some(grpc_status.to_l7_response(Some("request rejected by plugin")));
+                Action::Reject(reason) => {
+                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                    // preserving only Bit-1 bypass headers and grpc-status trailers.
+                    let grpc_status = GrpcStatus::from_reject_reason(reason);
+                    let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
+                    for (name, val) in req.headers.bypass_headers() {
+                        resp.headers.insert(name.clone(), val.clone());
+                    }
+                    resp.headers
+                        .set_request_id(req.headers.request_id().clone());
+                    return resp;
                 }
                 Action::Delay { .. } => unreachable!(),
             }
@@ -182,20 +176,26 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(err) => {
-                    let grpc_status = match err.kind() {
-                        ErrorKind::Rejected => GrpcStatus::PermissionDenied,
-                        ErrorKind::InvalidRequest => GrpcStatus::InvalidArgument,
-                        _ => GrpcStatus::Internal,
-                    };
-                    short_circuit_resp =
-                        Some(grpc_status.to_l7_response(Some("request rejected by plugin")));
+                Action::Reject(reason) => {
+                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                    // preserving only Bit-1 bypass headers and grpc-status trailers.
+                    let grpc_status = GrpcStatus::from_reject_reason(reason);
+                    let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
+                    for (name, val) in req.headers.bypass_headers() {
+                        resp.headers.insert(name.clone(), val.clone());
+                    }
+                    resp.headers
+                        .set_request_id(req.headers.request_id().clone());
+                    return resp;
                 }
                 Action::Delay { .. } => unreachable!(),
             }
         }
 
         if let Some(mut resp) = short_circuit_resp {
+            resp.headers
+                .set_request_id(req.headers.request_id().clone());
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
             }
@@ -271,19 +271,22 @@ mod tests {
     use std::net::SocketAddr;
 
     use http::HeaderMap;
+    use velda_core::HeaderWorkspace;
     use velda_grpc::udp::server::enrich_headers;
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut map = HeaderMap::new();
         // Client attempts to spoof their IP, host, and SSL status
-        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        headers.insert("x-forwarded-proto", "http".parse().unwrap());
-        headers.insert("connection", "close".parse().unwrap());
-        headers.insert("keep-alive", "timeout=5".parse().unwrap());
-        headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+        map.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
+        map.insert("x-real-ip", "203.0.113.195".parse().unwrap());
+        map.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        map.insert("x-forwarded-proto", "http".parse().unwrap());
+        map.insert("connection", "close".parse().unwrap());
+        map.insert("keep-alive", "timeout=5".parse().unwrap());
+        map.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+
+        let mut headers = HeaderWorkspace::from_headers(map);
 
         let peer: SocketAddr = "192.0.2.50:50052".parse().unwrap();
         let local: SocketAddr = "10.0.0.1:443".parse().unwrap();

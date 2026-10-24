@@ -11,7 +11,7 @@ High-performance L7 ingress gatekeeper enforcing zero-trust client IP address an
 | **Plugin ID** | `ip_filter` |
 | **Canonical Phase** | `pre_route` |
 | **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Can generate `Action::Respond` 403) |
+| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Generates `Action::Reject(RejectReason::Forbidden)`) |
 | **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
 | **Hot-Path Overhead** | Single-digit nanoseconds (~2–5ns); byte-level decimal parsing; bitmask integer arithmetic; **0 heap allocations** |
 
@@ -51,16 +51,13 @@ High-performance L7 ingress gatekeeper enforcing zero-trust client IP address an
    - RFC 6052 Well-Known NAT64 (`64:ff9b::a.b.c.d` / `64:ff9b::/96`)
    - RFC 4291 §2.5.5.1 IPv4-compatible IPv6 (`::a.b.c.d`, excluding `::` and `::1`)
 
-### Response Generated on Violation (`403 Forbidden`)
-- **Status**: `403 Forbidden`.
-- **Headers**:
-  - `Content-Type: text/plain; charset=utf-8`
-  - `Cache-Control: no-store`
-- **Body Options**:
-  - Denied by rule: `Forbidden: client IP address rejected by edge policy\n`
-  - Not permitted by allowlist: `Forbidden: client IP address is not permitted by edge policy\n`
-  - Unresolved or malformed: `Forbidden: unable to verify client IP address for protected resource\n`
-- **Short-circuiting**: Immediately halts the pipeline (`Action::Respond`), preventing body streaming or router trie traversal.
+### Response Generated on Violation (`Action::Reject(RejectReason::Forbidden)`)
+- **Action**: Returns `Action::Reject(RejectReason::Forbidden)` with zero runtime heap allocations.
+- **Protocol-Native Downstream Mapping**:
+  - **HTTP/1.1 & HTTP/2 & HTTP/3**: Downstream engine formats a precompiled `403 Forbidden` early response frame with `Cache-Control: no-store`.
+  - **gRPC**: Downstream engine terminates the RPC stream with canonical `PERMISSION_DENIED` status trailer.
+- **Information Disclosure Protection**: Automatically drops all Bit 0 internal/upstream headers from the error response, preventing header reflection or leak of sensitive routing/context tags.
+- **Short-circuiting**: Immediately halts the pipeline, preventing body streaming or router trie traversal.
 
 ---
 

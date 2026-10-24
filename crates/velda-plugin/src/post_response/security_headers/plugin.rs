@@ -331,7 +331,12 @@ mod tests {
 
         plugin.on_response(&req_headers, &mut resp);
 
-        assert!(resp.headers.is_empty());
+        // Verify no security headers were injected (only the pre-loaded x-request-id is present)
+        assert_eq!(resp.headers.len(), 1);
+        assert!(resp.headers.contains_key(&velda_core::X_REQUEST_ID));
+        assert!(!resp.headers.contains_key("x-frame-options"));
+        assert!(!resp.headers.contains_key("strict-transport-security"));
+        assert!(!resp.headers.contains_key("x-content-type-options"));
     }
 
     #[test]

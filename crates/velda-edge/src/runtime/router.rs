@@ -213,12 +213,14 @@ pub fn build_router(
                         .add_http2_route(http2_route);
                 }
                 "grpc" => {
-                    let service = route
+                    let raw_service = route
                         .match_rule
                         .path
                         .as_deref()
                         .or(route.match_rule.path_prefix.as_deref())
                         .unwrap_or("*");
+                    let clean = raw_service.strip_prefix('/').unwrap_or(raw_service);
+                    let service = clean.strip_suffix('/').unwrap_or(clean);
 
                     let mut grpc_route = GrpcRoute::new(
                         route_id,

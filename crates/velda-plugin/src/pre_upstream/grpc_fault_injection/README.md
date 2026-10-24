@@ -29,8 +29,8 @@ Enterprise-grade Chaos Engineering & Microservice Resilience Testing plugin spec
 | `delay.fixed_delay_ms` | Integer (u64) | **Yes** | `1 ..= 60000` ms (when `enabled: true`), or `0` if disabled | `200` | Fixed artificial delay in milliseconds injected before forwarding gRPC RPC. |
 | `delay.percentage` | Integer (u32) | **Yes** | `0 ..= 100` (%) | `10` (when testing) / `0` (Prod) | Percentage probability ($0\%$ to $100\%$) of applying delay to gRPC calls. |
 | `abort.enabled` | Boolean | **Yes** | `true` or `false` | `false` (Prod) / `true` (Chaos test) | Whether simulated gRPC error abort is active. |
-| `abort.grpc_status` | Integer (u32) | **Yes** | `0 ..= 16` (Canonical gRPC status codes) | `14` (`UNAVAILABLE`) | Canonical gRPC status code returned in `grpc-status` trailers. |
-| `abort.grpc_message` | String | **Yes** | Non-empty string | `"synthetic chaos injection error"` | Human-readable error diagnostic message in `grpc-message` trailer. |
+| `abort.grpc_status` | Integer (u32) | **Yes** | `1 ..= 16` (Canonical gRPC error status codes; `0` is `OK` and forbidden for abort) | `14` (`UNAVAILABLE`) | Canonical gRPC status code returned in `grpc-status` trailers. |
+| `abort.grpc_message` | String | **Yes** | Non-empty printable ASCII string (no CRLF/control chars) | `"synthetic chaos injection error"` | Human-readable error diagnostic message in `grpc-message` trailer. |
 | `abort.percentage` | Integer (u32) | **Yes** | `0 ..= 100` (%) | `5` (when testing) / `0` (Prod) | Percentage probability ($0\%$ to $100\%$) of aborting gRPC calls with synthetic trailers. |
 
 ---

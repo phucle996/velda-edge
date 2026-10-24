@@ -28,7 +28,7 @@ pub async fn serve(
     upstream: &Arc<Http2Upstream>,
     plan: &Arc<RoutePluginPlan>,
 ) {
-    let mut headers = req.headers.clone();
+    let mut headers = req.headers.clone().into_inner();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
     let (mut client, lease) = match upstream.acquire(&upstream.config).await {
@@ -57,7 +57,7 @@ pub async fn serve(
         .method(req.method.clone())
         .uri(req.uri.clone())
         .version(Version::HTTP_2);
-    *h2_req.headers_mut().unwrap() = headers.clone().into();
+    *h2_req.headers_mut().unwrap() = headers.clone();
     let h2_req = h2_req.body(()).unwrap();
 
     let has_body = !req.body.is_empty();
@@ -79,7 +79,7 @@ pub async fn serve(
                         .method(req.method.clone())
                         .uri(req.uri.clone())
                         .version(Version::HTTP_2);
-                    *fresh_req.headers_mut().unwrap() = headers.into();
+                    *fresh_req.headers_mut().unwrap() = headers;
                     let fresh_req = fresh_req.body(()).unwrap();
 
                     match fresh_client.send_request(fresh_req, !has_body) {

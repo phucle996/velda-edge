@@ -56,3 +56,5 @@ Downstream Client                      Velda Edge                       Upstream
    Status is authoritatively communicated via `grpc-status` and optional `grpc-message` in HTTP/2 trailers, never in the HTTP status line.
 4. **Copy & Zero-Allocation Configuration**:
    [`GrpcConfig`] derives `Copy` and contains purely primitive limits (`max_message_size`, timeouts, window sizes) to eliminate runtime heap allocations.
+5. **Canonical Rejection Mapping**:
+   Implements `From<velda_core::RejectReason> for GrpcStatus`. When policy plugins trigger `Action::Reject(reason)`, `velda-grpc` terminates the RPC stream with canonical `grpc-status` trailers and forwards tagged Bit 1 bypass metadata (including `x-request-id`) without allocating HTTP bodies.

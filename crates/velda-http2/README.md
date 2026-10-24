@@ -101,6 +101,10 @@ RFC 9113 §8.2.2 strictly forbids hop-by-hop headers in HTTP/2 requests and resp
 - **CONTINUATION Flood (CVE-2024-27983)**: Enforces `max_continuation_frames` bound per header block.
 - **Payload Bombing**: Ingress limits enforced progressively chunk-by-chunk without loading oversized bodies into RAM.
 
+### 5. Canonical Rejections & Zero-Body Early Error Framing
+- Downstream ingress pipelines leverage `precompiled_reject_response` and `send_early_error` in `server/early_response.rs` to emit a single `HEADERS` frame with `END_STREAM = true`.
+- Converts canonical `velda_core::RejectReason` into HTTP/2 status codes and forwards tagged Bit 1 bypass headers (including `x-request-id`) with zero `DATA` frame allocation or flow-control window overhead.
+
 ---
 
 ## Performance Summary

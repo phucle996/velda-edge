@@ -29,7 +29,9 @@ pub mod header;
 
 pub mod slab;
 
-pub use header::{HeaderPool, HeaderWorkspace, HeaderWorkspaceLease};
+pub use header::{
+    HeaderPool, HeaderWorkspace, HeaderWorkspaceLease, MAX_BYPASS_HEADERS, X_REQUEST_ID,
+};
 pub use slab::{PayloadSlab, PayloadSlabLease, PayloadSlabPool, SlabClass};
 
 use std::sync::Arc;

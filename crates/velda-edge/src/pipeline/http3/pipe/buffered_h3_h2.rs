@@ -14,7 +14,7 @@ use crate::upstream::Http2Upstream;
 
 /// Serves a buffered HTTP/3 downstream request bridged to an HTTP/2 multiplexed backend.
 pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response {
-    let mut headers = req.headers.clone();
+    let mut headers = req.headers.clone().into_inner();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
     let body_bytes = req.body.to_bytes();

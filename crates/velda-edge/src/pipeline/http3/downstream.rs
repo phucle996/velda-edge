@@ -5,10 +5,9 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderValue};
-use velda_core::{Action, ErrorKind, L7Request, L7Response};
+use http::header::HeaderValue;
+use velda_core::{Action, L7Request};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
@@ -178,13 +177,10 @@ pub async fn handle_http3_udp(
         let runtime = runtime.clone();
 
         tokio::spawn(async move {
-            // [INGRESS W3C REQUEST ID GENERATION]
-            // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
-            // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-            let (_request_id, req_id_header) = velda_core::next_request_id();
+            // [INGRESS W3C REQUEST ID]
+            // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
             let mut req = req_event.request;
-            req.headers
-                .insert(crate::pipeline::X_REQUEST_ID, req_id_header.clone());
+            let req_id_header = req.headers.request_id().clone();
 
             let responder = super::engine::Http3Responder::new(
                 req_event.handle,
@@ -214,7 +210,12 @@ pub async fn handle_http3_udp(
                     path = %req.path(),
                     "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
                 );
-                let _ = responder.send_response(make_too_early_response()).await;
+                let _ = responder
+                    .send_response(velda_http3::server::precompiled_early_response(
+                        StatusCode::TOO_EARLY,
+                        Some(&req_id_header),
+                    ))
+                    .await;
                 return;
             }
             if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {
@@ -224,7 +225,12 @@ pub async fn handle_http3_udp(
                     path = %req.path(),
                     "Rejecting HTTP/3 request with unsafe URI path"
                 );
-                let _ = responder.send_response(make_bad_request_response()).await;
+                let _ = responder
+                    .send_response(velda_http3::server::precompiled_early_response(
+                        StatusCode::BAD_REQUEST,
+                        Some(&req_id_header),
+                    ))
+                    .await;
                 return;
             }
 
@@ -263,7 +269,12 @@ async fn process_http3_request(
             method = %req.method,
             "No HTTP/3 route matched"
         );
-        let _ = responder.send_response(make_not_found_response()).await;
+        let _ = responder
+            .send_response(velda_http3::server::precompiled_early_response(
+                StatusCode::NOT_FOUND,
+                Some(req.headers.request_id()),
+            ))
+            .await;
         return;
     };
 
@@ -288,16 +299,25 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(err) => {
-                    let status = match err.kind() {
-                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
-                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
-                        _ => StatusCode::INTERNAL_SERVER_ERROR,
-                    };
-                    short_circuit_resp = Some(L7Response::from_bytes(
-                        status,
-                        format!("{status}\n").into_bytes(),
-                    ));
+                Action::Reject(reason) => {
+                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                    // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                    let mut resp = velda_http3::server::precompiled_reject_response(
+                        reason,
+                        Some(req.headers.request_id()),
+                    );
+                    for (name, val) in req.headers.bypass_headers() {
+                        resp.headers.insert(name.clone(), val.clone());
+                    }
+                    resp.headers.insert(
+                        http::header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store"),
+                    );
+                    resp.headers
+                        .set_request_id(req.headers.request_id().clone());
+                    let _ = responder.send_response(resp).await;
+                    return;
                 }
                 Action::Delay { .. } => unreachable!(),
             }
@@ -318,22 +338,41 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(err) => {
-                    let status = match err.kind() {
-                        ErrorKind::Rejected => StatusCode::FORBIDDEN,
-                        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
-                        _ => StatusCode::INTERNAL_SERVER_ERROR,
-                    };
-                    short_circuit_resp = Some(L7Response::from_bytes(
-                        status,
-                        format!("{status}\n").into_bytes(),
-                    ));
+                Action::Reject(reason) => {
+                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
+                    // preserving only Bit-1 bypass headers and Cache-Control: no-store.
+                    let mut resp = velda_http3::server::precompiled_reject_response(
+                        reason,
+                        Some(req.headers.request_id()),
+                    );
+                    for (name, val) in req.headers.bypass_headers() {
+                        resp.headers.insert(name.clone(), val.clone());
+                    }
+                    resp.headers.insert(
+                        http::header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store"),
+                    );
+                    resp.headers
+                        .set_request_id(req.headers.request_id().clone());
+                    let _ = responder.send_response(resp).await;
+                    return;
                 }
                 Action::Delay { .. } => unreachable!(),
             }
         }
 
         if let Some(mut resp) = short_circuit_resp {
+            resp.headers
+                .set_request_id(req.headers.request_id().clone());
+            // Edge Authority Caching: Pre-load Cache-Control: no-store if unconfigured,
+            // allowing post_response_hooks (http_cache_store) to override if permitted.
+            if resp.headers.get(http::header::CACHE_CONTROL).is_none() {
+                resp.headers.insert(
+                    http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+            }
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
             }
@@ -350,7 +389,10 @@ async fn process_http3_request(
             "No HTTP upstream configured"
         );
         let _ = responder
-            .send_response(make_service_unavailable_response())
+            .send_response(velda_http3::server::precompiled_early_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(req.headers.request_id()),
+            ))
             .await;
         return;
     };
@@ -364,7 +406,12 @@ async fn process_http3_request(
             overload = ?overload_lvl,
             "Shedding HTTP/3 request due to memory saturation"
         );
-        let _ = responder.send_response(make_overload_response()).await;
+        let _ = responder
+            .send_response(velda_http3::server::precompiled_early_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(req.headers.request_id()),
+            ))
+            .await;
         return;
     }
 
@@ -453,72 +500,6 @@ async fn process_http3_request(
             }
         },
     }
-}
-
-#[cold]
-#[inline(never)]
-fn make_too_early_response() -> L7Response {
-    L7Response::from_bytes(
-        StatusCode::TOO_EARLY,
-        Bytes::from_static(b"425 Too Early: non-idempotent request rejected in 0-RTT early data\n"),
-    )
-    .with_header(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn make_bad_request_response() -> L7Response {
-    L7Response::from_bytes(
-        StatusCode::BAD_REQUEST,
-        Bytes::from_static(b"400 Bad Request: unsafe or invalid URI path\n"),
-    )
-    .with_header(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn make_not_found_response() -> L7Response {
-    L7Response::from_bytes(
-        StatusCode::NOT_FOUND,
-        Bytes::from_static(b"404 Not Found: no matching route\n"),
-    )
-    .with_header(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn make_service_unavailable_response() -> L7Response {
-    L7Response::from_bytes(
-        StatusCode::SERVICE_UNAVAILABLE,
-        Bytes::from_static(b"503 Service Unavailable: upstream not configured\n"),
-    )
-    .with_header(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn make_overload_response() -> L7Response {
-    L7Response::from_bytes(
-        StatusCode::TOO_MANY_REQUESTS,
-        Bytes::from_static(b"429 Too Many Requests\n"),
-    )
-    .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
-    .with_header(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    )
 }
 
 #[cfg(test)]

@@ -125,6 +125,29 @@ impl GrpcStatus {
         }
     }
 
+    /// Maps a canonical `RejectReason` from `velda-core` to a canonical `GrpcStatus`.
+    pub fn from_reject_reason(reason: velda_core::RejectReason) -> Self {
+        use velda_core::RejectReason;
+        match reason {
+            RejectReason::BadRequest
+            | RejectReason::Conflict
+            | RejectReason::UnsupportedMediaType
+            | RejectReason::HeaderFieldsTooLarge
+            | RejectReason::UriTooLong => Self::InvalidArgument,
+            RejectReason::Unauthorized => Self::Unauthenticated,
+            RejectReason::Forbidden => Self::PermissionDenied,
+            RejectReason::NotFound => Self::NotFound,
+            RejectReason::MethodNotAllowed => Self::Unimplemented,
+            RejectReason::RequestTimeout | RejectReason::GatewayTimeout => Self::DeadlineExceeded,
+            RejectReason::PayloadTooLarge | RejectReason::TooManyRequests => {
+                Self::ResourceExhausted
+            }
+            RejectReason::ClientClosedRequest => Self::Cancelled,
+            RejectReason::InternalError => Self::Internal,
+            RejectReason::BadGateway | RejectReason::ServiceUnavailable => Self::Unavailable,
+        }
+    }
+
     /// Maps a canonical `GrpcStatus` to a standard HTTP status code according to the
     /// official Google Cloud API design specification:
     /// https://cloud.google.com/apis/design/errors#handling_errors
@@ -192,6 +215,35 @@ mod tests {
         assert_eq!(
             GrpcStatus::Unavailable.to_http_status(),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn test_grpc_status_from_reject_reason() {
+        use velda_core::RejectReason;
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::Forbidden),
+            GrpcStatus::PermissionDenied
+        );
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::Unauthorized),
+            GrpcStatus::Unauthenticated
+        );
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::TooManyRequests),
+            GrpcStatus::ResourceExhausted
+        );
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::BadRequest),
+            GrpcStatus::InvalidArgument
+        );
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::PayloadTooLarge),
+            GrpcStatus::ResourceExhausted
+        );
+        assert_eq!(
+            GrpcStatus::from_reject_reason(RejectReason::ServiceUnavailable),
+            GrpcStatus::Unavailable
         );
     }
 }

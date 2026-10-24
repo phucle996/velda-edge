@@ -331,7 +331,13 @@ impl GrpcUdpEngine {
             match decode_udp_frame(&mut slot.wire_buf) {
                 Ok(Some(frame)) => match frame {
                     UdpFrame::Headers(payload) => match decode_qpack_headers(&payload) {
-                        Ok(decoded) => {
+                        Ok(mut decoded) => {
+                            // [INGRESS W3C REQUEST ID GENERATION]
+                            // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
+                            // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers
+                            // preserves it directly in Slot 0 without double ID generation.
+                            let (_id, req_id) = velda_core::next_request_id();
+                            decoded.headers.insert(velda_core::X_REQUEST_ID, req_id);
                             let req = L7Request::new(
                                 decoded.method.unwrap_or(http::Method::POST),
                                 decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),
