@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 1;
                 }
             }
-            "-D" | "--duration" => {
+            "-d" | "-D" | "--duration" => {
                 if i + 1 < args.len() {
                     let raw = args[i + 1].trim_end_matches('s').trim_end_matches('S');
                     duration_secs = Some(raw.parse()?);

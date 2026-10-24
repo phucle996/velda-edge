@@ -107,7 +107,8 @@ mod tests {
         let initial_rt = Runtime::empty();
         let shared = new_shared_runtime(initial_rt);
         let (_task_tx, task_rx) = tokio::sync::mpsc::channel(16);
-        let (_traffic_tx, traffic_rx) = tokio::sync::oneshot::channel();
+        let (traffic_tx, traffic_rx) = tokio::sync::oneshot::channel();
+        let _ = traffic_tx.send(tokio::runtime::Handle::current());
 
         let handle = crate::lifecycle::worker::spawn_shadow_worker(
             0,

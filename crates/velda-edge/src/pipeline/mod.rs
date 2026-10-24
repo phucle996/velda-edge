@@ -335,12 +335,13 @@ async fn handle_http_auto_stream(
 
             let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, config.alt_svc);
 
-            // ALPN demuxing strictly within the HTTP protocol family
+            // ALPN demuxing strictly within the HTTP protocol family.
+            // When ALPN is omitted by the client, default to HTTP/1.1 as per RFC 7301.
             match alpn.as_deref() {
                 Some("h2") => {
                     http2::run_http2_loop(tls_stream, meta, config.http2_config, runtime).await;
                 }
-                Some("http/1.1") => {
+                None | Some("http/1.1") => {
                     http1::run_http1_loop(
                         tls_stream,
                         meta,
