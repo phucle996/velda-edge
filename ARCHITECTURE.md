@@ -388,3 +388,7 @@ When the Shadow Worker establishes pre-warmed sockets:
 - Polling of the connection and CPU-intensive cryptographic handshakes (TLS 1.3, ALPN negotiation, HPACK/QPACK initialization) executes on the Shadow Worker's `SCHED_IDLE` thread.
 - When the Traffic Worker later leases the connection, the socket is already registered on its local I/O driver, ensuring zero cross-reactor event dispatching overhead.
 
+> [!NOTE]
+> For in-depth analysis of connection churn mechanics, the phenomenon of cold upstream thrashing, and empirical telemetry from Azure HPC stress benchmarks, see [Downstream Connection Storms & Cold Upstream Thrashing](docs/CONNECTION_STORMS_AND_UPSTREAM_THRASHING.md).
+
+
