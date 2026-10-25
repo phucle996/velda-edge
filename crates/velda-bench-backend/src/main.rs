@@ -13,6 +13,8 @@ mod http1;
 mod http2;
 mod http3;
 mod routes;
+mod tcp;
+mod udp;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::File;
@@ -129,8 +131,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
+    // 5. Launch Layer 4 Raw TCP Echo Server (Port 9001)
+    let tcp_l4_addr: SocketAddr = "0.0.0.0:9001".parse().unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = tcp::L4TcpServer::run(tcp_l4_addr).await {
+            tracing::error!(error = %e, "L4 TCP Echo Server crashed");
+        }
+    });
+
+    // 6. Launch Layer 4 Raw UDP Echo / Game Server (Port 9002)
+    let udp_l4_addr: SocketAddr = "0.0.0.0:9002".parse().unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = udp::L4UdpServer::run(udp_l4_addr).await {
+            tracing::error!(error = %e, "L4 UDP Echo Server crashed");
+        }
+    });
+
     tracing::info!(
-        "✅ All 4 Protocol Routers initialized successfully (HTTP/1, HTTP/2, HTTP/3, and native gRPC)"
+        "✅ All 6 Protocol Routers initialized successfully (HTTP/1, HTTP/2, HTTP/3, native gRPC, L4 TCP, and L4 UDP)"
     );
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down backend...");

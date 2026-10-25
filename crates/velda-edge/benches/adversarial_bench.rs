@@ -312,13 +312,15 @@ fn bench_l4_udp_queue_saturation_storm() {
 
     // 1. Establish session and fill channel buffer (capacity = 128)
     // Retain `_rx` in scope so the channel remains open during the benchmark.
-    let (_rx, tx) = match table.get_or_create(&key) {
+    let cap = table.max_sessions();
+    let (_rx, tx) = match table.get_or_create(&key, cap) {
         SessionAcquisition::Created { sender, rx } => (Some(rx), sender),
         SessionAcquisition::Existing(sender) => (None, sender),
+        SessionAcquisition::CapacityExceeded => panic!("Table capacity exceeded unexpectedly"),
     };
 
     for i in 0..128 {
-        let dummy = vec![0xabu8; 64];
+        let dummy = bytes::Bytes::from_static(&[0xabu8; 64]);
         let res = tx.try_send(dummy);
         assert!(res.is_ok(), "failed to fill slot {i}");
     }
@@ -331,9 +333,9 @@ fn bench_l4_udp_queue_saturation_storm() {
 
     let mut dropped_count = 0u64;
     for _ in 0..iters {
-        match table.get_or_create(&key) {
+        match table.get_or_create(&key, cap) {
             SessionAcquisition::Existing(sender) => {
-                let payload = vec![0x42u8; 64];
+                let payload = bytes::Bytes::from_static(&[0x42u8; 64]);
                 match sender.try_send(payload) {
                     Ok(_) => panic!("Should not succeed on saturated channel!"),
                     Err(tokio::sync::mpsc::error::TrySendError::Full(returned_payload)) => {
@@ -347,6 +349,9 @@ fn bench_l4_udp_queue_saturation_storm() {
             }
             SessionAcquisition::Created { .. } => {
                 panic!("Session should already exist!");
+            }
+            SessionAcquisition::CapacityExceeded => {
+                panic!("Capacity exceeded unexpectedly!");
             }
         }
     }
@@ -480,12 +485,13 @@ fn bench_depleted_upstream_fail_fast_storm() {
     let listener_id: Arc<str> = Arc::from("listener_depleted");
 
     // Warm up shard table bucket capacity so we measure steady-state flow allocation & teardown
+    let cap_b = table.max_sessions();
     for s in 0..64 {
         let dummy_key = UdpSessionKey {
             listener_id: Arc::clone(&listener_id),
             client_addr: SocketAddr::from(([127, 0, 0, (s + 1) as u8], 9999)),
         };
-        let _ = table.get_or_create(&dummy_key);
+        let _ = table.get_or_create(&dummy_key, cap_b);
         table.remove(&dummy_key);
     }
 
@@ -501,16 +507,20 @@ fn bench_depleted_upstream_fail_fast_storm() {
             client_addr,
         };
 
-        // Mimic handle_l4_udp flow:
-        // 1. Get or create session
-        let _acq = table.get_or_create(&key);
-
-        // 2. Upstream has 0 healthy endpoints -> fail fast
-        if depleted_udp.select_target().is_none() {
-            // 3. Immediately remove from table to avoid orphan session leak
-            table.remove(&key);
-            cleaned_count += 1;
+        // Mimic hardened handle_l4_udp flow:
+        // 1. Fast path: check existing active session
+        if let Some(_sender) = table.get_sender(&key) {
+            continue;
         }
+
+        // 2. New session: verify upstream target availability FIRST before allocating session
+        if depleted_udp.select_target().is_none() {
+            // Fails fast immediately with 0 allocations and 0 table pollution
+            cleaned_count += 1;
+            continue;
+        }
+
+        let _acq = table.get_or_create(&key, cap_b);
     }
 
     let elapsed_b = start_b.elapsed();

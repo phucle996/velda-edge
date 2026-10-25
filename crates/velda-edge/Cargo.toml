@@ -72,3 +72,7 @@ harness = false
 name = "memory_leak_bench"
 harness = false
 
+[[bench]]
+name = "l4_bench"
+harness = false
+

@@ -96,8 +96,7 @@ async fn splice_stream_to_stream(
     to: &TcpStream,
     pipe: &SplicePipe,
     chunk_size: usize,
-    last_activity_ms: Option<&std::sync::atomic::AtomicU64>,
-    start_instant: std::time::Instant,
+    has_activity: Option<&std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<u64> {
     use std::os::fd::AsRawFd;
     let from_fd = from.as_raw_fd();
@@ -129,11 +128,9 @@ async fn splice_stream_to_stream(
             break;
         }
 
-        if let Some(act) = last_activity_ms {
-            act.store(
-                start_instant.elapsed().as_millis() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+        // Single-instruction atomic flag eliminates clock_gettime / Instant::elapsed calls per chunk
+        if let Some(act) = has_activity {
+            act.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Drain entire pipe into destination socket
@@ -181,8 +178,7 @@ async fn splice_bidirectional(
     client: &mut TcpStream,
     server: &mut TcpStream,
     chunk_size: usize,
-    last_activity_ms: Option<&std::sync::atomic::AtomicU64>,
-    start_instant: std::time::Instant,
+    has_activity: Option<&std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<TransferStats> {
     use std::os::fd::AsRawFd;
     let client_fd = client.as_raw_fd();
@@ -191,17 +187,12 @@ async fn splice_bidirectional(
     let pipe_c2s = SplicePipe::new(chunk_size)?;
     let pipe_s2c = SplicePipe::new(chunk_size)?;
 
-    let (c2s_res, s2c_res) = tokio::join!(
+    // Using try_join! ensures that any I/O error on one direction immediately cancels
+    // the opposing direction, dropping all 4 pipe file descriptors and closing sockets cleanly.
+    let (client_to_server, server_to_client) = tokio::try_join!(
         async {
-            let res = splice_stream_to_stream(
-                client,
-                server,
-                &pipe_c2s,
-                chunk_size,
-                last_activity_ms,
-                start_instant,
-            )
-            .await;
+            let res =
+                splice_stream_to_stream(client, server, &pipe_c2s, chunk_size, has_activity).await;
             if res.is_ok() {
                 unsafe {
                     libc::shutdown(server_fd, libc::SHUT_WR);
@@ -210,15 +201,8 @@ async fn splice_bidirectional(
             res
         },
         async {
-            let res = splice_stream_to_stream(
-                server,
-                client,
-                &pipe_s2c,
-                chunk_size,
-                last_activity_ms,
-                start_instant,
-            )
-            .await;
+            let res =
+                splice_stream_to_stream(server, client, &pipe_s2c, chunk_size, has_activity).await;
             if res.is_ok() {
                 unsafe {
                     libc::shutdown(client_fd, libc::SHUT_WR);
@@ -226,10 +210,7 @@ async fn splice_bidirectional(
             }
             res
         }
-    );
-
-    let client_to_server = c2s_res?;
-    let server_to_client = s2c_res?;
+    )?;
 
     Ok(TransferStats::new(client_to_server, server_to_client))
 }
@@ -245,25 +226,15 @@ pub async fn forward_connection(
     buffer_size: usize,
     idle_timeout: Option<std::time::Duration>,
 ) -> Result<TransferStats> {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    let start_instant = Instant::now();
-    let last_activity_ms = Arc::new(AtomicU64::new(0));
+    let has_activity = AtomicBool::new(false);
 
-    let act_clone = last_activity_ms.clone();
     let forward_fut = async {
         #[cfg(target_os = "linux")]
         {
-            match splice_bidirectional(
-                client.stream_mut(),
-                &mut server,
-                buffer_size,
-                Some(&act_clone),
-                start_instant,
-            )
-            .await
+            let act_ref = idle_timeout.is_some().then_some(&has_activity);
+            match splice_bidirectional(client.stream_mut(), &mut server, buffer_size, act_ref).await
             {
                 Ok(stats) => return Ok(stats),
                 Err(err) => {
@@ -279,18 +250,18 @@ pub async fn forward_connection(
     };
 
     let stats = if let Some(timeout) = idle_timeout {
-        let timeout_ms = timeout.as_millis() as u64;
         let watchdog = async {
             loop {
                 tokio::time::sleep(timeout).await;
-                let current_elapsed_ms = start_instant.elapsed().as_millis() as u64;
-                let last = last_activity_ms.load(Ordering::Relaxed);
-                if current_elapsed_ms.saturating_sub(last) >= timeout_ms {
-                    return Err(TransportError::Forward(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "L4 raw TCP stream idle timeout exceeded",
-                    )));
+                // If data was transferred during the sleep interval, clear flag and continue.
+                // Avoids clock_gettime / Instant::elapsed calls per chunk on the forwarding hot path.
+                if has_activity.swap(false, Ordering::Relaxed) {
+                    continue;
                 }
+                return Err(TransportError::Forward(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "L4 raw TCP stream idle timeout exceeded",
+                )));
             }
         };
 

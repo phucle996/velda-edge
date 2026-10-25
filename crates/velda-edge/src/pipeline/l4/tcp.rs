@@ -4,29 +4,57 @@
 //! via `velda_transport::forward_connection`. Pure raw TCP with zero TLS termination.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use velda_transport::Connection;
 
 use crate::runtime::Runtime;
+use crate::runtime::pipeline::L4TcpConfig;
+
+static ACTIVE_L4_TCP_CONNS: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns the currently active L4 TCP connection count.
+#[inline]
+pub fn active_l4_tcp_conns() -> usize {
+    ACTIVE_L4_TCP_CONNS.load(Ordering::Acquire)
+}
+
+/// Zero-cost RAII guard tracking active L4 TCP stream concurrency.
+struct L4TcpConnGuard;
+
+impl Drop for L4TcpConnGuard {
+    fn drop(&mut self) {
+        ACTIVE_L4_TCP_CONNS.fetch_sub(1, Ordering::Release);
+    }
+}
 
 /// Handles a raw L4 TCP connection: evaluates route, acquires backend stream, and pumps bytes.
 ///
-/// `rt` is the snapshot chosen by the dispatcher, so the pipeline decision and the L4 route
-/// lookup always come from the same generation.
-pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime) {
+/// `config` is pre-compiled at bootstrap in [`crate::runtime::pipeline::PipelineTable`], eliminating
+/// runtime listener searches on the connection accept hot path.
+pub async fn handle_l4_tcp(
+    conn: Connection,
+    listener_id: Arc<str>,
+    config: L4TcpConfig,
+    rt: &Runtime,
+) {
     let peer = conn.peer();
 
-    // Resource Saturation Circuit Breaker (Overload Protection)
-    let overload_lvl = rt.overload.level();
-    if overload_lvl.is_shedding() {
-        tracing::warn!(
+    // 1. Ingress Admission: Reject if connection capacity reached or memory is saturating
+    let current_conns = ACTIVE_L4_TCP_CONNS.load(Ordering::Acquire);
+    if current_conns >= config.max_connections || rt.overload.level().is_shedding() {
+        tracing::trace!(
             listener = %listener_id,
             peer = %peer,
-            overload = ?overload_lvl,
-            "Shedding L4 TCP connection due to memory saturation"
+            current = current_conns,
+            max = config.max_connections,
+            "Shedding L4 TCP connection: capacity limit or memory saturation"
         );
         return;
     }
+
+    ACTIVE_L4_TCP_CONNS.fetch_add(1, Ordering::Release);
+    let _conn_guard = L4TcpConnGuard;
 
     let Some(route) = rt.router.route_tcp(&listener_id) else {
         tracing::warn!(
@@ -61,22 +89,10 @@ pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime
         "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
     );
 
-    // Resolve idle timeout and copy buffer size from listener declaration or upstream fallback
-    let listener = rt.config.listeners.iter().find(|l| l.id == *listener_id);
-    let idle_timeout = listener
-        .and_then(|l| {
-            l.raw
-                .and_then(|r| r.idle_timeout_ms.map(std::time::Duration::from_millis))
-        })
-        .or_else(|| Some(upstream.timeouts().idle));
+    // Resolve idle timeout from pre-compiled listener configuration or upstream fallback
+    let idle_timeout = config.idle_timeout.or(Some(upstream.timeouts().idle));
 
-    let default_buffer_size = velda_core::global_hardware_topology()
-        .sizing
-        .tcp_copy_buffer_size;
-
-    let buffer_size = listener
-        .and_then(|l| l.raw.and_then(|r| r.copy_buffer_size))
-        .unwrap_or(default_buffer_size);
+    let buffer_size = config.copy_buffer_size;
 
     match upstream
         .dispatch_stream(|stream| {
@@ -101,5 +117,20 @@ pub async fn handle_l4_tcp(conn: Connection, listener_id: Arc<str>, rt: &Runtime
                 "L4 TCP stream forwarding terminated with error"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_l4_tcp_conn_guard_lifecycle() {
+        let before = active_l4_tcp_conns();
+        ACTIVE_L4_TCP_CONNS.fetch_add(1, Ordering::Release);
+        let guard = L4TcpConnGuard;
+        assert_eq!(active_l4_tcp_conns(), before + 1);
+        drop(guard);
+        assert_eq!(active_l4_tcp_conns(), before);
     }
 }

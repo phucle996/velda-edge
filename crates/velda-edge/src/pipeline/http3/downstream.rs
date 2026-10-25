@@ -418,14 +418,19 @@ async fn process_http3_request(
     // ========================================================================
     // Upstream Forwarding & Pipe Strategy Dispatch
     // ========================================================================
-    let is_chunked = req
-        .headers
-        .get(http::header::TRANSFER_ENCODING)
-        .is_some_and(|te| {
-            te.as_bytes()
-                .windows(b"chunked".len())
-                .any(|w| w.eq_ignore_ascii_case(b"chunked"))
-        });
+    let has_upload_body = !req.body.is_empty()
+        || req
+            .headers
+            .get(http::header::CONTENT_LENGTH)
+            .is_some_and(|cl| cl.to_str().map(|s| s.trim() != "0").unwrap_or(false))
+        || req
+            .headers
+            .get(http::header::TRANSFER_ENCODING)
+            .is_some_and(|te| {
+                te.as_bytes()
+                    .windows(b"chunked".len())
+                    .any(|w| w.eq_ignore_ascii_case(b"chunked"))
+            });
     let is_sse = req.headers.get(http::header::ACCEPT).is_some_and(|a| {
         a.as_bytes()
             .windows(b"text/event-stream".len())
@@ -433,7 +438,8 @@ async fn process_http3_request(
     });
 
     match upstream_target.as_ref() {
-        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http3PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -455,7 +461,8 @@ async fn process_http3_request(
                 pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await;
             }
         },
-        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http2PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -477,7 +484,8 @@ async fn process_http3_request(
                 pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await;
             }
         },
-        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http1PipeStrategy::Buffered => {
                 let mut resp = pipe::buffered_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {

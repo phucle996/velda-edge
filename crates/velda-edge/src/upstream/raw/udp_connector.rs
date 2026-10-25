@@ -170,20 +170,11 @@ impl UdpAccelerationPath {
                 }
             }
 
-            const UDP_SEGMENT: libc::c_int = 103;
-            if let Some(gso_len) = self.gso_segment {
-                let val = gso_len as libc::c_int;
-                let ret = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_UDP,
-                    UDP_SEGMENT,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
-                if ret != 0 {
-                    tracing::trace!(error = %std::io::Error::last_os_error(), "UDP_SEGMENT (GSO) skipped");
-                }
-            }
+            // Note on UDP_SEGMENT (GSO): We deliberately do NOT set UDP_SEGMENT globally on the socket
+            // via setsockopt here. Doing so would force the kernel to chop every outgoing datagram
+            // to a fixed segment length, corrupting datagram boundaries for variable-length packets.
+            // Instead, GSO segmentation is applied dynamically per-datagram via `cmsg` (IPPROTO_UDP, UDP_SEGMENT)
+            // in `UdpSocket::try_send_gso_aware` when a coalesced GRO super-packet is forwarded.
 
             if let Some(busy_poll_us) = self.busy_poll_us {
                 let val = busy_poll_us as libc::c_int;
@@ -249,12 +240,12 @@ pub fn connect_udp_socket(
         acceleration.apply_pre_bind(socket.as_raw_fd(), endpoint.is_ipv4());
     }
 
-    let bind_addr: SocketAddr = if endpoint.is_ipv4() {
-        "0.0.0.0:0".parse().unwrap()
+    let bind_ip: std::net::IpAddr = if endpoint.is_ipv4() {
+        std::net::Ipv4Addr::UNSPECIFIED.into()
     } else {
-        "[::]:0".parse().unwrap()
+        std::net::Ipv6Addr::UNSPECIFIED.into()
     };
-    socket.bind(&bind_addr.into())?;
+    socket.bind(&SocketAddr::new(bind_ip, 0).into())?;
 
     #[cfg(target_os = "linux")]
     {

@@ -109,7 +109,7 @@ Downstream Ingress (4)  ×  Streaming Modes (4)  ×  Upstream Protocols (3)  =  
 | :--- | :--- | :---: | :--- |
 | **HTTP/1.1** | `docs/pipe/http1/` | **12 Pipes** | 47,181 RPS (Baseline) / 110,954 RPS (WAF Fast-Abort) |
 | **HTTP/2** | `docs/pipe/http2/` | **12 Pipes** | **46,691 RPS** (Micro-Ping) / **8,099 RPS** (64KB Stream, 507 MB/s) / **571 RPS** (1MB Bulk, 572 MB/s) |
-| **HTTP/3 (QUIC)** | `docs/pipe/http3/` | **12 Pipes** | 27,000+ RPS (UDP 1-RTT connection, 0-RTT resumption) |
+| **HTTP/3 (QUIC)** | `docs/pipe/http3/` | **12 Pipes** | **27,041 RPS** (Micro-Ping) / **7,450 RPS** (64KB Stream, 465 MB/s) / **545 RPS** (1MB Bulk, 546 MB/s) |
 | **gRPC (TCP/UDP)** | `docs/pipe/grpc/` | **8 Pipes** | Length-prefixed framing, native trailer propagation |
 
 ---

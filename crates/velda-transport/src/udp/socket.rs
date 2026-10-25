@@ -619,9 +619,6 @@ impl UdpSocket {
             let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
-                let n = msgs[i].msg_len as usize;
-                total_bytes += n as u64;
-
                 let sa = &sock_storage[i];
                 let addr = match sa.ss_family as libc::c_int {
                     libc::AF_INET => {
@@ -643,6 +640,15 @@ impl UdpSocket {
                     }
                     _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
                 };
+
+                if (msgs[i].msg_hdr.msg_flags & libc::MSG_TRUNC) != 0 {
+                    tracing::trace!("Dropping truncated UDP datagram exceeding slab slot");
+                    out[i] = (0, addr);
+                    continue;
+                }
+
+                let n = msgs[i].msg_len as usize;
+                total_bytes += n as u64;
                 out[i] = (n, addr);
             }
             self.bytes_received
@@ -747,9 +753,6 @@ impl UdpSocket {
             let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
-                let n = msgs[i].msg_len as usize;
-                total_bytes += n as u64;
-
                 let sa = &sock_storage[i];
                 let addr = match sa.ss_family as libc::c_int {
                     libc::AF_INET => {
@@ -771,6 +774,15 @@ impl UdpSocket {
                     }
                     _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
                 };
+
+                if (msgs[i].msg_hdr.msg_flags & libc::MSG_TRUNC) != 0 {
+                    tracing::trace!("Dropping truncated UDP datagram exceeding slab slot");
+                    out[i] = (0, addr);
+                    continue;
+                }
+
+                let n = msgs[i].msg_len as usize;
+                total_bytes += n as u64;
                 out[i] = (n, addr);
             }
             self.bytes_received

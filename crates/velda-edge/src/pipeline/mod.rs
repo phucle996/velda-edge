@@ -199,14 +199,26 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 })
             })
         }
+        Some(TcpPipeline::Raw { config }) => {
+            let lid = Arc::clone(&lid);
+            Arc::new(move |connection: Connection| {
+                let rt = runtime.load();
+                let lid = Arc::clone(&lid);
+                Box::pin(async move {
+                    tcp::handle_l4_tcp(connection, lid, config, &rt).await;
+                })
+            })
+        }
         None => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
-                let rt = runtime.load_full();
-                let lid = Arc::clone(&lid);
-                Box::pin(async move {
-                    tcp::handle_l4_tcp(connection, lid, &rt).await;
-                })
+                let peer = connection.peer();
+                tracing::warn!(
+                    listener = %lid,
+                    peer = %peer,
+                    "Unregistered TCP listener dropped (Fail-Closed)"
+                );
+                Box::pin(async move {})
             })
         }
     }
@@ -259,7 +271,7 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 },
             )
         }
-        None => {
+        Some(UdpPipeline::Raw { config }) => {
             let lid = Arc::clone(&lid);
             Arc::new(
                 move |_id: Arc<str>, socket: Arc<UdpSocket>, datagram: Datagram| {
@@ -267,8 +279,22 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                     let lid = Arc::clone(&lid);
                     Box::pin(async move {
                         let rt_guard = rt.load();
-                        udp::handle_l4_udp(lid, socket, datagram, &rt_guard).await;
+                        udp::handle_l4_udp(lid, socket, datagram, config, &rt_guard).await;
                     })
+                },
+            )
+        }
+        None => {
+            let lid = Arc::clone(&lid);
+            Arc::new(
+                move |_id: Arc<str>, _socket: Arc<UdpSocket>, datagram: Datagram| {
+                    let peer = datagram.peer();
+                    tracing::warn!(
+                        listener = %lid,
+                        peer = %peer,
+                        "Unregistered UDP listener datagram dropped (Fail-Closed)"
+                    );
+                    Box::pin(async move {})
                 },
             )
         }

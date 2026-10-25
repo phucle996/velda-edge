@@ -193,17 +193,22 @@ impl UdpIngress {
                         continue;
                     }
 
-                    // High-throughput non-blocking batch drain:
-                    // Drains up to 32 datagrams per recvmmsg syscall directly from the kernel receive queue.
-                    // If the socket has more than 32 packets, loops to drain them all before yielding to epoll,
-                    // minimizing context switches and epoll wakeups.
-                    loop {
+                    // High-throughput non-blocking batch drain with cooperative scheduling:
+                    // Drains up to 16 batches (512 datagrams) directly from the kernel receive queue.
+                    // Capping consecutive loops prevents worker starvation under high-rate packet floods,
+                    // ensuring spawned session tasks and shutdown monitors receive cooperative execution time.
+                    let mut drain_loops = 0;
+                    while drain_loops < 16 {
                         let count = socket.try_recv_batch_slab(&mut slab, SLOT_SIZE, &mut batch_out);
                         if count == 0 {
                             break;
                         }
+                        drain_loops += 1;
 
                         for (i, &(n, peer)) in batch_out[..count].iter().enumerate() {
+                            if n == 0 {
+                                continue;
+                            }
                             let offset = i * SLOT_SIZE;
                             let dgram_bytes = bytes::Bytes::copy_from_slice(&slab[offset..offset + n]);
                             let dgram = Datagram::new(peer, local_addr, dgram_bytes);

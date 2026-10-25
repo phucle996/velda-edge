@@ -15,6 +15,28 @@ use velda_sync::post_sync::listener::ListenerConfig;
 
 use crate::error::EdgeError;
 
+/// Pre-compiled configuration bundle for Layer 4 (Raw) TCP stream forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct L4TcpConfig {
+    /// Buffer size for TCP forwarding copy.
+    pub copy_buffer_size: usize,
+    /// Optional idle timeout for the raw stream.
+    pub idle_timeout: Option<std::time::Duration>,
+    /// Hard cap on concurrent active TCP connections to prevent FD and pipe exhaustion.
+    pub max_connections: usize,
+}
+
+/// Pre-compiled configuration bundle for Layer 4 (Raw) UDP datagram forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct L4UdpConfig {
+    /// Hard cap on concurrent active UDP sessions across the table.
+    pub max_sessions: usize,
+    /// Fast unassured timeout for sessions that haven't received a response from upstream.
+    pub unassured_timeout: std::time::Duration,
+    /// Receive buffer size for upstream responses.
+    pub recv_buffer_size: usize,
+}
+
 /// Pre-compiled TCP protocol discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpProtocol {
@@ -26,6 +48,8 @@ pub enum TcpProtocol {
     HttpAuto,
     /// gRPC stream worker.
     Grpc,
+    /// Layer 4 raw TCP stream worker.
+    Raw,
 }
 
 impl TcpProtocol {
@@ -37,6 +61,7 @@ impl TcpProtocol {
             Self::Http2 => "http2",
             Self::HttpAuto => "http",
             Self::Grpc => "grpc",
+            Self::Raw => "raw",
         }
     }
 
@@ -46,6 +71,7 @@ impl TcpProtocol {
         match self {
             Self::Http1 | Self::Http2 | Self::HttpAuto => ProtocolFamily::Http,
             Self::Grpc => ProtocolFamily::Grpc,
+            Self::Raw => ProtocolFamily::Raw,
         }
     }
 }
@@ -57,6 +83,8 @@ pub enum UdpProtocol {
     Http3,
     /// gRPC over QUIC pipeline.
     Grpc,
+    /// Layer 4 raw UDP datagram worker.
+    Raw,
 }
 
 impl UdpProtocol {
@@ -66,6 +94,7 @@ impl UdpProtocol {
         match self {
             Self::Http3 => "http3",
             Self::Grpc => "grpc",
+            Self::Raw => "raw",
         }
     }
 
@@ -75,6 +104,7 @@ impl UdpProtocol {
         match self {
             Self::Http3 => ProtocolFamily::Http,
             Self::Grpc => ProtocolFamily::Grpc,
+            Self::Raw => ProtocolFamily::Raw,
         }
     }
 }
@@ -106,6 +136,9 @@ pub enum TcpPipeline {
         streaming: StreamingMode,
         config: GrpcConfig,
     },
+    Raw {
+        config: L4TcpConfig,
+    },
 }
 
 impl TcpPipeline {
@@ -116,6 +149,7 @@ impl TcpPipeline {
             Self::Http2 { .. } => TcpProtocol::Http2,
             Self::HttpAuto { .. } => TcpProtocol::HttpAuto,
             Self::Grpc { .. } => TcpProtocol::Grpc,
+            Self::Raw { .. } => TcpProtocol::Raw,
         }
     }
 
@@ -131,6 +165,7 @@ impl TcpPipeline {
             Self::Http2 { tls_enabled, .. } => *tls_enabled,
             Self::HttpAuto { tls_enabled, .. } => *tls_enabled,
             Self::Grpc { tls_enabled, .. } => *tls_enabled,
+            Self::Raw { .. } => false,
         }
     }
 
@@ -141,6 +176,7 @@ impl TcpPipeline {
             Self::Http2 { streaming, .. } => *streaming,
             Self::HttpAuto { streaming, .. } => *streaming,
             Self::Grpc { streaming, .. } => *streaming,
+            Self::Raw { .. } => StreamingMode::DISABLED,
         }
     }
 
@@ -150,7 +186,7 @@ impl TcpPipeline {
             Self::Http1 { alt_svc, .. } => alt_svc.as_ref(),
             Self::Http2 { alt_svc, .. } => alt_svc.as_ref(),
             Self::HttpAuto { alt_svc, .. } => alt_svc.as_ref(),
-            Self::Grpc { .. } => None,
+            Self::Grpc { .. } | Self::Raw { .. } => None,
         }
     }
 }
@@ -168,6 +204,9 @@ pub enum UdpPipeline {
         streaming: StreamingMode,
         config: GrpcConfig,
     },
+    Raw {
+        config: L4UdpConfig,
+    },
 }
 
 impl UdpPipeline {
@@ -176,6 +215,7 @@ impl UdpPipeline {
         match self {
             Self::Http3 { .. } => UdpProtocol::Http3,
             Self::Grpc { .. } => UdpProtocol::Grpc,
+            Self::Raw { .. } => UdpProtocol::Raw,
         }
     }
 
@@ -189,6 +229,7 @@ impl UdpPipeline {
         match self {
             Self::Http3 { tls_enabled, .. } => *tls_enabled,
             Self::Grpc { tls_enabled, .. } => *tls_enabled,
+            Self::Raw { .. } => false,
         }
     }
 
@@ -197,6 +238,7 @@ impl UdpPipeline {
         match self {
             Self::Http3 { streaming, .. } => *streaming,
             Self::Grpc { streaming, .. } => *streaming,
+            Self::Raw { .. } => StreamingMode::DISABLED,
         }
     }
 }
@@ -229,14 +271,49 @@ impl PipelineTable {
         for listener in listeners {
             let app = listener.application.protocol.to_ascii_lowercase();
 
-            // L4 raw listeners do not enter L7 dispatch
-            if app == "raw" {
-                continue;
-            }
-
             let is_tls = listener.tls.enabled;
             let streaming = listener.application.streaming;
             let transport = listener.transport.protocol.to_ascii_lowercase();
+
+            // Layer 4 (Raw) listeners pre-compiled explicitly without L7 protocol overhead
+            if app == "raw" {
+                if transport == "udp" {
+                    let max_sessions = velda_core::global_hardware_topology()
+                        .worker_threads
+                        .max(4)
+                        .saturating_mul(16_384)
+                        .clamp(16_384, 131_072);
+                    let config = L4UdpConfig {
+                        max_sessions,
+                        unassured_timeout: std::time::Duration::from_secs(3),
+                        recv_buffer_size: 2048,
+                    };
+                    udp.insert(listener.id.clone(), UdpPipeline::Raw { config });
+                } else {
+                    let default_buffer_size = velda_core::global_hardware_topology()
+                        .sizing
+                        .tcp_copy_buffer_size;
+                    let copy_buffer_size = listener
+                        .raw
+                        .and_then(|r| r.copy_buffer_size)
+                        .unwrap_or(default_buffer_size);
+                    let idle_timeout = listener
+                        .raw
+                        .and_then(|r| r.idle_timeout_ms.map(std::time::Duration::from_millis));
+                    let max_connections = velda_core::global_hardware_topology()
+                        .worker_threads
+                        .max(4)
+                        .saturating_mul(16_384)
+                        .clamp(16_384, 131_072);
+                    let config = L4TcpConfig {
+                        copy_buffer_size,
+                        idle_timeout,
+                        max_connections,
+                    };
+                    tcp.insert(listener.id.clone(), TcpPipeline::Raw { config });
+                }
+                continue;
+            }
 
             if transport == "udp" {
                 match app.as_str() {
@@ -582,6 +659,7 @@ mod tests {
             cfg("grpc-clear", "tcp", "grpc", None, false),
             cfg("h3-udp", "udp", "http3", None, false),
             cfg("raw-tcp", "tcp", "raw", None, false),
+            cfg("raw-udp", "udp", "raw", None, false),
         ];
 
         let table = PipelineTable::build(&listeners).unwrap();
@@ -608,8 +686,13 @@ mod tests {
         assert_eq!(h3.protocol_family(), ProtocolFamily::Http);
         assert!(!h3.tls_enabled());
 
-        assert!(table.tcp_pipeline("raw-tcp").is_none());
-        assert!(table.udp_pipeline("raw-tcp").is_none());
+        let raw_tcp = table.tcp_pipeline("raw-tcp").unwrap();
+        assert_eq!(raw_tcp.protocol(), TcpProtocol::Raw);
+        assert_eq!(raw_tcp.protocol_family(), ProtocolFamily::Raw);
+
+        let raw_udp = table.udp_pipeline("raw-udp").unwrap();
+        assert_eq!(raw_udp.protocol(), UdpProtocol::Raw);
+        assert_eq!(raw_udp.protocol_family(), ProtocolFamily::Raw);
     }
 
     #[test]
