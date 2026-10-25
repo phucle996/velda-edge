@@ -245,6 +245,7 @@ pub struct Http2StreamReceiver {
     body_stream: h2::RecvStream,
     max_body_size: usize,
     bytes_received: usize,
+    eof: bool,
     flood_tracker: Option<Arc<Http2FloodTracker>>,
 }
 
@@ -258,10 +259,12 @@ impl Http2StreamReceiver {
     /// Creates a new [`Http2StreamReceiver`] with ingress safety limits.
     #[inline]
     pub fn new(body_stream: h2::RecvStream, max_body_size: usize) -> Self {
+        let eof = body_stream.is_end_stream();
         Self {
             body_stream,
             max_body_size,
             bytes_received: 0,
+            eof,
             flood_tracker: None,
         }
     }
@@ -275,7 +278,13 @@ impl Http2StreamReceiver {
 
     /// Asynchronously receives the next DATA chunk from the incoming stream.
     pub async fn recv_chunk(&mut self) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
+        if self.eof || self.body_stream.is_end_stream() {
+            self.eof = true;
+            return Ok(None);
+        }
+
         let Some(chunk_res) = self.body_stream.data().await else {
+            self.eof = true;
             return Ok(None);
         };
 
@@ -297,6 +306,9 @@ impl Http2StreamReceiver {
         // h2 automatically generates WINDOW_UPDATE frames whenever consumed capacity crosses its threshold,
         // avoiding artificial stalls on client uploads.
         let _ = self.body_stream.flow_control().release_capacity(len);
+        if self.body_stream.is_end_stream() {
+            self.eof = true;
+        }
 
         Ok(Some(chunk))
     }
@@ -305,6 +317,10 @@ impl Http2StreamReceiver {
     pub fn try_recv_chunk(
         &mut self,
     ) -> Result<Option<Option<bytes::Bytes>>, crate::error::Http2Error> {
+        if self.eof || self.body_stream.is_end_stream() {
+            self.eof = true;
+            return Ok(Some(None));
+        }
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
         match self.body_stream.poll_data(&mut cx) {
@@ -321,16 +337,22 @@ impl Http2StreamReceiver {
                     ));
                 }
                 let _ = self.body_stream.flow_control().release_capacity(len);
+                if self.body_stream.is_end_stream() {
+                    self.eof = true;
+                }
                 Ok(Some(Some(chunk)))
             }
-            std::task::Poll::Ready(None) => Ok(Some(None)),
+            std::task::Poll::Ready(None) => {
+                self.eof = true;
+                Ok(Some(None))
+            }
             std::task::Poll::Ready(Some(Err(e))) => Err(crate::error::Http2Error::from(e)),
             std::task::Poll::Pending => Ok(None),
         }
     }
 
     /// Receives a chunk, opportunistically coalescing any immediately available subsequent chunks
-    /// up to `max_coalesce_bytes` without parking the task.
+    /// up to `max_coalesce_bytes` without parking the task or clobbering the stream waker.
     pub async fn recv_coalesced_chunk(
         &mut self,
         max_coalesce_bytes: usize,
@@ -341,18 +363,85 @@ impl Http2StreamReceiver {
         if first.len() >= max_coalesce_bytes || self.is_end_stream() {
             return Ok(Some(first));
         }
-        let mut buf =
-            bytes::BytesMut::with_capacity((first.len() + 16_384).min(max_coalesce_bytes));
-        buf.extend_from_slice(&first);
-        while buf.len() < max_coalesce_bytes && !self.is_end_stream() {
-            match self.try_recv_chunk()? {
-                Some(Some(chunk)) => {
-                    buf.extend_from_slice(&chunk);
+
+        let mut first_opt = Some(first);
+        std::future::poll_fn(|cx| {
+            let first = first_opt.take().unwrap();
+            let second = match self.body_stream.poll_data(cx) {
+                std::task::Poll::Ready(Some(Ok(chunk))) => {
+                    let len = chunk.len();
+                    self.bytes_received += len;
+                    if let Some(tracker) = &self.flood_tracker {
+                        tracker.on_payload_read(len);
+                    }
+                    if self.bytes_received > self.max_body_size {
+                        let _ = self.body_stream.flow_control().release_capacity(len);
+                        return std::task::Poll::Ready(Err(
+                            crate::error::Http2Error::PayloadTooLarge(self.bytes_received),
+                        ));
+                    }
+                    let _ = self.body_stream.flow_control().release_capacity(len);
+                    if self.body_stream.is_end_stream() {
+                        self.eof = true;
+                    }
+                    chunk
                 }
-                _ => break,
+                std::task::Poll::Ready(None) => {
+                    self.eof = true;
+                    return std::task::Poll::Ready(Ok(Some(first)));
+                }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    return std::task::Poll::Ready(Err(crate::error::Http2Error::from(e)));
+                }
+                std::task::Poll::Pending => {
+                    return std::task::Poll::Ready(Ok(Some(first)));
+                }
+            };
+
+            if second.is_empty() && self.is_end_stream() {
+                return std::task::Poll::Ready(Ok(Some(first)));
             }
-        }
-        Ok(Some(buf.freeze()))
+
+            let initial_cap = (first.len() + second.len() + 16_384)
+                .min(max_coalesce_bytes.max(first.len() + second.len()));
+            let mut buf = bytes::BytesMut::with_capacity(initial_cap);
+            buf.extend_from_slice(&first);
+            buf.extend_from_slice(&second);
+
+            while buf.len() < max_coalesce_bytes && !self.is_end_stream() {
+                match self.body_stream.poll_data(cx) {
+                    std::task::Poll::Ready(Some(Ok(chunk))) => {
+                        let len = chunk.len();
+                        self.bytes_received += len;
+                        if let Some(tracker) = &self.flood_tracker {
+                            tracker.on_payload_read(len);
+                        }
+                        if self.bytes_received > self.max_body_size {
+                            let _ = self.body_stream.flow_control().release_capacity(len);
+                            return std::task::Poll::Ready(Err(
+                                crate::error::Http2Error::PayloadTooLarge(self.bytes_received),
+                            ));
+                        }
+                        let _ = self.body_stream.flow_control().release_capacity(len);
+                        if self.body_stream.is_end_stream() {
+                            self.eof = true;
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    std::task::Poll::Ready(None) => {
+                        self.eof = true;
+                        break;
+                    }
+                    std::task::Poll::Ready(Some(Err(e))) => {
+                        return std::task::Poll::Ready(Err(crate::error::Http2Error::from(e)));
+                    }
+                    std::task::Poll::Pending => break,
+                }
+            }
+
+            std::task::Poll::Ready(Ok(Some(buf.freeze())))
+        })
+        .await
     }
 
     /// Returns the total number of body bytes received so far on this stream.
@@ -364,7 +453,7 @@ impl Http2StreamReceiver {
     /// Returns whether the stream has reached the end of stream.
     #[inline]
     pub fn is_end_stream(&self) -> bool {
-        self.body_stream.is_end_stream()
+        self.eof || self.body_stream.is_end_stream()
     }
 
     /// Accumulates all remaining chunks into a [`Body`] while enforcing `max_body_size`.
@@ -381,8 +470,17 @@ impl Http2StreamReceiver {
             return Ok(Body::Bytes(first_chunk));
         }
 
-        let mut body_buf = bytes::BytesMut::with_capacity(first_chunk.len() * 2);
+        let Some(second_chunk) = self.recv_chunk().await? else {
+            return Ok(Body::Bytes(first_chunk));
+        };
+        if second_chunk.is_empty() && self.is_end_stream() {
+            return Ok(Body::Bytes(first_chunk));
+        }
+
+        let mut body_buf =
+            bytes::BytesMut::with_capacity((first_chunk.len() + second_chunk.len()) * 2);
         body_buf.extend_from_slice(&first_chunk);
+        body_buf.extend_from_slice(&second_chunk);
 
         while let Some(chunk) = self.recv_chunk().await? {
             body_buf.extend_from_slice(&chunk);

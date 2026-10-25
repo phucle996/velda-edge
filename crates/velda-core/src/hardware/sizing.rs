@@ -63,9 +63,9 @@ pub struct HardwareSizing {
     // -------------------------------------------------------------------------
     // L7 HTTP/2 & gRPC Multiplexing Engine
     // -------------------------------------------------------------------------
-    /// HTTP/2 initial stream-level flow control window size (bounded [65,535, 4 MB]).
+    /// HTTP/2 initial stream-level flow control window size (bounded [256 KB, 4 MB]).
     pub h2_initial_stream_window_size: u32,
-    /// HTTP/2 initial connection-level flow control window size (bounded [1 MB, 16 MB]).
+    /// HTTP/2 initial connection-level flow control window size (bounded [2 MB, 64 MB]).
     pub h2_initial_connection_window_size: u32,
     /// HTTP/2 maximum concurrent streams per peer connection (bounded [128, 1024]).
     pub h2_max_concurrent_streams: u32,
@@ -145,10 +145,10 @@ impl HardwareSizing {
     ///   datagram bursts are absorbed without dropped frames.
     ///
     /// ### 9. HTTP/2 & gRPC Flow Control Windows
-    /// - **Stream Window**: Clamped to 65,535 bytes (RFC 9113 baseline) to eliminate per-stream buffer waste.
-    /// - **Connection Window**: `((memory_bytes / (1024 * 1024 * 1024)) * 256 * 1024).clamp(1_048_576, 2 * 1024 * 1024) as u32`
-    /// - **Rationale**: Bounding connection window to 1-2MB and stream window to RFC baseline absorbs WAN bursts
-    ///   while preventing hundreds of concurrent streams from allocating hundreds of MBs in internal ring buffers.
+    /// - **Stream Window**: `(memory_bytes / 8192).clamp(256 * 1024, 4 * 1024 * 1024) as u32`
+    /// - **Connection Window**: `(stream_window * (cores * 2).clamp(4, 16)).clamp(2 * 1024 * 1024, 64 * 1024 * 1024) as u32`
+    /// - **Rationale**: Eliminates the 65,535-byte (64KB - 1B) RFC default stall while scaling connection-wide
+    ///   multiplexing capacity proportionally to both available RAM and CPU worker concurrency.
     ///
     /// ### 10. TLS Session Cache
     /// - **Formula**: `((memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536)`
@@ -348,16 +348,36 @@ impl HardwareSizing {
         };
 
         // 6. L7 HTTP/2 parameters
-        let h2_initial_stream_window_size = 65535;
-
-        let h2_initial_connection_window_size = {
-            let val = (ram_gb * 256 * KB) as u32;
-            if val < MB as u32 {
-                MB as u32
-            } else if val > 2 * MB as u32 {
-                2 * MB as u32
+        let stream_win_bytes = {
+            let val = ram / 8192;
+            if val < 256 * KB {
+                256 * KB
+            } else if val > 4 * MB {
+                4 * MB
             } else {
                 val
+            }
+        };
+        let h2_initial_stream_window_size = stream_win_bytes as u32;
+
+        let h2_initial_connection_window_size = {
+            let conn_mult = {
+                let m = cores * 2;
+                if m < 4 {
+                    4
+                } else if m > 16 {
+                    16
+                } else {
+                    m
+                }
+            };
+            let val = stream_win_bytes * conn_mult;
+            if val < 2 * MB {
+                (2 * MB) as u32
+            } else if val > 64 * MB {
+                (64 * MB) as u32
+            } else {
+                val as u32
             }
         };
 

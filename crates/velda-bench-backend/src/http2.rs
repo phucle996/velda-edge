@@ -35,6 +35,11 @@ impl Http2Router {
                         Ok::<_, std::convert::Infallible>(dispatch(req, false).await)
                     });
                     let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .initial_stream_window_size(4 * 1024 * 1024)
+                        .initial_connection_window_size(32 * 1024 * 1024)
+                        .max_frame_size(128 * 1024)
+                        .max_concurrent_streams(1024)
+                        .max_send_buf_size(4 * 1024 * 1024)
                         .serve_connection(io, service)
                         .await;
                 });
@@ -60,6 +65,11 @@ impl Http2Router {
                                 Ok::<_, std::convert::Infallible>(dispatch(req, true).await)
                             });
                             let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                                .initial_stream_window_size(4 * 1024 * 1024)
+                                .initial_connection_window_size(32 * 1024 * 1024)
+                                .max_frame_size(128 * 1024)
+                                .max_concurrent_streams(1024)
+                                .max_send_buf_size(4 * 1024 * 1024)
                                 .serve_connection(io, service)
                                 .await;
                         }

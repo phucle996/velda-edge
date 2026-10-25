@@ -314,10 +314,21 @@ impl Http2Upstream {
                 continue;
             }
 
-            if !self
-                .pool
-                .has_headroom_for_lane(&addr, lane, self.max_concurrent_streams)
+            let existing = self.pool.connection_count_for_lane(&addr, lane);
+            let min_warm = 1;
+            let to_establish = if existing < min_warm {
+                min_warm - existing
+            } else if existing < self.max_connections_per_key
+                && !self
+                    .pool
+                    .has_headroom_for_lane(&addr, lane, self.max_concurrent_streams)
             {
+                1
+            } else {
+                0
+            };
+
+            for _ in 0..to_establish {
                 let tls = self
                     .tls
                     .as_ref()
@@ -349,6 +360,7 @@ impl Http2Upstream {
                     }
                     Err(e) => {
                         tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/2");
+                        break;
                     }
                 }
             }

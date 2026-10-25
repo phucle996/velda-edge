@@ -367,10 +367,16 @@ impl Http2StreamSender {
 
     /// Sends a DATA frame chunk downstream with RFC 9113 flow-control backpressure.
     pub async fn send_chunk(&mut self, mut chunk: Bytes) -> Result<(), Http2Error> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let avail = self.send_stream.capacity();
+        if avail < chunk.len() {
+            self.send_stream.reserve_capacity(chunk.len() - avail);
+        }
         while !chunk.is_empty() {
             let available = self.send_stream.capacity();
             if available == 0 {
-                self.send_stream.reserve_capacity(chunk.len().max(65_536));
                 let res = std::future::poll_fn(|cx| self.send_stream.poll_capacity(cx)).await;
                 match res {
                     Some(Ok(_)) => {}
@@ -386,10 +392,6 @@ impl Http2StreamSender {
             let to_send = chunk.len().min(available);
             let slice = chunk.split_to(to_send);
             self.send_stream.send_data(slice, false)?;
-
-            if self.send_stream.capacity() < 32_768 && !chunk.is_empty() {
-                self.send_stream.reserve_capacity(chunk.len().max(65_536));
-            }
         }
         Ok(())
     }

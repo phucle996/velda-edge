@@ -481,16 +481,7 @@ async fn serve_http2_stream(
         return;
     };
 
-    let is_chunked = !receiver.is_end_stream()
-        && (req_head.headers.get(http::header::CONTENT_LENGTH).is_none()
-            || req_head
-                .headers
-                .get(http::header::TRANSFER_ENCODING)
-                .is_some_and(|te| {
-                    te.as_bytes()
-                        .windows(b"chunked".len())
-                        .any(|w| w.eq_ignore_ascii_case(b"chunked"))
-                }));
+    let has_upload_body = !receiver.is_end_stream();
     let is_sse = req_head.headers.get(http::header::ACCEPT).is_some_and(|a| {
         a.as_bytes()
             .windows(b"text/event-stream".len())
@@ -498,7 +489,8 @@ async fn serve_http2_stream(
     });
 
     match upstream_target.as_ref() {
-        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http2PipeStrategy::Buffered => {
                 pipe::buffered_h2_h2::serve(
                     req_head, receiver, responder, meta, config, upstream, &plan,
@@ -524,7 +516,8 @@ async fn serve_http2_stream(
                 .await;
             }
         },
-        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http1(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http1PipeStrategy::Buffered => {
                 pipe::buffered_h2_h1::serve(req_head, receiver, responder, meta, upstream, &plan)
                     .await;
@@ -546,7 +539,8 @@ async fn serve_http2_stream(
                     .await;
             }
         },
-        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(is_chunked, is_sse) {
+        HttpUpstream::Http3(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
+        {
             Http3PipeStrategy::Buffered => {
                 pipe::buffered_h2_h3::serve(req_head, receiver, responder, meta, upstream, &plan)
                     .await;

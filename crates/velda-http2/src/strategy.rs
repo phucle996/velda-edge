@@ -35,22 +35,7 @@ impl Http2PipeStrategy {
     #[inline]
     pub fn effective(self, is_chunked: bool, is_sse: bool) -> Self {
         match self {
-            Self::Buffered => Self::Buffered,
-            Self::ServerStream => {
-                if is_sse {
-                    Self::ServerStream
-                } else {
-                    Self::Buffered
-                }
-            }
-            Self::ClientStream => {
-                if is_chunked {
-                    Self::ClientStream
-                } else {
-                    Self::Buffered
-                }
-            }
-            Self::Duplex => {
+            Self::Buffered => {
                 if is_chunked && is_sse {
                     Self::Duplex
                 } else if is_chunked {
@@ -59,6 +44,21 @@ impl Http2PipeStrategy {
                     Self::ServerStream
                 } else {
                     Self::Buffered
+                }
+            }
+            Self::ServerStream => Self::ServerStream,
+            Self::ClientStream => {
+                if is_chunked {
+                    Self::ClientStream
+                } else {
+                    Self::Buffered
+                }
+            }
+            Self::Duplex => {
+                if is_chunked {
+                    Self::Duplex
+                } else {
+                    Self::ServerStream
                 }
             }
         }

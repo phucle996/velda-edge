@@ -56,17 +56,6 @@ const fn clamp_usize(val: usize, min: usize, max: usize) -> usize {
 }
 
 #[inline]
-const fn clamp_u32(val: u32, min: u32, max: u32) -> u32 {
-    if val < min {
-        min
-    } else if val > max {
-        max
-    } else {
-        val
-    }
-}
-
-#[inline]
 const fn max_usize(a: usize, b: usize) -> usize {
     if a > b { a } else { b }
 }
@@ -88,18 +77,23 @@ impl Http2Config {
 
         let cores = max_usize(cores, 1);
 
-        // 1. Max concurrent streams: (cores * 64).clamp(128, 512)
-        let max_concurrent_streams = clamp_u32((cores * 64) as u32, 128, 512);
+        // 1. Max concurrent streams: (cores * 64).clamp(128, 1024)
+        let max_concurrent_streams = clamp_usize(cores * 64, 128, 1024) as u32;
 
-        // 2. Initial stream window (receive): 65535 (RFC 9113 standard)
-        let initial_stream_window_size = 65535;
+        // 2. Initial stream window (receive): (ram_bytes / 8192).clamp(256 KB, 4 MB)
+        //    Eliminates the 65,535-byte RFC floor stall on >=64KB chunks while scaling smoothly with RAM.
+        let stream_win_bytes = clamp_usize(ram_bytes / 8192, 256 * KB, 4 * MB);
+        let initial_stream_window_size = stream_win_bytes as u32;
 
-        // 3. Initial connection window: (ram_bytes / 16384).clamp(1 MB, 2 MB)
+        // 3. Initial connection window: scales with both stream window (RAM) and core concurrency:
+        //    (stream_win_bytes * (cores * 2).clamp(4, 16)).clamp(2 MB, 64 MB)
+        let conn_win_mult = clamp_usize(cores * 2, 4, 16);
         let initial_connection_window_size =
-            clamp_u32((ram_bytes / 16384) as u32, 1024 * 1024, 2 * 1024 * 1024);
+            clamp_usize(stream_win_bytes * conn_win_mult, 2 * MB, 64 * MB) as u32;
 
-        // 4. Max send buffer size: (ram_bytes / 65536).clamp(64 KB, 128 KB)
-        let max_send_buffer_size = clamp_usize(ram_bytes / 65536, 64 * KB, 128 * KB);
+        // 4. Max send buffer size: matches stream window [256 KB, 4 MB] so outbound h2 send capacity
+        //    never throttles streams when peer flow-control window is open.
+        let max_send_buffer_size = stream_win_bytes;
 
         // 5. Max body size for buffered requests: (ram_bytes / 256).clamp(8 MB, 64 MB)
         let max_body_size = clamp_usize(ram_bytes / 256, 8 * MB, 64 * MB);
@@ -110,14 +104,14 @@ impl Http2Config {
         // 7. Max headers count: clamped to [32, 96]
         let max_headers = clamp_usize(cores * 16, 32, 96);
 
-        // 8. Idle timeout and safety limits
+        // 8. Idle timeout, frame payload ceiling [64 KB, 256 KB], and safety limits
         let idle_timeout_ms = 30_000;
-        let max_frame_size = 64 * 1024;
+        let max_frame_size = clamp_usize(ram_bytes / 131_072, 64 * KB, 256 * KB) as u32;
         let max_header_list_size = max_header_size as u32;
 
-        let max_consecutive_resets = clamp_u32((cores * 200) as u32, 200, 2000);
-        let max_pending_control_frames = clamp_u32((cores * 100) as u32, 100, 1000);
-        let max_continuation_frames = clamp_u32((cores * 4) as u32, 8, 32);
+        let max_consecutive_resets = clamp_usize(cores * 200, 200, 2000) as u32;
+        let max_pending_control_frames = clamp_usize(cores * 100, 100, 1000) as u32;
+        let max_continuation_frames = clamp_usize(cores * 4, 8, 32) as u32;
 
         Self {
             max_body_size,
@@ -275,21 +269,27 @@ mod tests {
     fn test_from_hardware_continuous_scaling() {
         let edge_2c_4g = Http2Config::from_hardware(2, 4 * 1024 * 1024 * 1024);
         assert_eq!(edge_2c_4g.max_concurrent_streams, 128);
-        assert_eq!(edge_2c_4g.initial_connection_window_size, 1024 * 1024);
-        assert_eq!(edge_2c_4g.initial_stream_window_size, 65535);
+        assert_eq!(edge_2c_4g.initial_stream_window_size, 512 * 1024);
+        assert_eq!(edge_2c_4g.initial_connection_window_size, 2 * 1024 * 1024);
+        assert_eq!(edge_2c_4g.max_send_buffer_size, 512 * 1024);
+        assert_eq!(edge_2c_4g.max_frame_size, 64 * 1024);
 
         let vm_4c_16g = Http2Config::from_hardware(4, 16 * 1024 * 1024 * 1024);
         assert_eq!(vm_4c_16g.max_concurrent_streams, 256);
-        assert_eq!(vm_4c_16g.initial_connection_window_size, 1024 * 1024);
-        assert_eq!(vm_4c_16g.initial_stream_window_size, 65535);
+        assert_eq!(vm_4c_16g.initial_stream_window_size, 2 * 1024 * 1024);
+        assert_eq!(vm_4c_16g.initial_connection_window_size, 16 * 1024 * 1024);
+        assert_eq!(vm_4c_16g.max_send_buffer_size, 2 * 1024 * 1024);
+        assert_eq!(vm_4c_16g.max_frame_size, 128 * 1024);
 
         let server_64c_128g = Http2Config::from_hardware(64, 128 * 1024 * 1024 * 1024);
-        assert_eq!(server_64c_128g.max_concurrent_streams, 512);
+        assert_eq!(server_64c_128g.max_concurrent_streams, 1024);
+        assert_eq!(server_64c_128g.initial_stream_window_size, 4 * 1024 * 1024);
         assert_eq!(
             server_64c_128g.initial_connection_window_size,
-            2 * 1024 * 1024
+            64 * 1024 * 1024
         );
-        assert_eq!(server_64c_128g.initial_stream_window_size, 65535);
+        assert_eq!(server_64c_128g.max_send_buffer_size, 4 * 1024 * 1024);
+        assert_eq!(server_64c_128g.max_frame_size, 256 * 1024);
     }
 
     #[test]
@@ -297,8 +297,9 @@ mod tests {
         let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
         let config = Http2Config::for_topology(&topo);
         assert_eq!(config.max_concurrent_streams, 256);
-        assert_eq!(config.initial_connection_window_size, 1024 * 1024);
-        assert_eq!(config.initial_stream_window_size, 65535);
+        assert_eq!(config.initial_stream_window_size, 1024 * 1024);
+        assert_eq!(config.initial_connection_window_size, 8 * 1024 * 1024);
+        assert_eq!(config.max_send_buffer_size, 1024 * 1024);
         assert_eq!(config.max_body_size, 32 * 1024 * 1024);
         assert_eq!(config.max_frame_size, 64 * 1024);
     }

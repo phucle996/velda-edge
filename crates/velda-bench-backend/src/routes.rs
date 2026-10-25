@@ -323,7 +323,7 @@ pub async fn dispatch(req: Request<Incoming>, is_tls: bool) -> Response<RespBody
     // Reads chunks as they arrive and echoes them back in real time!
     // ─────────────────────────────────────────────────────────────────────────
     if method == Method::POST && (path.contains("duplex") || path.contains("echo")) {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(16);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(256);
         let mut in_body = req.into_body();
 
         tokio::spawn(async move {

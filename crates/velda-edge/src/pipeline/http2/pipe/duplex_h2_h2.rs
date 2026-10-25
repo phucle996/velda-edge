@@ -81,20 +81,33 @@ pub async fn serve(
         };
         velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
         let http_req = req_head.into_http_request();
-        let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
+        let is_empty_upload = receiver.is_end_stream();
+        let (response_fut, mut send_stream) = client.send_request(http_req, is_empty_upload)?;
 
-        let upload_reserve = config.initial_stream_window_size as usize;
-        let upload_coalesce = (upload_reserve / 2).max(16_384);
-        let upload_low_wm = (upload_reserve / 4).max(8_192);
+        let upload_coalesce = 65_536;
 
         let upload_task = async move {
-            send_stream.reserve_capacity(upload_reserve);
-
-            while let Some(mut chunk) = receiver.recv_coalesced_chunk(upload_coalesce).await? {
+            if is_empty_upload {
+                return Ok::<(), Http2Error>(());
+            }
+            let mut sent_end_stream = false;
+            while !receiver.is_end_stream() {
+                let Some(mut chunk) = receiver.recv_coalesced_chunk(upload_coalesce).await? else {
+                    break;
+                };
+                if chunk.is_empty() {
+                    if receiver.is_end_stream() {
+                        break;
+                    }
+                    continue;
+                }
+                let avail = send_stream.capacity();
+                if avail < chunk.len() {
+                    send_stream.reserve_capacity(chunk.len() - avail);
+                }
                 while !chunk.is_empty() {
                     let available = send_stream.capacity();
                     if available == 0 {
-                        send_stream.reserve_capacity(chunk.len().max(upload_reserve));
                         match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
                             Some(Ok(_)) => {}
                             Some(Err(err)) => return Err(err.into()),
@@ -107,17 +120,23 @@ pub async fn serve(
                     }
 
                     let to_send = chunk.len().min(available);
+                    let is_last = receiver.is_end_stream() && to_send == chunk.len();
                     let slice = chunk.split_to(to_send);
-                    if send_stream.send_data(slice, false).is_err() {
+                    if send_stream.send_data(slice, is_last).is_err() {
                         return Ok(());
                     }
-
-                    if send_stream.capacity() < upload_low_wm {
-                        send_stream.reserve_capacity(upload_reserve);
+                    if is_last {
+                        sent_end_stream = true;
+                        break;
                     }
                 }
+                if sent_end_stream {
+                    break;
+                }
             }
-            let _ = send_stream.send_data(Bytes::new(), true);
+            if !sent_end_stream {
+                let _ = send_stream.send_data(Bytes::new(), true);
+            }
             Ok::<(), Http2Error>(())
         };
 
@@ -151,14 +170,9 @@ pub async fn serve(
 
             let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
 
-            let batch_threshold =
-                (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
+            let batch_threshold = 65_536;
             let mut total_bytes = 0;
             let mut unreleased_bytes = 0;
-            let coalesce_limit =
-                (config.initial_stream_window_size as usize / 8).clamp(16_384, 65_536);
-            let zero_copy_threshold = (coalesce_limit / 4).clamp(8_192, 16_384);
-            let mut pending_buf = bytes::BytesMut::with_capacity(coalesce_limit);
 
             while let Some(chunk) = body_stream.data().await {
                 let data = chunk?;
@@ -173,49 +187,20 @@ pub async fn serve(
                     return Err(Http2Error::PayloadTooLarge(total_bytes));
                 }
 
-                if pending_buf.is_empty() && len >= zero_copy_threshold {
-                    if sender.send_chunk(data).await.is_err() {
-                        tracing::debug!(
-                            "Downstream client disconnected during H2 duplex streaming"
-                        );
-                        let _ = body_stream
-                            .flow_control()
-                            .release_capacity(unreleased_bytes);
-                        return Ok(());
-                    }
-                } else {
-                    pending_buf.extend_from_slice(&data);
-                    if pending_buf.len() >= coalesce_limit {
-                        let to_send = pending_buf.split().freeze();
-                        if sender.send_chunk(to_send).await.is_err() {
-                            tracing::debug!(
-                                "Downstream client disconnected during H2 duplex streaming"
-                            );
-                            let _ = body_stream
-                                .flow_control()
-                                .release_capacity(unreleased_bytes);
-                            return Ok(());
-                        }
-                    }
-                }
-
                 if unreleased_bytes >= batch_threshold {
                     let _ = body_stream
                         .flow_control()
                         .release_capacity(unreleased_bytes);
                     unreleased_bytes = 0;
                 }
-            }
 
-            if !pending_buf.is_empty() {
-                let to_send = pending_buf.freeze();
-                if sender.send_chunk(to_send).await.is_err() {
-                    tracing::debug!(
-                        "Downstream client disconnected during H2 duplex streaming tail"
-                    );
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
+                if !data.is_empty() && sender.send_chunk(data).await.is_err() {
+                    tracing::debug!("Downstream client disconnected during H2 duplex streaming");
+                    if unreleased_bytes > 0 {
+                        let _ = body_stream
+                            .flow_control()
+                            .release_capacity(unreleased_bytes);
+                    }
                     return Ok(());
                 }
             }
@@ -230,18 +215,9 @@ pub async fn serve(
             Ok(())
         };
 
-        let mut upload_pinned = std::pin::pin!(upload_task);
-        let mut download_pinned = std::pin::pin!(download_task);
-
-        tokio::select! {
-            res = &mut download_pinned => {
-                res?;
-            }
-            res = &mut upload_pinned => {
-                res?;
-                download_pinned.await?;
-            }
-        }
+        let (up_res, down_res) = tokio::join!(upload_task, download_task);
+        up_res?;
+        down_res?;
         Ok::<(), Http2Error>(())
     }
     .await;
