@@ -181,8 +181,8 @@ impl<LB: LoadBalancer> Upstream<LB> {
     // Public Acquisition & Execution Entrypoints
     // ------------------------------------------------------------------------
 
-    /// Selects a healthy endpoint address using the configured load balancer.
-    pub fn select_endpoint(&self) -> Result<SocketAddr> {
+    /// Selects a healthy endpoint address using the configured load balancer and selection context.
+    pub fn select_endpoint_with_context(&self, ctx: &SelectionContext<'_>) -> Result<SocketAddr> {
         let endpoints = self.discovery.current_endpoints();
         let all_eps = endpoints.all_endpoints();
         if all_eps.is_empty() {
@@ -204,10 +204,16 @@ impl<LB: LoadBalancer> Upstream<LB> {
 
         let selected = self
             .balancer
-            .select(usable, &SelectionContext::NONE)
+            .select(usable, ctx)
             .ok_or_else(|| UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)))?;
 
         Ok(selected.address)
+    }
+
+    /// Selects a healthy endpoint address using the configured load balancer.
+    #[inline]
+    pub fn select_endpoint(&self) -> Result<SocketAddr> {
+        self.select_endpoint_with_context(&SelectionContext::NONE)
     }
 
     /// Executes a protocol-specific asynchronous operation against a healthy target endpoint.

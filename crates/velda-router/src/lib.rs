@@ -14,7 +14,7 @@ pub mod path;
 pub mod router;
 
 pub use error::RouterError;
-pub use l4::{TcpRoute, TcpRouter, UdpRoute, UdpRouter};
+pub use l4::{TcpRoute, TcpRouter, UdpRoute, UdpRouter, UdpSessionAffinity};
 pub use l7::{
     GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router,
     Http2Route, Http2RouteRequest, Http2Router, Http3Route, Http3RouteRequest, Http3Router,

@@ -30,6 +30,7 @@ The `routes.json` file configures the razor-thin in-memory routing waist of Veld
 | `match` | `object` | Yes | Matching criteria (Host, Path, Prefix, Protocol). |
 | `timeouts` | `object` | No | Route-specific timeout overrides. |
 | `upstream` | `string` | Yes | ID of the target logical upstream pool in `upstreams.json`. |
+| `session_affinity` | `object` | No | Strictly for `kind: "l4"` UDP routes. Configures stateful affinity (`{"type": "client_ip"}` or `{"type": "token", "offset": 0, "len": 8}`) for Game Tickets & NAT rebinding resilience. |
 | `plugins` | `object` | No | Phased plugin execution chains (`pre_upstream` and `post_response`). |
 
 ---

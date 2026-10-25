@@ -136,6 +136,7 @@ mod tests {
             match_rule: RouteMatch::default(),
             timeouts: RouteTimeouts::default(),
             upstream: upstream.into(),
+            session_affinity: None,
             plugins: vec![],
         }
     }

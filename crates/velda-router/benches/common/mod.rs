@@ -253,6 +253,7 @@ pub fn generate_realistic_workload(
                 downstream_idle_ms: Some(30000),
             },
             upstream: up_id,
+            session_affinity: None,
             plugins: vec!["rate-limit".into(), "telemetry".into()],
         });
     }

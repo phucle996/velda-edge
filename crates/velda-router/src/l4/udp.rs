@@ -25,8 +25,65 @@ pub struct UdpRoute {
     /// If `None`, UDP is unidirectional (1 chiều fire-and-forget).
     /// If `Some`, UDP is bidirectional (2 chiều stateful proxying).
     pub udp_idle_timeout: Option<Duration>,
+    /// Session affinity strategy (pure L4 client peer address vs opt-in payload token).
+    pub session_affinity: UdpSessionAffinity,
     /// Plugin hook identifiers associated with this route.
     pub plugins: Vec<String>,
+}
+
+/// Session affinity strategy for L4 UDP stateful routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UdpSessionAffinity {
+    /// Pure L4 default: Session key is (listener_id, client_addr). Zero payload inspection.
+    #[default]
+    ClientAddr,
+    /// Opt-in Token Affinity (Game Ticket / IoT / QUIC Connection ID):
+    /// Extracts a token of `len` bytes (1..=16) at byte `offset` in the UDP payload.
+    /// Used as the session table key (supporting NAT rebinding) and deterministic LB hash key.
+    PayloadToken { offset: u16, len: u8 },
+}
+
+impl UdpSessionAffinity {
+    /// Extracts a 64-bit session token from the UDP payload if enabled and data is sufficient.
+    #[inline]
+    pub fn extract_token(&self, payload: &[u8]) -> Option<u64> {
+        match self {
+            Self::ClientAddr => None,
+            Self::PayloadToken { offset, len } => {
+                let start = *offset as usize;
+                let end = start.checked_add(*len as usize)?;
+                if payload.len() >= end && *len > 0 && *len <= 16 {
+                    let slice = &payload[start..end];
+                    match slice.len() {
+                        8 => {
+                            let buf: [u8; 8] = slice.try_into().ok()?;
+                            Some(u64::from_le_bytes(buf))
+                        }
+                        4 => {
+                            let buf: [u8; 4] = slice.try_into().ok()?;
+                            Some(u32::from_le_bytes(buf) as u64)
+                        }
+                        1..=7 => {
+                            let mut buf = [0u8; 8];
+                            buf[..slice.len()].copy_from_slice(slice);
+                            Some(u64::from_le_bytes(buf))
+                        }
+                        9..=16 => {
+                            // Fast 64-bit FNV-1a hash
+                            let mut hash: u64 = 0xcbf29ce484222325;
+                            for &byte in slice {
+                                hash = (hash ^ (byte as u64)).wrapping_mul(0x100000001b3);
+                            }
+                            Some(hash)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl UdpRoute {
@@ -43,6 +100,7 @@ impl UdpRoute {
             upstream_id,
             upstream_name: upstream_name.into(),
             udp_idle_timeout: None,
+            session_affinity: UdpSessionAffinity::ClientAddr,
             plugins: Vec::new(),
         }
     }
@@ -50,6 +108,12 @@ impl UdpRoute {
     /// Sets the optional idle timeout for stateful bidirectional L4 UDP sessions.
     pub fn with_udp_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.udp_idle_timeout = timeout;
+        self
+    }
+
+    /// Sets the session affinity strategy (pure L4 peer address vs opt-in payload token).
+    pub fn with_session_affinity(mut self, affinity: UdpSessionAffinity) -> Self {
+        self.session_affinity = affinity;
         self
     }
 

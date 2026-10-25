@@ -308,6 +308,7 @@ fn bench_l4_udp_queue_saturation_storm() {
     let key = UdpSessionKey {
         listener_id: Arc::from("listener_udp_saturation"),
         client_addr,
+        token: None,
     };
 
     // 1. Establish session and fill channel buffer (capacity = 128)
@@ -490,6 +491,7 @@ fn bench_depleted_upstream_fail_fast_storm() {
         let dummy_key = UdpSessionKey {
             listener_id: Arc::clone(&listener_id),
             client_addr: SocketAddr::from(([127, 0, 0, (s + 1) as u8], 9999)),
+            token: None,
         };
         let _ = table.get_or_create(&dummy_key, cap_b);
         table.remove(&dummy_key);
@@ -505,6 +507,7 @@ fn bench_depleted_upstream_fail_fast_storm() {
         let key = UdpSessionKey {
             listener_id: Arc::clone(&listener_id),
             client_addr,
+            token: None,
         };
 
         // Mimic hardened handle_l4_udp flow:

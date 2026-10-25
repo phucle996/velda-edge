@@ -54,6 +54,14 @@ pub fn build_router(
 
             match protocol_str.to_ascii_lowercase().as_str() {
                 "tcp" => {
+                    if route.session_affinity.is_some() {
+                        return Err(EdgeError::InvalidConfig {
+                            detail: format!(
+                                "route '{}': session_affinity is strictly for L4 UDP routes and cannot be applied to TCP",
+                                route.id
+                            ),
+                        });
+                    }
                     let tcp_route =
                         TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
                             .with_plugins(route.plugins.clone());
@@ -72,9 +80,20 @@ pub fn build_router(
                         Some(std::time::Duration::from_millis(ms))
                     };
 
+                    let session_affinity = match &route.session_affinity {
+                        Some(aff) if aff.is_token() => {
+                            velda_router::UdpSessionAffinity::PayloadToken {
+                                offset: aff.offset,
+                                len: aff.len,
+                            }
+                        }
+                        _ => velda_router::UdpSessionAffinity::ClientAddr,
+                    };
+
                     let udp_route =
                         UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
                             .with_udp_idle_timeout(udp_idle_timeout)
+                            .with_session_affinity(session_affinity)
                             .with_plugins(route.plugins.clone());
 
                     builder = builder.add_udp_route(udp_route);
@@ -89,6 +108,14 @@ pub fn build_router(
                 }
             }
         } else if route.kind.eq_ignore_ascii_case("l7") {
+            if route.session_affinity.is_some() {
+                return Err(EdgeError::InvalidConfig {
+                    detail: format!(
+                        "route '{}': session_affinity is strictly for L4 UDP routes and cannot be applied to L7",
+                        route.id
+                    ),
+                });
+            }
             let route_id = RouteId::new(hash_id_to_u32(&route.id));
             let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
 
@@ -430,6 +457,7 @@ mod tests {
                 },
                 timeouts: RouteTimeouts::default(),
                 upstream: "postgres-backend".into(),
+                session_affinity: None,
                 plugins: vec!["rate-limit".into()],
             },
             RouteConfig {
@@ -442,6 +470,22 @@ mod tests {
                 },
                 timeouts: RouteTimeouts::default(),
                 upstream: "dns-backend".into(),
+                session_affinity: None,
+                plugins: vec![],
+            },
+            RouteConfig {
+                id: "game-route".into(),
+                kind: "l4".into(),
+                listener: "game-in".into(),
+                match_rule: RouteMatch {
+                    protocol: Some("udp".into()),
+                    ..Default::default()
+                },
+                timeouts: RouteTimeouts::default(),
+                upstream: "dns-backend".into(),
+                session_affinity: Some(velda_sync::post_sync::route::SessionAffinityConfig::token(
+                    0, 8,
+                )),
                 plugins: vec![],
             },
             RouteConfig {
@@ -454,6 +498,7 @@ mod tests {
                 },
                 timeouts: RouteTimeouts::default(),
                 upstream: "http-backend".into(),
+                session_affinity: None,
                 plugins: vec![],
             },
         ];
@@ -527,6 +572,16 @@ mod tests {
         let udp = router.route_udp("dns-in").unwrap();
         assert_eq!(udp.listener_id, "dns-in");
         assert_eq!(udp.upstream_name, "dns-backend");
+        assert_eq!(
+            udp.session_affinity,
+            velda_router::UdpSessionAffinity::ClientAddr
+        );
+
+        let game_udp = router.route_udp("game-in").unwrap();
+        assert_eq!(
+            game_udp.session_affinity,
+            velda_router::UdpSessionAffinity::PayloadToken { offset: 0, len: 8 }
+        );
 
         // Verify L7 HTTP/1.1 route compilation
         let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");

@@ -55,6 +55,15 @@ impl UdpUpstream {
         self.inner.select_endpoint().ok()
     }
 
+    /// Selects an eligible backend endpoint via configured load balancing with contextual affinity attributes.
+    #[inline]
+    pub fn select_target_with_context(
+        &self,
+        ctx: &velda_lb::SelectionContext<'_>,
+    ) -> Option<SocketAddr> {
+        self.inner.select_endpoint_with_context(ctx).ok()
+    }
+
     /// Connects an ephemeral UDP socket to the given target endpoint using pre-compiled acceleration.
     #[inline]
     pub fn connect_socket(

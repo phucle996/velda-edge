@@ -163,12 +163,99 @@ async fn send_batch_to_socket(socket: &tokio::net::UdpSocket, batch: &[bytes::By
 }
 
 /// Unique identifier for an active client flow in the L4 UDP session table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct UdpSessionKey {
     /// Ingress listener identifier accepting the client flow.
     pub listener_id: Arc<str>,
     /// Client remote socket address.
     pub client_addr: SocketAddr,
+    /// Opt-in payload token (e.g. Game ticket / Match ID / QUIC connection ID).
+    pub token: Option<u64>,
+}
+
+impl UdpSessionKey {
+    /// Creates a pure L4 session key identified strictly by listener and client address.
+    #[inline]
+    pub fn peer(listener_id: Arc<str>, client_addr: SocketAddr) -> Self {
+        Self {
+            listener_id,
+            client_addr,
+            token: None,
+        }
+    }
+
+    /// Creates an opt-in session key identified by listener and payload session token.
+    #[inline]
+    pub fn token(listener_id: Arc<str>, client_addr: SocketAddr, token: u64) -> Self {
+        Self {
+            listener_id,
+            client_addr,
+            token: Some(token),
+        }
+    }
+}
+
+impl PartialEq for UdpSessionKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.listener_id, &other.listener_id)
+            || self.listener_id == other.listener_id)
+            && match (self.token, other.token) {
+                (Some(t1), Some(t2)) => t1 == t2,
+                (None, None) => self.client_addr == other.client_addr,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for UdpSessionKey {}
+
+impl Hash for UdpSessionKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.listener_id.hash(state);
+        match self.token {
+            Some(token) => {
+                1u8.hash(state);
+                token.hash(state);
+            }
+            None => {
+                0u8.hash(state);
+                self.client_addr.hash(state);
+            }
+        }
+    }
+}
+
+/// Active session entry storing the upstream delivery channel and dynamic peer address.
+#[derive(Clone)]
+pub struct UdpSessionEntry {
+    /// Channel sender transmitting incoming datagrams to the session worker task.
+    pub sender: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    /// Dynamic client peer address (supports seamless NAT rebinding and network migration).
+    pub peer: Arc<parking_lot::RwLock<SocketAddr>>,
+}
+
+impl UdpSessionEntry {
+    /// Creates a new session entry with the initial client peer address.
+    #[inline]
+    pub fn new(sender: tokio::sync::mpsc::Sender<bytes::Bytes>, peer_addr: SocketAddr) -> Self {
+        Self {
+            sender,
+            peer: Arc::new(parking_lot::RwLock::new(peer_addr)),
+        }
+    }
+
+    /// Updates the client peer address if it has changed (e.g. NAT rebinding).
+    #[inline]
+    pub fn update_peer_if_changed(&self, new_addr: SocketAddr) {
+        if *self.peer.read() != new_addr {
+            let mut lock = self.peer.write();
+            if *lock != new_addr {
+                *lock = new_addr;
+            }
+        }
+    }
 }
 
 /// Result of acquiring or registering a session slot in [`UdpSessionTable`].
@@ -186,8 +273,7 @@ pub enum SessionAcquisition {
     CapacityExceeded,
 }
 
-pub type UdpSessionShard =
-    RwLock<FxHashMap<UdpSessionKey, tokio::sync::mpsc::Sender<bytes::Bytes>>>;
+pub type UdpSessionShard = RwLock<FxHashMap<UdpSessionKey, UdpSessionEntry>>;
 
 /// In-memory sharded session table tracking active bidirectional L4 UDP flows with zero cross-client contention.
 pub struct UdpSessionTable {
@@ -259,8 +345,9 @@ impl UdpSessionTable {
 
         // 1. Read-lock fast path: return active session without allocating
         if let Ok(guard) = shard.read() {
-            if let Some(sender) = guard.get(key).filter(|s| !s.is_closed()) {
-                return SessionAcquisition::Existing(sender.clone());
+            if let Some(entry) = guard.get(key).filter(|e| !e.sender.is_closed()) {
+                entry.update_peer_if_changed(key.client_addr);
+                return SessionAcquisition::Existing(entry.sender.clone());
             }
             if !guard.contains_key(key) && self.active_sessions.load(Ordering::Acquire) >= cap {
                 return SessionAcquisition::CapacityExceeded;
@@ -272,8 +359,9 @@ impl UdpSessionTable {
             return SessionAcquisition::CapacityExceeded;
         };
 
-        if let Some(sender) = guard.get(key).filter(|s| !s.is_closed()) {
-            return SessionAcquisition::Existing(sender.clone());
+        if let Some(entry) = guard.get(key).filter(|e| !e.sender.is_closed()) {
+            entry.update_peer_if_changed(key.client_addr);
+            return SessionAcquisition::Existing(entry.sender.clone());
         }
 
         let is_new = !guard.contains_key(key);
@@ -285,8 +373,38 @@ impl UdpSessionTable {
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
-        guard.insert(key.clone(), tx.clone());
+        let entry = UdpSessionEntry::new(tx.clone(), key.client_addr);
+        guard.insert(key.clone(), entry);
         SessionAcquisition::Created { sender: tx, rx }
+    }
+
+    /// Fast-path packet forwarding under the shard read lock without cloning `Sender` or `Arc<RwLock<SocketAddr>>`.
+    ///
+    /// Returns:
+    /// - `Ok(true)`: Datagram delivered to the active session channel and peer updated if changed.
+    /// - `Ok(false)`: Session exists and is alive, but its 128-slot ring buffer is full (drop packet).
+    /// - `Err(data)`: Session does not exist or its channel is closed; returns ownership of `data` for new session creation.
+    #[inline]
+    pub fn try_forward(
+        &self,
+        key: &UdpSessionKey,
+        client_addr: SocketAddr,
+        data: bytes::Bytes,
+    ) -> Result<bool, bytes::Bytes> {
+        let Ok(guard) = self.shard_for(key).read() else {
+            return Err(data);
+        };
+        let Some(entry) = guard.get(key) else {
+            return Err(data);
+        };
+        match entry.sender.try_send(data) {
+            Ok(()) => {
+                entry.update_peer_if_changed(client_addr);
+                Ok(true)
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(recovered)) => Err(recovered),
+        }
     }
 
     /// Retrieves an active sender channel for the given session key.
@@ -294,18 +412,51 @@ impl UdpSessionTable {
         &self,
         key: &UdpSessionKey,
     ) -> Option<tokio::sync::mpsc::Sender<bytes::Bytes>> {
-        let sender = self.shard_for(key).read().ok()?.get(key).cloned()?;
-        if sender.is_closed() {
+        let entry = self.shard_for(key).read().ok()?.get(key).cloned()?;
+        if entry.sender.is_closed() {
             None
         } else {
-            Some(sender)
+            Some(entry.sender)
         }
     }
 
-    /// Inserts an active session into the appropriate shard.
+    /// Retrieves the active session entry for the given session key.
+    pub fn get_session(&self, key: &UdpSessionKey) -> Option<UdpSessionEntry> {
+        let entry = self.shard_for(key).read().ok()?.get(key).cloned()?;
+        if entry.sender.is_closed() {
+            None
+        } else {
+            Some(entry)
+        }
+    }
+
+    /// Retrieves the shared dynamic peer address handle for the given session key.
+    pub fn get_peer(&self, key: &UdpSessionKey) -> Option<Arc<parking_lot::RwLock<SocketAddr>>> {
+        let entry = self.shard_for(key).read().ok()?.get(key).cloned()?;
+        Some(entry.peer)
+    }
+
+    /// Seamlessly updates the client peer socket address for an active session (e.g. NAT rebinding).
+    pub fn update_peer(&self, key: &UdpSessionKey, new_addr: SocketAddr) -> bool {
+        if let Some(entry) = self.get_session(key) {
+            entry.update_peer_if_changed(new_addr);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Inserts an active session into the appropriate shard (defaults peer address to key.client_addr).
     pub fn insert(&self, key: UdpSessionKey, sender: tokio::sync::mpsc::Sender<bytes::Bytes>) {
+        let peer_addr = key.client_addr;
+        let entry = UdpSessionEntry::new(sender, peer_addr);
+        self.insert_entry(key, entry);
+    }
+
+    /// Inserts an active session entry into the appropriate shard.
+    pub fn insert_entry(&self, key: UdpSessionKey, entry: UdpSessionEntry) {
         if let Ok(mut lock) = self.shard_for(&key).write()
-            && lock.insert(key, sender).is_none()
+            && lock.insert(key, entry).is_none()
         {
             self.active_sessions.fetch_add(1, Ordering::Release);
         }
@@ -391,27 +542,7 @@ pub async fn handle_l4_udp(
 
     let initial_data = datagram.into_bytes();
 
-    // 3. Fast Path: Check existing bidirectional session immediately.
-    // Bypasses router and upstream table lookups entirely for 99.99% of established client datagrams.
-    let key = UdpSessionKey {
-        listener_id: Arc::clone(&listener_id),
-        client_addr,
-    };
-    let session_table = get_udp_session_table();
-
-    if let Some(sender) = session_table.get_sender(&key) {
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = sender.try_send(initial_data)
-        {
-            tracing::trace!(
-                listener = %listener_id,
-                peer = %client_addr,
-                "UDP session buffer full; dropping datagram"
-            );
-        }
-        return;
-    }
-
-    // 4. Slow Path (New Session): Route evaluation & upstream selection
+    // 3. Route Resolution (O(1) in-memory lookup)
     let Some(route) = rt.router.route_udp(&listener_id) else {
         tracing::warn!(
             listener = %listener_id,
@@ -421,6 +552,31 @@ pub async fn handle_l4_udp(
         return;
     };
 
+    // 4. Session Key Construction (Opt-in Token Affinity vs Pure L4 Client Address)
+    // Move `listener_id` directly into `key` to avoid an atomic refcount increment on every packet.
+    let token = route.session_affinity.extract_token(&initial_data);
+    let key = match token {
+        Some(tok) => UdpSessionKey::token(listener_id, client_addr, tok),
+        None => UdpSessionKey::peer(listener_id, client_addr),
+    };
+    let session_table = get_udp_session_table();
+
+    // 5. Fast Path: Check existing bidirectional session immediately under shard read guard.
+    // Zero Arc clones on the hot path; updates downstream peer only after successful enqueue.
+    let initial_data = match session_table.try_forward(&key, client_addr, initial_data) {
+        Ok(true) => return,
+        Ok(false) => {
+            tracing::trace!(
+                listener = %key.listener_id,
+                peer = %client_addr,
+                "UDP session buffer full; dropping datagram"
+            );
+            return;
+        }
+        Err(recovered) => recovered,
+    };
+
+    // 6. Upstream Backend Resolution
     let Some(up) = rt
         .upstreams
         .raw
@@ -428,7 +584,7 @@ pub async fn handle_l4_udp(
         .and_then(|u| u.as_udp())
     else {
         tracing::error!(
-            listener = %listener_id,
+            listener = %key.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %client_addr,
@@ -437,10 +593,15 @@ pub async fn handle_l4_udp(
         return;
     };
 
-    // 5. Upstream Physical Endpoint Selection
-    let Some(target_addr) = up.select_target() else {
+    // 7. Upstream Physical Endpoint Selection with LB Affinity Context
+    let selection_ctx = match token {
+        Some(tok) => velda_lb::SelectionContext::with_hash(tok),
+        None => velda_lb::SelectionContext::with_client_ip(client_addr),
+    };
+
+    let Some(target_addr) = up.select_target_with_context(&selection_ctx) else {
         tracing::error!(
-            listener = %listener_id,
+            listener = %key.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %client_addr,
@@ -449,10 +610,10 @@ pub async fn handle_l4_udp(
         return;
     };
 
-    // 6. Unidirectional Mode (1 chiều): fire-and-forget datagram forwarding
+    // 8. Unidirectional Mode (1 chiều): fire-and-forget datagram forwarding
     if route.is_unidirectional() {
         tracing::debug!(
-            listener = %listener_id,
+            listener = %key.listener_id,
             target = %target_addr,
             peer = %client_addr,
             "Forwarding UDP datagram unidirectionally"
@@ -460,7 +621,7 @@ pub async fn handle_l4_udp(
         if let Err(e) = socket.send_to(&initial_data, target_addr).await {
             tracing::trace!(
                 error = %e,
-                listener = %listener_id,
+                listener = %key.listener_id,
                 target = %target_addr,
                 peer = %client_addr,
                 "Failed to forward UDP datagram (unidirectional)"
@@ -469,7 +630,7 @@ pub async fn handle_l4_udp(
         return;
     }
 
-    // 7. Bidirectional Flow: Allocate or retrieve conntrack session slot
+    // 9. Bidirectional Flow: Allocate or retrieve conntrack session slot
     let (mut rx, initial_bytes) = match session_table.get_or_create(&key, config.max_sessions) {
         SessionAcquisition::Existing(sender) => {
             // Concurrent race: another worker created the session in parallel
@@ -479,7 +640,7 @@ pub async fn handle_l4_udp(
         SessionAcquisition::Created { sender: _, rx } => (rx, initial_data),
         SessionAcquisition::CapacityExceeded => {
             tracing::trace!(
-                listener = %listener_id,
+                listener = %key.listener_id,
                 peer = %client_addr,
                 max = config.max_sessions,
                 "L4 UDP session table capacity exceeded; dropping datagram"
@@ -488,13 +649,17 @@ pub async fn handle_l4_udp(
         }
     };
 
+    let session_peer = session_table
+        .get_peer(&key)
+        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(client_addr)));
     let downstream_socket = socket.clone();
-    let session_key = key.clone();
+    let session_key = key;
 
     tracing::debug!(
-        listener = %listener_id,
+        listener = %session_key.listener_id,
         target = %target_addr,
         client = %client_addr,
+        token = ?token,
         "Established new bidirectional L4 UDP session"
     );
 
@@ -570,6 +735,7 @@ pub async fn handle_l4_udp(
 
                     let mut drained_any = false;
                     let mut fallback_packet: Option<(bytes::Bytes, Option<u16>)> = None;
+                    let current_peer = *session_peer.read();
 
                     GRO_SCRATCH.with(|cell| {
                         let mut buf = cell.borrow_mut();
@@ -579,12 +745,12 @@ pub async fn handle_l4_udp(
                             }
                             drained_any = true;
                             // Fast path: non-blocking GSO / batch send directly to downstream socket
-                            match downstream_socket.try_send_gso_aware(&buf[..n], gso_size, client_addr) {
+                            match downstream_socket.try_send_gso_aware(&buf[..n], gso_size, current_peer) {
                                 Some(Ok(_)) => {}
                                 Some(Err(e)) => {
                                     tracing::trace!(
                                         error = %e,
-                                        client = %client_addr,
+                                        client = %current_peer,
                                         "Failed forwarding UDP reply back to client"
                                     );
                                     break;
@@ -600,12 +766,12 @@ pub async fn handle_l4_udp(
 
                     if let Some((pkt, gso_size)) = fallback_packet
                         && let Err(e) = downstream_socket
-                            .send_gso_aware(&pkt, gso_size, client_addr)
+                            .send_gso_aware(&pkt, gso_size, current_peer)
                             .await
                     {
                         tracing::trace!(
                             error = %e,
-                            client = %client_addr,
+                            client = %current_peer,
                             "Failed forwarding UDP reply back to client with backpressure"
                         );
                         break;
@@ -636,8 +802,9 @@ pub async fn handle_l4_udp(
                     };
 
                     if elapsed >= limit {
+                        let current_peer = *session_peer.read();
                         tracing::debug!(
-                            client = %client_addr,
+                            client = %current_peer,
                             target = %target_addr,
                             assured,
                             "UDP L4 session timeout elapsed ({limit:?}); closing session"
@@ -659,18 +826,9 @@ mod tests {
     #[test]
     fn test_udp_session_table_capacity_enforcement() {
         let table = UdpSessionTable::with_capacity(4, 2);
-        let key1 = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:10001".parse().unwrap(),
-        };
-        let key2 = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:10002".parse().unwrap(),
-        };
-        let key3 = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:10003".parse().unwrap(),
-        };
+        let key1 = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:10001".parse().unwrap());
+        let key2 = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:10002".parse().unwrap());
+        let key3 = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:10003".parse().unwrap());
 
         let cap = table.max_sessions();
         let (_rx1, _tx1) = match table.get_or_create(&key1, cap) {
@@ -721,10 +879,7 @@ mod tests {
     #[test]
     fn test_udp_session_table_clear() {
         let table = UdpSessionTable::with_capacity(4, 10);
-        let key = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:10001".parse().unwrap(),
-        };
+        let key = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:10001".parse().unwrap());
         let cap = table.max_sessions();
         let _ = table.get_or_create(&key, cap);
         assert_eq!(table.active_session_count(), 1);
@@ -737,14 +892,8 @@ mod tests {
     fn test_udp_session_table_max_sessions_override() {
         // Table capacity is 100, but per-listener config limit is 1
         let table = UdpSessionTable::with_capacity(4, 100);
-        let key1 = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:20001".parse().unwrap(),
-        };
-        let key2 = UdpSessionKey {
-            listener_id: Arc::from("l1"),
-            client_addr: "127.0.0.1:20002".parse().unwrap(),
-        };
+        let key1 = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:20001".parse().unwrap());
+        let key2 = UdpSessionKey::peer(Arc::from("l1"), "127.0.0.1:20002".parse().unwrap());
 
         match table.get_or_create(&key1, 1) {
             SessionAcquisition::Created { .. } => {}
@@ -757,5 +906,93 @@ mod tests {
             SessionAcquisition::CapacityExceeded => {}
             _ => panic!("Expected key2 to exceed per-listener capacity"),
         }
+    }
+
+    #[test]
+    fn test_udp_session_affinity_pure_l4_default() {
+        let listener: Arc<str> = Arc::from("game-l4");
+        let client_a: SocketAddr = "10.0.0.1:50000".parse().unwrap();
+        let client_b: SocketAddr = "10.0.0.2:50000".parse().unwrap();
+
+        let key_a = UdpSessionKey::peer(Arc::clone(&listener), client_a);
+        let key_b = UdpSessionKey::peer(Arc::clone(&listener), client_b);
+
+        // Pure L4 keys with different client addresses must not be equal
+        assert_ne!(key_a, key_b);
+
+        let table = UdpSessionTable::with_capacity(4, 100);
+        let _ = table.get_or_create(&key_a, 100);
+        let _ = table.get_or_create(&key_b, 100);
+
+        assert_eq!(table.active_session_count(), 2);
+    }
+
+    #[test]
+    fn test_udp_session_affinity_token_extraction() {
+        use velda_router::UdpSessionAffinity;
+
+        // Default pure L4 extracts nothing
+        let default_affinity = UdpSessionAffinity::ClientAddr;
+        let payload = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+        assert_eq!(default_affinity.extract_token(&payload), None);
+
+        // Token affinity at offset 0, len 4 (u32 LE)
+        let token_affinity = UdpSessionAffinity::PayloadToken { offset: 0, len: 4 };
+        let tok = token_affinity.extract_token(&payload).unwrap();
+        assert_eq!(tok, u32::from_le_bytes([0x01, 0x02, 0x03, 0x04]) as u64);
+
+        // Token affinity at offset 2, len 8 (u64 LE)
+        let token_affinity_64 = UdpSessionAffinity::PayloadToken { offset: 2, len: 8 };
+        let payload_64 = [0xAA, 0xBB, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let tok_64 = token_affinity_64.extract_token(&payload_64).unwrap();
+        assert_eq!(
+            tok_64,
+            u64::from_le_bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+        );
+
+        // Insufficient payload length returns None
+        let short_payload = [0x01, 0x02];
+        assert_eq!(token_affinity_64.extract_token(&short_payload), None);
+    }
+
+    #[test]
+    fn test_udp_nat_rebinding_migration() {
+        let listener: Arc<str> = Arc::from("game-matchmaker");
+        let initial_client: SocketAddr = "192.168.1.50:41234".parse().unwrap();
+        let migrated_client: SocketAddr = "100.64.0.1:58999".parse().unwrap(); // NAT rebind
+        let match_ticket: u64 = 0xCAFEBABE_DEADBEEF;
+
+        let key_initial = UdpSessionKey::token(Arc::clone(&listener), initial_client, match_ticket);
+        let key_migrated =
+            UdpSessionKey::token(Arc::clone(&listener), migrated_client, match_ticket);
+
+        // With token affinity, both keys represent the identical game session despite address drift!
+        assert_eq!(key_initial, key_migrated);
+
+        let table = UdpSessionTable::with_capacity(4, 100);
+
+        // 1. Initial player connects
+        let rx = match table.get_or_create(&key_initial, 100) {
+            SessionAcquisition::Created { rx, .. } => rx,
+            _ => panic!("Expected session creation"),
+        };
+        assert_eq!(table.active_session_count(), 1);
+
+        let peer_handle = table.get_peer(&key_initial).unwrap();
+        assert_eq!(*peer_handle.read(), initial_client);
+
+        // 2. Client encounters NAT port rebind or WiFi -> 5G network migration
+        // Gateway receives packet from new migrated_client carrying the same match_ticket
+        let session = table
+            .get_session(&key_migrated)
+            .expect("Session must exist");
+        session.update_peer_if_changed(migrated_client);
+
+        // 3. Dynamic peer address is updated seamlessly without tearing down the stream or channel
+        assert_eq!(*peer_handle.read(), migrated_client);
+        assert_eq!(table.active_session_count(), 1);
+
+        // Retain rx to verify channel was undisturbed
+        drop(rx);
     }
 }

@@ -4,4 +4,4 @@ pub mod tcp;
 pub mod udp;
 
 pub use tcp::{TcpRoute, TcpRouter};
-pub use udp::{UdpRoute, UdpRouter};
+pub use udp::{UdpRoute, UdpRouter, UdpSessionAffinity};

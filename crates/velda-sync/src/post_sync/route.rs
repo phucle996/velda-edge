@@ -38,6 +38,62 @@ pub const DOMAIN_HEADER_SIZE: usize = std::mem::size_of::<DomainHeader>();
 // Phase 1: Entity & Schema Definitions
 // ============================================================================
 
+/// Session affinity strategy for L4 UDP stateful routing declared in routes.json.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAffinityConfig {
+    /// Strategy type: "client_ip" (pure L4 default) or "token" (payload token affinity).
+    #[serde(rename = "type", default = "default_affinity_type")]
+    pub affinity_type: String,
+    /// Byte offset into the UDP payload (used when type is "token").
+    #[serde(default)]
+    pub offset: u16,
+    /// Token byte length (1..=16, used when type is "token").
+    #[serde(default = "default_token_len")]
+    pub len: u8,
+}
+
+fn default_affinity_type() -> String {
+    "client_ip".into()
+}
+
+fn default_token_len() -> u8 {
+    8
+}
+
+impl SessionAffinityConfig {
+    /// Creates a token-based payload session affinity configuration.
+    #[inline]
+    pub fn token(offset: u16, len: u8) -> Self {
+        Self {
+            affinity_type: "token".into(),
+            offset,
+            len,
+        }
+    }
+
+    /// Creates a client-IP based pure L4 session affinity configuration.
+    #[inline]
+    pub fn client_ip() -> Self {
+        Self {
+            affinity_type: "client_ip".into(),
+            offset: 0,
+            len: 8,
+        }
+    }
+
+    /// Returns true if this configuration uses payload token affinity.
+    #[inline]
+    pub fn is_token(&self) -> bool {
+        self.affinity_type.eq_ignore_ascii_case("token")
+    }
+
+    /// Returns true if this configuration uses standard client IP affinity.
+    #[inline]
+    pub fn is_client_ip(&self) -> bool {
+        self.affinity_type.eq_ignore_ascii_case("client_ip")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutesFile {
     pub schema_version: u32,
@@ -54,6 +110,8 @@ pub struct RouteConfig {
     #[serde(default)]
     pub timeouts: RouteTimeouts,
     pub upstream: String, // Logical target name; resolved dynamically at runtime
+    #[serde(default)]
+    pub session_affinity: Option<SessionAffinityConfig>,
     #[serde(default)]
     pub plugins: Vec<String>,
 }
@@ -74,6 +132,8 @@ struct IngestRouteConfig {
     #[serde(default)]
     pub timeouts: RouteTimeouts,
     pub upstream: String,
+    #[serde(default)]
+    pub session_affinity: Option<SessionAffinityConfig>,
     #[serde(default, deserialize_with = "deserialize_route_plugins")]
     pub plugins: Vec<String>,
 }
@@ -186,6 +246,7 @@ pub fn parse_routes(payload: &[u8]) -> Result<Vec<RouteConfig>, SyncError> {
             match_rule: r.match_rule,
             timeouts: r.timeouts,
             upstream: r.upstream,
+            session_affinity: r.session_affinity,
             plugins: r.plugins,
         })
         .collect())
@@ -305,6 +366,62 @@ pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
             }
         }
 
+        // Session affinity is strictly for L4 UDP routes; reject on TCP, L7, etc.
+        if let Some(affinity) = &mut route.session_affinity {
+            trim_in_place(&mut affinity.affinity_type);
+            affinity.affinity_type.make_ascii_lowercase();
+
+            let is_udp = is_l4
+                && route
+                    .match_rule
+                    .protocol
+                    .as_deref()
+                    .map(|p| p.eq_ignore_ascii_case("udp"))
+                    .unwrap_or(false);
+
+            if !is_udp {
+                return Err(SyncError::Validation {
+                    domain: "routes".into(),
+                    reason: format!(
+                        "Route '{}': session_affinity is strictly supported for L4 UDP routes only; TCP and L7 routes must not declare session_affinity",
+                        route.id
+                    ),
+                });
+            }
+
+            if affinity.is_token() {
+                if affinity.len == 0 || affinity.len > 16 {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}': session_affinity token length must be between 1 and 16 bytes, found {}",
+                            route.id, affinity.len
+                        ),
+                    });
+                }
+                if (affinity.offset as usize)
+                    .checked_add(affinity.len as usize)
+                    .is_none_or(|end| end > 65535)
+                {
+                    return Err(SyncError::Validation {
+                        domain: "routes".into(),
+                        reason: format!(
+                            "Route '{}': session_affinity token offset + len exceeds maximum datagram boundary (65535)",
+                            route.id
+                        ),
+                    });
+                }
+            } else if !affinity.is_client_ip() {
+                return Err(SyncError::Validation {
+                    domain: "routes".into(),
+                    reason: format!(
+                        "Route '{}': unsupported session_affinity type '{}'; must be 'token' or 'client_ip'",
+                        route.id, affinity.affinity_type
+                    ),
+                });
+            }
+        }
+
         if let Some(prefix) = &route.match_rule.path_prefix
             && !prefix.starts_with('/')
         {
@@ -373,13 +490,36 @@ pub fn validate_routes_with_listeners(
     listeners: &[super::listener::ListenerConfig],
 ) -> Result<(), SyncError> {
     use std::collections::HashMap;
-    let listener_map: HashMap<&str, &str> = listeners
+    let listener_map: HashMap<&str, (&str, &str)> = listeners
         .iter()
-        .map(|l| (l.id.as_str(), l.application.protocol.as_str()))
+        .map(|l| {
+            (
+                l.id.as_str(),
+                (
+                    l.application.protocol.as_str(),
+                    l.transport.protocol.as_str(),
+                ),
+            )
+        })
         .collect();
 
     for route in routes {
-        if let Some(&listener_proto) = listener_map.get(route.listener.as_str()) {
+        if let Some(&(listener_proto, listener_transport)) =
+            listener_map.get(route.listener.as_str())
+        {
+            if route.session_affinity.is_some()
+                && (!matches!(listener_proto, "raw" | "udp")
+                    || !listener_transport.eq_ignore_ascii_case("udp"))
+            {
+                return Err(SyncError::Validation {
+                    domain: "routes".into(),
+                    reason: format!(
+                        "Route '{}': session_affinity cannot be applied to listener '{}' (transport='{}', app='{}'); strictly L4 UDP listeners only",
+                        route.id, route.listener, listener_transport, listener_proto
+                    ),
+                });
+            }
+
             for plugin_id in &route.plugins {
                 if let Some(expected_proto) =
                     super::plugin::canonical_protocol_family_for_id(plugin_id)
@@ -585,6 +725,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "users".into(),
+            session_affinity: None,
             plugins: vec![],
         }];
 
@@ -606,6 +747,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "users".into(),
+            session_affinity: None,
             plugins: vec![],
         }];
 
@@ -624,6 +766,7 @@ mod tests {
             match_rule: RouteMatch::default(),
             timeouts: Default::default(),
             upstream: "users".into(),
+            session_affinity: None,
             plugins: vec![],
         }];
 
@@ -649,6 +792,7 @@ mod tests {
                 downstream_idle_ms: Some(30000),
             },
             upstream: "backend".into(),
+            session_affinity: None,
             plugins: vec!["rate-limit".into()],
         }];
 
@@ -758,6 +902,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "order-grpc".into(),
+            session_affinity: None,
             plugins: vec!["grpc_fault_injection".into()],
         }];
         assert!(validate_routes_with_listeners(&valid_grpc_routes, &listeners).is_ok());
@@ -773,6 +918,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "web-backend".into(),
+            session_affinity: None,
             plugins: vec!["grpc_fault_injection".into()],
         }];
         let err = validate_routes_with_listeners(&invalid_grpc_routes, &listeners);
@@ -794,6 +940,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "payment-grpc".into(),
+            session_affinity: None,
             plugins: vec!["http_fault_injection".into()],
         }];
         let err2 = validate_routes_with_listeners(&invalid_http_routes, &listeners);
@@ -815,6 +962,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "order-grpc".into(),
+            session_affinity: None,
             plugins: vec![
                 "http_cache_lookup".into(),
                 "http_cache_store".into(),
@@ -840,6 +988,7 @@ mod tests {
             },
             timeouts: Default::default(),
             upstream: "order-grpc".into(),
+            session_affinity: None,
             plugins: vec!["request_termination".into()],
         }];
         let err4 = validate_routes_with_listeners(&invalid_term_routes, &listeners);
@@ -848,6 +997,107 @@ mod tests {
             err4.unwrap_err()
                 .to_string()
                 .contains("strictly restricted to 'http'")
+        );
+    }
+
+    #[test]
+    fn test_udp_session_affinity_validation() {
+        // 1. Valid UDP route with token affinity
+        let mut valid_udp = vec![RouteConfig {
+            id: "game-route".into(),
+            kind: "l4".into(),
+            listener: "udp-game".into(),
+            match_rule: RouteMatch {
+                protocol: Some("udp".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "game-servers".into(),
+            session_affinity: Some(SessionAffinityConfig::token(0, 8)),
+            plugins: vec![],
+        }];
+        assert!(validate_routes(&mut valid_udp).is_ok());
+
+        // 2. Reject session affinity on TCP route (MUST FAIL)
+        let mut invalid_tcp = vec![RouteConfig {
+            id: "tcp-route".into(),
+            kind: "l4".into(),
+            listener: "tcp-in".into(),
+            match_rule: RouteMatch {
+                protocol: Some("tcp".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "tcp-backend".into(),
+            session_affinity: Some(SessionAffinityConfig::token(0, 8)),
+            plugins: vec![],
+        }];
+        let err = validate_routes(&mut invalid_tcp);
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("strictly supported for L4 UDP routes only")
+        );
+
+        // 3. Reject session affinity on L7 HTTP route (MUST FAIL)
+        let mut invalid_l7 = vec![RouteConfig {
+            id: "http-route".into(),
+            kind: "l7".into(),
+            listener: "http-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/api".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "http-backend".into(),
+            session_affinity: Some(SessionAffinityConfig::token(0, 8)),
+            plugins: vec![],
+        }];
+        assert!(validate_routes(&mut invalid_l7).is_err());
+
+        // 4. Reject invalid token length (0 or > 16)
+        let mut invalid_len = vec![RouteConfig {
+            id: "game-route-len".into(),
+            kind: "l4".into(),
+            listener: "udp-game".into(),
+            match_rule: RouteMatch {
+                protocol: Some("udp".into()),
+                ..Default::default()
+            },
+            timeouts: Default::default(),
+            upstream: "game-servers".into(),
+            session_affinity: Some(SessionAffinityConfig::token(0, 32)),
+            plugins: vec![],
+        }];
+        assert!(validate_routes(&mut invalid_len).is_err());
+    }
+
+    #[test]
+    fn test_parse_session_affinity_json() {
+        let json = br#"{
+            "schema_version": 1,
+            "routes": [
+                {
+                    "id": "game-udp",
+                    "kind": "l4",
+                    "listener": "game-in",
+                    "match": { "protocol": "udp" },
+                    "session_affinity": {
+                        "type": "token",
+                        "offset": 0,
+                        "len": 8
+                    },
+                    "upstream": "game-servers"
+                }
+            ]
+        }"#;
+
+        let routes = parse_routes(json).expect("should parse session_affinity");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].session_affinity,
+            Some(SessionAffinityConfig::token(0, 8))
         );
     }
 }

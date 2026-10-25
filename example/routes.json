@@ -104,6 +104,27 @@
           "access_log"
         ]
       }
+    },
+    {
+      "id": "game-udp",
+      "kind": "l4",
+      "listener": "udp-game-ingress",
+      "match": {
+        "protocol": "udp"
+      },
+      "session_affinity": {
+        "type": "token",
+        "offset": 0,
+        "len": 8
+      },
+      "timeouts": {
+        "downstream_idle_ms": 30000
+      },
+      "upstream": "game-backend",
+      "plugins": {
+        "pre_upstream": [],
+        "post_response": []
+      }
     }
   ]
 }

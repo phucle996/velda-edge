@@ -294,6 +294,7 @@ pub fn build_mock_routes(
             },
             timeouts: RouteTimeouts::default(),
             upstream: matching_upstream.id.clone(),
+            session_affinity: None,
             plugins: vec![],
         });
     }
