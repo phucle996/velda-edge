@@ -53,16 +53,7 @@ pub async fn serve(
         req_head.headers.insert(http::header::HOST, hv);
     }
 
-    // 3. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 4. Acquire pooled HTTP/1.1 upstream connection
+    // 3. Acquire pooled HTTP/1.1 upstream connection
     let mut lease = match upstream.acquire().await {
         Ok(l) => l,
         Err(e) => {

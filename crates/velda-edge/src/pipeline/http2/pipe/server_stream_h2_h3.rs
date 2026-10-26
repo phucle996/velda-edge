@@ -42,16 +42,7 @@ pub async fn serve(
         }
     };
 
-    // 2. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 3. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
+    // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
 
     // 4. Construct canonical L7Request

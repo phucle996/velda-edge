@@ -242,27 +242,69 @@ Cross-Origin Resource Sharing preflight handling and response header injection.
 ---
 
 ### 4.6 `header_mutation` (Phase: `pre_upstream`)
-Adds, replaces, or strips HTTP headers before upstream dispatch.
+Adds, replaces, renames, appends, or strips HTTP request headers before upstream dispatch.
 
 ```json
 {
   "id": "header_mutation",
   "config": {
+    "strip_hop_by_hop": true,
+    "remove_headers": ["x-powered-by", "server"],
+    "rename_headers": {
+      "x-client-device": "x-device-type"
+    },
     "set_headers": {
       "x-gateway-proxy": "velda-edge",
-      "x-forwarded-proto": "https"
+      "x-forwarded-proto": "$scheme",
+      "x-real-ip": "$client_ip"
     },
-    "remove_headers": ["x-powered-by", "server"]
+    "append_headers": {
+      "x-forwarded-for": "$client_ip"
+    }
   }
 }
 ```
 
-- `set_headers`: Map of header name $\to$ value to set or overwrite.
-- `remove_headers`: Array of header names to strip from the request.
+- `strip_hop_by_hop`: Strip RFC 9110 / RFC 7230 connection-level headers (`Connection`, `Keep-Alive`, `Upgrade`, etc.) while protecting critical headers (`Host`, `Authorization`, `X-Real-IP`) from strip abuse (CVE-2022-26143).
+- `remove_headers`: Array of header names to strip. Essential headers (`Host`, `Content-Length`, `Transfer-Encoding`, `X-Request-Id`, and pseudo-headers `:`) cannot be removed.
+- `rename_headers`: Key-value map of source header $\to$ destination header with anti-shadowing protection.
+- `set_headers`: Map of header name $\to$ value to set or overwrite. Framing and hop-by-hop headers cannot be overwritten.
+- `append_headers`: Map of header name $\to$ value to append.
+- **Dynamic Variables**: `$client_ip`, `$request_id`, `$scheme`, `$host`, `$method`, `$path` (use `$$` for a literal `$`).
 
 ---
 
-### 4.7 `access_log` (Phase: `post_response`)
+### 4.7 `response_header_mutation` (Phase: `post_response`)
+Adds, replaces, appends, or strips HTTP headers on downstream responses.
+
+```json
+{
+  "id": "response_header_mutation",
+  "config": {
+    "remove_headers": ["server", "x-powered-by"],
+    "set_headers": {
+      "server": "velda-edge",
+      "x-request-id": "$request_id"
+    },
+    "append_headers": {
+      "vary": "accept-encoding"
+    },
+    "set_if_missing": {
+      "x-content-type-options": "nosniff"
+    }
+  }
+}
+```
+
+- `remove_headers`: Array of headers to strip from outgoing response.
+- `set_headers`: Headers to overwrite or set.
+- `append_headers`: Headers to append to (e.g. multi-value `Vary`).
+- `set_if_missing`: Headers to insert only if not already emitted by upstream.
+- **Dynamic Variables**: `$request_id`, `$status`, `$timestamp_epoch` (use `$$` for literal `$`).
+
+---
+
+### 4.8 `access_log` (Phase: `post_response`)
 Controls structured telemetry and access log emissions.
 
 ```json

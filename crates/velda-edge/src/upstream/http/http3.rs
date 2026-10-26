@@ -113,6 +113,15 @@ impl Http3Upstream {
         self.inner.id()
     }
 
+    /// Returns the request timeout for upstream HTTP/3 exchanges (defaults to 60s if unspecified).
+    #[inline]
+    pub fn request_timeout(&self) -> std::time::Duration {
+        self.inner
+            .timeouts()
+            .request
+            .unwrap_or(std::time::Duration::from_secs(60))
+    }
+
     /// Acquires an active multiplexed HTTP/3 client from the pool or establishes a new QUIC connection.
     ///
     /// Distributes streams across parallel QUIC connections when active streams exceed the scale-out threshold.

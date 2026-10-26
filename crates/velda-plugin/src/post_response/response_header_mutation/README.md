@@ -98,9 +98,7 @@ Dynamic variables can be specified with a leading `$` in header value strings:
 
 | Variable | Description |
 | :--- | :--- |
-| `$request_id` | Propagates the unique request ID (from `x-request-id` header or system generator) |
-| `$route_id` | Propagates the matched route identifier (`x-route-id`) |
-| `$upstream_addr` | Propagates the upstream backend endpoint (`x-upstream-addr`) |
+| `$request_id` | Propagates the unique request ID (from `x-request-id` header or Slot 0 system generator) |
 | `$status` | Numeric HTTP response status code as string (e.g. `"200"`, `"503"`) |
 | `$timestamp_epoch` | Monotonic Unix epoch timestamp in seconds |
 
@@ -115,3 +113,14 @@ Dynamic variables can be specified with a leading `$` in header value strings:
 >   "plugins": ["edge_cache_store", "edge_response_mutation"]
 >   ```
 >   Placing `http_cache_store` **first** allows it to inspect pristine upstream headers (such as `Cache-Control`, `ETag`, `Set-Cookie`) to make accurate caching decisions. `response_header_mutation` then sanitizes response headers on the outgoing response.
+
+---
+
+## 7. Documentation Suite Links
+
+For comprehensive architectural design, empirical Azure benchmarks, and security test matrices, refer to the dedicated documents:
+
+- **[Architectural Specification](ARCHITECTURE.md)**: Internal data structures, in-place mutation, and pre-partitioned static/dynamic arrays.
+- **[Performance Benchmark Report](BENCHMARK.md)**: Live Azure VM cluster measurements, latency percentiles, and sub-15ns hot-path overhead.
+- **[Test Plan & Security Verification](TEST.md)**: Automated unit test catalog, CRLF injection defense, and live cURL reproduction logs.
+

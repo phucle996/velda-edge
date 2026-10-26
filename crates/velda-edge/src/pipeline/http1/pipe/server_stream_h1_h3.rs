@@ -31,16 +31,7 @@ pub async fn serve<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. Enrich proxy forwarding headers
-    velda_http1::server::header::enrich_headers(
-        &mut req_head.headers,
-        &req_head.uri,
-        meta.peer,
-        meta.local_addr,
-        meta.is_tls,
-    );
-
-    // 2. Handle Expect: 100-continue unblocking
+    // 1. Handle Expect: 100-continue unblocking
     if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");

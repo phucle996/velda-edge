@@ -116,6 +116,13 @@ Velda Edge strictly separates serving execution from background connection logis
   - Operates sequentially on its assigned core lane (`lane = worker_id`), executing `prewarm_lane(worker_id)` at startup, upon config reload, and periodically (every 2s).
   - Sole owner of connection replenishment, proactive TLS/QUIC handshakes, and depositing warm connection handles into the lane shard via `release_to_lane()` or `register_warmed_to_lane()`.
 
+### 2.10 Single Ingress Header Enrichment Invariant
+Across **ALL protocol pipelines** (HTTP/1.1, HTTP/2, HTTP/3, gRPC):
+- Proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) MUST be enriched **EXACTLY ONCE** on the inbound downstream request path, authoritatively at the ingress entrypoint (`downstream.rs`) before route matching and plugin phases.
+- **Strictly Forbidden**:
+  - Calling `enrich_headers`, `enrich_headers_cached`, or `enrich_headers_precomputed` inside any upstream forwarding strategy (`pipe/*`). Upstream pipe strategies MUST treat ingress headers as already authoritatively finalized and only forward or stream them.
+  - Re-injecting or redundantly appending `x-forwarded-*` along the internal serving path, which leads to duplicate IP bugs (`x-forwarded-for: IP, IP`).
+
 ---
 
 ## 3. Subsystem Invariants & Crate Boundaries

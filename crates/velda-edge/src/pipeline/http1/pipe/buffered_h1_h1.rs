@@ -20,7 +20,7 @@ use velda_http1::{
 };
 
 use crate::pipeline::DownstreamMeta;
-use crate::upstream::Http1Upstream;
+use crate::upstream::{Http1Upstream, LeaseGuard};
 
 /// Serves a buffered HTTP/1.1 request-response transaction forwarded to an HTTP/1.1 backend.
 pub async fn serve<IO>(
@@ -34,16 +34,7 @@ pub async fn serve<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. Enrich proxy forwarding headers using pre-computed connection metadata
-    velda_http1::server::header::enrich_headers_cached(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 2. Handle Expect: 100-continue unblocking
+    // 1. Handle Expect: 100-continue unblocking
     if req_head.is_expect_100_continue() && framing != Http1BodyFraming::Empty {
         if let Err(e) = conn.send_100_continue().await {
             tracing::debug!(error = %e, "Failed to send 100 Continue downstream");
@@ -84,7 +75,7 @@ where
     };
 
     // 4. Acquire pooled HTTP/1.1 upstream connection
-    let mut upstream_lease = match upstream.acquire().await {
+    let upstream_lease = match upstream.acquire().await {
         Ok(lease) => lease,
         Err(e) => {
             tracing::warn!(
@@ -107,138 +98,164 @@ where
     };
 
     let cfg = *conn.config();
+    let req_timeout = upstream.request_timeout();
     let mut req = Http1ServerRequest::from_parts(req_head, body);
     sanitize_headers(&mut req.headers);
 
-    // 5. Send request and read response head with self-healing retry on stale pooled connection
-    let (mut resp_head, resp_framing) = {
-        let exchange_attempt = async {
-            send_request(&req, &mut *upstream_lease, &mut conn.upstream_write_buf).await?;
-            read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await
+    // 5. Execute full Upstream transaction guarded by an authoritative end-to-end deadline
+    let mut lease_guard = LeaseGuard::new(upstream_lease);
+    let upstream_exchange = async {
+        // Send request and read response head with self-healing retry on stale pooled connection
+        let (mut resp_head, resp_framing) = {
+            let attempt = async {
+                send_request(&req, &mut *lease_guard, &mut conn.upstream_write_buf).await?;
+                read_response_head(&mut *lease_guard, &mut conn.upstream_read_buf, &cfg).await
+            };
+
+            match attempt.await {
+                Ok(head_and_framing) => head_and_framing,
+                Err(e) if lease_guard.is_reused() && e.is_stale_connection() => {
+                    tracing::debug!(
+                        upstream = %upstream.id(),
+                        "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
+                    );
+
+                    match upstream.acquire_fresh().await {
+                        Ok(mut fresh_lease) => {
+                            let retry_attempt = async {
+                                send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
+                                    .await?;
+                                read_response_head(
+                                    &mut *fresh_lease,
+                                    &mut conn.upstream_read_buf,
+                                    &cfg,
+                                )
+                                .await
+                            };
+                            match retry_attempt.await {
+                                Ok(head_and_framing) => {
+                                    lease_guard.replace(fresh_lease);
+                                    head_and_framing
+                                }
+                                Err(retry_err) => {
+                                    fresh_lease.mark_closed();
+                                    return Err(retry_err);
+                                }
+                            }
+                        }
+                        Err(fresh_err) => {
+                            tracing::warn!(
+                                error = %fresh_err,
+                                upstream = %upstream.id(),
+                                "Failed to acquire fresh connection for self-healing retry"
+                            );
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         };
 
-        match exchange_attempt.await {
-            Ok(head_and_framing) => head_and_framing,
-            Err(e) if upstream_lease.is_reused && e.is_stale_connection() => {
-                upstream_lease.mark_closed();
-                drop(upstream_lease);
-
-                tracing::debug!(
-                    upstream = %upstream.id(),
-                    "Stale pooled HTTP/1.1 connection detected; self-healing with fresh connection"
-                );
-
-                match upstream.acquire_fresh().await {
-                    Ok(mut fresh_lease) => {
-                        let retry_res = async {
-                            send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
-                                .await?;
-                            read_response_head(&mut *fresh_lease, &mut conn.upstream_read_buf, &cfg)
-                                .await
-                        }
-                        .await;
-
-                        match retry_res {
-                            Ok(head_and_framing) => {
-                                upstream_lease = fresh_lease;
-                                head_and_framing
-                            }
-                            Err(retry_err) => {
-                                fresh_lease.mark_closed();
-                                return Err(retry_err);
-                            }
-                        }
-                    }
-                    Err(fresh_err) => {
-                        tracing::warn!(
-                            error = %fresh_err,
-                            upstream = %upstream.id(),
-                            "Failed to acquire fresh connection for self-healing retry"
-                        );
-                        return Err(e);
-                    }
-                }
-            }
-            Err(e) => {
-                upstream_lease.mark_closed();
-                return Err(e);
-            }
+        sanitize_headers(&mut resp_head.headers);
+        if let Some(req_id) = req.headers.get(&crate::pipeline::X_REQUEST_ID) {
+            resp_head
+                .headers
+                .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
-    };
 
-    sanitize_headers(&mut resp_head.headers);
-    if let Some(req_id) = req.headers.get(&crate::pipeline::X_REQUEST_ID) {
-        resp_head
-            .headers
-            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
-    }
-
-    // 6. Validate that upstream does not violate buffered mode invariant
-    if let Some(content_type) = resp_head.headers.get(http::header::CONTENT_TYPE)
-        && content_type
-            .as_bytes()
-            .windows(b"text/event-stream".len())
-            .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
-    {
-        upstream_lease.mark_closed();
-        return Err(Http1Error::StreamingViolation(
-            "Upstream returned text/event-stream (SSE), but server streaming is disabled on this listener"
-                .into(),
-        ));
-    }
-
-    // 7. Read bounded response body (RFC 9110 §6.4.1 & §9.3.2: HEAD, 204, 304 have no body)
-    let is_head = req.method == http::Method::HEAD;
-    let is_no_body_status = resp_head.status.is_informational()
-        || resp_head.status == http::StatusCode::NO_CONTENT
-        || resp_head.status == http::StatusCode::NOT_MODIFIED;
-
-    let (body_len, decoded_chunk_bytes) = match resp_framing {
-        Http1BodyFraming::Empty => (0, None),
-        Http1BodyFraming::ContentLength(len) => {
-            if len > cfg.max_body_size {
-                upstream_lease.mark_closed();
-                return Err(Http1Error::PayloadTooLarge(len));
-            }
-            if conn.upstream_read_buf.len() < len {
-                let needed = len - conn.upstream_read_buf.len();
-                conn.upstream_read_buf.reserve(needed);
-                while conn.upstream_read_buf.len() < len {
-                    let n = upstream_lease.read_buf(&mut conn.upstream_read_buf).await?;
-                    if n == 0 {
-                        upstream_lease.mark_closed();
-                        return Err(Http1Error::Parse(
-                            "Unexpected EOF while reading upstream response body: premature connection close".into(),
-                        ));
-                    }
-                }
-            }
-            (len, None)
+        // 6. Validate that upstream does not violate buffered mode invariant
+        if let Some(content_type) = resp_head.headers.get(http::header::CONTENT_TYPE)
+            && content_type
+                .as_bytes()
+                .windows(b"text/event-stream".len())
+                .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
+        {
+            return Err(Http1Error::StreamingViolation(
+                "Upstream returned text/event-stream (SSE), but server streaming is disabled on this listener"
+                    .into(),
+            ));
         }
-        Http1BodyFraming::Chunked => {
-            resp_head.headers.remove(http::header::TRANSFER_ENCODING);
-            loop {
-                match velda_http1::wire::parse_chunked_body(
-                    &conn.upstream_read_buf,
-                    cfg.max_body_size,
-                )? {
-                    Some((_consumed, body)) => {
-                        let bytes = body.to_bytes();
-                        break (bytes.len(), Some(bytes));
-                    }
-                    None => {
-                        let n = upstream_lease.read_buf(&mut conn.upstream_read_buf).await?;
+
+        // 7. Read bounded response body (Contiguous, linear, zero boilerplate)
+        let (body_len, decoded_chunk_bytes) = match resp_framing {
+            Http1BodyFraming::Empty => (0, None),
+            Http1BodyFraming::ContentLength(len) => {
+                if len > cfg.max_body_size {
+                    return Err(Http1Error::PayloadTooLarge(len));
+                }
+                if conn.upstream_read_buf.len() < len {
+                    let needed = len - conn.upstream_read_buf.len();
+                    conn.upstream_read_buf.reserve(needed);
+                    while conn.upstream_read_buf.len() < len {
+                        let n = lease_guard.read_buf(&mut conn.upstream_read_buf).await?;
                         if n == 0 {
-                            upstream_lease.mark_closed();
                             return Err(Http1Error::Parse(
-                                "Unexpected EOF while reading upstream chunked response body: premature connection close".into(),
+                                "Unexpected EOF while reading upstream response body: premature connection close".into(),
                             ));
                         }
                     }
                 }
+                (len, None)
             }
-        }
+            Http1BodyFraming::Chunked => {
+                resp_head.headers.remove(http::header::TRANSFER_ENCODING);
+                loop {
+                    match velda_http1::wire::parse_chunked_body(
+                        &conn.upstream_read_buf,
+                        cfg.max_body_size,
+                    )? {
+                        Some((_consumed, body)) => {
+                            let bytes = body.to_bytes();
+                            break (bytes.len(), Some(bytes));
+                        }
+                        None => {
+                            let n = lease_guard.read_buf(&mut conn.upstream_read_buf).await?;
+                            if n == 0 {
+                                return Err(Http1Error::Parse(
+                                    "Unexpected EOF while reading upstream chunked response body: premature connection close".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok((resp_head, body_len, decoded_chunk_bytes))
     };
+
+    let (mut resp_head, body_len, decoded_chunk_bytes) =
+        match tokio::time::timeout(req_timeout, upstream_exchange).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                tracing::warn!(
+                    upstream = %upstream.id(),
+                    timeout_ms = req_timeout.as_millis(),
+                    "Upstream transaction deadline exceeded"
+                );
+                let err_resp = Http1ServerResponse::from_bytes(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    b"504 Gateway Timeout: upstream request timeout exceeded\n".to_vec(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                conn.mark_close();
+                let _ = conn.send_response(&err_resp).await;
+                return Err(Http1Error::Timeout);
+            }
+        };
+
+    // Upstream exchange succeeded completely: commit clean lease for reuse!
+    let upstream_lease = lease_guard.commit();
+
+    let is_head = req.method == http::Method::HEAD;
+    let is_no_body_status = resp_head.status.is_informational()
+        || resp_head.status == http::StatusCode::NO_CONTENT
+        || resp_head.status == http::StatusCode::NOT_MODIFIED;
 
     // 8. Align response version with downstream request
     if req.version == http::Version::HTTP_10 {

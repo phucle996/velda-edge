@@ -49,14 +49,14 @@ fn fast_random_u64() -> u64 {
 /// Configuration for HTTP Abort Injection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpAbortConfig {
-    /// Configured percentage of matching requests that are aborted (0.0 to 100.0).
-    pub percentage: u64, // Stored as integer threshold for Eq compliance
     /// Pre-computed integer threshold in `0..=u64::MAX`.
     threshold: u64,
     /// Default HTTP status code to return when aborted (e.g. 503).
     pub status: StatusCode,
     /// Pre-allocated raw response payload body.
     pub body: Bytes,
+    /// Pre-computed Content-Length header value to eliminate heap allocations per response.
+    content_length_val: HeaderValue,
     /// Pre-compiled response headers to inject.
     pub headers: Vec<(HeaderName, HeaderValue)>,
     default_response: L7Response,
@@ -76,9 +76,9 @@ impl HttpAbortConfig {
             ));
         }
 
-        if !(200..=599).contains(&status_code) {
+        if !(400..=599).contains(&status_code) {
             return Err(format!(
-                "Abort HTTP status code must be between 200 and 599, got {status_code}"
+                "Abort HTTP status code must be an error status between 400 and 599, got {status_code}"
             ));
         }
 
@@ -113,15 +113,16 @@ impl HttpAbortConfig {
             ((percentage / 100.0) * (u64::MAX as f64)) as u64
         };
 
+        let len_str = body.len().to_string();
+        let content_length_val =
+            HeaderValue::from_str(&len_str).unwrap_or_else(|_| HeaderValue::from_static("0"));
+
         let mut header_map = HeaderMap::with_capacity(headers.len() + 1);
         for (name, val) in &headers {
             header_map.insert(name.clone(), val.clone());
         }
-        let len_str = body.len().to_string();
-        header_map.insert(
-            CONTENT_LENGTH,
-            HeaderValue::from_str(&len_str).unwrap_or_else(|_| HeaderValue::from_static("0")),
-        );
+        header_map.insert(CONTENT_LENGTH, content_length_val.clone());
+
         let default_response = L7Response::new(
             status,
             Version::HTTP_11,
@@ -130,10 +131,10 @@ impl HttpAbortConfig {
         );
 
         Ok(Self {
-            percentage: threshold,
             threshold,
             status,
             body,
+            content_length_val,
             headers,
             default_response,
         })
@@ -173,11 +174,7 @@ impl HttpAbortConfig {
         for (name, val) in &self.headers {
             header_map.insert(name.clone(), val.clone());
         }
-        header_map.insert(
-            CONTENT_LENGTH,
-            HeaderValue::from_str(&self.body.len().to_string())
-                .unwrap_or_else(|_| HeaderValue::from_static("0")),
-        );
+        header_map.insert(CONTENT_LENGTH, self.content_length_val.clone());
 
         L7Response::new(
             status,
@@ -197,6 +194,8 @@ mod tests {
         assert!(HttpAbortConfig::new(101.0, 503, None, None).is_err());
         assert!(HttpAbortConfig::new(-0.1, 503, None, None).is_err());
         assert!(HttpAbortConfig::new(50.0, 999, None, None).is_err()); // invalid status
+        assert!(HttpAbortConfig::new(50.0, 200, None, None).is_err()); // non-error status
+        assert!(HttpAbortConfig::new(50.0, 302, None, None).is_err()); // redirect not a fault abort
         assert!(HttpAbortConfig::new(10.0, 503, None, None).is_ok());
     }
 

@@ -109,6 +109,15 @@ impl Http2Upstream {
         self.inner.id()
     }
 
+    /// Returns the request timeout for upstream HTTP/2 exchanges (defaults to 60s if unspecified).
+    #[inline]
+    pub fn request_timeout(&self) -> std::time::Duration {
+        self.inner
+            .timeouts()
+            .request
+            .unwrap_or(std::time::Duration::from_secs(60))
+    }
+
     /// Returns whether this upstream uses TLS.
     #[inline]
     pub fn is_tls(&self) -> bool {

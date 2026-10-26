@@ -167,7 +167,7 @@ async fn forward_buffered(
 
 /// Serves a buffered HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
-    mut req_head: Http2ServerRequestHead,
+    req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -193,16 +193,7 @@ pub async fn serve(
         }
     };
 
-    // 2. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 3. Acquire upstream multiplexed connection
+    // 2. Acquire upstream multiplexed connection
     let (mut client, _lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {

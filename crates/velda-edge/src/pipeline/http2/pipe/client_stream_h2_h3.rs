@@ -25,16 +25,7 @@ pub async fn serve(
     upstream: &Arc<Http3Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
 ) {
-    // 1. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
+    // 1. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
 
     // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response

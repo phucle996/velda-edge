@@ -34,16 +34,7 @@ pub async fn serve(
         req_head.headers.insert(http::header::HOST, hv);
     }
 
-    // 2. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 3. Opportunistically ingest first chunk (up to 262KB)
+    // 2. Opportunistically ingest first chunk (up to 262KB)
     let coalesce_limit = upstream.config.client_body_buffer_size;
     let (first_chunk, is_fin) = match receiver.recv_coalesced_chunk(coalesce_limit).await {
         Ok(Some(c)) => {

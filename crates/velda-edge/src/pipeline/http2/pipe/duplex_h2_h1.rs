@@ -34,16 +34,7 @@ pub async fn serve(
         req_head.headers.insert(http::header::HOST, hv);
     }
 
-    // 2. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 3. Mark request as Chunked transfer encoding towards HTTP/1.1
+    // 2. Mark request as Chunked transfer encoding towards HTTP/1.1
     req_head
         .headers
         .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));

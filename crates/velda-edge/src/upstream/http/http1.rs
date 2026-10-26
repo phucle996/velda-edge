@@ -156,6 +156,62 @@ impl Drop for Http1Lease {
     }
 }
 
+/// RAII guard that automatically marks an [`Http1Lease`] closed if dropped before explicit commit.
+pub struct LeaseGuard(Option<Http1Lease>);
+
+impl LeaseGuard {
+    /// Wraps an active lease in an auto-closing cancellation guard.
+    #[inline]
+    pub fn new(lease: Http1Lease) -> Self {
+        Self(Some(lease))
+    }
+
+    /// Returns whether this lease was acquired from the pool as a reused connection.
+    #[inline]
+    pub fn is_reused(&self) -> bool {
+        self.0.as_ref().expect("lease must be active").is_reused
+    }
+
+    /// Replaces the current lease with a fresh one, safely marking the old lease closed.
+    #[inline]
+    pub fn replace(&mut self, fresh: Http1Lease) {
+        if let Some(mut old) = self.0.take() {
+            old.mark_closed();
+        }
+        self.0 = Some(fresh);
+    }
+
+    /// Commits the transaction, disarming the guard and returning the clean, reusable lease.
+    #[inline]
+    pub fn commit(mut self) -> Http1Lease {
+        self.0.take().expect("lease must be active")
+    }
+}
+
+impl Deref for LeaseGuard {
+    type Target = UpstreamHttp1Stream;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("lease must be active").deref()
+    }
+}
+
+impl DerefMut for LeaseGuard {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("lease must be active").deref_mut()
+    }
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        if let Some(mut lease) = self.0.take() {
+            lease.mark_closed();
+        }
+    }
+}
+
 /// Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe forwarding.
 ///
 /// Pre-compiled with static TLS engine, load balancer, sequential keep-alive pool, and streaming strategy.
@@ -250,6 +306,15 @@ impl Http1Upstream {
     #[inline]
     pub fn id(&self) -> &str {
         self.inner.id()
+    }
+
+    /// Returns the request timeout for upstream HTTP/1.1 exchanges (defaults to 60s if unspecified).
+    #[inline]
+    pub fn request_timeout(&self) -> std::time::Duration {
+        self.inner
+            .timeouts()
+            .request
+            .unwrap_or(std::time::Duration::from_secs(60))
     }
 
     /// Acquires a pooled or fresh HTTP/1.1 upstream stream wrapped in an RAII [`Http1Lease`].

@@ -30,16 +30,7 @@ pub async fn serve(
     upstream: &Arc<Http2Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
 ) {
-    // 1. Enrich proxy forwarding headers
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.client_port_header,
-        meta.is_tls,
-    );
-
-    // 2. Fail-fast: Acquire upstream multiplexed connection before streaming
+    // 1. Fail-fast: Acquire upstream multiplexed connection before streaming
     let (mut client, _lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {

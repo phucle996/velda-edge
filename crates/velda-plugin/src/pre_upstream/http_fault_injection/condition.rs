@@ -227,7 +227,7 @@ impl Default for HttpFaultCondition {
             ip_matcher: None,
             header_match: None,
             allow_header_override: false,
-            max_override_delay_ms: 60_000, // 60 seconds default cap
+            max_override_delay_ms: 5_000, // 5 seconds default safe cap
         }
     }
 }
@@ -285,26 +285,31 @@ impl HttpFaultCondition {
             .get("x-fault-abort-code")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u16>().ok())
-            .filter(|&code| (200..=599).contains(&code));
+            .filter(|&code| (400..=599).contains(&code));
 
         (delay_override, abort_override)
     }
 }
 
-/// Helper to extract client IP from X-Forwarded-For or X-Real-IP headers.
+/// Helper to extract client IP authoritatively from X-Real-IP or right-most X-Forwarded-For.
 #[inline]
 fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
+    // Security Invariant: Prefer authoritative edge-assigned x-real-ip first to eliminate IP spoofing attacks.
+    if let Some(real_ip) = req
+        .headers
+        .get("x-real-ip")
+        .and_then(|val| val.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
+    {
+        return Some(real_ip);
+    }
+
+    // Fall back to nearest proxy (right-most IP in comma-separated list)
     req.headers
         .get("x-forwarded-for")
         .and_then(|val| val.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .and_then(|first| first.trim().parse::<IpAddr>().ok())
-        .or_else(|| {
-            req.headers
-                .get("x-real-ip")
-                .and_then(|val| val.to_str().ok())
-                .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
-        })
+        .and_then(|raw| raw.rsplit(',').next())
+        .and_then(|last| last.trim().parse::<IpAddr>().ok())
 }
 
 #[cfg(test)]
@@ -439,5 +444,49 @@ mod tests {
         let (delay_ms, abort_code) = condition.extract_overrides(&req);
         assert_eq!(delay_ms, None);
         assert_eq!(abort_code, None);
+    }
+
+    #[test]
+    fn test_extract_client_ip_anti_spoofing() {
+        let condition = HttpFaultCondition {
+            ip_matcher: Some(IpRangeMatcher::from_cidrs(&["10.0.0.0/8".to_string()]).unwrap()),
+            ..Default::default()
+        };
+
+        // Case 1: Attacker forges 10.0.0.1 in XFF left prefix, but edge set X-Real-IP: 203.0.113.5
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1, 198.51.100.1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-real-ip"),
+            HeaderValue::from_static("203.0.113.5"),
+        );
+        let req = L7Request::new(
+            Method::GET,
+            Uri::from_static("/api/orders"),
+            Version::HTTP_11,
+            headers,
+            Body::Empty,
+        );
+        // X-Real-IP is 203.0.113.5 -> Not in 10.0.0.0/8 -> Does not match!
+        assert!(!condition.matches(&req));
+
+        // Case 2: No X-Real-IP, but XFF has right-most proxy IP
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("198.51.100.1, 10.1.2.3"),
+        );
+        let req2 = L7Request::new(
+            Method::GET,
+            Uri::from_static("/api/orders"),
+            Version::HTTP_11,
+            headers2,
+            Body::Empty,
+        );
+        // Right-most IP is 10.1.2.3 -> In 10.0.0.0/8 -> Matches!
+        assert!(condition.matches(&req2));
     }
 }

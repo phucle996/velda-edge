@@ -73,6 +73,10 @@ impl KeyState {
 /// Shard count for in-memory concurrent state striping (power of 2).
 const NUM_SHARDS: usize = 64;
 
+/// Maximum active client state entries allowed per shard to prevent cardinality bombs and memory exhaustion.
+/// With 64 shards, 32,768 entries/shard permits up to 2,097,152 concurrently tracked clients (~160MB max).
+pub const MAX_ENTRIES_PER_SHARD: usize = 32_768;
+
 /// Cache-line aligned shard container preventing false sharing across CPU cores.
 #[repr(align(64))]
 struct CacheAlignedShard {
@@ -129,9 +133,23 @@ impl ShardedState {
             shard_entry.last_cleanup.store(now_sec, Ordering::Relaxed);
         }
 
-        let entry = shard
-            .entry(key_hash)
-            .or_insert_with(|| KeyState::new(burst_capacity, now_sec, now_instant));
+        let entry = match shard.get_mut(&key_hash) {
+            Some(existing) => existing,
+            None => {
+                // Anti-Cardinality-Bomb Guard: If shard reaches capacity, eagerly prune inactive keys (>10s)
+                if shard.len() >= MAX_ENTRIES_PER_SHARD {
+                    shard.retain(|_, v| now_sec.saturating_sub(v.last_access_sec) < 10);
+                    shard_entry.last_cleanup.store(now_sec, Ordering::Relaxed);
+                }
+                if shard.len() >= MAX_ENTRIES_PER_SHARD {
+                    // Shard saturated under sustained attack: reject new key to prevent memory exhaustion
+                    return (false, 1);
+                }
+                shard
+                    .entry(key_hash)
+                    .or_insert_with(|| KeyState::new(burst_capacity, now_sec, now_instant))
+            }
+        };
         entry.last_access_sec = now_sec;
 
         match algorithm {
@@ -252,6 +270,31 @@ mod tests {
 
         let (ok2, retry) = state.evaluate(key_hash, RateLimitAlgorithm::FixedWindow, 1, 1);
         assert!(!ok2);
+        assert_eq!(retry, 1);
+    }
+
+    #[test]
+    fn test_cardinality_bomb_protection() {
+        let state = ShardedState::new();
+        let shard_idx = 0usize;
+        {
+            let mut shard = state.shards[shard_idx].lock.lock().unwrap();
+            let now_sec = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let now_instant = Instant::now();
+            // Fill shard to capacity with keys mapping to shard 0
+            for i in 0..MAX_ENTRIES_PER_SHARD {
+                let key = (i as u64) * 64; // key % 64 == 0
+                shard.insert(key, KeyState::new(10, now_sec, now_instant));
+            }
+        }
+
+        // New key mapping to shard 0 should be rejected due to capacity limit
+        let new_key = (MAX_ENTRIES_PER_SHARD as u64 + 100) * 64;
+        let (allowed, retry) = state.evaluate(new_key, RateLimitAlgorithm::TokenBucket, 10, 10);
+        assert!(!allowed);
         assert_eq!(retry, 1);
     }
 }
