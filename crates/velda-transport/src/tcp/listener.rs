@@ -169,11 +169,15 @@ impl TcpListener {
         worker_id: usize,
     ) -> Result<Self> {
         let listener = Self::bind(addr, config.clone())?;
-        if config.incoming_cpu {
-            let available_cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            listener.apply_incoming_cpu(worker_id % available_cpus);
+        // Only when NIC hardware RSS is proven to cover every worker core do we let the NIC's
+        // queue->CPU choice win (SO_INCOMING_CPU = real physical core). Otherwise the kernel
+        // SO_REUSEPORT software hash distributes flows; binding SO_INCOMING_CPU on a NIC that does
+        // not spread flows would funnel all connections into one worker.
+        if config.incoming_cpu
+            && !addr.ip().is_loopback()
+            && let Some(core) = velda_core::ingress_steering_cpu(worker_id)
+        {
+            listener.apply_incoming_cpu(core);
         }
         Ok(listener)
     }

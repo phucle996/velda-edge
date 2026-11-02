@@ -64,9 +64,20 @@ impl AccessLogPlugin {
 
         // Spawn background writer task if an active Tokio runtime is available
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let format = plugin.config.format;
             handle.spawn(async move {
-                while let Some(_record) = rx.recv().await {
-                    // Drained asynchronously; in full deployment, buffered batching writes to stdout/file.
+                // Reusable byte buffer across records: zero allocations on the serving hot path
+                let mut buffer = Vec::with_capacity(512);
+                while let Some(record) = rx.recv().await {
+                    buffer.clear();
+                    match format {
+                        LogFormat::Json => record.write_json(&mut buffer),
+                        LogFormat::Text => record.write_text(&mut buffer),
+                    }
+                    // Reclaim memory if an extreme request enlarged the buffer beyond 4KB
+                    if buffer.capacity() > 4096 {
+                        buffer.shrink_to(512);
+                    }
                 }
             });
         }

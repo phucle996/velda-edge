@@ -2,6 +2,8 @@
 //!
 //! Partitioned by remote peer address to eliminate lock contention on multi-core topologies.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -20,6 +22,10 @@ use crate::runtime::SharedRuntime;
 #[derive(Clone)]
 pub struct GrpcUdpEngineShards {
     shards: Arc<Vec<Arc<Mutex<GrpcUdpEngine>>>>,
+    /// Per-process randomly keyed SipHash state. Source IP/port are attacker-chosen, so an
+    /// unkeyed `ip ^ port` would let a client pile every flow onto one shard mutex. The key is
+    /// fixed for the process lifetime (clones share it), so a peer always maps to the same shard.
+    hasher: RandomState,
 }
 
 impl GrpcUdpEngineShards {
@@ -38,21 +44,17 @@ impl GrpcUdpEngineShards {
         }
         Self {
             shards: Arc::new(shards),
+            hasher: RandomState::new(),
         }
     }
 
-    /// Selects an engine shard deterministically by hashing remote peer IP and port.
+    /// Selects an engine shard by a keyed hash of the full remote peer address (IP + port).
+    ///
+    /// Deterministic within the process (a peer's QUIC state always lives in one shard) yet
+    /// unpredictable to clients, so shard placement cannot be targeted.
     #[inline]
     pub fn get_shard_for_peer(&self, peer: SocketAddr) -> Arc<Mutex<GrpcUdpEngine>> {
-        let port = peer.port() as usize;
-        let ip_hash = match peer.ip() {
-            std::net::IpAddr::V4(v4) => u32::from_ne_bytes(v4.octets()) as usize,
-            std::net::IpAddr::V6(v6) => {
-                let o = v6.octets();
-                u32::from_ne_bytes([o[12], o[13], o[14], o[15]]) as usize
-            }
-        };
-        let idx = (port ^ ip_hash) % self.shards.len();
+        let idx = (self.hasher.hash_one(peer) as usize) & (self.shards.len() - 1);
         self.shards[idx].clone()
     }
 
@@ -125,4 +127,31 @@ pub fn get_or_init_grpc_udp_engine_for_peer(
         .ok()?
         .get(listener_id)
         .map(|p| p.get_shard_for_peer(peer))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    use std::net::SocketAddr;
+
+    /// Structured, attacker-style peers (one IP, sequential ports) must spread across shards
+    /// the same way `get_shard_for_peer` selects them, and stay stable for a given key.
+    #[test]
+    fn keyed_peer_hash_spreads_sequential_ports() {
+        let hasher = RandomState::new();
+        let shards = 8usize;
+        let mut buckets = [0usize; 8];
+        for port in 10_000u16..18_000 {
+            let peer: SocketAddr = SocketAddr::from(([203, 0, 113, 7], port));
+            let idx = (hasher.hash_one(peer) as usize) & (shards - 1);
+            assert_eq!(idx, (hasher.hash_one(peer) as usize) & (shards - 1));
+            buckets[idx] += 1;
+        }
+        // 8000 flows / 8 shards = 1000 expected; allow +-25%.
+        assert!(
+            buckets.iter().all(|&c| (750..=1250).contains(&c)),
+            "{buckets:?}"
+        );
+    }
 }

@@ -340,28 +340,196 @@ pub fn to_base64(bytes: &[u8]) -> String {
     BASE64_STANDARD.encode(bytes)
 }
 
-/// Constant-time byte slice comparison using 128-bit vector words to eliminate timing
-/// side-channel attacks while vectorizing directly into SIMD instructions on modern CPUs.
+/// Signature for register-width-specific constant-time byte comparison functions.
+pub type ConstantTimeEqFn = fn(a: &[u8], b: &[u8]) -> bool;
+
+/// Pre-resolved static function pointer for constant-time comparison (up to 256-bit SIMD).
+pub static CONSTANT_TIME_EQ_FN: std::sync::LazyLock<ConstantTimeEqFn> =
+    std::sync::LazyLock::new(|| {
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+        match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
+            velda_core::hardware::RegisterWidth::Bits256 => constant_time_eq_256,
+            velda_core::hardware::RegisterWidth::Bits128 => constant_time_eq_128,
+            velda_core::hardware::RegisterWidth::Bits64 => constant_time_eq_64bit,
+            velda_core::hardware::RegisterWidth::Bits32 => constant_time_eq_32bit,
+        }
+    });
+
+/// Constant-time byte slice comparison using hardware vector registers (up to 256-bit max)
+/// to eliminate timing side-channel attacks with zero hot-path branching.
 #[inline]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u128;
-    let (chunks_a, remainder_a) = a.as_chunks::<16>();
-    let (chunks_b, remainder_b) = b.as_chunks::<16>();
+    (*CONSTANT_TIME_EQ_FN)(a, b)
+}
 
-    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
-        let val_a = u128::from_ne_bytes(*ca);
-        let val_b = u128::from_ne_bytes(*cb);
-        diff |= val_a ^ val_b;
+/// Constant-time comparison using 256-bit vector registers (32 bytes per iteration).
+#[inline]
+pub fn constant_time_eq_256(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { constant_time_eq_256_x86_impl(a, b) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        constant_time_eq_128(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn constant_time_eq_256_x86_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    let vec_len = len & !31;
+    let mut i = 0;
+    let mut acc = _mm256_setzero_si256();
+
+    while i < vec_len {
+        unsafe {
+            let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
+            let vb = _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i);
+            acc = _mm256_or_si256(acc, _mm256_xor_si256(va, vb));
+        }
+        i += 32;
     }
 
-    for (&ra, &rb) in remainder_a.iter().zip(remainder_b.iter()) {
-        diff |= (ra ^ rb) as u128;
+    let vec_zero = _mm256_testz_si256(acc, acc) != 0;
+    let mut rem_diff = 0u8;
+    for j in vec_len..len {
+        rem_diff |= a[j] ^ b[j];
+    }
+    vec_zero && (rem_diff == 0)
+}
+
+/// Constant-time comparison using 128-bit vector registers (16 bytes per iteration).
+#[inline]
+pub fn constant_time_eq_128(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { constant_time_eq_128_x86_impl(a, b) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { constant_time_eq_128_neon_impl(a, b) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        constant_time_eq_64bit(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn constant_time_eq_128_x86_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    let vec_len = len & !15;
+    let mut i = 0;
+    let mut acc = _mm_setzero_si128();
+
+    while i < vec_len {
+        unsafe {
+            let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
+            let vb = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+            acc = _mm_or_si128(acc, _mm_xor_si128(va, vb));
+        }
+        i += 16;
     }
 
-    diff == 0
+    let cmp = _mm_cmpeq_epi8(acc, _mm_setzero_si128());
+    let vec_zero = _mm_movemask_epi8(cmp) == 0xFFFF;
+    let mut rem_diff = 0u8;
+    for j in vec_len..len {
+        rem_diff |= a[j] ^ b[j];
+    }
+    vec_zero && (rem_diff == 0)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn constant_time_eq_128_neon_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::aarch64::*;
+    let len = a.len();
+    let vec_len = len & !15;
+    let mut i = 0;
+    let mut acc = vdupq_n_u8(0);
+
+    while i < vec_len {
+        unsafe {
+            let va = vld1q_u8(a.as_ptr().add(i));
+            let vb = vld1q_u8(b.as_ptr().add(i));
+            acc = vorrq_u8(acc, veorq_u8(va, vb));
+        }
+        i += 16;
+    }
+
+    let vec_zero = vmaxvq_u8(acc) == 0;
+    let mut rem_diff = 0u8;
+    for j in vec_len..len {
+        rem_diff |= a[j] ^ b[j];
+    }
+    vec_zero && (rem_diff == 0)
+}
+
+/// Constant-time comparison using 64-bit scalar registers (8 bytes per iteration).
+#[inline]
+pub fn constant_time_eq_64bit(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let len = a.len();
+    let word_len = len & !7;
+    let mut diff = 0u64;
+    let mut i = 0;
+
+    while i < word_len {
+        let wa = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
+        let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
+        diff |= wa ^ wb;
+        i += 8;
+    }
+
+    let mut rem_diff = 0u8;
+    for j in word_len..len {
+        rem_diff |= a[j] ^ b[j];
+    }
+    diff == 0 && rem_diff == 0
+}
+
+/// Constant-time comparison using 32-bit scalar registers (4 bytes per iteration).
+#[inline]
+pub fn constant_time_eq_32bit(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let len = a.len();
+    let word_len = len & !3;
+    let mut diff = 0u32;
+    let mut i = 0;
+
+    while i < word_len {
+        let wa = u32::from_ne_bytes(a[i..i + 4].try_into().unwrap());
+        let wb = u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
+        diff |= wa ^ wb;
+        i += 4;
+    }
+
+    let mut rem_diff = 0u8;
+    for j in word_len..len {
+        rem_diff |= a[j] ^ b[j];
+    }
+    diff == 0 && rem_diff == 0
 }
 
 /// Calculates the SHA-256 digest of a byte payload.
@@ -546,13 +714,24 @@ mod tests {
     }
 
     #[test]
-    fn test_simd_constant_time_eq() {
+    fn test_simd_constant_time_eq_all_tiers() {
         let a = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let b = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let c = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg";
 
-        assert!(constant_time_eq(a, b));
-        assert!(!constant_time_eq(a, c));
-        assert!(!constant_time_eq(a, &a[..32]));
+        for eq_fn in [
+            constant_time_eq,
+            constant_time_eq_256,
+            constant_time_eq_128,
+            constant_time_eq_64bit,
+            constant_time_eq_32bit,
+        ] {
+            assert!(eq_fn(a, b));
+            assert!(!eq_fn(a, c));
+            assert!(!eq_fn(a, &a[..32]));
+            assert!(eq_fn(&a[..37], &b[..37]));
+            assert!(!eq_fn(&a[27..64], &c[27..64]));
+            assert!(eq_fn(&a[..19], &b[..19]));
+        }
     }
 }

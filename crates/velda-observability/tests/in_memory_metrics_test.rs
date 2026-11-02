@@ -425,3 +425,80 @@ fn test_concurrent_pool_operations() {
     assert_eq!(snap.evictions_idle_timeout, expected_evictions);
     assert_eq!(snap.lifespan_le_5s, expected_evictions);
 }
+
+#[test]
+fn test_vectorized_pipeline_aggregation_and_basis_points() {
+    let store = MetricsStore::new();
+
+    // Pipeline 1: 100 requests (90 success 2xx, 10 errors 5xx)
+    for _ in 0..90 {
+        store.record_stream_completion(
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            StreamCompletion {
+                status_code: 200,
+                bytes_rx: 100,
+                bytes_tx: 500,
+                duration: Duration::from_millis(2),
+                ttfb: Some(Duration::from_millis(1)),
+            },
+        );
+    }
+    for _ in 0..10 {
+        store.record_stream_completion(
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            StreamCompletion {
+                status_code: 500,
+                bytes_rx: 50,
+                bytes_tx: 200,
+                duration: Duration::from_millis(50),
+                ttfb: Some(Duration::from_millis(20)),
+            },
+        );
+    }
+
+    // Pipeline 2: 50 requests (50 success 2xx)
+    for _ in 0..50 {
+        store.record_stream_completion(
+            DownstreamProto::H2,
+            UpstreamProto::H2,
+            PipeStrategy::Duplex,
+            StreamCompletion {
+                status_code: 200,
+                bytes_rx: 200,
+                bytes_tx: 1000,
+                duration: Duration::from_millis(8),
+                ttfb: Some(Duration::from_millis(3)),
+            },
+        );
+    }
+
+    let snap = store.snapshot();
+    let p1 = snap
+        .find_pipeline(
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+        )
+        .unwrap();
+
+    assert_eq!(p1.total_requests(), 100);
+    assert_eq!(p1.success_rate_basis_points(), 9_000); // 90.00%
+    assert!((p1.success_rate() - 0.90).abs() < f64::EPSILON);
+
+    // Vectorized aggregation across all 36 slots
+    let totals = snap.aggregate_pipelines();
+    assert_eq!(totals.total_requests(), 150);
+    assert_eq!(totals.requests_2xx, 140);
+    assert_eq!(totals.requests_5xx, 10);
+    assert_eq!(totals.bytes_rx, 90 * 100 + 10 * 50 + 50 * 200);
+    assert_eq!(totals.bytes_tx, 90 * 500 + 10 * 200 + 50 * 1000);
+    // 140 / 150 = 93.33% = 9333 basis points
+    assert_eq!(totals.success_rate_basis_points(), 9_333);
+
+    // Verify snapshot.total_requests() uses SIMD aggregation
+    assert_eq!(snap.total_requests(), 150);
+}

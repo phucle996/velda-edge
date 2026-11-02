@@ -139,6 +139,39 @@ impl MetricsStore {
 
         for (idx, slot) in self.slots.iter().enumerate() {
             let (down, up, pipe) = Self::decode_slot_index(idx);
+
+            // Compute cumulative duration histogram outside the traffic hot path
+            let d0 = slot.duration_b0_le_1ms.load(Ordering::Relaxed);
+            let d1 = slot.duration_b1_le_5ms.load(Ordering::Relaxed);
+            let d2 = slot.duration_b2_le_10ms.load(Ordering::Relaxed);
+            let d3 = slot.duration_b3_le_50ms.load(Ordering::Relaxed);
+            let d4 = slot.duration_b4_le_250ms.load(Ordering::Relaxed);
+            let d5 = slot.duration_b5_le_1000ms.load(Ordering::Relaxed);
+            let d6 = slot.duration_b6_gt_1000ms.load(Ordering::Relaxed);
+
+            let dur_1 = d0;
+            let dur_5 = dur_1.saturating_add(d1);
+            let dur_10 = dur_5.saturating_add(d2);
+            let dur_50 = dur_10.saturating_add(d3);
+            let dur_250 = dur_50.saturating_add(d4);
+            let dur_1000 = dur_250.saturating_add(d5);
+            let dur_inf = d6;
+
+            // Compute cumulative TTFB histogram outside the traffic hot path
+            let t0 = slot.ttfb_b0_le_1ms.load(Ordering::Relaxed);
+            let t1 = slot.ttfb_b1_le_5ms.load(Ordering::Relaxed);
+            let t2 = slot.ttfb_b2_le_10ms.load(Ordering::Relaxed);
+            let t3 = slot.ttfb_b3_le_50ms.load(Ordering::Relaxed);
+            let t4 = slot.ttfb_b4_le_250ms.load(Ordering::Relaxed);
+            let t5 = slot.ttfb_b5_gt_250ms.load(Ordering::Relaxed);
+
+            let ttfb_1 = t0;
+            let ttfb_5 = ttfb_1.saturating_add(t1);
+            let ttfb_10 = ttfb_5.saturating_add(t2);
+            let ttfb_50 = ttfb_10.saturating_add(t3);
+            let ttfb_250 = ttfb_50.saturating_add(t4);
+            let ttfb_inf = t5;
+
             pipelines.push(PipelineSnapshot {
                 downstream: down,
                 upstream: up,
@@ -151,19 +184,19 @@ impl MetricsStore {
                 active_streams: slot.active_streams.load(Ordering::Relaxed),
                 bytes_rx: slot.bytes_rx.load(Ordering::Relaxed),
                 bytes_tx: slot.bytes_tx.load(Ordering::Relaxed),
-                duration_le_1ms: slot.duration_le_1ms.load(Ordering::Relaxed),
-                duration_le_5ms: slot.duration_le_5ms.load(Ordering::Relaxed),
-                duration_le_10ms: slot.duration_le_10ms.load(Ordering::Relaxed),
-                duration_le_50ms: slot.duration_le_50ms.load(Ordering::Relaxed),
-                duration_le_250ms: slot.duration_le_250ms.load(Ordering::Relaxed),
-                duration_le_1000ms: slot.duration_le_1000ms.load(Ordering::Relaxed),
-                duration_gt_1000ms: slot.duration_gt_1000ms.load(Ordering::Relaxed),
-                ttfb_le_1ms: slot.ttfb_le_1ms.load(Ordering::Relaxed),
-                ttfb_le_5ms: slot.ttfb_le_5ms.load(Ordering::Relaxed),
-                ttfb_le_10ms: slot.ttfb_le_10ms.load(Ordering::Relaxed),
-                ttfb_le_50ms: slot.ttfb_le_50ms.load(Ordering::Relaxed),
-                ttfb_le_250ms: slot.ttfb_le_250ms.load(Ordering::Relaxed),
-                ttfb_gt_250ms: slot.ttfb_gt_250ms.load(Ordering::Relaxed),
+                duration_le_1ms: dur_1,
+                duration_le_5ms: dur_5,
+                duration_le_10ms: dur_10,
+                duration_le_50ms: dur_50,
+                duration_le_250ms: dur_250,
+                duration_le_1000ms: dur_1000,
+                duration_gt_1000ms: dur_inf,
+                ttfb_le_1ms: ttfb_1,
+                ttfb_le_5ms: ttfb_5,
+                ttfb_le_10ms: ttfb_10,
+                ttfb_le_50ms: ttfb_50,
+                ttfb_le_250ms: ttfb_250,
+                ttfb_gt_250ms: ttfb_inf,
             });
         }
 

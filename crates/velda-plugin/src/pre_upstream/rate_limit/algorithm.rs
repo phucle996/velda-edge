@@ -39,12 +39,16 @@ impl RateLimitAlgorithm {
     }
 }
 
+/// Fixed-point scaling factor for integer Token Bucket accounting (`1 token = 1_000_000_000 nano-tokens`).
+/// Eliminates all floating-point (`f64`/FPU) conversions and IEEE-754 precision drift on the hot path.
+pub const NANO_TOKENS_PER_UNIT: u64 = 1_000_000_000;
+
 /// Per-client state stored in in-memory shards.
 #[derive(Debug, Clone)]
 pub struct KeyState {
     pub last_access_sec: u64,
-    // Token Bucket fields
-    pub tokens: f64,
+    // Token Bucket fields (pure integer fixed-point nano-tokens)
+    pub nano_tokens: u64,
     pub last_refill: Instant,
     // Sliding Window fields
     pub sw_current_sec: u64,
@@ -59,7 +63,7 @@ impl KeyState {
     pub fn new(burst_capacity: u64, now_sec: u64, now_instant: Instant) -> Self {
         Self {
             last_access_sec: now_sec,
-            tokens: burst_capacity as f64,
+            nano_tokens: burst_capacity.saturating_mul(NANO_TOKENS_PER_UNIT),
             last_refill: now_instant,
             sw_current_sec: now_sec,
             sw_current_count: 0,
@@ -121,10 +125,10 @@ impl ShardedState {
         let mut shard = shard_entry.lock.lock().unwrap();
 
         let now_instant = Instant::now();
-        let now_sec = SystemTime::now()
+        let now_dur = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let now_sec = now_dur.as_secs();
 
         // Perform periodic cleanup of stale keys (>60s inactivity) every 60s
         let last_clean = shard_entry.last_cleanup.load(Ordering::Relaxed);
@@ -154,19 +158,26 @@ impl ShardedState {
 
         match algorithm {
             RateLimitAlgorithm::TokenBucket => {
-                let elapsed_sec = now_instant.duration_since(entry.last_refill).as_secs_f64();
+                let elapsed_nanos = now_instant.duration_since(entry.last_refill).as_nanos() as u64;
                 entry.last_refill = now_instant;
 
-                // Refill tokens
-                let new_tokens = entry.tokens + (elapsed_sec * rate_per_second as f64);
-                entry.tokens = new_tokens.min(burst_capacity as f64);
+                // Pure integer fixed-point refill: 1 token = 1_000_000_000 nano-tokens.
+                // Zero FPU (f64) instructions, zero IEEE-754 precision drift.
+                let added_nano = (elapsed_nanos as u128)
+                    .saturating_mul(rate_per_second as u128)
+                    .min(u64::MAX as u128) as u64;
+                let max_nano = burst_capacity.saturating_mul(NANO_TOKENS_PER_UNIT);
+                entry.nano_tokens = entry.nano_tokens.saturating_add(added_nano).min(max_nano);
 
-                if entry.tokens >= 1.0 {
-                    entry.tokens -= 1.0;
+                if entry.nano_tokens >= NANO_TOKENS_PER_UNIT {
+                    entry.nano_tokens -= NANO_TOKENS_PER_UNIT;
                     (true, 0)
+                } else if rate_per_second == 0 {
+                    (false, 1)
                 } else {
-                    let deficit = 1.0 - entry.tokens;
-                    let wait_sec = (deficit / rate_per_second as f64).ceil() as u64;
+                    let deficit_nano = NANO_TOKENS_PER_UNIT - entry.nano_tokens;
+                    let denom = rate_per_second.saturating_mul(NANO_TOKENS_PER_UNIT).max(1);
+                    let wait_sec = deficit_nano.saturating_add(denom - 1) / denom;
                     (false, wait_sec.max(1))
                 }
             }
@@ -183,15 +194,17 @@ impl ShardedState {
                     entry.sw_current_sec = now_sec;
                 }
 
-                let now_millis = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let elapsed_fraction = (now_millis % 1000) as f64 / 1000.0;
-                let effective_count = (entry.sw_prev_count as f64 * (1.0 - elapsed_fraction))
-                    + entry.sw_current_count as f64;
+                // Pure integer cross-multiplication (scaled by 1000 ms, zero FPU division):
+                // effective_milli = sw_prev_count * (1000 - subsec_ms) + sw_current_count * 1000
+                let subsec_ms = now_dur.subsec_millis() as u64;
+                let weighted_prev = entry
+                    .sw_prev_count
+                    .saturating_mul(1000u64.saturating_sub(subsec_ms));
+                let weighted_curr = entry.sw_current_count.saturating_mul(1000);
+                let effective_milli = weighted_prev.saturating_add(weighted_curr);
+                let limit_milli = rate_per_second.saturating_mul(1000);
 
-                if effective_count < rate_per_second as f64 {
+                if effective_milli < limit_milli {
                     entry.sw_current_count += 1;
                     (true, 0)
                 } else {

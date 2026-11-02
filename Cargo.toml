@@ -44,3 +44,8 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 debug = false
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

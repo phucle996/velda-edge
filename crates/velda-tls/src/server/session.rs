@@ -43,14 +43,75 @@ impl fmt::Debug for ShardedServerSessionCache {
     }
 }
 
+type HashSessionKeyFn = fn(&[u8]) -> usize;
+
+static HASH_SESSION_KEY_FN: std::sync::LazyLock<HashSessionKeyFn> =
+    std::sync::LazyLock::new(|| {
+        let width = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities
+            .select_for_workload(velda_core::RegisterWidth::Bits64);
+        match width {
+            velda_core::RegisterWidth::Bits64
+            | velda_core::RegisterWidth::Bits128
+            | velda_core::RegisterWidth::Bits256 => hash_session_key_64,
+            velda_core::RegisterWidth::Bits32 => hash_session_key_32,
+        }
+    });
+
 #[inline]
-fn hash_session_key(bytes: &[u8]) -> usize {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+fn hash_session_key_64(bytes: &[u8]) -> usize {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h: u64 = OFFSET;
+    let len = bytes.len();
+    let aligned = len & !7;
+    let ptr = bytes.as_ptr();
+    let mut i = 0;
+
+    while i < aligned {
+        let word = unsafe { (ptr.add(i) as *const u64).read_unaligned() }.to_le();
+        h ^= word;
+        h = h.wrapping_mul(PRIME).rotate_left(31);
+        i += 8;
     }
-    h as usize
+
+    while i < len {
+        h ^= bytes[i] as u64;
+        h = h.wrapping_mul(PRIME);
+        i += 1;
+    }
+    (h ^ (h >> 32)) as usize
+}
+
+#[inline]
+fn hash_session_key_32(bytes: &[u8]) -> usize {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h: u64 = OFFSET;
+    let len = bytes.len();
+    let aligned = len & !3;
+    let ptr = bytes.as_ptr();
+    let mut i = 0;
+
+    while i < aligned {
+        let word = unsafe { (ptr.add(i) as *const u32).read_unaligned() }.to_le() as u64;
+        h ^= word;
+        h = h.wrapping_mul(PRIME);
+        i += 4;
+    }
+
+    while i < len {
+        h ^= bytes[i] as u64;
+        h = h.wrapping_mul(PRIME);
+        i += 1;
+    }
+    (h ^ (h >> 32)) as usize
+}
+
+#[inline(always)]
+fn hash_session_key(bytes: &[u8]) -> usize {
+    (HASH_SESSION_KEY_FN)(bytes)
 }
 
 impl ShardedServerSessionCache {

@@ -6,15 +6,76 @@ use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
 
-/// 64-bit FNV-1a hash function with zero external dependencies.
-#[inline]
-pub fn fnv1a_hash(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+type HashBytesFn = fn(&[u8]) -> u64;
+
+static HASH_BYTES_FN: std::sync::LazyLock<HashBytesFn> = std::sync::LazyLock::new(|| {
+    let width = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities
+        .select_for_workload(velda_core::RegisterWidth::Bits64);
+    match width {
+        velda_core::RegisterWidth::Bits64
+        | velda_core::RegisterWidth::Bits128
+        | velda_core::RegisterWidth::Bits256 => hash_bytes_64,
+        velda_core::RegisterWidth::Bits32 => hash_bytes_32,
     }
-    hash
+});
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// 64-bit register word-accelerated FNV-1a mixer (processes 8 bytes per multiplication).
+#[inline]
+fn hash_bytes_64(data: &[u8]) -> u64 {
+    let mut hash: u64 = FNV_OFFSET;
+    let len = data.len();
+    let aligned = len & !7;
+    let ptr = data.as_ptr();
+    let mut i = 0;
+
+    while i < aligned {
+        let word = unsafe { (ptr.add(i) as *const u64).read_unaligned() }.to_le();
+        hash ^= word;
+        hash = hash.wrapping_mul(FNV_PRIME).rotate_left(31);
+        i += 8;
+    }
+
+    while i < len {
+        hash ^= data[i] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        i += 1;
+    }
+    hash ^ (hash >> 32)
+}
+
+/// 32-bit register word-accelerated FNV-1a mixer (processes 4 bytes per multiplication).
+#[inline]
+fn hash_bytes_32(data: &[u8]) -> u64 {
+    let mut hash: u64 = FNV_OFFSET;
+    let len = data.len();
+    let aligned = len & !3;
+    let ptr = data.as_ptr();
+    let mut i = 0;
+
+    while i < aligned {
+        let word = unsafe { (ptr.add(i) as *const u32).read_unaligned() }.to_le() as u64;
+        hash ^= word;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        i += 4;
+    }
+
+    while i < len {
+        hash ^= data[i] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        i += 1;
+    }
+    hash ^ (hash >> 32)
+}
+
+/// High-speed register-dispatched 64-bit hash function (`Bits64` -> `Bits32`) with zero external dependencies.
+#[inline(always)]
+pub fn fnv1a_hash(data: &[u8]) -> u64 {
+    (HASH_BYTES_FN)(data)
 }
 
 /// Hashes the client's IP address to map them consistently to a backend.
@@ -27,11 +88,23 @@ impl IpHash {
         Self
     }
 
-    /// Computes a 64-bit hash from a [`SocketAddr`].
+    /// Computes a 64-bit hash from a [`SocketAddr`] directly in integer registers without byte loops.
+    #[inline]
     pub fn hash_socket_addr(addr: SocketAddr) -> u64 {
         match addr {
-            SocketAddr::V4(v4) => fnv1a_hash(&v4.ip().octets()),
-            SocketAddr::V6(v6) => fnv1a_hash(&v6.ip().octets()),
+            SocketAddr::V4(v4) => {
+                let ip = u32::from_be_bytes(v4.ip().octets()) as u64;
+                let h = (FNV_OFFSET ^ ip).wrapping_mul(FNV_PRIME);
+                h ^ (h >> 32)
+            }
+            SocketAddr::V6(v6) => {
+                let octets = v6.ip().octets();
+                let hi = u64::from_be_bytes(octets[0..8].try_into().unwrap());
+                let lo = u64::from_be_bytes(octets[8..16].try_into().unwrap());
+                let h = (FNV_OFFSET ^ hi).wrapping_mul(FNV_PRIME) ^ lo;
+                let h = h.wrapping_mul(FNV_PRIME);
+                h ^ (h >> 32)
+            }
         }
     }
 }

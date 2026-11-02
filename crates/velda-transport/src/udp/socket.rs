@@ -203,12 +203,12 @@ impl UdpSocket {
     pub fn bind_shard(addr: SocketAddr, config: UdpSocketConfig, worker_id: usize) -> Result<Self> {
         let mut socket = Self::bind(addr, config.clone())?;
         socket.worker_id = worker_id;
-        #[cfg(target_os = "linux")]
+        // See `TcpListener::bind_shard`: hardware RSS authority is applied only when proven;
+        // otherwise the kernel software hash owns flow distribution.
+        if !addr.ip().is_loopback()
+            && let Some(core) = velda_core::ingress_steering_cpu(worker_id)
         {
-            let available_cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            socket.apply_incoming_cpu(worker_id % available_cpus);
+            socket.apply_incoming_cpu(core);
         }
         Ok(socket)
     }

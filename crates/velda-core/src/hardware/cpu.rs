@@ -3,59 +3,165 @@
 //! Owns host CPU core discovery, container cgroups limits (v1 & v2),
 //! environment overrides, and CPU profile detection.
 
-/// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
+/// Canonical hardware register width representation.
 ///
-/// Enables portable binaries to dynamically activate AVX-512 or AVX2 hardware acceleration
-/// without risking SIGILL crashes on older cloud VPS nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CpuVectorCapabilities {
-    /// Intel/AMD AVX2 (Advanced Vector Extensions 2: 256-bit integer/float SIMD, FMA, BMI1/BMI2).
-    pub avx2: bool,
-    /// Intel Xeon / AMD EPYC Zen 4 AVX-512 Foundation (512-bit vector processing).
-    pub avx512f: bool,
-    /// ARM64 NEON Vector Extensions (128-bit SIMD on AWS Graviton / Apple Silicon / Ampere).
-    pub neon: bool,
+/// Strictly vendor-neutral (represented by bit-width rather than vendor extensions).
+/// Capped at 256 bits maximum to prevent thermal throttling and CPU core downclocking
+/// induced by wider (e.g. 512-bit) vector units on Intel Xeon and AMD EPYC platforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u16)]
+pub enum RegisterWidth {
+    /// 32-bit scalar general-purpose registers (or 32-bit SWAR emulation).
+    Bits32 = 32,
+    /// 64-bit scalar general-purpose registers (standard 64-bit ALU).
+    Bits64 = 64,
+    /// 128-bit vector registers (e.g. SSE2 / NEON).
+    Bits128 = 128,
+    /// 256-bit vector registers (e.g. AVX2 / 256-bit SIMD).
+    Bits256 = 256,
 }
 
-impl CpuVectorCapabilities {
-    /// Probes CPUID hardware capabilities at runtime with zero risk of SIGILL.
+/// Hardware register width capabilities detected at runtime via CPUID.
+///
+/// # Architectural Invariant
+/// - Strictly capped at 256-bit max. AVX-512 is deliberately excluded and banned to prevent
+///   frequency drops (downclocking) that degrade frontline worker threads.
+/// - Vendor-agnostic: workloads query required bit-widths (`Bits32`, `Bits64`, `Bits128`, `Bits256`)
+///   rather than vendor instruction names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuRegisterCapabilities {
+    /// 32-bit arithmetic supported.
+    pub has_32: bool,
+    /// 64-bit arithmetic supported.
+    pub has_64: bool,
+    /// 128-bit vector registers supported.
+    pub has_128: bool,
+    /// 256-bit vector registers supported (hardware ceiling).
+    pub has_256: bool,
+    /// Maximum supported register width on host.
+    pub max_width: RegisterWidth,
+}
+
+impl CpuRegisterCapabilities {
+    /// Probes hardware register widths at runtime with zero risk of SIGILL.
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
+            let has_32 = true;
+            let has_64 = true;
+            let has_128 = true; // SSE2 is mandatory baseline on x86_64
+            let has_256 = std::is_x86_feature_detected!("avx2");
+            let max_width = if has_256 {
+                RegisterWidth::Bits256
+            } else {
+                RegisterWidth::Bits128
+            };
             Self {
-                avx2: std::is_x86_feature_detected!("avx2"),
-                avx512f: std::is_x86_feature_detected!("avx512f"),
-                neon: false,
+                has_32,
+                has_64,
+                has_128,
+                has_256,
+                max_width,
             }
         }
         #[cfg(target_arch = "aarch64")]
         {
+            let has_32 = true;
+            let has_64 = true;
+            let has_128 = std::arch::is_aarch64_feature_detected!("neon");
+            let has_256 = false; // NEON is 128-bit
+            let max_width = if has_128 {
+                RegisterWidth::Bits128
+            } else {
+                RegisterWidth::Bits64
+            };
             Self {
-                avx2: false,
-                avx512f: false,
-                neon: std::arch::is_aarch64_feature_detected!("neon"),
+                has_32,
+                has_64,
+                has_128,
+                has_256,
+                max_width,
             }
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
+            let has_32 = true;
+            let has_64 = cfg!(target_pointer_width = "64");
+            let has_128 = false;
+            let has_256 = false;
+            let max_width = if has_64 {
+                RegisterWidth::Bits64
+            } else {
+                RegisterWidth::Bits32
+            };
             Self {
-                avx2: false,
-                avx512f: false,
-                neon: false,
+                has_32,
+                has_64,
+                has_128,
+                has_256,
+                max_width,
             }
         }
     }
 
-    /// Returns a human-readable summary of detected SIMD acceleration for startup logging.
+    /// Selects the optimal hardware register tier for a workload's declared ceiling.
+    ///
+    /// Workloads do not use fallback branches; instead they declare their target register width.
+    /// The selector returns the exact matching register width supported by the host up to that ceiling:
+    /// - Workloads targeting 64-bit use `Bits64` (or split into `Bits32` on 32-bit hardware).
+    /// - Workloads targeting 256-bit use `Bits256` if available, otherwise `Bits128`, `Bits64`, or `Bits32`.
+    #[inline]
+    pub fn select_for_workload(&self, target_max: RegisterWidth) -> RegisterWidth {
+        match target_max {
+            RegisterWidth::Bits256 => {
+                if self.has_256 {
+                    RegisterWidth::Bits256
+                } else if self.has_128 {
+                    RegisterWidth::Bits128
+                } else if self.has_64 {
+                    RegisterWidth::Bits64
+                } else {
+                    RegisterWidth::Bits32
+                }
+            }
+            RegisterWidth::Bits128 => {
+                if self.has_128 {
+                    RegisterWidth::Bits128
+                } else if self.has_64 {
+                    RegisterWidth::Bits64
+                } else {
+                    RegisterWidth::Bits32
+                }
+            }
+            RegisterWidth::Bits64 => {
+                if self.has_64 {
+                    RegisterWidth::Bits64
+                } else {
+                    RegisterWidth::Bits32
+                }
+            }
+            RegisterWidth::Bits32 => RegisterWidth::Bits32,
+        }
+    }
+
+    /// Checks if a specific register width is natively supported by the host.
+    #[inline]
+    pub const fn is_supported(&self, width: RegisterWidth) -> bool {
+        match width {
+            RegisterWidth::Bits32 => self.has_32,
+            RegisterWidth::Bits64 => self.has_64,
+            RegisterWidth::Bits128 => self.has_128,
+            RegisterWidth::Bits256 => self.has_256,
+        }
+    }
+
+    /// Returns a human-readable summary of detected register acceleration for startup logging.
     pub const fn summary(&self) -> &'static str {
-        if self.avx512f {
-            "AVX-512 (512-bit Vector Engine)"
-        } else if self.avx2 {
-            "AVX2 + FMA (256-bit Vector Engine)"
-        } else if self.neon {
-            "ARM NEON (128-bit Vector Engine)"
-        } else {
-            "Standard Scalar Baseline"
+        match self.max_width {
+            RegisterWidth::Bits256 => "256-bit Vector Register Engine",
+            RegisterWidth::Bits128 => "128-bit Vector Register Engine",
+            RegisterWidth::Bits64 => "64-bit Scalar Register Engine",
+            RegisterWidth::Bits32 => "32-bit Register Engine",
         }
     }
 }
@@ -67,8 +173,8 @@ pub struct CpuProfile {
     pub available_cores: usize,
     /// Provenance source indicating how CPU capacity was resolved.
     pub source: &'static str,
-    /// Hardware SIMD & vector instruction capabilities detected at runtime via CPUID.
-    pub vector_capabilities: CpuVectorCapabilities,
+    /// Hardware register width capabilities detected at runtime via CPUID.
+    pub register_capabilities: CpuRegisterCapabilities,
 }
 
 impl CpuProfile {
@@ -79,75 +185,171 @@ impl CpuProfile {
         Self {
             available_cores: cores,
             source,
-            vector_capabilities: CpuVectorCapabilities::detect(),
+            register_capabilities: CpuRegisterCapabilities::detect(),
         }
     }
 }
 
-/// Copies bulk byte payloads using runtime dynamic dispatch to the widest vector registers available on host CPU.
+/// Signature for register-width-specific bulk byte copy functions.
+pub type CopyBulkFn = fn(src: &[u8], dst: &mut [u8]);
+
+/// Pre-resolved static function pointer for bulk payload transfers.
 ///
-/// # Hardware Rationale
-/// Under large payloads (such as 1MB HTTP/3 responses), scalar byte moves consume significant L1 cache
-/// and CPU execution ports. On CPUs with AVX-512 (e.g. Intel Xeon Ice Lake / Sapphire Rapids or AMD EPYC Zen 4),
-/// this function transfers 64 bytes per cycle using 512-bit ZMM registers. On AVX2 systems, it transfers
-/// 32 bytes per cycle. On older systems, it transparently falls back to optimized libc memcpy.
+/// Bound once at boot via `select_for_workload(RegisterWidth::Bits256)` with zero hot-path branching.
+pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> = std::sync::LazyLock::new(|| {
+    let caps = CpuRegisterCapabilities::detect();
+    match caps.select_for_workload(RegisterWidth::Bits256) {
+        RegisterWidth::Bits256 => copy_bulk_256,
+        RegisterWidth::Bits128 => copy_bulk_128,
+        RegisterWidth::Bits64 => copy_bulk_64,
+        RegisterWidth::Bits32 => copy_bulk_32,
+    }
+});
+
+/// Copies bulk byte payloads using the pre-resolved hardware register function pointer (up to 256-bit max).
+///
+/// # Hardware Invariant
+/// Capped strictly at 256 bits (`Bits256`). AVX-512 is never executed to avoid core downclocking.
+/// Dispatches directly via `COPY_BULK_FN` without runtime CPUID feature checks on the hot path.
 #[inline]
 pub fn copy_bulk_payload(src: &[u8], dst: &mut [u8]) {
     let len = src.len().min(dst.len());
     if len == 0 {
         return;
     }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx512f") && len >= 64 {
-            unsafe {
-                copy_bulk_avx512(&src[..len], &mut dst[..len]);
-                return;
-            }
-        }
-        if std::is_x86_feature_detected!("avx2") && len >= 32 {
-            unsafe {
-                copy_bulk_avx2(&src[..len], &mut dst[..len]);
-                return;
-            }
-        }
-    }
-
-    dst[..len].copy_from_slice(&src[..len]);
+    (*COPY_BULK_FN)(&src[..len], &mut dst[..len]);
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-unsafe fn copy_bulk_avx512(src: &[u8], dst: &mut [u8]) {
-    use std::arch::x86_64::*;
-    let mut i = 0;
-    while i + 64 <= src.len() {
+/// Bulk byte copy using 256-bit vector registers (32 bytes per iteration).
+#[inline]
+pub fn copy_bulk_256(src: &[u8], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
         unsafe {
-            let chunk = _mm512_loadu_si512(src.as_ptr().add(i) as *const _);
-            _mm512_storeu_si512(dst.as_mut_ptr().add(i) as *mut _, chunk);
+            copy_bulk_256_x86_impl(&src[..len], &mut dst[..len]);
         }
-        i += 64;
     }
-    if i < src.len() {
-        dst[i..].copy_from_slice(&src[i..]);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        copy_bulk_128(&src[..len], &mut dst[..len]);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn copy_bulk_avx2(src: &[u8], dst: &mut [u8]) {
+unsafe fn copy_bulk_256_x86_impl(src: &[u8], dst: &mut [u8]) {
     use std::arch::x86_64::*;
+    let len = src.len();
+    let vec_len = len & !31;
     let mut i = 0;
-    while i + 32 <= src.len() {
+    while i < vec_len {
         unsafe {
-            let chunk = _mm256_loadu_si256(src.as_ptr().add(i) as *const _);
-            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut _, chunk);
+            let chunk = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, chunk);
         }
         i += 32;
     }
-    if i < src.len() {
-        dst[i..].copy_from_slice(&src[i..]);
+    if vec_len < len {
+        dst[vec_len..len].copy_from_slice(&src[vec_len..len]);
+    }
+}
+
+/// Bulk byte copy using 128-bit vector registers (16 bytes per iteration).
+#[inline]
+pub fn copy_bulk_128(src: &[u8], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe {
+            copy_bulk_128_x86_impl(&src[..len], &mut dst[..len]);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            copy_bulk_128_neon_impl(&src[..len], &mut dst[..len]);
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        copy_bulk_64(&src[..len], &mut dst[..len]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn copy_bulk_128_x86_impl(src: &[u8], dst: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let len = src.len();
+    let vec_len = len & !15;
+    let mut i = 0;
+    while i < vec_len {
+        unsafe {
+            let chunk = _mm_loadu_si128(src.as_ptr().add(i) as *const __m128i);
+            _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, chunk);
+        }
+        i += 16;
+    }
+    if vec_len < len {
+        dst[vec_len..len].copy_from_slice(&src[vec_len..len]);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn copy_bulk_128_neon_impl(src: &[u8], dst: &mut [u8]) {
+    use std::arch::aarch64::*;
+    let len = src.len();
+    let vec_len = len & !15;
+    let mut i = 0;
+    while i < vec_len {
+        unsafe {
+            let chunk = vld1q_u8(src.as_ptr().add(i));
+            vst1q_u8(dst.as_mut_ptr().add(i), chunk);
+        }
+        i += 16;
+    }
+    if vec_len < len {
+        dst[vec_len..len].copy_from_slice(&src[vec_len..len]);
+    }
+}
+
+/// Bulk byte copy using 64-bit scalar registers (8 bytes per iteration).
+#[inline]
+pub fn copy_bulk_64(src: &[u8], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    let word_len = len & !7;
+    let mut i = 0;
+    while i < word_len {
+        unsafe {
+            let w = std::ptr::read_unaligned(src.as_ptr().add(i) as *const u64);
+            std::ptr::write_unaligned(dst.as_mut_ptr().add(i) as *mut u64, w);
+        }
+        i += 8;
+    }
+    while i < len {
+        dst[i] = src[i];
+        i += 1;
+    }
+}
+
+/// Bulk byte copy using 32-bit scalar registers (4 bytes per iteration).
+#[inline]
+pub fn copy_bulk_32(src: &[u8], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    let word_len = len & !3;
+    let mut i = 0;
+    while i < word_len {
+        unsafe {
+            let w = std::ptr::read_unaligned(src.as_ptr().add(i) as *const u32);
+            std::ptr::write_unaligned(dst.as_mut_ptr().add(i) as *mut u32, w);
+        }
+        i += 4;
+    }
+    while i < len {
+        dst[i] = src[i];
+        i += 1;
     }
 }
 
@@ -204,17 +406,60 @@ mod tests {
         let cpu = probe_cpu();
         assert!(cpu.available_cores >= 1);
         assert!(!cpu.source.is_empty());
-        assert!(!cpu.vector_capabilities.summary().is_empty());
+        assert!(!cpu.register_capabilities.summary().is_empty());
     }
 
     #[test]
-    fn test_copy_bulk_payload() {
-        // Test varying boundary sizes: 0B, 15B, 32B, 64B, 128B, 1024B, 65536B
-        for size in [0, 7, 31, 32, 63, 64, 127, 128, 1024, 65536] {
+    fn test_register_width_selection() {
+        let caps = CpuRegisterCapabilities::detect();
+        assert!(caps.has_32);
+        assert!(caps.has_64);
+
+        // Workload requesting Bits64 gets exactly Bits64
+        let w64 = caps.select_for_workload(RegisterWidth::Bits64);
+        assert_eq!(w64, RegisterWidth::Bits64);
+
+        // Workload requesting Bits32 gets exactly Bits32
+        let w32 = caps.select_for_workload(RegisterWidth::Bits32);
+        assert_eq!(w32, RegisterWidth::Bits32);
+
+        // Workload requesting Bits256 gets maximum supported up to Bits256
+        let w256 = caps.select_for_workload(RegisterWidth::Bits256);
+        assert!(w256 <= RegisterWidth::Bits256);
+        assert!(w256 >= RegisterWidth::Bits128); // On x86_64, at least 128-bit
+    }
+
+    #[test]
+    fn test_copy_bulk_payload_all_tiers() {
+        // Test varying boundary sizes across all register tiers (256, 128, 64, 32)
+        for size in [
+            0, 1, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 1024, 65536,
+        ] {
             let src: Vec<u8> = (0..size).map(|i| (i % 255) as u8).collect();
-            let mut dst = vec![0u8; size];
-            copy_bulk_payload(&src, &mut dst);
-            assert_eq!(src, dst, "Mismatch at payload size {}", size);
+
+            let mut dst_fn = vec![0u8; size];
+            copy_bulk_payload(&src, &mut dst_fn);
+            assert_eq!(
+                src, dst_fn,
+                "Mismatch in copy_bulk_payload at size {}",
+                size
+            );
+
+            let mut dst_256 = vec![0u8; size];
+            copy_bulk_256(&src, &mut dst_256);
+            assert_eq!(src, dst_256, "Mismatch in copy_bulk_256 at size {}", size);
+
+            let mut dst_128 = vec![0u8; size];
+            copy_bulk_128(&src, &mut dst_128);
+            assert_eq!(src, dst_128, "Mismatch in copy_bulk_128 at size {}", size);
+
+            let mut dst_64 = vec![0u8; size];
+            copy_bulk_64(&src, &mut dst_64);
+            assert_eq!(src, dst_64, "Mismatch in copy_bulk_64 at size {}", size);
+
+            let mut dst_32 = vec![0u8; size];
+            copy_bulk_32(&src, &mut dst_32);
+            assert_eq!(src, dst_32, "Mismatch in copy_bulk_32 at size {}", size);
         }
     }
 }

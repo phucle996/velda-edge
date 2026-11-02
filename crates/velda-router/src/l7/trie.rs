@@ -5,9 +5,93 @@
 //! with early termination and longest-prefix-first fallback. Traversal operates
 //! with zero heap allocations on the request serving hot path.
 
+use velda_core::hardware::{RegisterWidth, global_hardware_topology};
+
+/// Signature for register-width-specific common prefix length calculation.
+pub type CommonPrefixLenFn = fn(a: &[u8], b: &[u8]) -> usize;
+
+/// Pre-resolved static function pointer for 64-bit / 32-bit SWAR prefix matching.
+///
+/// Workload explicitly targets `RegisterWidth::Bits64` (avoiding wider vector overhead on short URI segments).
+/// On 64-bit hosts, selects `common_prefix_len_64`; on 32-bit hosts, selects `common_prefix_len_32`.
+pub static COMMON_PREFIX_LEN_FN: std::sync::LazyLock<CommonPrefixLenFn> =
+    std::sync::LazyLock::new(|| {
+        let caps = global_hardware_topology().cpu.register_capabilities;
+        match caps.select_for_workload(RegisterWidth::Bits64) {
+            RegisterWidth::Bits64 | RegisterWidth::Bits128 | RegisterWidth::Bits256 => {
+                common_prefix_len_64
+            }
+            RegisterWidth::Bits32 => common_prefix_len_32,
+        }
+    });
+
 #[inline]
-fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
+pub fn common_prefix_len(a: &str, b: &str) -> usize {
+    (*COMMON_PREFIX_LEN_FN)(a.as_bytes(), b.as_bytes())
+}
+
+/// Computes common prefix length using 64-bit SWAR word XOR + hardware TZCNT (`trailing_zeros() / 8`).
+#[inline]
+pub fn common_prefix_len_64(a: &[u8], b: &[u8]) -> usize {
+    let len = a.len().min(b.len());
+    let word_len = len & !7;
+    let mut i = 0;
+
+    while i < word_len {
+        let wa = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+        let wb = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let diff = wa ^ wb;
+        if diff != 0 {
+            return i + (diff.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+
+    while i < len && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+/// Computes common prefix length using dual 32-bit SWAR registers (`2 x 32-bit`) + hardware TZCNT.
+#[inline]
+pub fn common_prefix_len_32(a: &[u8], b: &[u8]) -> usize {
+    let len = a.len().min(b.len());
+    let pair_len = len & !7;
+    let mut i = 0;
+
+    // Process 8 bytes per iteration using two 32-bit registers (lo, hi)
+    while i < pair_len {
+        let a_lo = u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
+        let b_lo = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        let diff_lo = a_lo ^ b_lo;
+        if diff_lo != 0 {
+            return i + (diff_lo.trailing_zeros() / 8) as usize;
+        }
+
+        let a_hi = u32::from_le_bytes(a[i + 4..i + 8].try_into().unwrap());
+        let b_hi = u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap());
+        let diff_hi = a_hi ^ b_hi;
+        if diff_hi != 0 {
+            return i + 4 + (diff_hi.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+
+    while i + 4 <= len {
+        let a_w = u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
+        let b_w = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        let diff = a_w ^ b_w;
+        if diff != 0 {
+            return i + (diff.trailing_zeros() / 8) as usize;
+        }
+        i += 4;
+    }
+
+    while i < len && a[i] == b[i] {
+        i += 1;
+    }
+    i
 }
 
 /// A node in the compressed radix trie.
@@ -233,5 +317,41 @@ mod tests {
         let count =
             trie.match_prefixes("/api/v1/clusters/us-east/tenants/corp-beta/other", &mut buf);
         assert_eq!(&buf[..count], &[3]);
+    }
+
+    #[test]
+    fn test_swar_common_prefix_len_64_and_32_equivalence() {
+        let cases = [
+            ("", "", 0),
+            ("/api/v1/users", "/api/v1/orders", 8),
+            (
+                "/api/v1/clusters/us-east/tenants",
+                "/api/v1/clusters/us-east/tenants",
+                32,
+            ),
+            (
+                "/api/v1/clusters/us-east/tenants/a",
+                "/api/v1/clusters/us-east/tenants/b",
+                33,
+            ),
+            ("/short", "/shorter", 6),
+            ("/a", "/b", 1),
+            ("abcdefg", "abcdefh", 6),
+            ("0123456789abcdef", "0123456789abcdeg", 15),
+        ];
+
+        for (a, b, expected) in cases {
+            assert_eq!(common_prefix_len(a, b), expected, "Mismatch for ({a}, {b})");
+            assert_eq!(
+                common_prefix_len_64(a.as_bytes(), b.as_bytes()),
+                expected,
+                "64-bit mismatch for ({a}, {b})"
+            );
+            assert_eq!(
+                common_prefix_len_32(a.as_bytes(), b.as_bytes()),
+                expected,
+                "32-bit mismatch for ({a}, {b})"
+            );
+        }
     }
 }

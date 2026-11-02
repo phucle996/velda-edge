@@ -394,11 +394,199 @@ fn compact_whitespace_and_comments(buf: &mut [u8], len: usize) -> usize {
     w
 }
 
+/// Signature for register-width-specific fast-path normalization inspection.
+pub type NeedsNormalizationFn = fn(bytes: &[u8], convert_plus: bool) -> bool;
+
+/// Pre-resolved static function pointer for WAF fast-path byte scanning (up to 256-bit SIMD: 32 bytes/cycle).
+pub static NEEDS_NORMALIZATION_FN: std::sync::LazyLock<NeedsNormalizationFn> =
+    std::sync::LazyLock::new(|| {
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+        match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
+            velda_core::hardware::RegisterWidth::Bits256 => needs_normalization_256,
+            velda_core::hardware::RegisterWidth::Bits128 => needs_normalization_128,
+            velda_core::hardware::RegisterWidth::Bits64
+            | velda_core::hardware::RegisterWidth::Bits32 => needs_normalization_scalar,
+        }
+    });
+
 /// Fast-path inspector checking whether input bytes require any normalization.
 #[inline(always)]
-fn needs_normalization(bytes: &[u8], convert_plus: bool) -> bool {
-    let mut prev_space = false;
+pub fn needs_normalization(bytes: &[u8], convert_plus: bool) -> bool {
+    (*NEEDS_NORMALIZATION_FN)(bytes, convert_plus)
+}
+
+/// 256-bit SIMD inspector scanning 32 bytes per cycle for uppercase, `%`, `#`, `+`, whitespace, `/*`, `--`, `  `.
+#[inline]
+pub fn needs_normalization_256(bytes: &[u8], convert_plus: bool) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { needs_normalization_256_x86_impl(bytes, convert_plus) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        needs_normalization_128(bytes, convert_plus)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn needs_normalization_256_x86_impl(bytes: &[u8], convert_plus: bool) -> bool {
+    use std::arch::x86_64::*;
+    let len = bytes.len();
     let mut i = 0;
+
+    if len >= 33 {
+        let v_at = _mm256_set1_epi8(b'@' as i8);
+        let v_bracket = _mm256_set1_epi8(b'[' as i8);
+        let v_pct = _mm256_set1_epi8(b'%' as i8);
+        let v_hash = _mm256_set1_epi8(b'#' as i8);
+        let v_tab = _mm256_set1_epi8(b'\t' as i8);
+        let v_cr = _mm256_set1_epi8(b'\r' as i8);
+        let v_lf = _mm256_set1_epi8(b'\n' as i8);
+        let v_plus = _mm256_set1_epi8(if convert_plus { b'+' as i8 } else { b'%' as i8 });
+        let v_slash = _mm256_set1_epi8(b'/' as i8);
+        let v_star = _mm256_set1_epi8(b'*' as i8);
+        let v_dash = _mm256_set1_epi8(b'-' as i8);
+        let v_space = _mm256_set1_epi8(b' ' as i8);
+
+        while i + 32 < len {
+            unsafe {
+                let curr = _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i);
+                let next = _mm256_loadu_si256(bytes.as_ptr().add(i + 1) as *const __m256i);
+
+                let is_upper = _mm256_and_si256(
+                    _mm256_cmpgt_epi8(curr, v_at),
+                    _mm256_cmpgt_epi8(v_bracket, curr),
+                );
+                let single1 = _mm256_or_si256(
+                    _mm256_cmpeq_epi8(curr, v_pct),
+                    _mm256_cmpeq_epi8(curr, v_hash),
+                );
+                let single2 = _mm256_or_si256(
+                    _mm256_cmpeq_epi8(curr, v_tab),
+                    _mm256_or_si256(_mm256_cmpeq_epi8(curr, v_cr), _mm256_cmpeq_epi8(curr, v_lf)),
+                );
+                let single3 = _mm256_cmpeq_epi8(curr, v_plus);
+
+                let slash_star = _mm256_and_si256(
+                    _mm256_cmpeq_epi8(curr, v_slash),
+                    _mm256_cmpeq_epi8(next, v_star),
+                );
+                let dash_dash = _mm256_and_si256(
+                    _mm256_cmpeq_epi8(curr, v_dash),
+                    _mm256_cmpeq_epi8(next, v_dash),
+                );
+                let space_space = _mm256_and_si256(
+                    _mm256_cmpeq_epi8(curr, v_space),
+                    _mm256_cmpeq_epi8(next, v_space),
+                );
+
+                let triggers = _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_or_si256(is_upper, single1),
+                        _mm256_or_si256(single2, single3),
+                    ),
+                    _mm256_or_si256(slash_star, _mm256_or_si256(dash_dash, space_space)),
+                );
+
+                if _mm256_movemask_epi8(triggers) != 0 {
+                    return true;
+                }
+            }
+            i += 32;
+        }
+    }
+
+    needs_normalization_scalar_from(bytes, convert_plus, i)
+}
+
+/// 128-bit SIMD inspector scanning 16 bytes per cycle.
+#[inline]
+pub fn needs_normalization_128(bytes: &[u8], convert_plus: bool) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { needs_normalization_128_x86_impl(bytes, convert_plus) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        needs_normalization_scalar(bytes, convert_plus)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn needs_normalization_128_x86_impl(bytes: &[u8], convert_plus: bool) -> bool {
+    use std::arch::x86_64::*;
+    let len = bytes.len();
+    let mut i = 0;
+
+    if len >= 17 {
+        let v_at = _mm_set1_epi8(b'@' as i8);
+        let v_bracket = _mm_set1_epi8(b'[' as i8);
+        let v_pct = _mm_set1_epi8(b'%' as i8);
+        let v_hash = _mm_set1_epi8(b'#' as i8);
+        let v_tab = _mm_set1_epi8(b'\t' as i8);
+        let v_cr = _mm_set1_epi8(b'\r' as i8);
+        let v_lf = _mm_set1_epi8(b'\n' as i8);
+        let v_plus = _mm_set1_epi8(if convert_plus { b'+' as i8 } else { b'%' as i8 });
+        let v_slash = _mm_set1_epi8(b'/' as i8);
+        let v_star = _mm_set1_epi8(b'*' as i8);
+        let v_dash = _mm_set1_epi8(b'-' as i8);
+        let v_space = _mm_set1_epi8(b' ' as i8);
+
+        while i + 16 < len {
+            unsafe {
+                let curr = _mm_loadu_si128(bytes.as_ptr().add(i) as *const __m128i);
+                let next = _mm_loadu_si128(bytes.as_ptr().add(i + 1) as *const __m128i);
+
+                let is_upper =
+                    _mm_and_si128(_mm_cmpgt_epi8(curr, v_at), _mm_cmpgt_epi8(v_bracket, curr));
+                let single1 =
+                    _mm_or_si128(_mm_cmpeq_epi8(curr, v_pct), _mm_cmpeq_epi8(curr, v_hash));
+                let single2 = _mm_or_si128(
+                    _mm_cmpeq_epi8(curr, v_tab),
+                    _mm_or_si128(_mm_cmpeq_epi8(curr, v_cr), _mm_cmpeq_epi8(curr, v_lf)),
+                );
+                let single3 = _mm_cmpeq_epi8(curr, v_plus);
+
+                let slash_star =
+                    _mm_and_si128(_mm_cmpeq_epi8(curr, v_slash), _mm_cmpeq_epi8(next, v_star));
+                let dash_dash =
+                    _mm_and_si128(_mm_cmpeq_epi8(curr, v_dash), _mm_cmpeq_epi8(next, v_dash));
+                let space_space =
+                    _mm_and_si128(_mm_cmpeq_epi8(curr, v_space), _mm_cmpeq_epi8(next, v_space));
+
+                let triggers = _mm_or_si128(
+                    _mm_or_si128(
+                        _mm_or_si128(is_upper, single1),
+                        _mm_or_si128(single2, single3),
+                    ),
+                    _mm_or_si128(slash_star, _mm_or_si128(dash_dash, space_space)),
+                );
+
+                if _mm_movemask_epi8(triggers) != 0 {
+                    return true;
+                }
+            }
+            i += 16;
+        }
+    }
+
+    needs_normalization_scalar_from(bytes, convert_plus, i)
+}
+
+/// Scalar normalization inspector.
+#[inline]
+pub fn needs_normalization_scalar(bytes: &[u8], convert_plus: bool) -> bool {
+    needs_normalization_scalar_from(bytes, convert_plus, 0)
+}
+
+#[inline(always)]
+fn needs_normalization_scalar_from(bytes: &[u8], convert_plus: bool, start: usize) -> bool {
+    let mut prev_space = start > 0 && bytes[start - 1] == b' ';
+    let mut i = start;
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'%' || b.is_ascii_uppercase() {
@@ -712,5 +900,58 @@ mod tests {
             matcher.check_patterns(b"/test?q=custom_attack", false),
             Some(ThreatVector::CustomPattern)
         );
+    }
+
+    #[test]
+    fn test_needs_normalization_all_register_tiers_equivalence() {
+        let cases: &[(&[u8], bool, bool)] = &[
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/details",
+                false,
+                false,
+            ),
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/Details",
+                false,
+                true,
+            ),
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/%2e%2e",
+                false,
+                true,
+            ),
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/*comment*/",
+                false,
+                true,
+            ),
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/--sql",
+                false,
+                true,
+            ),
+            (
+                b"/api/v1/users/profile-settings/items/1234567890/two  spaces",
+                false,
+                true,
+            ),
+            (
+                b"q=hello+world+from+clean+query+string+1234567890",
+                false,
+                false,
+            ),
+            (
+                b"q=hello+world+from+clean+query+string+1234567890",
+                true,
+                true,
+            ),
+        ];
+
+        for &(input, convert_plus, expected) in cases {
+            assert_eq!(needs_normalization(input, convert_plus), expected);
+            assert_eq!(needs_normalization_256(input, convert_plus), expected);
+            assert_eq!(needs_normalization_128(input, convert_plus), expected);
+            assert_eq!(needs_normalization_scalar(input, convert_plus), expected);
+        }
     }
 }

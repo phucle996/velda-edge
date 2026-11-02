@@ -12,6 +12,7 @@
 use std::time::Instant;
 
 use crate::types::{DownstreamProto, PipeStrategy, UpstreamProto};
+use crate::vector::{AGGREGATE_COUNTERS, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,33 @@ pub struct PipelineSnapshot {
 }
 
 impl PipelineSnapshot {
+    /// Converts pipeline metric counters into a 20-counter array.
+    #[inline(always)]
+    pub fn to_counters(&self) -> [u64; PIPELINE_COUNTERS_LEN] {
+        [
+            self.requests_2xx,
+            self.requests_3xx,
+            self.requests_4xx,
+            self.requests_5xx,
+            self.requests_other,
+            self.bytes_rx,
+            self.bytes_tx,
+            self.duration_le_1ms,
+            self.duration_le_5ms,
+            self.duration_le_10ms,
+            self.duration_le_50ms,
+            self.duration_le_250ms,
+            self.duration_le_1000ms,
+            self.duration_gt_1000ms,
+            self.ttfb_le_1ms,
+            self.ttfb_le_5ms,
+            self.ttfb_le_10ms,
+            self.ttfb_le_50ms,
+            self.ttfb_le_250ms,
+            self.ttfb_gt_250ms,
+        ]
+    }
+
     /// Computes total requests served across all status code classes.
     #[inline(always)]
     pub fn total_requests(&self) -> u64 {
@@ -71,17 +99,26 @@ impl PipelineSnapshot {
             .saturating_add(self.requests_other)
     }
 
+    /// Computes the ratio of successful requests (2xx / total) in basis points (1 bp = 0.01%, 10,000 = 100.00%).
+    ///
+    /// Operates purely in integer arithmetic (zero FPU instructions, zero float conversions).
+    /// Returns 10,000 (100.00%) if no requests have been recorded yet.
+    #[inline]
+    pub fn success_rate_basis_points(&self) -> u32 {
+        let total = self.total_requests();
+        if total == 0 {
+            10_000
+        } else {
+            ((self.requests_2xx as u128 * 10_000) / total as u128) as u32
+        }
+    }
+
     /// Computes the ratio of successful requests (2xx / total).
     ///
     /// Returns 1.0 (100%) if no requests have been recorded yet.
     #[inline]
     pub fn success_rate(&self) -> f64 {
-        let total = self.total_requests();
-        if total == 0 {
-            1.0
-        } else {
-            self.requests_2xx as f64 / total as f64
-        }
+        self.success_rate_basis_points() as f64 / 10_000.0
     }
 }
 
@@ -163,19 +200,28 @@ impl PoolSnapshot {
             .saturating_add(self.lease_timeouts_total)
     }
 
+    /// Computes the connection pool hit rate (hits / (hits + misses)) in basis points (1 bp = 0.01%, 10,000 = 100.00%).
+    ///
+    /// Operates purely in integer arithmetic.
+    /// Returns 10,000 (100.00%) if no lease acquisitions have been recorded yet.
+    #[inline]
+    pub fn hit_rate_basis_points(&self) -> u32 {
+        let attempts = self
+            .lease_hits_total
+            .saturating_add(self.lease_misses_total);
+        if attempts == 0 {
+            10_000
+        } else {
+            ((self.lease_hits_total as u128 * 10_000) / attempts as u128) as u32
+        }
+    }
+
     /// Computes the connection pool hit rate (hits / (hits + misses)).
     ///
     /// Returns 1.0 (100%) if no lease acquisitions have been recorded yet.
     #[inline]
     pub fn hit_rate(&self) -> f64 {
-        let attempts = self
-            .lease_hits_total
-            .saturating_add(self.lease_misses_total);
-        if attempts == 0 {
-            1.0
-        } else {
-            self.lease_hits_total as f64 / attempts as f64
-        }
+        self.hit_rate_basis_points() as f64 / 10_000.0
     }
 
     /// Computes the total number of connection evictions across all reasons.
@@ -196,16 +242,26 @@ impl PoolSnapshot {
         self.lifespan_le_1h.saturating_add(self.lifespan_gt_1h)
     }
 
+    /// Computes the average number of active streams multiplexed per connection, scaled by 1,000 (millistreams).
+    ///
+    /// For example, 2.5 streams per connection returns 2,500.
+    /// Operates purely in integer arithmetic.
+    #[inline]
+    pub fn avg_streams_per_mux_conn_scaled(&self) -> u32 {
+        if self.connections_multiplexed == 0 {
+            0
+        } else {
+            let active = self.multiplexed_active_streams.max(0) as u128;
+            ((active * 1_000) / self.connections_multiplexed as u128) as u32
+        }
+    }
+
     /// Computes the average number of active streams multiplexed per connection.
     ///
     /// Returns 0.0 if no multiplexed connections are active.
     #[inline]
     pub fn avg_streams_per_mux_conn(&self) -> f64 {
-        if self.connections_multiplexed == 0 {
-            0.0
-        } else {
-            self.multiplexed_active_streams.max(0) as f64 / self.connections_multiplexed as f64
-        }
+        self.avg_streams_per_mux_conn_scaled() as f64 / 1_000.0
     }
 }
 
@@ -223,10 +279,22 @@ pub struct MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
+    /// Computes aggregate totals across all pipelines using vectorized SIMD integer arithmetic.
+    #[inline]
+    pub fn aggregate_pipelines(&self) -> PipelineMetricsTotals {
+        let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
+        let agg_fn = *AGGREGATE_COUNTERS;
+        for p in &self.pipelines {
+            let counters = p.to_counters();
+            agg_fn(&mut total_counters, &counters);
+        }
+        PipelineMetricsTotals::from_counters(&total_counters)
+    }
+
     /// Computes the sum of all requests served across all 36 pipelines.
     #[inline]
     pub fn total_requests(&self) -> u64 {
-        self.pipelines.iter().map(|p| p.total_requests()).sum()
+        self.aggregate_pipelines().total_requests()
     }
 
     /// Computes the total number of in-flight active streams across all pipelines.

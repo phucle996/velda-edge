@@ -1,152 +1,208 @@
 //! OpenTelemetry ResourceMetrics JSON Formatter (`otlp_metrics_exporter`).
 //!
 //! Encodes point-in-time [`MetricsSnapshot`] values from [`velda_observability::MetricsStore`]
-//! into compliant OpenTelemetry ResourceMetrics JSON payloads (`POST /v1/metrics`).
+//! into compliant OpenTelemetry ResourceMetrics JSON payloads (`POST /v1/metrics`)
+//! via zero-allocation single-pass template byte injection.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use velda_observability::MetricsSnapshot;
 
+#[inline(always)]
+fn write_u64(buf: &mut Vec<u8>, mut n: u64) {
+    if n == 0 {
+        buf.push(b'0');
+        return;
+    }
+    let mut temp = [0u8; 20];
+    let mut i = 0;
+    while n > 0 {
+        temp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        buf.push(temp[i]);
+    }
+}
+
+#[inline(always)]
+fn write_i64(buf: &mut Vec<u8>, n: i64) {
+    if n < 0 {
+        buf.push(b'-');
+        write_u64(buf, n.unsigned_abs());
+    } else {
+        write_u64(buf, n as u64);
+    }
+}
+
+#[inline(always)]
+fn write_u128(buf: &mut Vec<u8>, mut n: u128) {
+    if n == 0 {
+        buf.push(b'0');
+        return;
+    }
+    let mut temp = [0u8; 40];
+    let mut i = 0;
+    while n > 0 {
+        temp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        buf.push(temp[i]);
+    }
+}
+
 /// Encodes a [`MetricsSnapshot`] into compliant OpenTelemetry ResourceMetrics JSON.
 pub fn format_otlp_metrics_json(snapshot: &MetricsSnapshot, service_name: &str) -> String {
+    let mut buf = Vec::with_capacity(64 * 1024);
+    format_otlp_metrics_into(snapshot, service_name, &mut buf);
+    // SAFETY: Output is strictly valid ASCII JSON
+    unsafe { String::from_utf8_unchecked(buf) }
+}
+
+/// Encodes a [`MetricsSnapshot`] directly into the provided byte buffer without intermediate allocations.
+pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, buf: &mut Vec<u8>) {
+    buf.clear();
+
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos().to_string())
-        .unwrap_or_else(|_| "0".to_string());
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
 
-    let mut metrics = Vec::new();
+    let mut nanos_vec = Vec::with_capacity(40);
+    write_u128(&mut nanos_vec, now_nanos);
+    let nanos_bytes = nanos_vec.as_slice();
 
-    // 1. velda.requests.total (Cumulative Sum)
-    let mut request_datapoints = Vec::new();
+    // Root JSON envelope
+    buf.extend_from_slice(b"{\"resourceMetrics\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"");
+    buf.extend_from_slice(service_name.as_bytes());
+    buf.extend_from_slice(b"\"}},{\"key\":\"telemetry.sdk.name\",\"value\":{\"stringValue\":\"velda-edge\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"rust\"}}]},\"scopeMetrics\":[{\"scope\":{\"name\":\"velda-edge\",\"version\":\"");
+    buf.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+    buf.extend_from_slice(b"\"},\"metrics\":[");
+
+    // Metric 1: velda.requests.total
+    buf.extend_from_slice(b"{\"name\":\"velda.requests.total\",\"description\":\"Total number of HTTP requests processed across pipeline dimensions\",\"unit\":\"1\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[");
+
+    let mut first_dp = true;
     for p in &snapshot.pipelines {
-        let downstream_str = p.downstream.as_str();
-        let upstream_str = p.upstream.as_str();
-        let pipe_str = p.pipe.as_str();
+        let d = p.downstream.as_str().as_bytes();
+        let u = p.upstream.as_str().as_bytes();
+        let pipe = p.pipe.as_str().as_bytes();
 
-        let classes = [
-            ("2xx", p.requests_2xx),
-            ("3xx", p.requests_3xx),
-            ("4xx", p.requests_4xx),
-            ("5xx", p.requests_5xx),
-            ("other", p.requests_other),
+        let classes: &[(&[u8], u64)] = &[
+            (b"2xx", p.requests_2xx),
+            (b"3xx", p.requests_3xx),
+            (b"4xx", p.requests_4xx),
+            (b"5xx", p.requests_5xx),
+            (b"other", p.requests_other),
         ];
 
         for (class, count) in classes {
-            request_datapoints.push(serde_json::json!({
-                "timeUnixNano": now_nanos,
-                "asInt": count.to_string(),
-                "attributes": [
-                    { "key": "downstream", "value": { "stringValue": downstream_str } },
-                    { "key": "upstream", "value": { "stringValue": upstream_str } },
-                    { "key": "pipe", "value": { "stringValue": pipe_str } },
-                    { "key": "status_class", "value": { "stringValue": class } },
-                ]
-            }));
-        }
-    }
-
-    metrics.push(serde_json::json!({
-        "name": "velda.requests.total",
-        "description": "Total number of HTTP requests processed across pipeline dimensions",
-        "unit": "1",
-        "sum": {
-            "aggregationTemporality": 2, // AGGREGATION_TEMPORALITY_CUMULATIVE
-            "isMonotonic": true,
-            "dataPoints": request_datapoints
-        }
-    }));
-
-    // 2. velda.active_streams (Gauge)
-    let mut active_datapoints = Vec::new();
-    for p in &snapshot.pipelines {
-        active_datapoints.push(serde_json::json!({
-            "timeUnixNano": now_nanos,
-            "asInt": p.active_streams.to_string(),
-            "attributes": [
-                { "key": "downstream", "value": { "stringValue": p.downstream.as_str() } },
-                { "key": "upstream", "value": { "stringValue": p.upstream.as_str() } },
-                { "key": "pipe", "value": { "stringValue": p.pipe.as_str() } },
-            ]
-        }));
-    }
-
-    metrics.push(serde_json::json!({
-        "name": "velda.active_streams",
-        "description": "Number of streams actively in-flight",
-        "unit": "1",
-        "gauge": {
-            "dataPoints": active_datapoints
-        }
-    }));
-
-    // 3. velda.bytes_received_total & velda.bytes_transmitted_total
-    let mut rx_datapoints = Vec::new();
-    let mut tx_datapoints = Vec::new();
-    for p in &snapshot.pipelines {
-        rx_datapoints.push(serde_json::json!({
-            "timeUnixNano": now_nanos,
-            "asInt": p.bytes_rx.to_string(),
-            "attributes": [
-                { "key": "downstream", "value": { "stringValue": p.downstream.as_str() } },
-                { "key": "upstream", "value": { "stringValue": p.upstream.as_str() } },
-            ]
-        }));
-        tx_datapoints.push(serde_json::json!({
-            "timeUnixNano": now_nanos,
-            "asInt": p.bytes_tx.to_string(),
-            "attributes": [
-                { "key": "downstream", "value": { "stringValue": p.downstream.as_str() } },
-                { "key": "upstream", "value": { "stringValue": p.upstream.as_str() } },
-            ]
-        }));
-    }
-
-    metrics.push(serde_json::json!({
-        "name": "velda.bytes_received_total",
-        "description": "Total payload bytes received from clients",
-        "unit": "By",
-        "sum": {
-            "aggregationTemporality": 2,
-            "isMonotonic": true,
-            "dataPoints": rx_datapoints
-        }
-    }));
-
-    metrics.push(serde_json::json!({
-        "name": "velda.bytes_transmitted_total",
-        "description": "Total payload bytes transmitted to clients",
-        "unit": "By",
-        "sum": {
-            "aggregationTemporality": 2,
-            "isMonotonic": true,
-            "dataPoints": tx_datapoints
-        }
-    }));
-
-    let otlp_doc = serde_json::json!({
-        "resourceMetrics": [
-            {
-                "resource": {
-                    "attributes": [
-                        { "key": "service.name", "value": { "stringValue": service_name } },
-                        { "key": "telemetry.sdk.name", "value": { "stringValue": "velda-edge" } },
-                        { "key": "telemetry.sdk.language", "value": { "stringValue": "rust" } },
-                    ]
-                },
-                "scopeMetrics": [
-                    {
-                        "scope": {
-                            "name": "velda-edge",
-                            "version": env!("CARGO_PKG_VERSION")
-                        },
-                        "metrics": metrics
-                    }
-                ]
+            if !first_dp {
+                buf.push(b',');
+            } else {
+                first_dp = false;
             }
-        ]
-    });
 
-    otlp_doc.to_string()
+            buf.extend_from_slice(b"{\"timeUnixNano\":\"");
+            buf.extend_from_slice(nanos_bytes);
+            buf.extend_from_slice(b"\",\"asInt\":\"");
+            write_u64(buf, *count);
+            buf.extend_from_slice(
+                b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
+            );
+            buf.extend_from_slice(d);
+            buf.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
+            buf.extend_from_slice(u);
+            buf.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
+            buf.extend_from_slice(pipe);
+            buf.extend_from_slice(b"\"}},{\"key\":\"status_class\",\"value\":{\"stringValue\":\"");
+            buf.extend_from_slice(class);
+            buf.extend_from_slice(b"\"}}]}");
+        }
+    }
+    buf.extend_from_slice(b"]}},");
+
+    // Metric 2: velda.active_streams
+    buf.extend_from_slice(b"{\"name\":\"velda.active_streams\",\"description\":\"Number of streams actively in-flight\",\"unit\":\"1\",\"gauge\":{\"dataPoints\":[");
+    first_dp = true;
+    for p in &snapshot.pipelines {
+        if !first_dp {
+            buf.push(b',');
+        } else {
+            first_dp = false;
+        }
+
+        buf.extend_from_slice(b"{\"timeUnixNano\":\"");
+        buf.extend_from_slice(nanos_bytes);
+        buf.extend_from_slice(b"\",\"asInt\":\"");
+        write_i64(buf, p.active_streams);
+        buf.extend_from_slice(
+            b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
+        );
+        buf.extend_from_slice(p.downstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
+        buf.extend_from_slice(p.upstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
+        buf.extend_from_slice(p.pipe.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}}]}");
+    }
+    buf.extend_from_slice(b"]}},");
+
+    // Metric 3: velda.bytes_received_total
+    buf.extend_from_slice(b"{\"name\":\"velda.bytes_received_total\",\"description\":\"Total payload bytes received from clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[");
+    first_dp = true;
+    for p in &snapshot.pipelines {
+        if !first_dp {
+            buf.push(b',');
+        } else {
+            first_dp = false;
+        }
+
+        buf.extend_from_slice(b"{\"timeUnixNano\":\"");
+        buf.extend_from_slice(nanos_bytes);
+        buf.extend_from_slice(b"\",\"asInt\":\"");
+        write_u64(buf, p.bytes_rx);
+        buf.extend_from_slice(
+            b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
+        );
+        buf.extend_from_slice(p.downstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
+        buf.extend_from_slice(p.upstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}}]}");
+    }
+    buf.extend_from_slice(b"]}},");
+
+    // Metric 4: velda.bytes_transmitted_total
+    buf.extend_from_slice(b"{\"name\":\"velda.bytes_transmitted_total\",\"description\":\"Total payload bytes transmitted to clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[");
+    first_dp = true;
+    for p in &snapshot.pipelines {
+        if !first_dp {
+            buf.push(b',');
+        } else {
+            first_dp = false;
+        }
+
+        buf.extend_from_slice(b"{\"timeUnixNano\":\"");
+        buf.extend_from_slice(nanos_bytes);
+        buf.extend_from_slice(b"\",\"asInt\":\"");
+        write_u64(buf, p.bytes_tx);
+        buf.extend_from_slice(
+            b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
+        );
+        buf.extend_from_slice(p.downstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
+        buf.extend_from_slice(p.upstream.as_str().as_bytes());
+        buf.extend_from_slice(b"\"}}]}");
+    }
+    buf.extend_from_slice(b"]}}");
+
+    // Close JSON envelope
+    buf.extend_from_slice(b"]}]}]}");
 }
 
 #[cfg(test)]

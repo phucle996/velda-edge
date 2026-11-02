@@ -17,19 +17,21 @@
 pub mod cpu;
 pub mod kernel;
 pub mod memory;
+pub mod nic;
 pub mod overload;
 pub mod partition;
 pub mod sizing;
 
 use std::sync::OnceLock;
 
-pub use cpu::{CpuProfile, CpuVectorCapabilities, copy_bulk_payload, probe_cpu};
+pub use cpu::{CpuProfile, CpuRegisterCapabilities, RegisterWidth, copy_bulk_payload, probe_cpu};
 pub use kernel::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
     KernelAccelerationLadder, KernelProfile, KernelVersion, MultipathResilienceTier,
     MultiplexPacingTier, OutboundPortScalingTier, UdpEgressTier, UdpOffloadTier, probe_kernel,
 };
 pub use memory::{MemoryProfile, probe_memory};
+pub use nic::{IngressHashAuthority, NicProfile, ingress_steering_cpu, probe_nic};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
 pub use partition::CorePartition;
 pub use sizing::{AdaptiveBufferDimensions, HardwareSizing};
@@ -43,6 +45,8 @@ pub struct HardwareTopology {
     pub memory: MemoryProfile,
     /// Kernel release and hardware I/O acceleration capabilities.
     pub kernel: KernelProfile,
+    /// NIC ingress distribution profile (hardware RSS vs kernel software hash).
+    pub nic: NicProfile,
     /// Number of logical CPU cores available to the process (respects container cgroups limits).
     pub available_cores: usize,
     /// Number of worker threads allocated for traffic processing.
@@ -130,12 +134,14 @@ impl HardwareTopology {
         let cpu = probe_cpu();
         let memory = probe_memory();
         let kernel = probe_kernel();
+        let nic = probe_nic();
         let sizing = HardwareSizing::from_hardware(cpu.available_cores, memory.total_bytes);
 
         Self {
             cpu,
             memory,
             kernel,
+            nic,
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
@@ -154,6 +160,7 @@ impl HardwareTopology {
             cpu,
             memory,
             kernel,
+            nic: NicProfile::software("explicit topology: RSS not probed"),
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
@@ -167,6 +174,13 @@ impl HardwareTopology {
     #[inline]
     pub fn with_kernel(mut self, kernel: KernelProfile) -> Self {
         self.kernel = kernel;
+        self
+    }
+
+    /// Attaches an explicit [`NicProfile`] (useful for testing).
+    #[inline]
+    pub fn with_nic(mut self, nic: NicProfile) -> Self {
+        self.nic = nic;
         self
     }
 

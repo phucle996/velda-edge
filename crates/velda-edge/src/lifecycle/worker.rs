@@ -52,6 +52,20 @@ impl RunningWorkerPool {
         let mut worker_threads = Vec::with_capacity(worker_count * 2);
         let registry = global_worker_registry();
 
+        // Register every traffic worker's real core BEFORE any worker thread starts binding
+        // sockets: `ingress_steering_cpu` needs the complete worker->core map to prove that NIC
+        // hardware RSS covers all workers.
+        for worker in &workers {
+            let wid = worker.worker_id();
+            let core = partition.traffic_cores[wid % partition.traffic_cores.len()];
+            registry.register(
+                WorkerId(wid as u32),
+                core,
+                WorkerRole::Traffic,
+                format!("velda-worker-{wid}"),
+            );
+        }
+
         for worker in workers {
             let worker_id = worker.worker_id();
             let core_id = partition.traffic_cores[worker_id % partition.traffic_cores.len()];
@@ -65,8 +79,7 @@ impl RunningWorkerPool {
             let traffic_thread_name = format!("velda-worker-{worker_id}");
             let shadow_thread_name = format!("velda-shadow-{worker_id}");
 
-            // Register both symmetrical workers in global registry
-            registry.register(w_id, core_id, WorkerRole::Traffic, &traffic_thread_name);
+            // Register companion shadow worker in global registry (Traffic worker registered upfront)
             registry.register(w_id, core_id, WorkerRole::Shadow, &shadow_thread_name);
 
             // 1. Core-local task hook & Shadow Worker (SCHED_IDLE)

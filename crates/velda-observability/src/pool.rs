@@ -93,18 +93,19 @@ pub struct PoolMetrics {
     // ------------------------------------------------------------------------
     // 4. Connection Lifespan Buckets (Cumulative Histogram)
     // ------------------------------------------------------------------------
+    // Disjoint Lifespan Buckets (1 atomic add per eviction)
     /// Closed connections that lived <= 5 seconds.
-    pub lifespan_le_5s: AtomicU64,
-    /// Closed connections that lived <= 30 seconds.
-    pub lifespan_le_30s: AtomicU64,
-    /// Closed connections that lived <= 5 minutes (300s).
-    pub lifespan_le_5m: AtomicU64,
-    /// Closed connections that lived <= 30 minutes (1800s).
-    pub lifespan_le_30m: AtomicU64,
-    /// Closed connections that lived <= 1 hour (3600s).
-    pub lifespan_le_1h: AtomicU64,
+    pub lifespan_b0_le_5s: AtomicU64,
+    /// Closed connections that lived (5s ..= 30s].
+    pub lifespan_b1_le_30s: AtomicU64,
+    /// Closed connections that lived (30s ..= 5m].
+    pub lifespan_b2_le_5m: AtomicU64,
+    /// Closed connections that lived (5m ..= 30m].
+    pub lifespan_b3_le_30m: AtomicU64,
+    /// Closed connections that lived (30m ..= 1h].
+    pub lifespan_b4_le_1h: AtomicU64,
     /// Closed connections that lived > 1 hour.
-    pub lifespan_gt_1h: AtomicU64,
+    pub lifespan_b5_gt_1h: AtomicU64,
 }
 
 impl Default for PoolMetrics {
@@ -132,12 +133,12 @@ impl PoolMetrics {
             evictions_goaway: AtomicU64::new(0),
             evictions_unhealthy: AtomicU64::new(0),
             evictions_capacity_exceeded: AtomicU64::new(0),
-            lifespan_le_5s: AtomicU64::new(0),
-            lifespan_le_30s: AtomicU64::new(0),
-            lifespan_le_5m: AtomicU64::new(0),
-            lifespan_le_30m: AtomicU64::new(0),
-            lifespan_le_1h: AtomicU64::new(0),
-            lifespan_gt_1h: AtomicU64::new(0),
+            lifespan_b0_le_5s: AtomicU64::new(0),
+            lifespan_b1_le_30s: AtomicU64::new(0),
+            lifespan_b2_le_5m: AtomicU64::new(0),
+            lifespan_b3_le_30m: AtomicU64::new(0),
+            lifespan_b4_le_1h: AtomicU64::new(0),
+            lifespan_b5_gt_1h: AtomicU64::new(0),
         }
     }
 
@@ -213,24 +214,20 @@ impl PoolMetrics {
             }
         }
 
-        // Lifespan Bucketing (Cumulative)
+        // Lifespan Bucketing (Single atomic add via disjoint branches)
         let secs = lifespan.as_secs();
         if secs <= 5 {
-            self.lifespan_le_5s.fetch_add(1, Ordering::Relaxed);
-        }
-        if secs <= 30 {
-            self.lifespan_le_30s.fetch_add(1, Ordering::Relaxed);
-        }
-        if secs <= 300 {
-            self.lifespan_le_5m.fetch_add(1, Ordering::Relaxed);
-        }
-        if secs <= 1800 {
-            self.lifespan_le_30m.fetch_add(1, Ordering::Relaxed);
-        }
-        if secs <= 3600 {
-            self.lifespan_le_1h.fetch_add(1, Ordering::Relaxed);
+            self.lifespan_b0_le_5s.fetch_add(1, Ordering::Relaxed);
+        } else if secs <= 30 {
+            self.lifespan_b1_le_30s.fetch_add(1, Ordering::Relaxed);
+        } else if secs <= 300 {
+            self.lifespan_b2_le_5m.fetch_add(1, Ordering::Relaxed);
+        } else if secs <= 1800 {
+            self.lifespan_b3_le_30m.fetch_add(1, Ordering::Relaxed);
+        } else if secs <= 3600 {
+            self.lifespan_b4_le_1h.fetch_add(1, Ordering::Relaxed);
         } else {
-            self.lifespan_gt_1h.fetch_add(1, Ordering::Relaxed);
+            self.lifespan_b5_gt_1h.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -294,12 +291,37 @@ impl PoolMetrics {
             evictions_goaway: self.evictions_goaway.load(Ordering::Relaxed),
             evictions_unhealthy: self.evictions_unhealthy.load(Ordering::Relaxed),
             evictions_capacity_exceeded: self.evictions_capacity_exceeded.load(Ordering::Relaxed),
-            lifespan_le_5s: self.lifespan_le_5s.load(Ordering::Relaxed),
-            lifespan_le_30s: self.lifespan_le_30s.load(Ordering::Relaxed),
-            lifespan_le_5m: self.lifespan_le_5m.load(Ordering::Relaxed),
-            lifespan_le_30m: self.lifespan_le_30m.load(Ordering::Relaxed),
-            lifespan_le_1h: self.lifespan_le_1h.load(Ordering::Relaxed),
-            lifespan_gt_1h: self.lifespan_gt_1h.load(Ordering::Relaxed),
+            lifespan_le_5s: self.lifespan_b0_le_5s.load(Ordering::Relaxed),
+            lifespan_le_30s: {
+                let l0 = self.lifespan_b0_le_5s.load(Ordering::Relaxed);
+                let l1 = self.lifespan_b1_le_30s.load(Ordering::Relaxed);
+                l0.saturating_add(l1)
+            },
+            lifespan_le_5m: {
+                let l0 = self.lifespan_b0_le_5s.load(Ordering::Relaxed);
+                let l1 = self.lifespan_b1_le_30s.load(Ordering::Relaxed);
+                let l2 = self.lifespan_b2_le_5m.load(Ordering::Relaxed);
+                l0.saturating_add(l1).saturating_add(l2)
+            },
+            lifespan_le_30m: {
+                let l0 = self.lifespan_b0_le_5s.load(Ordering::Relaxed);
+                let l1 = self.lifespan_b1_le_30s.load(Ordering::Relaxed);
+                let l2 = self.lifespan_b2_le_5m.load(Ordering::Relaxed);
+                let l3 = self.lifespan_b3_le_30m.load(Ordering::Relaxed);
+                l0.saturating_add(l1).saturating_add(l2).saturating_add(l3)
+            },
+            lifespan_le_1h: {
+                let l0 = self.lifespan_b0_le_5s.load(Ordering::Relaxed);
+                let l1 = self.lifespan_b1_le_30s.load(Ordering::Relaxed);
+                let l2 = self.lifespan_b2_le_5m.load(Ordering::Relaxed);
+                let l3 = self.lifespan_b3_le_30m.load(Ordering::Relaxed);
+                let l4 = self.lifespan_b4_le_1h.load(Ordering::Relaxed);
+                l0.saturating_add(l1)
+                    .saturating_add(l2)
+                    .saturating_add(l3)
+                    .saturating_add(l4)
+            },
+            lifespan_gt_1h: self.lifespan_b5_gt_1h.load(Ordering::Relaxed),
         }
     }
 }

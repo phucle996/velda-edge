@@ -55,9 +55,11 @@ pub struct IpFilterPlugin {
     pub allow_cidrs: Vec<IpNetwork>,
     pub deny_cidrs: Vec<IpNetwork>,
     pub client_ip_source: ClientIpSource,
-    // Optimization: Compacted & sorted bitwise tables for branchless contiguous cache line scanning
-    allow_v4: Vec<(u32, u32)>,
-    deny_v4: Vec<(u32, u32)>,
+    // Optimization: Structure-of-Arrays (SoA) compacted & sorted bitwise tables for 256-bit SIMD scanning
+    allow_v4_nets: Vec<u32>,
+    allow_v4_masks: Vec<u32>,
+    deny_v4_nets: Vec<u32>,
+    deny_v4_masks: Vec<u32>,
     allow_v6: Vec<(u128, u128)>,
     deny_v6: Vec<(u128, u128)>,
 }
@@ -106,14 +108,19 @@ impl IpFilterPlugin {
         let allow_v6 = compact_and_sort_v6(&raw_allow_v6);
         let deny_v6 = compact_and_sort_v6(&raw_deny_v6);
 
+        let (allow_v4_nets, allow_v4_masks): (Vec<u32>, Vec<u32>) = allow_v4.into_iter().unzip();
+        let (deny_v4_nets, deny_v4_masks): (Vec<u32>, Vec<u32>) = deny_v4.into_iter().unzip();
+
         Self {
             id: id.into(),
             mode: config.mode,
             allow_cidrs: config.allow_cidrs,
             deny_cidrs: config.deny_cidrs,
             client_ip_source: config.client_ip_source,
-            allow_v4,
-            deny_v4,
+            allow_v4_nets,
+            allow_v4_masks,
+            deny_v4_nets,
+            deny_v4_masks,
             allow_v6,
             deny_v6,
         }
@@ -218,8 +225,8 @@ impl PreRoutePlugin for IpFilterPlugin {
         };
 
         let hops = extracted.as_slice();
-        let has_deny = !self.deny_v4.is_empty() || !self.deny_v6.is_empty();
-        let has_allow = !self.allow_v4.is_empty() || !self.allow_v6.is_empty();
+        let has_deny = !self.deny_v4_nets.is_empty() || !self.deny_v6.is_empty();
+        let has_allow = !self.allow_v4_nets.is_empty() || !self.allow_v6.is_empty();
 
         match self.mode {
             IpFilterMode::AllowList => {
@@ -262,17 +269,193 @@ impl PreRoutePlugin for IpFilterPlugin {
     }
 }
 
+/// Signature for register-width-specific IPv4 CIDR matching functions.
+pub type MatchCidrV4Fn = fn(ip: u32, nets: &[u32], masks: &[u32]) -> bool;
+
+/// Pre-resolved static function pointer for IPv4 CIDR table scanning (up to 256-bit SIMD: 8 CIDRs/cycle).
+pub static MATCH_CIDR_V4_FN: std::sync::LazyLock<MatchCidrV4Fn> = std::sync::LazyLock::new(|| {
+    let caps = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities;
+    match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
+        velda_core::hardware::RegisterWidth::Bits256 => match_cidr_v4_256,
+        velda_core::hardware::RegisterWidth::Bits128 => match_cidr_v4_128,
+        velda_core::hardware::RegisterWidth::Bits64 => match_cidr_v4_64,
+        velda_core::hardware::RegisterWidth::Bits32 => match_cidr_v4_32,
+    }
+});
+
+/// Evaluates 8 IPv4 CIDR rules per cycle using 256-bit vector registers.
+#[inline]
+pub fn match_cidr_v4_256(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { match_cidr_v4_256_x86_impl(ip, nets, masks) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        match_cidr_v4_128(ip, nets, masks)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn match_cidr_v4_256_x86_impl(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    use std::arch::x86_64::*;
+    let len = nets.len().min(masks.len());
+    let vec_len = len & !7;
+    let mut i = 0;
+
+    if vec_len > 0 {
+        let ip_vec = _mm256_set1_epi32(ip as i32);
+        while i < vec_len {
+            unsafe {
+                let m = _mm256_loadu_si256(masks.as_ptr().add(i) as *const __m256i);
+                let n = _mm256_loadu_si256(nets.as_ptr().add(i) as *const __m256i);
+                let masked = _mm256_and_si256(ip_vec, m);
+                let cmp = _mm256_cmpeq_epi32(masked, n);
+                if _mm256_movemask_epi8(cmp) != 0 {
+                    return true;
+                }
+            }
+            i += 8;
+        }
+    }
+
+    while i < len {
+        if (ip & masks[i]) == nets[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Evaluates 4 IPv4 CIDR rules per cycle using 128-bit vector registers.
+#[inline]
+pub fn match_cidr_v4_128(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { match_cidr_v4_128_x86_impl(ip, nets, masks) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { match_cidr_v4_128_neon_impl(ip, nets, masks) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        match_cidr_v4_64(ip, nets, masks)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn match_cidr_v4_128_x86_impl(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    use std::arch::x86_64::*;
+    let len = nets.len().min(masks.len());
+    let vec_len = len & !3;
+    let mut i = 0;
+
+    if vec_len > 0 {
+        let ip_vec = _mm_set1_epi32(ip as i32);
+        while i < vec_len {
+            unsafe {
+                let m = _mm_loadu_si128(masks.as_ptr().add(i) as *const __m128i);
+                let n = _mm_loadu_si128(nets.as_ptr().add(i) as *const __m128i);
+                let masked = _mm_and_si128(ip_vec, m);
+                let cmp = _mm_cmpeq_epi32(masked, n);
+                if _mm_movemask_epi8(cmp) != 0 {
+                    return true;
+                }
+            }
+            i += 4;
+        }
+    }
+
+    while i < len {
+        if (ip & masks[i]) == nets[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn match_cidr_v4_128_neon_impl(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    use std::arch::aarch64::*;
+    let len = nets.len().min(masks.len());
+    let vec_len = len & !3;
+    let mut i = 0;
+
+    if vec_len > 0 {
+        let ip_vec = vdupq_n_u32(ip);
+        while i < vec_len {
+            unsafe {
+                let m = vld1q_u32(masks.as_ptr().add(i));
+                let n = vld1q_u32(nets.as_ptr().add(i));
+                let masked = vandq_u32(ip_vec, m);
+                let cmp = vceqq_u32(masked, n);
+                if vmaxvq_u32(cmp) != 0 {
+                    return true;
+                }
+            }
+            i += 4;
+        }
+    }
+
+    while i < len {
+        if (ip & masks[i]) == nets[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Evaluates 2 IPv4 CIDR rules per cycle using 64-bit SWAR registers.
+#[inline]
+pub fn match_cidr_v4_64(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    let len = nets.len().min(masks.len());
+    let pair_len = len & !1;
+    let ip64 = ((ip as u64) << 32) | (ip as u64);
+    let mut i = 0;
+
+    while i < pair_len {
+        let m64 = ((masks[i + 1] as u64) << 32) | (masks[i] as u64);
+        let n64 = ((nets[i + 1] as u64) << 32) | (nets[i] as u64);
+        let diff = (ip64 & m64) ^ n64;
+        if (diff as u32) == 0 || (diff >> 32) == 0 {
+            return true;
+        }
+        i += 2;
+    }
+
+    if i < len && (ip & masks[i]) == nets[i] {
+        return true;
+    }
+    false
+}
+
+/// Evaluates IPv4 CIDR rules using standard 32-bit registers.
+#[inline]
+pub fn match_cidr_v4_32(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    let len = nets.len().min(masks.len());
+    for i in 0..len {
+        if (ip & masks[i]) == nets[i] {
+            return true;
+        }
+    }
+    false
+}
+
 impl IpFilterPlugin {
     #[inline(always)]
     fn matches_allow(&self, ip: ParsedIp) -> bool {
         match ip {
             ParsedIp::V4(bits) => {
-                for &(net, mask) in &self.allow_v4 {
-                    if (bits & mask) == net {
-                        return true;
-                    }
-                }
-                false
+                (*MATCH_CIDR_V4_FN)(bits, &self.allow_v4_nets, &self.allow_v4_masks)
             }
             ParsedIp::V6(bits) => {
                 for &(net, mask) in &self.allow_v6 {
@@ -289,12 +472,7 @@ impl IpFilterPlugin {
     fn matches_deny(&self, ip: ParsedIp) -> bool {
         match ip {
             ParsedIp::V4(bits) => {
-                for &(net, mask) in &self.deny_v4 {
-                    if (bits & mask) == net {
-                        return true;
-                    }
-                }
-                false
+                (*MATCH_CIDR_V4_FN)(bits, &self.deny_v4_nets, &self.deny_v4_masks)
             }
             ParsedIp::V6(bits) => {
                 for &(net, mask) in &self.deny_v6 {
@@ -719,6 +897,47 @@ mod tests {
                 ),
                 "Malformed XFF chain '{malformed_chain}' must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_match_cidr_v4_all_register_tiers_equivalence() {
+        // 11 CIDR networks (tests 8-lane 256-bit, 4-lane 128-bit, 2-lane 64-bit, and remainder tail)
+        let cidrs = [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.1.0/24",
+            "192.168.2.0/24",
+            "192.168.3.0/24",
+            "192.168.4.0/24",
+            "192.168.5.0/24",
+            "192.168.6.0/24",
+            "192.168.7.0/24",
+            "192.168.8.0/24",
+            "203.0.113.0/24",
+        ];
+        let mut nets = Vec::new();
+        let mut masks = Vec::new();
+        for c in cidrs {
+            if let IpNetwork::V4 { net, mask } = IpNetwork::from_cidr(c).unwrap() {
+                nets.push(net);
+                masks.push(mask);
+            }
+        }
+
+        let match_ip = u32::from(std::net::Ipv4Addr::new(203, 0, 113, 42));
+        let first_ip = u32::from(std::net::Ipv4Addr::new(10, 25, 1, 1));
+        let miss_ip = u32::from(std::net::Ipv4Addr::new(8, 8, 8, 8));
+
+        for match_fn in [
+            match_cidr_v4_256,
+            match_cidr_v4_128,
+            match_cidr_v4_64,
+            match_cidr_v4_32,
+        ] {
+            assert!(match_fn(match_ip, &nets, &masks));
+            assert!(match_fn(first_ip, &nets, &masks));
+            assert!(!match_fn(miss_ip, &nets, &masks));
         }
     }
 }

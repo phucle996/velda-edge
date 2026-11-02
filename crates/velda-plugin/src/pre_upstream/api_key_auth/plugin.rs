@@ -244,16 +244,11 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
 }
 
 /// Constant-time slice equality comparison preventing timing attacks (CWE-208).
-#[inline]
+///
+/// Dispatches via the hardware-probed static function pointer (`Bits256` -> `Bits128` -> `Bits64` -> `Bits32`).
+#[inline(always)]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    crate::pre_upstream::hmac_auth::canonical::constant_time_eq(a, b)
 }
 
 /// Strips a specific query parameter from a URI, returning a new URI without the secret token.

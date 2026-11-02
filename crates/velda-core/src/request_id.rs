@@ -63,28 +63,115 @@ pub const ID_POOL_CAPACITY: usize = 64;
 /// Low watermark threshold. When available IDs fall below this count, a batch refill is triggered.
 pub const ID_POOL_LOW_WATERMARK: usize = 16;
 
-/// Lookup table for fast 2-digit hex encoding without branch prediction misses.
+/// Lookup table for fast 2-digit hex encoding on 32-bit registers.
 static HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-/// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes.
+type FormatHex16Fn = fn(u64, &mut [u8; 16]);
+
+static FORMAT_HEX_16_FN: std::sync::LazyLock<FormatHex16Fn> = std::sync::LazyLock::new(|| {
+    let width = crate::hardware::global_hardware_topology()
+        .cpu
+        .register_capabilities
+        .select_for_workload(crate::hardware::RegisterWidth::Bits128);
+    match width {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        crate::hardware::RegisterWidth::Bits128 | crate::hardware::RegisterWidth::Bits256 => {
+            format_hex_16_128
+        }
+        crate::hardware::RegisterWidth::Bits64 => format_hex_16_64,
+        _ => format_hex_16_32,
+    }
+});
+
+/// 128-bit vector register hex formatter: unpacks 16 nibbles and translates to ASCII in a single 128-bit store.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
+    use core::arch::x86_64::*;
+    let be = val.to_be_bytes();
+    unsafe {
+        let bytes = _mm_loadl_epi64(be.as_ptr() as *const __m128i);
+        let mask_0f = _mm_set1_epi8(0x0f);
+        let hi = _mm_and_si128(_mm_srli_epi16(bytes, 4), mask_0f);
+        let lo = _mm_and_si128(bytes, mask_0f);
+        let nibbles = _mm_unpacklo_epi8(hi, lo);
+        let gt9 = _mm_cmpgt_epi8(nibbles, _mm_set1_epi8(9));
+        let alpha_offset = _mm_and_si128(gt9, _mm_set1_epi8((b'a' - 10 - b'0') as i8));
+        let ascii = _mm_add_epi8(
+            _mm_add_epi8(nibbles, _mm_set1_epi8(b'0' as i8)),
+            alpha_offset,
+        );
+        _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, ascii);
+    }
+}
+
+/// 128-bit NEON vector register hex formatter.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
+    use core::arch::aarch64::*;
+    let be = val.to_be_bytes();
+    unsafe {
+        let bytes = vld1_u8(be.as_ptr());
+        let hi = vshr_n_u8(bytes, 4);
+        let lo = vand_u8(bytes, vdup_n_u8(0x0f));
+        let zipped = vzip_u8(hi, lo);
+        let nibbles = vcombine_u8(zipped.0, zipped.1);
+        let gt9 = vcgtq_u8(nibbles, vdupq_n_u8(9));
+        let alpha_offset = vandq_u8(gt9, vdupq_n_u8(b'a' - 10 - b'0'));
+        let ascii = vaddq_u8(vaddq_u8(nibbles, vdupq_n_u8(b'0')), alpha_offset);
+        vst1q_u8(out.as_mut_ptr(), ascii);
+    }
+}
+
+/// 64-bit SWAR branchless hex formatter: converts 8 nibbles at a time inside 64-bit integer registers.
+#[inline]
+fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
+    #[inline(always)]
+    fn swar_u32_to_hex8(x: u32) -> u64 {
+        // Spread 8 nibbles of `x` (big-endian order) into 8 bytes of a u64
+        let mut v = x.to_be() as u64;
+        v = ((v & 0x0000_0000_FFFF_0000) << 16) | (v & 0x0000_0000_0000_FFFF);
+        v = ((v & 0x0000_FF00_0000_FF00) << 8) | (v & 0x0000_00FF_0000_00FF);
+        v = ((v & 0x00F0_00F0_00F0_00F0) >> 4) | ((v & 0x000F_000F_000F_000F) << 8);
+        // Now each byte holds a nibble (0..15) in big-endian byte order on little-endian
+        let mask = ((v + 0x0606_0606_0606_0606) >> 4) & 0x0101_0101_0101_0101;
+        v + 0x3030_3030_3030_3030 + mask * (b'a' - 10 - b'0') as u64
+    }
+    let hi_ascii = swar_u32_to_hex8((val >> 32) as u32);
+    let lo_ascii = swar_u32_to_hex8(val as u32);
+    out[0..8].copy_from_slice(&hi_ascii.to_ne_bytes());
+    out[8..16].copy_from_slice(&lo_ascii.to_ne_bytes());
+}
+
+/// 32-bit register fallback hex formatter.
+#[inline]
+fn format_hex_16_32(val: u64, out: &mut [u8; 16]) {
+    let hi = (val >> 32) as u32;
+    let lo = val as u32;
+    out[0] = HEX_DIGITS[((hi >> 28) & 0x0f) as usize];
+    out[1] = HEX_DIGITS[((hi >> 24) & 0x0f) as usize];
+    out[2] = HEX_DIGITS[((hi >> 20) & 0x0f) as usize];
+    out[3] = HEX_DIGITS[((hi >> 16) & 0x0f) as usize];
+    out[4] = HEX_DIGITS[((hi >> 12) & 0x0f) as usize];
+    out[5] = HEX_DIGITS[((hi >> 8) & 0x0f) as usize];
+    out[6] = HEX_DIGITS[((hi >> 4) & 0x0f) as usize];
+    out[7] = HEX_DIGITS[(hi & 0x0f) as usize];
+    out[8] = HEX_DIGITS[((lo >> 28) & 0x0f) as usize];
+    out[9] = HEX_DIGITS[((lo >> 24) & 0x0f) as usize];
+    out[10] = HEX_DIGITS[((lo >> 20) & 0x0f) as usize];
+    out[11] = HEX_DIGITS[((lo >> 16) & 0x0f) as usize];
+    out[12] = HEX_DIGITS[((lo >> 12) & 0x0f) as usize];
+    out[13] = HEX_DIGITS[((lo >> 8) & 0x0f) as usize];
+    out[14] = HEX_DIGITS[((lo >> 4) & 0x0f) as usize];
+    out[15] = HEX_DIGITS[(lo & 0x0f) as usize];
+}
+
+/// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes
+/// using the hardware-probed static register function pointer (`Bits128` -> `Bits64` -> `Bits32`).
 #[inline(always)]
 pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
-    out[0] = HEX_DIGITS[((val >> 60) & 0x0f) as usize];
-    out[1] = HEX_DIGITS[((val >> 56) & 0x0f) as usize];
-    out[2] = HEX_DIGITS[((val >> 52) & 0x0f) as usize];
-    out[3] = HEX_DIGITS[((val >> 48) & 0x0f) as usize];
-    out[4] = HEX_DIGITS[((val >> 44) & 0x0f) as usize];
-    out[5] = HEX_DIGITS[((val >> 40) & 0x0f) as usize];
-    out[6] = HEX_DIGITS[((val >> 36) & 0x0f) as usize];
-    out[7] = HEX_DIGITS[((val >> 32) & 0x0f) as usize];
-    out[8] = HEX_DIGITS[((val >> 28) & 0x0f) as usize];
-    out[9] = HEX_DIGITS[((val >> 24) & 0x0f) as usize];
-    out[10] = HEX_DIGITS[((val >> 20) & 0x0f) as usize];
-    out[11] = HEX_DIGITS[((val >> 16) & 0x0f) as usize];
-    out[12] = HEX_DIGITS[((val >> 12) & 0x0f) as usize];
-    out[13] = HEX_DIGITS[((val >> 8) & 0x0f) as usize];
-    out[14] = HEX_DIGITS[((val >> 4) & 0x0f) as usize];
-    out[15] = HEX_DIGITS[(val & 0x0f) as usize];
+    (FORMAT_HEX_16_FN)(val, out)
 }
 
 /// Helper to get current Unix epoch in seconds.
@@ -235,15 +322,18 @@ mod tests {
 
     #[test]
     fn test_format_hex_16_accuracy() {
-        let mut out = [0u8; 16];
-        format_hex_16(0x0123456789abcdef, &mut out);
-        assert_eq!(&out, b"0123456789abcdef");
-
-        format_hex_16(0, &mut out);
-        assert_eq!(&out, b"0000000000000000");
-
-        format_hex_16(u64::MAX, &mut out);
-        assert_eq!(&out, b"ffffffffffffffff");
+        for &val in &[0u64, 0x0123456789abcdef, 0xfedcba9876543210, u64::MAX] {
+            let expected = format!("{val:016x}");
+            let mut out_dispatch = [0u8; 16];
+            let mut out_64 = [0u8; 16];
+            let mut out_32 = [0u8; 16];
+            format_hex_16(val, &mut out_dispatch);
+            format_hex_16_64(val, &mut out_64);
+            format_hex_16_32(val, &mut out_32);
+            assert_eq!(&out_dispatch, expected.as_bytes());
+            assert_eq!(&out_64, expected.as_bytes());
+            assert_eq!(&out_32, expected.as_bytes());
+        }
     }
 
     #[test]

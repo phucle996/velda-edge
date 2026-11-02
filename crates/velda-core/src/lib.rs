@@ -92,12 +92,14 @@ pub use lifecycle::{Action, Hook, HookPhase, Phase};
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
     AccelerationTier, BusyPollTier, CorePartition, CoreSteeringTier, CpuProfile,
-    DeadPeerTeardownTier, HardwareSizing, HardwareTopology, KernelAccelerationLadder,
-    KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier, MultiplexPacingTier,
-    OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker, UdpEgressTier,
-    UdpOffloadTier, compute_optimal_pool_concurrency, concurrency_shards, global_hardware_topology,
-    init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
-    probe_memory_usage, set_current_thread_idle_priority,
+    CpuRegisterCapabilities, DeadPeerTeardownTier, HardwareSizing, HardwareTopology,
+    IngressHashAuthority, KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile,
+    MultipathResilienceTier, MultiplexPacingTier, NicProfile, OutboundPortScalingTier,
+    OverloadConfig, OverloadLevel, OverloadTracker, RegisterWidth, UdpEgressTier, UdpOffloadTier,
+    compute_optimal_pool_concurrency, concurrency_shards, copy_bulk_payload,
+    global_hardware_topology, ingress_steering_cpu, init_hardware_topology,
+    optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory, probe_memory_usage, probe_nic,
+    set_current_thread_idle_priority,
 };
 pub use provenance::Provenance;
 pub use request_id::{ID_POOL_CAPACITY, ID_POOL_LOW_WATERMARK, RequestIdPool, next_request_id};

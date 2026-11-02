@@ -115,7 +115,7 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
         kernel_version = %hardware.kernel.version,
         acceleration = hardware.kernel.acceleration.as_str(),
         acceleration_reason = hardware.kernel.reason,
-        vector_simd = hardware.cpu.vector_capabilities.summary(),
+        vector_simd = hardware.cpu.register_capabilities.summary(),
         "Velda Edge supervisor bootstrapped successfully"
     );
 

@@ -34,45 +34,144 @@ pub const HEX_LUT: [u8; 256] = {
     lut
 };
 
-/// Branchless 64-byte constant-time comparison utilizing four 128-bit vector words.
+/// Signature for register-width-specific 64-byte constant-time signature comparison.
+pub type ConstantTimeEq64Fn = fn(a: &[u8; 64], b: &[u8; 64]) -> bool;
+
+/// Pre-resolved static function pointer for 64-byte HMAC signature constant-time comparison.
+pub static CONSTANT_TIME_EQ_64_FN: std::sync::LazyLock<ConstantTimeEq64Fn> =
+    std::sync::LazyLock::new(|| {
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+        match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
+            velda_core::hardware::RegisterWidth::Bits256 => constant_time_eq_64_256,
+            velda_core::hardware::RegisterWidth::Bits128 => constant_time_eq_64_128,
+            velda_core::hardware::RegisterWidth::Bits64 => constant_time_eq_64_64bit,
+            velda_core::hardware::RegisterWidth::Bits32 => constant_time_eq_64_32bit,
+        }
+    });
+
+/// Branchless 64-byte constant-time comparison using hardware vector registers (up to 256-bit max).
 /// Eliminates all loop counters and branch mispredictions.
 #[inline(always)]
 pub fn constant_time_eq_64(a: &[u8; 64], b: &[u8; 64]) -> bool {
-    let w0 = u128::from_ne_bytes(a[0..16].try_into().unwrap())
-        ^ u128::from_ne_bytes(b[0..16].try_into().unwrap());
-    let w1 = u128::from_ne_bytes(a[16..32].try_into().unwrap())
-        ^ u128::from_ne_bytes(b[16..32].try_into().unwrap());
-    let w2 = u128::from_ne_bytes(a[32..48].try_into().unwrap())
-        ^ u128::from_ne_bytes(b[32..48].try_into().unwrap());
-    let w3 = u128::from_ne_bytes(a[48..64].try_into().unwrap())
-        ^ u128::from_ne_bytes(b[48..64].try_into().unwrap());
-
-    (w0 | w1 | w2 | w3) == 0
+    (*CONSTANT_TIME_EQ_64_FN)(a, b)
 }
 
-/// Constant-time byte slice comparison using 128-bit vector words to eliminate timing
-/// side-channel attacks while vectorizing directly into SIMD instructions on modern CPUs.
+/// 64-byte constant-time comparison using two 256-bit vector registers.
+#[inline]
+pub fn constant_time_eq_64_256(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { constant_time_eq_64_256_x86_impl(a, b) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        constant_time_eq_64_128(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn constant_time_eq_64_256_x86_impl(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    use std::arch::x86_64::*;
+    unsafe {
+        let a0 = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+        let b0 = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+        let a1 = _mm256_loadu_si256(a.as_ptr().add(32) as *const __m256i);
+        let b1 = _mm256_loadu_si256(b.as_ptr().add(32) as *const __m256i);
+        let diff = _mm256_or_si256(_mm256_xor_si256(a0, b0), _mm256_xor_si256(a1, b1));
+        _mm256_testz_si256(diff, diff) != 0
+    }
+}
+
+/// 64-byte constant-time comparison using four 128-bit vector registers.
+#[inline]
+pub fn constant_time_eq_64_128(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { constant_time_eq_64_128_x86_impl(a, b) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { constant_time_eq_64_128_neon_impl(a, b) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        constant_time_eq_64_64bit(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn constant_time_eq_64_128_x86_impl(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    use std::arch::x86_64::*;
+    unsafe {
+        let d0 = _mm_xor_si128(
+            _mm_loadu_si128(a.as_ptr() as *const __m128i),
+            _mm_loadu_si128(b.as_ptr() as *const __m128i),
+        );
+        let d1 = _mm_xor_si128(
+            _mm_loadu_si128(a.as_ptr().add(16) as *const __m128i),
+            _mm_loadu_si128(b.as_ptr().add(16) as *const __m128i),
+        );
+        let d2 = _mm_xor_si128(
+            _mm_loadu_si128(a.as_ptr().add(32) as *const __m128i),
+            _mm_loadu_si128(b.as_ptr().add(32) as *const __m128i),
+        );
+        let d3 = _mm_xor_si128(
+            _mm_loadu_si128(a.as_ptr().add(48) as *const __m128i),
+            _mm_loadu_si128(b.as_ptr().add(48) as *const __m128i),
+        );
+        let acc = _mm_or_si128(_mm_or_si128(d0, d1), _mm_or_si128(d2, d3));
+        let cmp = _mm_cmpeq_epi8(acc, _mm_setzero_si128());
+        _mm_movemask_epi8(cmp) == 0xFFFF
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn constant_time_eq_64_128_neon_impl(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    use std::arch::aarch64::*;
+    unsafe {
+        let d0 = veorq_u8(vld1q_u8(a.as_ptr()), vld1q_u8(b.as_ptr()));
+        let d1 = veorq_u8(vld1q_u8(a.as_ptr().add(16)), vld1q_u8(b.as_ptr().add(16)));
+        let d2 = veorq_u8(vld1q_u8(a.as_ptr().add(32)), vld1q_u8(b.as_ptr().add(32)));
+        let d3 = veorq_u8(vld1q_u8(a.as_ptr().add(48)), vld1q_u8(b.as_ptr().add(48)));
+        let acc = vorrq_u8(vorrq_u8(d0, d1), vorrq_u8(d2, d3));
+        vmaxvq_u8(acc) == 0
+    }
+}
+
+/// 64-byte constant-time comparison using eight 64-bit scalar registers.
+#[inline]
+pub fn constant_time_eq_64_64bit(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    let mut diff = 0u64;
+    for i in (0..64).step_by(8) {
+        let wa = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
+        let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
+        diff |= wa ^ wb;
+    }
+    diff == 0
+}
+
+/// 64-byte constant-time comparison using sixteen 32-bit scalar registers.
+#[inline]
+pub fn constant_time_eq_64_32bit(a: &[u8; 64], b: &[u8; 64]) -> bool {
+    let mut diff = 0u32;
+    for i in (0..64).step_by(4) {
+        let wa = u32::from_ne_bytes(a[i..i + 4].try_into().unwrap());
+        let wb = u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
+        diff |= wa ^ wb;
+    }
+    diff == 0
+}
+
+/// Constant-time byte slice comparison using hardware vector registers (up to 256-bit max)
+/// to eliminate timing side-channel attacks.
 #[inline]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u128;
-    let (chunks_a, remainder_a) = a.as_chunks::<16>();
-    let (chunks_b, remainder_b) = b.as_chunks::<16>();
-
-    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
-        let val_a = u128::from_ne_bytes(*ca);
-        let val_b = u128::from_ne_bytes(*cb);
-        diff |= val_a ^ val_b;
-    }
-
-    let mut rem_diff = 0u8;
-    for (ra, rb) in remainder_a.iter().zip(remainder_b.iter()) {
-        rem_diff |= ra ^ rb;
-    }
-
-    diff == 0 && rem_diff == 0
+    crate::pre_upstream::hmac_auth::canonical::constant_time_eq(a, b)
 }
 
 /// Generates a valid 114-byte HMAC-SHA256 signed stateless token (`<timestamp_hex>.<nonce_hex>.<hmac_hex>`).
@@ -206,5 +305,24 @@ mod tests {
         assert_eq!(HEX_LUT[b'g' as usize], 0xFF);
         assert_eq!(HEX_LUT[b'Z' as usize], 0xFF);
         assert_eq!(HEX_LUT[b' ' as usize], 0xFF);
+    }
+
+    #[test]
+    fn test_constant_time_eq_64_all_tiers_equivalence() {
+        let a = [0x42u8; 64];
+        let b = [0x42u8; 64];
+        let mut c = [0x42u8; 64];
+        c[63] = 0x43;
+
+        for eq_fn in [
+            constant_time_eq_64,
+            constant_time_eq_64_256,
+            constant_time_eq_64_128,
+            constant_time_eq_64_64bit,
+            constant_time_eq_64_32bit,
+        ] {
+            assert!(eq_fn(&a, &b));
+            assert!(!eq_fn(&a, &c));
+        }
     }
 }

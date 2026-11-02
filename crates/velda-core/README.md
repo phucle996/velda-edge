@@ -162,7 +162,7 @@ Detects physical and container hardware allocations once at cold start from the 
 
 - `src/hardware/cpu.rs`:
   - `probe_cpu()`: Inspects cgroups v2 (`/sys/fs/cgroup/cpu.max`), cgroups v1 (`cpu.cfs_quota_us`), or falls back to system `available_parallelism`.
-  - Determines available logical cores and hardware vector SIMD capabilities (AVX-512, AVX2, NEON).
+  - Determines available logical cores and vendor-neutral hardware register width capabilities (`RegisterWidth`: `Bits32`, `Bits64`, `Bits128`, `Bits256`, strictly capped at 256-bit max to prevent AVX-512 frequency throttling).
   - Used to dynamically scale concurrency partitions and channel buffer capacities.
 - `src/hardware/memory.rs`:
   - `probe_memory()`: Inspects cgroups v2 (`memory.max`), cgroups v1 (`memory.limit_in_bytes`), or `/proc/meminfo` `MemTotal`.

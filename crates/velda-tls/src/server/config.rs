@@ -153,16 +153,15 @@ impl ServerTlsConfig {
 
         let protocol_versions = crate::version::resolve_protocol_versions(&all_versions)?;
 
-        let builder = ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&protocol_versions)
-        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+        let builder =
+            ServerConfig::builder_with_provider(crate::version::hardware_crypto_provider())
+                .with_protocol_versions(&protocol_versions)
+                .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
 
         let mut server_config = if requires_client_auth {
             let verifier = WebPkiClientVerifier::builder_with_provider(
                 Arc::new(client_root_store),
-                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+                crate::version::hardware_crypto_provider(),
             )
             .build()
             .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;
@@ -212,16 +211,15 @@ impl ServerTlsConfig {
             self.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
         let protocol_versions = crate::version::resolve_protocol_versions(&self.versions)?;
 
-        let builder = ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&protocol_versions)
-        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+        let builder =
+            ServerConfig::builder_with_provider(crate::version::hardware_crypto_provider())
+                .with_protocol_versions(&protocol_versions)
+                .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
 
         let mut server_config = if requires_client_auth {
             let verifier = WebPkiClientVerifier::builder_with_provider(
                 Arc::new(client_root_store),
-                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+                crate::version::hardware_crypto_provider(),
             )
             .build()
             .map_err(|e| TlsError::InvalidCaBundle(e.to_string()))?;

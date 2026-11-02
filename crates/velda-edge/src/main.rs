@@ -117,8 +117,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &listeners,
     );
 
-    // Initialize tracing subscriber
+    // Initialize high-performance, zero-allocation tracing subscriber
+    // 1. with_ansi(false): Completely eliminates nu_ansi_term coloring overhead and string allocations in production.
+    // 2. with_target(false): Skips module path hierarchy resolution on every log event.
+    // 3. Compact / thread-friendly formatting to minimize lock contention and formatting overhead.
     tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(false)
+        .compact()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),

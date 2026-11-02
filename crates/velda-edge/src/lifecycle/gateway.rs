@@ -45,6 +45,14 @@ pub async fn run_gateway(
         total_cores = partition.traffic_cores.len(),
         "Established zero-waste hardware core partition (all-worker balanced sharding)"
     );
+    let nic = &velda_core::global_hardware_topology().nic;
+    tracing::info!(
+        ingress_hash = ?nic.authority,
+        verified_interfaces = nic.verified_interfaces,
+        rx_queues = nic.rx_queues,
+        reason = nic.reason,
+        "NIC ingress hash authority resolved (hardware RSS only when proven, else kernel software hash)"
+    );
 
     // Register UDS IPC socket claim in host SocketManager
     if let Err(e) = velda_core::global_socket_manager()

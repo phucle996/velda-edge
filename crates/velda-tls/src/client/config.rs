@@ -31,11 +31,10 @@ impl ClientTlsConfig {
     pub fn build(&self) -> Result<Arc<ClientConfig>, TlsError> {
         let protocol_versions = crate::version::resolve_protocol_versions(&self.versions)?;
 
-        let builder = ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&protocol_versions)
-        .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
+        let builder =
+            ClientConfig::builder_with_provider(crate::version::hardware_crypto_provider())
+                .with_protocol_versions(&protocol_versions)
+                .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
 
         let builder = if self.insecure_skip_verify {
             builder

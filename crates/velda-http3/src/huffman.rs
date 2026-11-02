@@ -265,30 +265,89 @@ pub static HUFFMAN_CODES: [(u32, u8); 257] = [
     (0x3fffffff, 30), // 256
 ];
 
-/// Encodes raw bytes using RFC 7541 Huffman coding.
-pub fn encode_huffman(input: &[u8], dst: &mut bytes::BytesMut) {
+type EncodeHuffmanFn = fn(&[u8], &mut bytes::BytesMut);
+
+static ENCODE_HUFFMAN_FN: std::sync::LazyLock<EncodeHuffmanFn> = std::sync::LazyLock::new(|| {
+    let width = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities
+        .select_for_workload(velda_core::RegisterWidth::Bits64);
+    match width {
+        velda_core::RegisterWidth::Bits64
+        | velda_core::RegisterWidth::Bits128
+        | velda_core::RegisterWidth::Bits256 => encode_huffman_64,
+        velda_core::RegisterWidth::Bits32 => encode_huffman_32,
+    }
+});
+
+/// 64-bit register Huffman encoder: packs codes into a 64-bit bit-buffer and flushes 32 bits (4 bytes)
+/// at a single instruction (`put_u32`) whenever `bits >= 32`.
+fn encode_huffman_64(input: &[u8], dst: &mut bytes::BytesMut) {
     use bytes::BufMut;
+    dst.reserve(input.len());
 
     let mut current: u64 = 0;
-    let mut bits = 0;
+    let mut bits: u8 = 0;
 
     for &byte in input {
         let (code, len) = HUFFMAN_CODES[byte as usize];
         current = (current << len) | (code as u64);
         bits += len;
 
-        while bits >= 8 {
-            bits -= 8;
-            dst.put_u8((current >> bits) as u8);
+        if bits >= 32 {
+            bits -= 32;
+            dst.put_u32((current >> bits) as u32);
         }
+    }
+
+    while bits >= 8 {
+        bits -= 8;
+        dst.put_u8((current >> bits) as u8);
     }
 
     // Pad with 1s to octet boundary (EOS prefix)
     if bits > 0 {
         let pad = 8 - bits;
-        current = (current << pad) | ((1 << pad) - 1);
+        current = (current << pad) | ((1u64 << pad) - 1);
         dst.put_u8(current as u8);
     }
+}
+
+/// Dual 32-bit register Huffman encoder for 32-bit targets.
+fn encode_huffman_32(input: &[u8], dst: &mut bytes::BytesMut) {
+    use bytes::BufMut;
+    dst.reserve(input.len());
+
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for &byte in input {
+        let (code, len) = HUFFMAN_CODES[byte as usize];
+        // Since max code len is 30 bits, flush bytes first so `bits + len <= 32`
+        while bits + len > 32 {
+            bits -= 8;
+            dst.put_u8((acc >> bits) as u8);
+        }
+        acc = acc.checked_shl(len as u32).unwrap_or(0) | code;
+        bits += len;
+
+        while bits >= 8 {
+            bits -= 8;
+            dst.put_u8((acc >> bits) as u8);
+        }
+    }
+
+    if bits > 0 {
+        let pad = 8 - bits;
+        acc = (acc << pad) | ((1u32 << pad) - 1);
+        dst.put_u8(acc as u8);
+    }
+}
+
+/// Encodes raw bytes using RFC 7541 Huffman coding via the hardware-selected register function pointer.
+#[inline]
+pub fn encode_huffman(input: &[u8], dst: &mut bytes::BytesMut) {
+    (ENCODE_HUFFMAN_FN)(input, dst)
 }
 
 #[derive(Clone, Copy)]
@@ -297,10 +356,30 @@ struct HuffmanNode {
     sym: u16,
 }
 
-static HUFFMAN_TREE: std::sync::OnceLock<Vec<HuffmanNode>> = std::sync::OnceLock::new();
+const NIBBLE_FLAG_EMIT: u8 = 0x01;
+const NIBBLE_FLAG_FAIL: u8 = 0x02;
 
-fn get_huffman_tree() -> &'static [HuffmanNode] {
-    HUFFMAN_TREE.get_or_init(|| {
+/// 4-byte L1-cached 4-bit nibble state transition entry.
+/// Since the shortest RFC 7541 Huffman code is 5 bits, a 4-bit nibble can emit at most 1 symbol.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct NibbleTransition {
+    next_state: u16,
+    sym: u8,
+    flags: u8,
+}
+
+struct HuffmanDecoderAutomaton {
+    /// Indexed by `[state * 16 + nibble]`.
+    transitions: Vec<NibbleTransition>,
+    /// True if `state` is a valid EOF padding state (0..=7 consecutive '1' bits from root).
+    valid_eof: Vec<bool>,
+}
+
+static HUFFMAN_AUTOMATON: std::sync::OnceLock<HuffmanDecoderAutomaton> = std::sync::OnceLock::new();
+
+fn get_huffman_automaton() -> &'static HuffmanDecoderAutomaton {
+    HUFFMAN_AUTOMATON.get_or_init(|| {
         let mut nodes = vec![HuffmanNode {
             children: [0, 0],
             sym: 0xffff,
@@ -324,69 +403,112 @@ fn get_huffman_tree() -> &'static [HuffmanNode] {
             }
             nodes[curr].sym = sym as u16;
         }
-        nodes
+
+        let num_states = nodes.len();
+        let mut transitions = vec![
+            NibbleTransition {
+                next_state: 0,
+                sym: 0,
+                flags: NIBBLE_FLAG_FAIL,
+            };
+            num_states * 16
+        ];
+
+        for state in 0..num_states {
+            if nodes[state].sym != 0xffff {
+                continue;
+            }
+            for nib in 0..16usize {
+                let mut curr = state;
+                let mut sym = 0u8;
+                let mut flags = 0u8;
+
+                for shift in (0..4).rev() {
+                    let bit = (nib >> shift) & 1;
+                    let next = nodes[curr].children[bit] as usize;
+                    if next == 0 {
+                        flags = NIBBLE_FLAG_FAIL;
+                        break;
+                    }
+                    curr = next;
+                    if nodes[curr].sym != 0xffff {
+                        let s = nodes[curr].sym;
+                        if s == 256 {
+                            // EOS symbol is strictly forbidden in payload
+                            flags = NIBBLE_FLAG_FAIL;
+                            break;
+                        }
+                        sym = s as u8;
+                        flags |= NIBBLE_FLAG_EMIT;
+                        curr = 0;
+                    }
+                }
+
+                transitions[state * 16 + nib] = NibbleTransition {
+                    next_state: curr as u16,
+                    sym,
+                    flags,
+                };
+            }
+        }
+
+        // Precompute valid EOF states (RFC 7541 Section 5.2: 0 to 7 consecutive '1' bits from root 0)
+        let mut valid_eof = vec![false; num_states];
+        let mut eof_curr = 0usize;
+        valid_eof[0] = true;
+        for _ in 0..7 {
+            eof_curr = nodes[eof_curr].children[1] as usize;
+            if eof_curr == 0 {
+                break;
+            }
+            valid_eof[eof_curr] = true;
+        }
+
+        HuffmanDecoderAutomaton {
+            transitions,
+            valid_eof,
+        }
     })
 }
 
 /// Decodes RFC 7541 / RFC 9204 Huffman encoded bytes into a String.
 ///
-/// Uses an in-memory L1-cached Trie to perform deterministic $O(1)$ bit transitions,
-/// completely eliminating $O(N \times 256)$ brute-force code scans.
+/// Uses a precomputed L1-cached 4-bit nibble automaton (2 transitions per byte instead of 8 bit-steps),
+/// cutting branch and memory lookup overhead by 4x.
 pub fn decode_huffman(input: &[u8]) -> Option<String> {
-    let tree = get_huffman_tree();
+    let automaton = get_huffman_automaton();
+    let table = automaton.transitions.as_slice();
     // Huffman decompressed strings typically expand by ~1.3-1.5x. Pre-allocate 1.5x capacity to eliminate reallocs.
     let expanded_cap = input.len() + (input.len() >> 1).max(16);
     let mut out = Vec::with_capacity(expanded_cap);
-    let mut curr = 0;
-    let mut bits_in_current_symbol = 0;
+    let mut state = 0usize;
 
     for &byte in input {
-        let b = byte as usize;
-        let bits = [
-            (b >> 7) & 1,
-            (b >> 6) & 1,
-            (b >> 5) & 1,
-            (b >> 4) & 1,
-            (b >> 3) & 1,
-            (b >> 2) & 1,
-            (b >> 1) & 1,
-            b & 1,
-        ];
-
-        for &bit in &bits {
-            let next = tree[curr].children[bit] as usize;
-            if next == 0 {
-                return None;
-            }
-            curr = next;
-            bits_in_current_symbol += 1;
-
-            if tree[curr].sym != 0xffff {
-                let sym = tree[curr].sym;
-                if sym == 256 {
-                    return None; // EOS symbol is forbidden in payload
-                }
-                out.push(sym as u8);
-                curr = 0;
-                bits_in_current_symbol = 0;
-            }
-        }
-    }
-
-    // Check padding at the end (RFC 7541 Section 5.2):
-    // 1. Padding must be strictly less than 8 bits
-    if bits_in_current_symbol > 7 {
-        return None;
-    }
-    // 2. Padding must consist entirely of 1s (most significant bits of EOS)
-    if curr != 0 {
-        let mut check = 0;
-        for _ in 0..bits_in_current_symbol {
-            check = tree[check].children[1] as usize;
-        }
-        if check != curr {
+        let hi_nib = (byte >> 4) as usize;
+        let t_hi = table[state * 16 + hi_nib];
+        if (t_hi.flags & NIBBLE_FLAG_FAIL) != 0 {
             return None;
         }
+        if (t_hi.flags & NIBBLE_FLAG_EMIT) != 0 {
+            out.push(t_hi.sym);
+        }
+        state = t_hi.next_state as usize;
+
+        let lo_nib = (byte & 0x0f) as usize;
+        let t_lo = table[state * 16 + lo_nib];
+        if (t_lo.flags & NIBBLE_FLAG_FAIL) != 0 {
+            return None;
+        }
+        if (t_lo.flags & NIBBLE_FLAG_EMIT) != 0 {
+            out.push(t_lo.sym);
+        }
+        state = t_lo.next_state as usize;
+    }
+
+    // Verify RFC 7541 Section 5.2 EOF padding in O(1):
+    // State must correspond to 0..=7 '1'-bits from root.
+    if !automaton.valid_eof[state] {
+        return None;
     }
 
     String::from_utf8(out).ok()
