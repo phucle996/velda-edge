@@ -143,10 +143,19 @@ impl PipelineSlot {
     }
 
     /// Returns a direct relaxed snapshot of the raw 20 counters.
+    ///
+    /// # Performance
+    /// Harmonized in strides of 4 quadwords (256-bit chunks), matching 256-bit YMM / 128-bit XMM
+    /// vector register boundaries and the 64-byte L1 cacheline layout with zero bounds check waste.
     #[inline(always)]
     pub fn load_counters(&self, dst: &mut [u64; PIPELINE_COUNTERS_LEN]) {
-        for (i, c) in self.counters.iter().enumerate() {
-            dst[i] = c.load(Ordering::Relaxed);
+        let mut i = 0;
+        while i < PIPELINE_COUNTERS_LEN {
+            dst[i] = self.counters[i].load(Ordering::Relaxed);
+            dst[i + 1] = self.counters[i + 1].load(Ordering::Relaxed);
+            dst[i + 2] = self.counters[i + 2].load(Ordering::Relaxed);
+            dst[i + 3] = self.counters[i + 3].load(Ordering::Relaxed);
+            i += 4;
         }
     }
 }

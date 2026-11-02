@@ -282,8 +282,16 @@ impl MetricsSnapshot {
     /// Computes aggregate totals across all pipelines using vectorized SIMD integer arithmetic.
     #[inline]
     pub fn aggregate_pipelines(&self) -> PipelineMetricsTotals {
+        self.aggregate_pipelines_with(*AGGREGATE_COUNTERS)
+    }
+
+    /// Computes aggregate totals across all pipelines using an explicit function pointer.
+    #[inline]
+    pub fn aggregate_pipelines_with(
+        &self,
+        agg_fn: crate::vector::AccumulateCountersFn,
+    ) -> PipelineMetricsTotals {
         let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
-        let agg_fn = *AGGREGATE_COUNTERS;
         for p in &self.pipelines {
             let counters = p.to_counters();
             agg_fn(&mut total_counters, &counters);

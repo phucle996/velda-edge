@@ -23,24 +23,33 @@ pub const PIPELINE_COUNTERS_LEN: usize = 20;
 pub type AccumulateCountersFn = fn(dst: &mut [u64], src: &[u64]);
 
 /// Aggregates counter slices using 256-bit vector registers (AVX2-grade) with scalar tail.
+///
+/// # Workload-to-Register Adaptation
+/// If `len < 4`, the slice is narrower than a single 256-bit vector chunk (stride 4).
+/// In this case, execution adapts immediately to 128-bit/64-bit without paying 256-bit setup costs.
 #[inline]
 pub fn add_counters_256(dst: &mut [u64], src: &[u64]) {
     let len = dst.len().min(src.len());
+    if len < 4 {
+        add_counters_128(dst, src);
+        return;
+    }
     let vec_len = len & !3; // bitwise alignment to multiple of 4
 
     #[cfg(target_arch = "x86_64")]
     {
-        if vec_len > 0 {
+        if is_x86_feature_detected!("avx2") {
             unsafe {
                 add_counters_256_x86_impl(&mut dst[..vec_len], &src[..vec_len]);
             }
+        } else {
+            add_counters_128(dst, src);
+            return;
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        if vec_len > 0 {
-            add_counters_128(&mut dst[..vec_len], &src[..vec_len]);
-        }
+        add_counters_128(&mut dst[..vec_len], &src[..vec_len]);
     }
 
     // Scalar tail: handles any leftover 0..3 counters
@@ -66,32 +75,39 @@ unsafe fn add_counters_256_x86_impl(dst: &mut [u64], src: &[u64]) {
 }
 
 /// Aggregates counter slices using 128-bit vector registers (SSE2 / NEON) with scalar tail.
+///
+/// # Workload-to-Register Adaptation
+/// If `len < 2`, the slice is narrower than a 128-bit vector chunk (stride 2).
+/// In this case, execution adapts immediately to standard 64-bit scalar ALU, avoiding SIMD setup waste.
 #[inline]
 pub fn add_counters_128(dst: &mut [u64], src: &[u64]) {
     let len = dst.len().min(src.len());
+    if len < 2 {
+        add_counters_64(dst, src);
+        return;
+    }
     let vec_len = len & !1; // bitwise alignment to multiple of 2
 
     #[cfg(target_arch = "x86_64")]
     {
-        if vec_len > 0 {
-            unsafe {
-                add_counters_128_x86_impl(&mut dst[..vec_len], &src[..vec_len]);
-            }
+        unsafe {
+            add_counters_128_x86_impl(&mut dst[..vec_len], &src[..vec_len]);
         }
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if vec_len > 0 {
+        if std::arch::is_aarch64_feature_detected!("neon") {
             unsafe {
                 add_counters_128_neon_impl(&mut dst[..vec_len], &src[..vec_len]);
             }
+        } else {
+            add_counters_64(dst, src);
+            return;
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if vec_len > 0 {
-            add_counters_64(&mut dst[..vec_len], &src[..vec_len]);
-        }
+        add_counters_64(&mut dst[..vec_len], &src[..vec_len]);
     }
 
     // Scalar tail: handles any leftover 0..1 counter
@@ -171,11 +187,32 @@ pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
     }
 }
 
+/// Dynamically resolves the optimal counter accumulation function pointer adapting to both
+/// host hardware capabilities and the exact workload size (number of counters).
+///
+/// Prevents wasteful wide vector register setup when the workload is smaller than the register chunk:
+/// - `len >= 4`: Qualifies for 256-bit registers (stride 4, 32 bytes per iteration).
+/// - `2 <= len < 4`: Adapts to 128-bit registers (stride 2, 16 bytes per iteration).
+/// - `len == 1`: Adapts directly to 64-bit scalar ALU (zero SIMD setup waste).
+/// - `len == 0`: Minimal scalar.
+#[inline]
+pub fn resolve_counters_fn_for_len(len: usize) -> AccumulateCountersFn {
+    let caps = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities;
+    match caps.select_for_workload_size(len) {
+        RegisterWidth::Bits256 => add_counters_256,
+        RegisterWidth::Bits128 => add_counters_128,
+        RegisterWidth::Bits64 => add_counters_64,
+        RegisterWidth::Bits32 => add_counters_32,
+    }
+}
+
 /// Pre-resolved static function pointer for accumulating metrics slices.
 ///
-/// Resolves once at boot using the host maximum supported register width (up to 256-bit).
+/// Resolves once at boot adapted to the canonical pipeline slot width (`PIPELINE_COUNTERS_LEN = 20`).
 pub static AGGREGATE_COUNTERS: std::sync::LazyLock<AccumulateCountersFn> =
-    std::sync::LazyLock::new(|| resolve_counters_fn(RegisterWidth::Bits256));
+    std::sync::LazyLock::new(|| resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN));
 
 /// Aggregated metrics totals across multiple pipelines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

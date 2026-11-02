@@ -540,3 +540,280 @@ fn test_per_core_sharded_simd_aggregation() {
     assert_eq!(p.bytes_tx, 2000);
     assert_eq!(p.success_rate_basis_points(), 10_000);
 }
+
+#[test]
+fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
+    // Instantiate 4 sharded stores bound explicitly to 4 distinct hardware widths:
+    // 256-bit (AVX2), 128-bit (SSE2 / NEON), 64-bit (Scalar ALU), and 32-bit (SWAR)
+    let store_256 = MetricsStore::with_cores_and_fn(4, add_counters_256);
+    let store_128 = MetricsStore::with_cores_and_fn(4, add_counters_128);
+    let store_64 = MetricsStore::with_cores_and_fn(4, add_counters_64);
+    let store_32 = MetricsStore::with_cores_and_fn(4, add_counters_32);
+
+    let stores = [&store_256, &store_128, &store_64, &store_32];
+
+    // Seed diverse completions across all 4 core shards
+    let test_cases = [
+        (
+            0,
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            200,
+            100,
+            500,
+            Duration::from_millis(1),
+            Some(Duration::from_millis(1)),
+        ),
+        (
+            1,
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            302,
+            50,
+            150,
+            Duration::from_millis(4),
+            Some(Duration::from_millis(2)),
+        ),
+        (
+            2,
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            404,
+            80,
+            200,
+            Duration::from_millis(8),
+            Some(Duration::from_millis(4)),
+        ),
+        (
+            3,
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            500,
+            20,
+            100,
+            Duration::from_millis(45),
+            Some(Duration::from_millis(25)),
+        ),
+        (
+            0,
+            DownstreamProto::H2,
+            UpstreamProto::H2,
+            PipeStrategy::Duplex,
+            200,
+            1024,
+            4096,
+            Duration::from_millis(150),
+            Some(Duration::from_millis(80)),
+        ),
+        (
+            1,
+            DownstreamProto::H2,
+            UpstreamProto::H2,
+            PipeStrategy::Duplex,
+            502,
+            30,
+            80,
+            Duration::from_millis(800),
+            Some(Duration::from_millis(200)),
+        ),
+        (
+            2,
+            DownstreamProto::H2,
+            UpstreamProto::H2,
+            PipeStrategy::Duplex,
+            200,
+            5000,
+            12000,
+            Duration::from_millis(1500),
+            Some(Duration::from_millis(400)),
+        ),
+        (
+            3,
+            DownstreamProto::H3,
+            UpstreamProto::H2,
+            PipeStrategy::ServerStream,
+            200,
+            256,
+            1024,
+            Duration::from_millis(3),
+            Some(Duration::from_millis(1)),
+        ),
+    ];
+
+    for store in &stores {
+        for (core_id, down, up, pipe, status, rx, tx, dur, ttfb) in test_cases {
+            store.record_stream_completion_on_core(
+                core_id,
+                down,
+                up,
+                pipe,
+                StreamCompletion {
+                    status_code: status,
+                    bytes_rx: rx,
+                    bytes_tx: tx,
+                    duration: dur,
+                    ttfb,
+                },
+            );
+        }
+    }
+
+    let snap_256 = store_256.snapshot();
+    let snap_128 = store_128.snapshot();
+    let snap_64 = store_64.snapshot();
+    let snap_32 = store_32.snapshot();
+
+    // Verify bit-for-bit equivalence across all 36 pipeline snapshots
+    assert_eq!(snap_256.pipelines.len(), 36);
+    assert_eq!(snap_128.pipelines.len(), 36);
+    assert_eq!(snap_64.pipelines.len(), 36);
+    assert_eq!(snap_32.pipelines.len(), 36);
+
+    for i in 0..36 {
+        let p_256 = &snap_256.pipelines[i];
+        let p_128 = &snap_128.pipelines[i];
+        let p_64 = &snap_64.pipelines[i];
+        let p_32 = &snap_32.pipelines[i];
+
+        assert_eq!(
+            p_256, p_128,
+            "Pipeline slot {} mismatch between 256 and 128",
+            i
+        );
+        assert_eq!(
+            p_256, p_64,
+            "Pipeline slot {} mismatch between 256 and 64",
+            i
+        );
+        assert_eq!(
+            p_256, p_32,
+            "Pipeline slot {} mismatch between 256 and 32",
+            i
+        );
+    }
+
+    // Verify bit-for-bit equivalence across aggregate totals
+    let tot_256 = snap_256.aggregate_pipelines();
+    let tot_128 = snap_128.aggregate_pipelines();
+    let tot_64 = snap_64.aggregate_pipelines();
+    let tot_32 = snap_32.aggregate_pipelines();
+
+    assert_eq!(tot_256, tot_128);
+    assert_eq!(tot_256, tot_64);
+    assert_eq!(tot_256, tot_32);
+
+    assert_eq!(tot_256.total_requests(), 8);
+    assert_eq!(tot_256.requests_2xx, 4);
+    assert_eq!(tot_256.requests_3xx, 1);
+    assert_eq!(tot_256.requests_4xx, 1);
+    assert_eq!(tot_256.requests_5xx, 2);
+}
+
+#[test]
+fn test_aggregate_pipelines_with_explicit_function_pointers() {
+    let store = MetricsStore::new();
+
+    store.record_stream_completion(
+        DownstreamProto::H1,
+        UpstreamProto::H1,
+        PipeStrategy::Buffered,
+        StreamCompletion {
+            status_code: 200,
+            bytes_rx: 200,
+            bytes_tx: 800,
+            duration: Duration::from_millis(5),
+            ttfb: Some(Duration::from_millis(2)),
+        },
+    );
+
+    let snap = store.snapshot();
+
+    // Call aggregate_pipelines_with with all 4 function pointers explicitly
+    let res_256 = snap.aggregate_pipelines_with(add_counters_256);
+    let res_128 = snap.aggregate_pipelines_with(add_counters_128);
+    let res_64 = snap.aggregate_pipelines_with(add_counters_64);
+    let res_32 = snap.aggregate_pipelines_with(add_counters_32);
+
+    assert_eq!(res_256, res_128);
+    assert_eq!(res_256, res_64);
+    assert_eq!(res_256, res_32);
+    assert_eq!(res_256.total_requests(), 1);
+    assert_eq!(res_256.requests_2xx, 1);
+    assert_eq!(res_256.bytes_rx, 200);
+    assert_eq!(res_256.bytes_tx, 800);
+}
+
+#[test]
+fn test_resolve_counters_fn_returns_callable_pointer() {
+    use velda_core::hardware::RegisterWidth;
+
+    let fn_256 = resolve_counters_fn(RegisterWidth::Bits256);
+    let fn_128 = resolve_counters_fn(RegisterWidth::Bits128);
+    let fn_64 = resolve_counters_fn(RegisterWidth::Bits64);
+    let fn_32 = resolve_counters_fn(RegisterWidth::Bits32);
+
+    let mut dst = [10u64; 20];
+    let src = [5u64; 20];
+
+    // Each pointer must be callable without panic or invalid instruction
+    fn_256(&mut dst, &src);
+    assert_eq!(dst[0], 15);
+
+    fn_128(&mut dst, &src);
+    assert_eq!(dst[0], 20);
+
+    fn_64(&mut dst, &src);
+    assert_eq!(dst[0], 25);
+
+    fn_32(&mut dst, &src);
+    assert_eq!(dst[0], 30);
+}
+
+#[test]
+fn test_workload_adaptive_counters_and_narrow_slice_safety() {
+    // 1. Check adaptive function resolution matching workload length
+    let fn_20 = resolve_counters_fn_for_len(20);
+    let fn_4 = resolve_counters_fn_for_len(4);
+    let fn_2 = resolve_counters_fn_for_len(2);
+    let fn_1 = resolve_counters_fn_for_len(1);
+
+    let mut buf = [100u64; 20];
+    let src = [10u64; 20];
+
+    // Standard workload (20 counters)
+    fn_20(&mut buf, &src);
+    assert_eq!(buf[0], 110);
+    assert_eq!(buf[19], 110);
+
+    // Narrow workload (4 counters)
+    fn_4(&mut buf[..4], &src[..4]);
+    assert_eq!(buf[0], 120);
+
+    // Narrow workload (2 counters) adapts to 128-bit
+    fn_2(&mut buf[..2], &src[..2]);
+    assert_eq!(buf[0], 130);
+
+    // Single scalar counter adapts directly to 64-bit ALU
+    fn_1(&mut buf[..1], &src[..1]);
+    assert_eq!(buf[0], 140);
+
+    // 2. Direct calls to add_counters_256 on narrow slices (< 4 and < 2)
+    // MUST adapt safely to 128-bit and scalar without panics, SIGILL, or out-of-bounds
+    let mut small_dst = [5u64; 3];
+    let small_src = [2u64; 3];
+    add_counters_256(&mut small_dst, &small_src);
+    assert_eq!(small_dst, [7, 7, 7]);
+
+    let mut single_dst = [42u64; 1];
+    let single_src = [8u64; 1];
+    add_counters_256(&mut single_dst, &single_src);
+    assert_eq!(single_dst[0], 50);
+
+    let mut empty_dst: [u64; 0] = [];
+    let empty_src: [u64; 0] = [];
+    add_counters_256(&mut empty_dst, &empty_src);
+}

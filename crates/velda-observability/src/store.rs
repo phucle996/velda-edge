@@ -7,8 +7,9 @@
 //! - Shared-Nothing Per-Core Sharding: Each worker core writes exclusively to its own dedicated
 //!   local slot shard, completely eliminating cross-core cacheline invalidations (MESI bus traffic)
 //!   even when 128+ CPU cores process identical routes simultaneously.
-//! - 256-Bit Hardware Vector Aggregation: When exporting snapshots (`/metrics`), metric counters
-//!   across all active core shards are reduced concurrently using AVX2/NEON vector instructions.
+//! - Hardware Vector Aggregation: When exporting snapshots (`/metrics`), metric counters
+//!   across all active core shards are reduced concurrently via hardware-resolved function pointer
+//!   dispatch (AVX2 256-bit -> SSE2/NEON 128-bit -> Scalar 64-bit -> SWAR 32-bit).
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +64,7 @@ pub const TOTAL_PIPELINE_SLOTS: usize =
 pub struct MetricsStore {
     core_slots: Vec<[PipelineSlot; TOTAL_PIPELINE_SLOTS]>,
     active_cores: usize,
+    accumulate_fn: crate::vector::AccumulateCountersFn,
     global: GlobalMetrics,
     pool: PoolMetrics,
 }
@@ -75,6 +77,10 @@ impl Default for MetricsStore {
 
 impl MetricsStore {
     /// Creates a newly initialized metrics store sharded across detected hardware CPU cores.
+    ///
+    /// The accumulation function pointer is dynamically resolved at boot adapted to the
+    /// canonical workload size (`PIPELINE_COUNTERS_LEN = 20`) and host machine's hardware vector
+    /// capabilities (AVX2 256-bit -> SSE2/NEON 128-bit -> Scalar 64-bit -> SWAR 32-bit).
     pub fn new() -> Self {
         let detected_cores = velda_core::global_hardware_topology().cpu.available_cores;
         let active_cores = detected_cores.clamp(1, MAX_METRIC_WORKERS);
@@ -82,10 +88,12 @@ impl MetricsStore {
         for _ in 0..active_cores {
             core_slots.push(std::array::from_fn(|_| PipelineSlot::new()));
         }
+        let accumulate_fn = crate::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
 
         Self {
             core_slots,
             active_cores,
+            accumulate_fn,
             global: GlobalMetrics::new(),
             pool: PoolMetrics::new(),
         }
@@ -98,13 +106,41 @@ impl MetricsStore {
         for _ in 0..cores {
             core_slots.push(std::array::from_fn(|_| PipelineSlot::new()));
         }
+        let accumulate_fn = crate::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
 
         Self {
             core_slots,
             active_cores: cores,
+            accumulate_fn,
             global: GlobalMetrics::new(),
             pool: PoolMetrics::new(),
         }
+    }
+
+    /// Creates a metrics store explicitly bounded to `active_cores` shards and a custom accumulation function pointer.
+    pub fn with_cores_and_fn(
+        active_cores: usize,
+        accumulate_fn: crate::vector::AccumulateCountersFn,
+    ) -> Self {
+        let cores = active_cores.clamp(1, MAX_METRIC_WORKERS);
+        let mut core_slots = Vec::with_capacity(cores);
+        for _ in 0..cores {
+            core_slots.push(std::array::from_fn(|_| PipelineSlot::new()));
+        }
+
+        Self {
+            core_slots,
+            active_cores: cores,
+            accumulate_fn,
+            global: GlobalMetrics::new(),
+            pool: PoolMetrics::new(),
+        }
+    }
+
+    /// Returns the resolved accumulator function pointer.
+    #[inline(always)]
+    pub fn accumulate_fn(&self) -> crate::vector::AccumulateCountersFn {
+        self.accumulate_fn
     }
 
     /// Returns the active number of sharded core lanes.
@@ -248,9 +284,14 @@ impl MetricsStore {
     /// Captures a point-in-time pure snapshot of all metrics across all sharded core lanes.
     ///
     /// Non-blocking, reads atomics with `Ordering::Relaxed` and aggregates counter slices
-    /// using 256-bit SIMD / SWAR vector additions (`add_counters_256`).
+    /// using hardware vector registers via dynamic function pointer dispatch (`self.accumulate_fn`).
+    ///
+    /// # Performance
+    /// The intermediate extraction buffer is declared once outside the loop to remain cache-hot in L1,
+    /// eliminating stack allocation and zeroing churn across 36 slots * N cores.
     pub fn snapshot(&self) -> MetricsSnapshot {
         let mut pipelines = Vec::with_capacity(TOTAL_PIPELINE_SLOTS);
+        let mut core_buf = [0u64; PIPELINE_COUNTERS_LEN];
 
         for slot_idx in 0..TOTAL_PIPELINE_SLOTS {
             let (down, up, pipe) = Self::decode_slot_index(slot_idx);
@@ -262,10 +303,8 @@ impl MetricsStore {
                 let slot = &core_shard[slot_idx];
                 active_streams += slot.active_streams.load(Ordering::Relaxed);
 
-                let mut core_buf = [0u64; PIPELINE_COUNTERS_LEN];
                 slot.load_counters(&mut core_buf);
-
-                crate::vector::add_counters_256(&mut aggregated, &core_buf);
+                (self.accumulate_fn)(&mut aggregated, &core_buf);
             }
 
             // Latency Distribution Buckets (Cumulative transformation outside traffic hot path)

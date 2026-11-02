@@ -144,6 +144,47 @@ impl CpuRegisterCapabilities {
         }
     }
 
+    /// Adapts the register width to the workload element count (e.g. number of 64-bit quadwords)
+    /// to avoid wasteful wide-register setup for narrow workloads:
+    /// - `num_quadwords >= 4` -> targets `Bits256` (AVX2-grade)
+    /// - `2 <= num_quadwords < 4` -> targets `Bits128` (SSE2 / NEON)
+    /// - `num_quadwords == 1` -> targets `Bits64` (Standard scalar ALU)
+    /// - `num_quadwords == 0` -> `Bits32` / minimal tier.
+    #[inline]
+    pub fn select_for_workload_size(&self, num_quadwords: usize) -> RegisterWidth {
+        let target = if num_quadwords >= 4 {
+            RegisterWidth::Bits256
+        } else if num_quadwords >= 2 {
+            RegisterWidth::Bits128
+        } else if num_quadwords == 1 {
+            RegisterWidth::Bits64
+        } else {
+            RegisterWidth::Bits32
+        };
+        self.select_for_workload(target)
+    }
+
+    /// Adapts the register width for bulk byte transfers according to byte buffer length.
+    ///
+    /// Buffers below 32 bytes adapt to 128-bit or 64-bit to eliminate 256-bit vector setup overhead:
+    /// - `byte_len >= 32` -> targets `Bits256`
+    /// - `16 <= byte_len < 32` -> targets `Bits128`
+    /// - `8 <= byte_len < 16` -> targets `Bits64`
+    /// - `byte_len < 8` -> `Bits32`
+    #[inline]
+    pub fn select_for_byte_len(&self, byte_len: usize) -> RegisterWidth {
+        let target = if byte_len >= 32 {
+            RegisterWidth::Bits256
+        } else if byte_len >= 16 {
+            RegisterWidth::Bits128
+        } else if byte_len >= 8 {
+            RegisterWidth::Bits64
+        } else {
+            RegisterWidth::Bits32
+        };
+        self.select_for_workload(target)
+    }
+
     /// Checks if a specific register width is natively supported by the host.
     #[inline]
     pub const fn is_supported(&self, width: RegisterWidth) -> bool {
@@ -206,18 +247,25 @@ pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> = std::sync::LazyLock::
     }
 });
 
-/// Copies bulk byte payloads using the pre-resolved hardware register function pointer (up to 256-bit max).
+/// Copies bulk byte payloads using workload-adaptive hardware register acceleration (up to 256-bit max).
 ///
 /// # Hardware Invariant
-/// Capped strictly at 256 bits (`Bits256`). AVX-512 is never executed to avoid core downclocking.
-/// Dispatches directly via `COPY_BULK_FN` without runtime CPUID feature checks on the hot path.
+/// - Capped strictly at 256 bits (`Bits256`). AVX-512 is never executed to avoid core downclocking.
+/// - Workload-Adaptive: Short payloads (< 32 bytes) adapt directly to 128-bit or 64-bit scalar
+///   execution to eliminate wasteful 256-bit vector register setup and YMM context switching.
 #[inline]
 pub fn copy_bulk_payload(src: &[u8], dst: &mut [u8]) {
     let len = src.len().min(dst.len());
     if len == 0 {
         return;
     }
-    (*COPY_BULK_FN)(&src[..len], &mut dst[..len]);
+    if len < 16 {
+        copy_bulk_64(&src[..len], &mut dst[..len]);
+    } else if len < 32 {
+        copy_bulk_128(&src[..len], &mut dst[..len]);
+    } else {
+        (*COPY_BULK_FN)(&src[..len], &mut dst[..len]);
+    }
 }
 
 /// Bulk byte copy using 256-bit vector registers (32 bytes per iteration).
@@ -427,6 +475,39 @@ mod tests {
         let w256 = caps.select_for_workload(RegisterWidth::Bits256);
         assert!(w256 <= RegisterWidth::Bits256);
         assert!(w256 >= RegisterWidth::Bits128); // On x86_64, at least 128-bit
+
+        // Workload size adaptation test:
+        // 4+ elements adapts to 256-bit (or max supported)
+        assert_eq!(caps.select_for_workload_size(4), w256);
+        assert_eq!(caps.select_for_workload_size(20), w256);
+        // 2..3 elements adapts to 128-bit
+        assert_eq!(
+            caps.select_for_workload_size(2),
+            caps.select_for_workload(RegisterWidth::Bits128)
+        );
+        assert_eq!(
+            caps.select_for_workload_size(3),
+            caps.select_for_workload(RegisterWidth::Bits128)
+        );
+        // 1 element adapts directly to 64-bit scalar
+        assert_eq!(caps.select_for_workload_size(1), RegisterWidth::Bits64);
+
+        // Byte buffer length adaptation test:
+        // 32+ bytes targets 256-bit
+        assert_eq!(caps.select_for_byte_len(32), w256);
+        assert_eq!(caps.select_for_byte_len(128), w256);
+        // 16..31 bytes targets 128-bit
+        assert_eq!(
+            caps.select_for_byte_len(16),
+            caps.select_for_workload(RegisterWidth::Bits128)
+        );
+        assert_eq!(
+            caps.select_for_byte_len(31),
+            caps.select_for_workload(RegisterWidth::Bits128)
+        );
+        // 8..15 bytes targets 64-bit
+        assert_eq!(caps.select_for_byte_len(8), RegisterWidth::Bits64);
+        assert_eq!(caps.select_for_byte_len(15), RegisterWidth::Bits64);
     }
 
     #[test]
