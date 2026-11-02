@@ -103,6 +103,7 @@ impl RunningWorkerPool {
                 .spawn(move || {
                     velda_plugin::set_core_shadow_sender(shadow_tx);
                     velda_connection_pool::set_current_thread_lane(worker_id);
+                    velda_observability::set_current_worker_lane(worker_id);
                     let reg = global_worker_registry();
 
                     if cpu_pinning {
@@ -235,6 +236,7 @@ pub fn spawn_shadow_worker(
         .name(format!("velda-shadow-{worker_id}"))
         .spawn(move || {
             velda_connection_pool::set_current_thread_lane(worker_id);
+            velda_observability::set_current_worker_lane(worker_id);
             if cpu_pinning {
                 let _ = pin_current_thread_to_core(core_id);
             }

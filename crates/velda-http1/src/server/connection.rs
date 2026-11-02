@@ -32,6 +32,7 @@ pub struct Http1ServerConnection<IO> {
     pub close_requested: bool,
     pub current_request_id: Option<http::header::HeaderValue>,
     pub alt_svc: Option<http::header::HeaderValue>,
+    pub last_status: u16,
     config: Http1Config,
 }
 
@@ -50,6 +51,7 @@ where
             close_requested: false,
             current_request_id: None,
             alt_svc: None,
+            last_status: 0,
             config,
         }
     }
@@ -348,6 +350,7 @@ where
         body_len: Option<usize>,
         force_close: bool,
     ) {
+        self.last_status = status.as_u16();
         encode_head(
             version,
             status,
@@ -384,6 +387,7 @@ where
         headers: &http::HeaderMap,
         force_close: bool,
     ) {
+        self.last_status = status.as_u16();
         encode_chunked_head(
             version,
             status,
@@ -417,6 +421,7 @@ where
         &mut self,
         response: &Http1ServerResponse,
     ) -> Result<(), Http1Error> {
+        self.last_status = response.status.as_u16();
         let close = send_response(
             &mut self.stream,
             &mut self.write_buf,
@@ -438,6 +443,7 @@ where
     /// Respects the Single Responsibility Principle (SRP) by keeping HTTP/1.1 ASCII wire formatting
     /// strictly within `velda-http1`. Eliminates dynamic HeaderMap heap allocation and string formatting.
     pub async fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http1Error> {
+        self.last_status = status.as_u16();
         super::early_response::send_early_error(
             &mut self.stream,
             &mut self.write_buf,

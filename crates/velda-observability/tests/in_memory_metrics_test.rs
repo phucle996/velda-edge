@@ -502,3 +502,41 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
     // Verify snapshot.total_requests() uses SIMD aggregation
     assert_eq!(snap.total_requests(), 150);
 }
+
+#[test]
+fn test_per_core_sharded_simd_aggregation() {
+    let store = MetricsStore::with_cores(4);
+    assert_eq!(store.active_cores(), 4);
+
+    // Each core records to its own isolated shard
+    for core_id in 0..4 {
+        store.record_stream_completion_on_core(
+            core_id,
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+            StreamCompletion {
+                status_code: 200,
+                bytes_rx: 100,
+                bytes_tx: 500,
+                duration: Duration::from_millis(core_id as u64 + 1),
+                ttfb: Some(Duration::from_millis(1)),
+            },
+        );
+    }
+
+    let snap = store.snapshot();
+    let p = snap
+        .find_pipeline(
+            DownstreamProto::H1,
+            UpstreamProto::H1,
+            PipeStrategy::Buffered,
+        )
+        .unwrap();
+
+    assert_eq!(p.total_requests(), 4);
+    assert_eq!(p.requests_2xx, 4);
+    assert_eq!(p.bytes_rx, 400);
+    assert_eq!(p.bytes_tx, 2000);
+    assert_eq!(p.success_rate_basis_points(), 10_000);
+}

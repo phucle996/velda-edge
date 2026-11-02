@@ -6,40 +6,74 @@
 //! # Architectural Invariants
 //! 1. **Zero Dynamic Allocation**: Reuses an external `String` scratch buffer across scrapes.
 //! 2. **Single-Pass Direct Byte Assembly**: Appends pre-structured static byte slices and formats
-//!    integers via pure stack-based ASCII conversion, eliminating `std::fmt` runtime parsing.
-//! 3. **Bounded Capacity**: Strictly enforces `max_buffer_size_bytes` to prevent memory exhaustion
+//!    integers via pure stack-based 2-digit LUT ASCII conversion, eliminating `std::fmt` runtime parsing.
+//! 3. **Pure Serialization**: Observability layer already maintains pure integer metrics;
+//!    the formatter strictly serializes pre-aggregated values without business recalculation.
+//! 4. **Bounded Capacity**: Strictly enforces `max_buffer_size_bytes` to prevent memory exhaustion
 //!    under adversarial scrape conditions.
 
 use velda_observability::MetricsSnapshot;
 
 use crate::error::PluginError;
 
+/// Two-digit ASCII lookup table covering numbers from 00 to 99.
+///
+/// Enables emitting two ASCII bytes simultaneously with zero division instructions.
+const DIGIT_PAIRS: &[u8; 200] = b"\
+    00010203040506070809\
+    10111213141516171819\
+    20212223242526272829\
+    30313233343536373839\
+    40414243444546474849\
+    50515253545556575859\
+    60616263646566676869\
+    70717273747576777879\
+    80818283848586878889\
+    90919293949596979899";
+
+/// High-speed stack-based integer to ASCII serialization.
+///
+/// Converts a 64-bit integer into decimal ASCII digits using 2-digit lookup pairs.
+/// Generates zero dynamic heap allocations and copies the resulting bytes in a single slice write.
 #[inline(always)]
-fn write_u64(buf: &mut Vec<u8>, mut n: u64) {
-    if n == 0 {
-        buf.push(b'0');
+pub fn fast_write_u64(buf: &mut Vec<u8>, mut n: u64) {
+    if n < 10 {
+        buf.push(b'0' + n as u8);
         return;
     }
+
     let mut temp = [0u8; 20];
-    let mut i = 0;
-    while n > 0 {
-        temp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
+    let mut curr = 20;
+
+    while n >= 100 {
+        let rem = (n % 100) as usize * 2;
+        n /= 100;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
-    while i > 0 {
-        i -= 1;
-        buf.push(temp[i]);
+
+    if n < 10 {
+        curr -= 1;
+        temp[curr] = b'0' + n as u8;
+    } else {
+        let rem = n as usize * 2;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
+
+    buf.extend_from_slice(&temp[curr..20]);
 }
 
+/// Serializes signed 64-bit integer with negative sign check.
 #[inline(always)]
-fn write_i64(buf: &mut Vec<u8>, n: i64) {
+pub fn fast_write_i64(buf: &mut Vec<u8>, n: i64) {
     if n < 0 {
         buf.push(b'-');
-        write_u64(buf, n.unsigned_abs());
+        fast_write_u64(buf, n.unsigned_abs());
     } else {
-        write_u64(buf, n as u64);
+        fast_write_u64(buf, n as u64);
     }
 }
 
@@ -53,7 +87,13 @@ pub fn format_snapshot(
     max_buffer_size_bytes: usize,
 ) -> Result<(), PluginError> {
     buffer.clear();
-    // SAFETY: We only append valid ASCII bytes (Prometheus metric names, labels, and numbers)
+
+    // Pre-reserve capacity to eliminate intermediate vector reallocations
+    // Approximate ~600 bytes per pipeline + ~2KB for global & pool metrics
+    let estimated_bytes = snapshot.pipelines.len() * 640 + 2048;
+    buffer.reserve(estimated_bytes);
+
+    // SAFETY: We strictly append valid ASCII bytes (Prometheus metric names, labels, and numbers)
     let buf = unsafe { buffer.as_mut_vec() };
 
     // 1. Pipeline Requests Total (Counter by status_class)
@@ -64,70 +104,30 @@ pub fn format_snapshot(
         let u = p.upstream.as_str().as_bytes();
         let pipe = p.pipe.as_str().as_bytes();
 
-        let prefix_start = b"velda_requests_total{downstream=\"";
+        let prefix = b"velda_requests_total{downstream=\"";
         let sep_up = b"\",upstream=\"";
         let sep_pipe = b"\",pipe=\"";
-        let sep_class = b"\",status_class=\"";
 
-        // 2xx
-        buf.extend_from_slice(prefix_start);
-        buf.extend_from_slice(d);
-        buf.extend_from_slice(sep_up);
-        buf.extend_from_slice(u);
-        buf.extend_from_slice(sep_pipe);
-        buf.extend_from_slice(pipe);
-        buf.extend_from_slice(sep_class);
-        buf.extend_from_slice(b"2xx\"} ");
-        write_u64(buf, p.requests_2xx);
-        buf.push(b'\n');
+        // Macro-like helper to render one status class line without redundant branches
+        let mut emit_status = |class: &[u8], count: u64| {
+            buf.extend_from_slice(prefix);
+            buf.extend_from_slice(d);
+            buf.extend_from_slice(sep_up);
+            buf.extend_from_slice(u);
+            buf.extend_from_slice(sep_pipe);
+            buf.extend_from_slice(pipe);
+            buf.extend_from_slice(b"\",status_class=\"");
+            buf.extend_from_slice(class);
+            buf.extend_from_slice(b"\"} ");
+            fast_write_u64(buf, count);
+            buf.push(b'\n');
+        };
 
-        // 3xx
-        buf.extend_from_slice(prefix_start);
-        buf.extend_from_slice(d);
-        buf.extend_from_slice(sep_up);
-        buf.extend_from_slice(u);
-        buf.extend_from_slice(sep_pipe);
-        buf.extend_from_slice(pipe);
-        buf.extend_from_slice(sep_class);
-        buf.extend_from_slice(b"3xx\"} ");
-        write_u64(buf, p.requests_3xx);
-        buf.push(b'\n');
-
-        // 4xx
-        buf.extend_from_slice(prefix_start);
-        buf.extend_from_slice(d);
-        buf.extend_from_slice(sep_up);
-        buf.extend_from_slice(u);
-        buf.extend_from_slice(sep_pipe);
-        buf.extend_from_slice(pipe);
-        buf.extend_from_slice(sep_class);
-        buf.extend_from_slice(b"4xx\"} ");
-        write_u64(buf, p.requests_4xx);
-        buf.push(b'\n');
-
-        // 5xx
-        buf.extend_from_slice(prefix_start);
-        buf.extend_from_slice(d);
-        buf.extend_from_slice(sep_up);
-        buf.extend_from_slice(u);
-        buf.extend_from_slice(sep_pipe);
-        buf.extend_from_slice(pipe);
-        buf.extend_from_slice(sep_class);
-        buf.extend_from_slice(b"5xx\"} ");
-        write_u64(buf, p.requests_5xx);
-        buf.push(b'\n');
-
-        // other
-        buf.extend_from_slice(prefix_start);
-        buf.extend_from_slice(d);
-        buf.extend_from_slice(sep_up);
-        buf.extend_from_slice(u);
-        buf.extend_from_slice(sep_pipe);
-        buf.extend_from_slice(pipe);
-        buf.extend_from_slice(sep_class);
-        buf.extend_from_slice(b"other\"} ");
-        write_u64(buf, p.requests_other);
-        buf.push(b'\n');
+        emit_status(b"2xx", p.requests_2xx);
+        emit_status(b"3xx", p.requests_3xx);
+        emit_status(b"4xx", p.requests_4xx);
+        emit_status(b"5xx", p.requests_5xx);
+        emit_status(b"other", p.requests_other);
     }
 
     // 2. Active Streams (Gauge)
@@ -143,7 +143,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"\",pipe=\"");
         buf.extend_from_slice(p.pipe.as_str().as_bytes());
         buf.extend_from_slice(b"\"} ");
-        write_i64(buf, p.active_streams);
+        fast_write_i64(buf, p.active_streams);
         buf.push(b'\n');
     }
 
@@ -160,7 +160,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"\",pipe=\"");
         buf.extend_from_slice(p.pipe.as_str().as_bytes());
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, p.bytes_rx);
+        fast_write_u64(buf, p.bytes_rx);
         buf.push(b'\n');
     }
 
@@ -177,7 +177,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"\",pipe=\"");
         buf.extend_from_slice(p.pipe.as_str().as_bytes());
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, p.bytes_tx);
+        fast_write_u64(buf, p.bytes_tx);
         buf.push(b'\n');
     }
 
@@ -212,7 +212,7 @@ pub fn format_snapshot(
             buf.extend_from_slice(b"\",le=\"");
             buf.extend_from_slice(le);
             buf.extend_from_slice(b"\"} ");
-            write_u64(buf, *count);
+            fast_write_u64(buf, *count);
             buf.push(b'\n');
         }
 
@@ -223,7 +223,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"\",pipe=\"");
         buf.extend_from_slice(pipe);
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, total_count);
+        fast_write_u64(buf, total_count);
         buf.push(b'\n');
     }
 
@@ -257,7 +257,7 @@ pub fn format_snapshot(
             buf.extend_from_slice(b"\",le=\"");
             buf.extend_from_slice(le);
             buf.extend_from_slice(b"\"} ");
-            write_u64(buf, *count);
+            fast_write_u64(buf, *count);
             buf.push(b'\n');
         }
 
@@ -268,7 +268,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"\",pipe=\"");
         buf.extend_from_slice(pipe);
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, total_ttfb);
+        fast_write_u64(buf, total_ttfb);
         buf.push(b'\n');
     }
 
@@ -278,7 +278,7 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_connections_total counter\n");
     buf.extend_from_slice(b"velda_connections_total ");
-    write_u64(buf, snapshot.global.connections_total);
+    fast_write_u64(buf, snapshot.global.connections_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -286,7 +286,7 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_connections_active gauge\n");
     buf.extend_from_slice(b"velda_connections_active ");
-    write_i64(buf, snapshot.global.connections_active);
+    fast_write_i64(buf, snapshot.global.connections_active);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -294,13 +294,13 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_connections_rejected_total counter\n");
     buf.extend_from_slice(b"velda_connections_rejected_total ");
-    write_u64(buf, snapshot.global.connections_rejected);
+    fast_write_u64(buf, snapshot.global.connections_rejected);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_tls_handshakes_total Total successful TLS handshakes.\n");
     buf.extend_from_slice(b"# TYPE velda_tls_handshakes_total counter\n");
     buf.extend_from_slice(b"velda_tls_handshakes_total ");
-    write_u64(buf, snapshot.global.tls_handshakes_total);
+    fast_write_u64(buf, snapshot.global.tls_handshakes_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -308,7 +308,7 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_tls_handshake_errors_total counter\n");
     buf.extend_from_slice(b"velda_tls_handshake_errors_total ");
-    write_u64(buf, snapshot.global.tls_handshake_errors);
+    fast_write_u64(buf, snapshot.global.tls_handshake_errors);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -316,7 +316,7 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_h2_rst_stream_total counter\n");
     buf.extend_from_slice(b"velda_h2_rst_stream_total ");
-    write_u64(buf, snapshot.global.h2_rst_stream_total);
+    fast_write_u64(buf, snapshot.global.h2_rst_stream_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -324,7 +324,7 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_config_reloads_total counter\n");
     buf.extend_from_slice(b"velda_config_reloads_total ");
-    write_u64(buf, snapshot.global.config_reloads_total);
+    fast_write_u64(buf, snapshot.global.config_reloads_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(
@@ -332,68 +332,68 @@ pub fn format_snapshot(
     );
     buf.extend_from_slice(b"# TYPE velda_config_reload_errors_total counter\n");
     buf.extend_from_slice(b"velda_config_reload_errors_total ");
-    write_u64(buf, snapshot.global.config_reload_errors);
+    fast_write_u64(buf, snapshot.global.config_reload_errors);
     buf.push(b'\n');
 
-    // 8. Connection Pool Metrics (\"The Soul of Velda\")
+    // 8. Connection Pool Metrics ("The Soul of Velda")
     buf.extend_from_slice(b"# HELP velda_pool_containers_active Total active SubPool key containers resident in memory.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_containers_active gauge\n");
     buf.extend_from_slice(b"velda_pool_containers_active ");
-    write_u64(buf, snapshot.pool.pool_containers_total);
+    fast_write_u64(buf, snapshot.pool.pool_containers_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_connections_idle Sequential upstream connections currently idle in pool.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_connections_idle gauge\n");
     buf.extend_from_slice(b"velda_pool_connections_idle ");
-    write_u64(buf, snapshot.pool.connections_idle);
+    fast_write_u64(buf, snapshot.pool.connections_idle);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_connections_leased Sequential upstream connections actively checked out and in use.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_connections_leased gauge\n");
     buf.extend_from_slice(b"velda_pool_connections_leased ");
-    write_i64(buf, snapshot.pool.connections_leased);
+    fast_write_i64(buf, snapshot.pool.connections_leased);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_connections_multiplexed Multiplexed upstream connections currently active.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_connections_multiplexed gauge\n");
     buf.extend_from_slice(b"velda_pool_connections_multiplexed ");
-    write_u64(buf, snapshot.pool.connections_multiplexed);
+    fast_write_u64(buf, snapshot.pool.connections_multiplexed);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_multiplexed_active_streams Active concurrent streams across all multiplexed connections.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_multiplexed_active_streams gauge\n");
     buf.extend_from_slice(b"velda_pool_multiplexed_active_streams ");
-    write_i64(buf, snapshot.pool.multiplexed_active_streams);
+    fast_write_i64(buf, snapshot.pool.multiplexed_active_streams);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_lease_hits_total Upstream connection leases satisfied from warm pool.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_lease_hits_total counter\n");
     buf.extend_from_slice(b"velda_pool_lease_hits_total ");
-    write_u64(buf, snapshot.pool.lease_hits_total);
+    fast_write_u64(buf, snapshot.pool.lease_hits_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_lease_misses_total Upstream connection leases requiring fresh socket establishment.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_lease_misses_total counter\n");
     buf.extend_from_slice(b"velda_pool_lease_misses_total ");
-    write_u64(buf, snapshot.pool.lease_misses_total);
+    fast_write_u64(buf, snapshot.pool.lease_misses_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_lease_timeouts_total Upstream connection leases that timed out waiting for connection.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_lease_timeouts_total counter\n");
     buf.extend_from_slice(b"velda_pool_lease_timeouts_total ");
-    write_u64(buf, snapshot.pool.lease_timeouts_total);
+    fast_write_u64(buf, snapshot.pool.lease_timeouts_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_lease_releases_total Upstream connection leases returned to the pool.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_lease_releases_total counter\n");
     buf.extend_from_slice(b"velda_pool_lease_releases_total ");
-    write_u64(buf, snapshot.pool.lease_releases_total);
+    fast_write_u64(buf, snapshot.pool.lease_releases_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_connections_created_total Cumulative count of physical upstream connections created.\n");
     buf.extend_from_slice(b"# TYPE velda_pool_connections_created_total counter\n");
     buf.extend_from_slice(b"velda_pool_connections_created_total ");
-    write_u64(buf, snapshot.pool.connections_created_total);
+    fast_write_u64(buf, snapshot.pool.connections_created_total);
     buf.push(b'\n');
 
     buf.extend_from_slice(b"# HELP velda_pool_evictions_total Cumulative connection evictions categorized by reason.\n");
@@ -413,7 +413,7 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"velda_pool_evictions_total{reason=\"");
         buf.extend_from_slice(r);
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, *count);
+        fast_write_u64(buf, *count);
         buf.push(b'\n');
     }
 
@@ -433,12 +433,12 @@ pub fn format_snapshot(
         buf.extend_from_slice(b"velda_pool_connection_lifespan_seconds_bucket{le=\"");
         buf.extend_from_slice(le);
         buf.extend_from_slice(b"\"} ");
-        write_u64(buf, *count);
+        fast_write_u64(buf, *count);
         buf.push(b'\n');
     }
 
     buf.extend_from_slice(b"velda_pool_connection_lifespan_seconds_count ");
-    write_u64(buf, total_lifespans);
+    fast_write_u64(buf, total_lifespans);
     buf.push(b'\n');
 
     // Guard against buffer overflow
@@ -453,6 +453,66 @@ pub fn format_snapshot(
 mod tests {
     use super::*;
     use velda_observability::MetricsStore;
+
+    #[test]
+    fn test_fast_write_u64_boundary() {
+        let mut buf = Vec::new();
+
+        // 0
+        fast_write_u64(&mut buf, 0);
+        assert_eq!(buf, b"0");
+        buf.clear();
+
+        // 1-digit
+        fast_write_u64(&mut buf, 9);
+        assert_eq!(buf, b"9");
+        buf.clear();
+
+        // 2-digit
+        fast_write_u64(&mut buf, 10);
+        assert_eq!(buf, b"10");
+        buf.clear();
+
+        fast_write_u64(&mut buf, 99);
+        assert_eq!(buf, b"99");
+        buf.clear();
+
+        // 3-digit
+        fast_write_u64(&mut buf, 100);
+        assert_eq!(buf, b"100");
+        buf.clear();
+
+        // 4-digit
+        fast_write_u64(&mut buf, 1234);
+        assert_eq!(buf, b"1234");
+        buf.clear();
+
+        // max u64
+        fast_write_u64(&mut buf, u64::MAX);
+        assert_eq!(buf, u64::MAX.to_string().as_bytes());
+        buf.clear();
+    }
+
+    #[test]
+    fn test_fast_write_i64() {
+        let mut buf = Vec::new();
+
+        fast_write_i64(&mut buf, 0);
+        assert_eq!(buf, b"0");
+        buf.clear();
+
+        fast_write_i64(&mut buf, -1);
+        assert_eq!(buf, b"-1");
+        buf.clear();
+
+        fast_write_i64(&mut buf, -999);
+        assert_eq!(buf, b"-999");
+        buf.clear();
+
+        fast_write_i64(&mut buf, 12345);
+        assert_eq!(buf, b"12345");
+        buf.clear();
+    }
 
     #[test]
     fn test_format_snapshot_structure() {

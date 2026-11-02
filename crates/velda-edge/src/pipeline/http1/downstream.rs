@@ -25,6 +25,9 @@ use crate::upstream::HttpUpstream;
 use velda_core::{Action, L7Request};
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
+use velda_observability::{
+    DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto, global_metrics,
+};
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///
@@ -151,6 +154,8 @@ pub async fn run_http1_loop<IO>(
             conn.mark_close();
         }
         let rt = runtime.load();
+        let req_start = std::time::Instant::now();
+        conn.last_status = 0;
 
         // [INGRESS W3C REQUEST ID GENERATION]
         // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
@@ -169,6 +174,18 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::FORBIDDEN).await;
+            global_metrics().record_stream_completion(
+                DownstreamProto::H1,
+                UpstreamProto::H1,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(
+                    StatusCode::FORBIDDEN.as_u16(),
+                    0,
+                    0,
+                    req_start.elapsed(),
+                    None,
+                ),
+            );
             conn.lingering_close().await;
             break;
         }
@@ -182,6 +199,18 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::BAD_REQUEST).await;
+            global_metrics().record_stream_completion(
+                DownstreamProto::H1,
+                UpstreamProto::H1,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(
+                    StatusCode::BAD_REQUEST.as_u16(),
+                    0,
+                    0,
+                    req_start.elapsed(),
+                    None,
+                ),
+            );
             conn.lingering_close().await;
             break;
         }
@@ -221,6 +250,18 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::NOT_FOUND).await;
+            global_metrics().record_stream_completion(
+                DownstreamProto::H1,
+                UpstreamProto::H1,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(
+                    StatusCode::NOT_FOUND.as_u16(),
+                    0,
+                    0,
+                    req_start.elapsed(),
+                    None,
+                ),
+            );
             conn.lingering_close().await;
             break;
         };
@@ -273,12 +314,25 @@ pub async fn run_http1_loop<IO>(
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
+                            let status = server_resp.status.as_u16();
                             if framing == Http1BodyFraming::Empty && !conn.close_requested {
                                 let _ = conn.send_response(&server_resp).await;
+                                global_metrics().record_stream_completion(
+                                    DownstreamProto::H1,
+                                    UpstreamProto::H1,
+                                    PipeStrategy::Buffered,
+                                    StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                                );
                                 continue;
                             } else {
                                 conn.mark_close();
                                 let _ = conn.send_response(&server_resp).await;
+                                global_metrics().record_stream_completion(
+                                    DownstreamProto::H1,
+                                    UpstreamProto::H1,
+                                    PipeStrategy::Buffered,
+                                    StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                                );
                                 conn.lingering_close().await;
                                 break;
                             }
@@ -324,12 +378,25 @@ pub async fn run_http1_loop<IO>(
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
+                            let status = server_resp.status.as_u16();
                             if framing == Http1BodyFraming::Empty && !conn.close_requested {
                                 let _ = conn.send_response(&server_resp).await;
+                                global_metrics().record_stream_completion(
+                                    DownstreamProto::H1,
+                                    UpstreamProto::H1,
+                                    PipeStrategy::Buffered,
+                                    StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                                );
                                 continue;
                             } else {
                                 conn.mark_close();
                                 let _ = conn.send_response(&server_resp).await;
+                                global_metrics().record_stream_completion(
+                                    DownstreamProto::H1,
+                                    UpstreamProto::H1,
+                                    PipeStrategy::Buffered,
+                                    StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                                );
                                 conn.lingering_close().await;
                                 break;
                             }
@@ -357,12 +424,25 @@ pub async fn run_http1_loop<IO>(
                     }
                     let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                     meta.inject_response_headers(&mut server_resp.headers);
+                    let status = server_resp.status.as_u16();
                     if framing == Http1BodyFraming::Empty && !conn.close_requested {
                         let _ = conn.send_response(&server_resp).await;
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H1,
+                            UpstreamProto::H1,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                        );
                         continue;
                     } else {
                         conn.mark_close();
                         let _ = conn.send_response(&server_resp).await;
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H1,
+                            UpstreamProto::H1,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                        );
                         conn.lingering_close().await;
                         break;
                     }
@@ -383,6 +463,18 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::SERVICE_UNAVAILABLE).await;
+            global_metrics().record_stream_completion(
+                DownstreamProto::H1,
+                UpstreamProto::H1,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(
+                    StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    0,
+                    0,
+                    req_start.elapsed(),
+                    None,
+                ),
+            );
             conn.lingering_close().await;
             break;
         };
@@ -398,6 +490,18 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::TOO_MANY_REQUESTS).await;
+            global_metrics().record_stream_completion(
+                DownstreamProto::H1,
+                UpstreamProto::H1,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(
+                    StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    0,
+                    0,
+                    req_start.elapsed(),
+                    None,
+                ),
+            );
             conn.lingering_close().await;
             break;
         }
@@ -411,6 +515,38 @@ pub async fn run_http1_loop<IO>(
                 .windows(b"text/event-stream".len())
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
         });
+
+        let (up_proto, pipe_strat) = match upstream_target.as_ref() {
+            HttpUpstream::Http1(upstream) => (
+                UpstreamProto::H1,
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http1PipeStrategy::Buffered => PipeStrategy::Buffered,
+                    Http1PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                    Http1PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                    Http1PipeStrategy::Duplex => PipeStrategy::Duplex,
+                },
+            ),
+            HttpUpstream::Http2(upstream) => (
+                UpstreamProto::H2,
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http2PipeStrategy::Buffered => PipeStrategy::Buffered,
+                    Http2PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                    Http2PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                    Http2PipeStrategy::Duplex => PipeStrategy::Duplex,
+                },
+            ),
+            HttpUpstream::Http3(upstream) => (
+                UpstreamProto::H3,
+                match upstream.strategy.effective(is_chunked, is_sse) {
+                    Http3PipeStrategy::Buffered => PipeStrategy::Buffered,
+                    Http3PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                    Http3PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                    Http3PipeStrategy::Duplex => PipeStrategy::Duplex,
+                },
+            ),
+        };
+
+        global_metrics().record_stream_start(DownstreamProto::H1, up_proto, pipe_strat);
 
         let pipe_result = match upstream_target.as_ref() {
             HttpUpstream::Http1(upstream) => {
@@ -498,6 +634,21 @@ pub async fn run_http1_loop<IO>(
                 }
             }
         };
+
+        let final_status = if conn.last_status > 0 {
+            conn.last_status
+        } else if pipe_result.is_ok() {
+            200
+        } else {
+            StatusCode::BAD_GATEWAY.as_u16()
+        };
+
+        global_metrics().record_stream_completion(
+            DownstreamProto::H1,
+            up_proto,
+            pipe_strat,
+            StreamCompletion::new(final_status, 0, 0, req_start.elapsed(), None),
+        );
 
         if let Err(e) = pipe_result {
             tracing::warn!(

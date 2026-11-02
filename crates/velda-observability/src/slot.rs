@@ -14,58 +14,37 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use crate::types::{StatusClass, StreamCompletion};
+use crate::vector::PIPELINE_COUNTERS_LEN;
+
+// Canonical Counter Indices in the 20-counter array:
+pub const IDX_REQ_2XX: usize = 0;
+pub const IDX_REQ_3XX: usize = 1;
+pub const IDX_REQ_4XX: usize = 2;
+pub const IDX_REQ_5XX: usize = 3;
+pub const IDX_REQ_OTHER: usize = 4;
+pub const IDX_BYTES_RX: usize = 5;
+pub const IDX_BYTES_TX: usize = 6;
+pub const IDX_DUR_1MS: usize = 7;
+pub const IDX_DUR_5MS: usize = 8;
+pub const IDX_DUR_10MS: usize = 9;
+pub const IDX_DUR_50MS: usize = 10;
+pub const IDX_DUR_250MS: usize = 11;
+pub const IDX_DUR_1000MS: usize = 12;
+pub const IDX_DUR_INF: usize = 13;
+pub const IDX_TTFB_1MS: usize = 14;
+pub const IDX_TTFB_5MS: usize = 15;
+pub const IDX_TTFB_10MS: usize = 16;
+pub const IDX_TTFB_50MS: usize = 17;
+pub const IDX_TTFB_250MS: usize = 18;
+pub const IDX_TTFB_INF: usize = 19;
 
 /// Cacheline-aligned atomic metrics slot representing a unique pipeline combination.
 #[repr(align(64))]
 pub struct PipelineSlot {
-    /// Total count of successful requests (2xx status codes).
-    pub requests_2xx: AtomicU64,
-    /// Total count of redirection requests (3xx status codes).
-    pub requests_3xx: AtomicU64,
-    /// Total count of client error requests (4xx status codes).
-    pub requests_4xx: AtomicU64,
-    /// Total count of server / upstream error requests (5xx status codes).
-    pub requests_5xx: AtomicU64,
-    /// Total count of non-standard / informational requests.
-    pub requests_other: AtomicU64,
-
+    /// 20 contiguous atomic 64-bit counters matching `PIPELINE_COUNTERS_LEN`.
+    pub counters: [AtomicU64; PIPELINE_COUNTERS_LEN],
     /// Instantaneous number of in-flight active streams currently being served.
     pub active_streams: AtomicI64,
-
-    /// Cumulative count of payload bytes received from downstream clients.
-    pub bytes_rx: AtomicU64,
-    /// Cumulative count of payload bytes transmitted to downstream clients.
-    pub bytes_tx: AtomicU64,
-
-    // Latency Distribution Buckets (Disjoint/Exclusive in memory to minimize atomic cacheline RMWs)
-    /// Requests completing in <= 1 ms.
-    pub duration_b0_le_1ms: AtomicU64,
-    /// Requests completing in (1 ms ..= 5 ms].
-    pub duration_b1_le_5ms: AtomicU64,
-    /// Requests completing in (5 ms ..= 10 ms].
-    pub duration_b2_le_10ms: AtomicU64,
-    /// Requests completing in (10 ms ..= 50 ms].
-    pub duration_b3_le_50ms: AtomicU64,
-    /// Requests completing in (50 ms ..= 250 ms].
-    pub duration_b4_le_250ms: AtomicU64,
-    /// Requests completing in (250 ms ..= 1,000 ms].
-    pub duration_b5_le_1000ms: AtomicU64,
-    /// Requests taking > 1,000 ms.
-    pub duration_b6_gt_1000ms: AtomicU64,
-
-    // Time to First Byte (TTFB) Buckets (Disjoint/Exclusive in memory)
-    /// TTFB <= 1 ms.
-    pub ttfb_b0_le_1ms: AtomicU64,
-    /// TTFB (1 ms ..= 5 ms].
-    pub ttfb_b1_le_5ms: AtomicU64,
-    /// TTFB (5 ms ..= 10 ms].
-    pub ttfb_b2_le_10ms: AtomicU64,
-    /// TTFB (10 ms ..= 50 ms].
-    pub ttfb_b3_le_50ms: AtomicU64,
-    /// TTFB (50 ms ..= 250 ms].
-    pub ttfb_b4_le_250ms: AtomicU64,
-    /// TTFB > 250 ms.
-    pub ttfb_b5_gt_250ms: AtomicU64,
 }
 
 impl Default for PipelineSlot {
@@ -78,27 +57,8 @@ impl PipelineSlot {
     /// Creates a new zeroed pipeline metrics slot.
     pub const fn new() -> Self {
         Self {
-            requests_2xx: AtomicU64::new(0),
-            requests_3xx: AtomicU64::new(0),
-            requests_4xx: AtomicU64::new(0),
-            requests_5xx: AtomicU64::new(0),
-            requests_other: AtomicU64::new(0),
+            counters: [const { AtomicU64::new(0) }; PIPELINE_COUNTERS_LEN],
             active_streams: AtomicI64::new(0),
-            bytes_rx: AtomicU64::new(0),
-            bytes_tx: AtomicU64::new(0),
-            duration_b0_le_1ms: AtomicU64::new(0),
-            duration_b1_le_5ms: AtomicU64::new(0),
-            duration_b2_le_10ms: AtomicU64::new(0),
-            duration_b3_le_50ms: AtomicU64::new(0),
-            duration_b4_le_250ms: AtomicU64::new(0),
-            duration_b5_le_1000ms: AtomicU64::new(0),
-            duration_b6_gt_1000ms: AtomicU64::new(0),
-            ttfb_b0_le_1ms: AtomicU64::new(0),
-            ttfb_b1_le_5ms: AtomicU64::new(0),
-            ttfb_b2_le_10ms: AtomicU64::new(0),
-            ttfb_b3_le_50ms: AtomicU64::new(0),
-            ttfb_b4_le_250ms: AtomicU64::new(0),
-            ttfb_b5_gt_250ms: AtomicU64::new(0),
         }
     }
 
@@ -126,68 +86,67 @@ impl PipelineSlot {
     #[inline(always)]
     pub fn record_completion(&self, completion: &StreamCompletion) {
         // 1. Status Counter
-        match StatusClass::from_status_code(completion.status_code) {
-            StatusClass::Success2xx => {
-                self.requests_2xx.fetch_add(1, Ordering::Relaxed);
-            }
-            StatusClass::Redirect3xx => {
-                self.requests_3xx.fetch_add(1, Ordering::Relaxed);
-            }
-            StatusClass::ClientError4xx => {
-                self.requests_4xx.fetch_add(1, Ordering::Relaxed);
-            }
-            StatusClass::ServerError5xx => {
-                self.requests_5xx.fetch_add(1, Ordering::Relaxed);
-            }
-            StatusClass::Other => {
-                self.requests_other.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        let status_idx = match StatusClass::from_status_code(completion.status_code) {
+            StatusClass::Success2xx => IDX_REQ_2XX,
+            StatusClass::Redirect3xx => IDX_REQ_3XX,
+            StatusClass::ClientError4xx => IDX_REQ_4XX,
+            StatusClass::ServerError5xx => IDX_REQ_5XX,
+            StatusClass::Other => IDX_REQ_OTHER,
+        };
+        self.counters[status_idx].fetch_add(1, Ordering::Relaxed);
 
         // 2. Transferred Bytes
         if completion.bytes_rx > 0 {
-            self.bytes_rx
-                .fetch_add(completion.bytes_rx, Ordering::Relaxed);
+            self.counters[IDX_BYTES_RX].fetch_add(completion.bytes_rx, Ordering::Relaxed);
         }
         if completion.bytes_tx > 0 {
-            self.bytes_tx
-                .fetch_add(completion.bytes_tx, Ordering::Relaxed);
+            self.counters[IDX_BYTES_TX].fetch_add(completion.bytes_tx, Ordering::Relaxed);
         }
 
         // 3. E2E Duration Histogram Buckets (Single atomic add via disjoint branches)
         let dur_ms = completion.duration.as_millis();
-        if dur_ms <= 1 {
-            self.duration_b0_le_1ms.fetch_add(1, Ordering::Relaxed);
+        let dur_idx = if dur_ms <= 1 {
+            IDX_DUR_1MS
         } else if dur_ms <= 5 {
-            self.duration_b1_le_5ms.fetch_add(1, Ordering::Relaxed);
+            IDX_DUR_5MS
         } else if dur_ms <= 10 {
-            self.duration_b2_le_10ms.fetch_add(1, Ordering::Relaxed);
+            IDX_DUR_10MS
         } else if dur_ms <= 50 {
-            self.duration_b3_le_50ms.fetch_add(1, Ordering::Relaxed);
+            IDX_DUR_50MS
         } else if dur_ms <= 250 {
-            self.duration_b4_le_250ms.fetch_add(1, Ordering::Relaxed);
+            IDX_DUR_250MS
         } else if dur_ms <= 1000 {
-            self.duration_b5_le_1000ms.fetch_add(1, Ordering::Relaxed);
+            IDX_DUR_1000MS
         } else {
-            self.duration_b6_gt_1000ms.fetch_add(1, Ordering::Relaxed);
-        }
+            IDX_DUR_INF
+        };
+        self.counters[dur_idx].fetch_add(1, Ordering::Relaxed);
 
         // 4. TTFB Histogram Buckets (if captured - single atomic add via disjoint branches)
         if let Some(t) = completion.ttfb {
             let ttfb_ms = t.as_millis();
-            if ttfb_ms <= 1 {
-                self.ttfb_b0_le_1ms.fetch_add(1, Ordering::Relaxed);
+            let ttfb_idx = if ttfb_ms <= 1 {
+                IDX_TTFB_1MS
             } else if ttfb_ms <= 5 {
-                self.ttfb_b1_le_5ms.fetch_add(1, Ordering::Relaxed);
+                IDX_TTFB_5MS
             } else if ttfb_ms <= 10 {
-                self.ttfb_b2_le_10ms.fetch_add(1, Ordering::Relaxed);
+                IDX_TTFB_10MS
             } else if ttfb_ms <= 50 {
-                self.ttfb_b3_le_50ms.fetch_add(1, Ordering::Relaxed);
+                IDX_TTFB_50MS
             } else if ttfb_ms <= 250 {
-                self.ttfb_b4_le_250ms.fetch_add(1, Ordering::Relaxed);
+                IDX_TTFB_250MS
             } else {
-                self.ttfb_b5_gt_250ms.fetch_add(1, Ordering::Relaxed);
-            }
+                IDX_TTFB_INF
+            };
+            self.counters[ttfb_idx].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns a direct relaxed snapshot of the raw 20 counters.
+    #[inline(always)]
+    pub fn load_counters(&self, dst: &mut [u64; PIPELINE_COUNTERS_LEN]) {
+        for (i, c) in self.counters.iter().enumerate() {
+            dst[i] = c.load(Ordering::Relaxed);
         }
     }
 }

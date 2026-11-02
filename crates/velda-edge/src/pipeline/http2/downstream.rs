@@ -19,6 +19,9 @@ use velda_http2::server::{
     Http2Responder, Http2ServerConnection, Http2ServerRequestHead, Http2StreamReceiver,
 };
 use velda_http3::Http3PipeStrategy;
+use velda_observability::{
+    DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto, global_metrics,
+};
 use velda_plugin::RoutePluginPlan;
 use velda_router::Http2RouteRequest;
 use velda_tls::TlsServerEngine;
@@ -167,6 +170,18 @@ pub async fn run_http2_loop<IO>(
                         } else {
                             let _ = responder.send_early_error(StatusCode::BAD_REQUEST);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(
+                                StatusCode::BAD_REQUEST.as_u16(),
+                                0,
+                                0,
+                                std::time::Duration::ZERO,
+                                None,
+                            ),
+                        );
                         continue;
                     }
 
@@ -200,6 +215,18 @@ pub async fn run_http2_loop<IO>(
                         } else {
                             let _ = responder.send_early_error(StatusCode::NOT_FOUND);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(
+                                StatusCode::NOT_FOUND.as_u16(),
+                                0,
+                                0,
+                                std::time::Duration::ZERO,
+                                None,
+                            ),
+                        );
                         continue;
                     };
 
@@ -221,6 +248,18 @@ pub async fn run_http2_loop<IO>(
                         } else {
                             let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(
+                                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                                0,
+                                0,
+                                std::time::Duration::ZERO,
+                                None,
+                            ),
+                        );
                         continue;
                     };
 
@@ -239,6 +278,18 @@ pub async fn run_http2_loop<IO>(
                         } else {
                             let _ = responder.send_early_error(StatusCode::TOO_MANY_REQUESTS);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(
+                                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                                0,
+                                0,
+                                std::time::Duration::ZERO,
+                                None,
+                            ),
+                        );
                         if overload_lvl.is_critical() && !is_draining {
                             is_draining = true;
                             conn.graceful_shutdown();
@@ -308,6 +359,7 @@ async fn serve_http2_stream(
     responder: Http2Responder,
     ctx: Http2StreamContext,
 ) {
+    let req_start = std::time::Instant::now();
     let Http2StreamContext {
         meta,
         config,
@@ -372,12 +424,19 @@ async fn serve_http2_stream(
                         resp.headers
                             .set_request_id(l7_req.headers.request_id().clone());
                         meta.inject_response_headers(&mut resp.headers);
+                        let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&resp);
                         } else {
                             let _ = responder.send_response(&resp);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                        );
                         return;
                     }
                     Action::Delay { .. } => unreachable!(),
@@ -420,12 +479,19 @@ async fn serve_http2_stream(
                         resp.headers
                             .set_request_id(l7_req.headers.request_id().clone());
                         meta.inject_response_headers(&mut resp.headers);
+                        let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&resp);
                         } else {
                             let _ = responder.send_response(&resp);
                         }
+                        global_metrics().record_stream_completion(
+                            DownstreamProto::H2,
+                            UpstreamProto::H2,
+                            PipeStrategy::Buffered,
+                            StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                        );
                         return;
                     }
                     Action::Delay { .. } => unreachable!(),
@@ -447,12 +513,19 @@ async fn serve_http2_stream(
                     velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
                 }
                 meta.inject_response_headers(&mut resp.headers);
+                let status = resp.status.as_u16();
                 let mut responder = responder;
                 if !receiver.is_end_stream() {
                     let _ = responder.send_response_and_cancel_upload(&resp);
                 } else {
                     let _ = responder.send_response(&resp);
                 }
+                global_metrics().record_stream_completion(
+                    DownstreamProto::H2,
+                    UpstreamProto::H2,
+                    PipeStrategy::Buffered,
+                    StreamCompletion::new(status, 0, 0, req_start.elapsed(), None),
+                );
                 return;
             }
 
@@ -478,6 +551,18 @@ async fn serve_http2_stream(
         } else {
             let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
         }
+        global_metrics().record_stream_completion(
+            DownstreamProto::H2,
+            UpstreamProto::H2,
+            PipeStrategy::Buffered,
+            StreamCompletion::new(
+                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                0,
+                0,
+                req_start.elapsed(),
+                None,
+            ),
+        );
         return;
     };
 
@@ -487,6 +572,38 @@ async fn serve_http2_stream(
             .windows(b"text/event-stream".len())
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     });
+
+    let (up_proto, pipe_strat) = match upstream_target.as_ref() {
+        HttpUpstream::Http2(upstream) => (
+            UpstreamProto::H2,
+            match upstream.strategy.effective(has_upload_body, is_sse) {
+                Http2PipeStrategy::Buffered => PipeStrategy::Buffered,
+                Http2PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                Http2PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                Http2PipeStrategy::Duplex => PipeStrategy::Duplex,
+            },
+        ),
+        HttpUpstream::Http1(upstream) => (
+            UpstreamProto::H1,
+            match upstream.strategy.effective(has_upload_body, is_sse) {
+                Http1PipeStrategy::Buffered => PipeStrategy::Buffered,
+                Http1PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                Http1PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                Http1PipeStrategy::Duplex => PipeStrategy::Duplex,
+            },
+        ),
+        HttpUpstream::Http3(upstream) => (
+            UpstreamProto::H3,
+            match upstream.strategy.effective(has_upload_body, is_sse) {
+                Http3PipeStrategy::Buffered => PipeStrategy::Buffered,
+                Http3PipeStrategy::ServerStream => PipeStrategy::ServerStream,
+                Http3PipeStrategy::ClientStream => PipeStrategy::ClientStream,
+                Http3PipeStrategy::Duplex => PipeStrategy::Duplex,
+            },
+        ),
+    };
+
+    global_metrics().record_stream_start(DownstreamProto::H2, up_proto, pipe_strat);
 
     match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
@@ -563,6 +680,13 @@ async fn serve_http2_stream(
             }
         },
     }
+
+    global_metrics().record_stream_completion(
+        DownstreamProto::H2,
+        up_proto,
+        pipe_strat,
+        StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+    );
 }
 
 #[cfg(test)]

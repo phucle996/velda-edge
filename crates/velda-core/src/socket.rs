@@ -192,8 +192,30 @@ impl SocketManager {
             }
         }
 
-        // Perform atomic OS bind
-        let listener = std::net::TcpListener::bind(address).map_err(SocketError::Io)?;
+        // Perform atomic OS bind with SO_REUSEADDR and SO_REUSEPORT
+        let domain = if address.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let socket =
+            socket2::Socket::new(domain, socket2::Type::STREAM, None).map_err(SocketError::Io)?;
+        socket.set_reuse_address(true).map_err(SocketError::Io)?;
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            let opt: libc::c_int = 1;
+            let _ = libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &opt as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&opt) as libc::socklen_t,
+            );
+        }
+        socket.bind(&address.into()).map_err(SocketError::Io)?;
+        socket.listen(1024).map_err(SocketError::Io)?;
+        let listener: std::net::TcpListener = socket.into();
 
         // Record or update claim
         if let Some(pos) = claims.iter().position(|c| {

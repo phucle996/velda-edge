@@ -28,7 +28,10 @@ pub use global::GlobalMetrics;
 pub use pool::{EvictionReason, PoolMetrics};
 pub use slot::PipelineSlot;
 pub use snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot, PoolSnapshot};
-pub use store::{MetricsStore, TOTAL_PIPELINE_SLOTS, global_metrics, init_global_metrics};
+pub use store::{
+    MAX_METRIC_WORKERS, MetricsStore, TOTAL_PIPELINE_SLOTS, current_worker_lane, global_metrics,
+    init_global_metrics, set_current_worker_lane,
+};
 pub use telemetry::{LiveTelemetry, NoopTelemetry, Telemetry};
 pub use types::{
     AlpnProtocol, DownstreamProto, PipeStrategy, StatusClass, StreamCompletion, UpstreamProto,
