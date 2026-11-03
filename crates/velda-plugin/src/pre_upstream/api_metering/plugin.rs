@@ -426,6 +426,7 @@ fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &A
     };
 
     let dist_cfg = dist.clone();
+    let initial_balance = config.initial_balance_micro_credits;
     let weak_state = Arc::downgrade(&state);
 
     let _ = std::thread::Builder::new()
@@ -461,13 +462,13 @@ fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &A
                         continue;
                     }
 
-                    // Format HINCRBY {prefix}:metering:balances {acc_hash} -{delta}
+                    // Format HINCRBY {prefix}:metering:consumed {acc_hash} {delta}
                     let mut cmd_strings = Vec::with_capacity(deltas.len());
                     for &(acc_hash, delta) in &deltas {
-                        let key = format!("{}:metering:balances", dist_cfg.key_prefix);
+                        let key = format!("{}:metering:consumed", dist_cfg.key_prefix);
                         let field = acc_hash.to_string();
-                        // Deduct delta from global balance
-                        cmd_strings.push((key, field, -delta, acc_hash));
+                        // Track positive accumulated consumption
+                        cmd_strings.push((key, field, delta, acc_hash));
                     }
 
                     let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
@@ -480,7 +481,8 @@ fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &A
                             let mut updates = Vec::with_capacity(results.len());
                             for (idx, &res) in results.iter().enumerate() {
                                 let (_, _, _, acc_hash) = cmd_strings[idx];
-                                updates.push((acc_hash, res));
+                                let remaining_balance = initial_balance - res;
+                                updates.push((acc_hash, remaining_balance));
                             }
                             state.reconcile_balances(&updates);
                         }
