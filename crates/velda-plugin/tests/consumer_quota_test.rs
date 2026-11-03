@@ -36,6 +36,7 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
             limit: 3,
             algorithm: QuotaAlgorithm::SlidingWindow,
         }],
+        distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-1", config));
     let mut target = Arc::from("upstream-llm");
@@ -104,6 +105,7 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
             limit: 2,
             algorithm: QuotaAlgorithm::SlidingWindow,
         }],
+        distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-2", config));
     let mut target = Arc::from("upstream-llm");
@@ -156,6 +158,7 @@ fn test_consumer_quota_fallback_to_client_ip() {
             limit: 1,
             algorithm: QuotaAlgorithm::FixedWindow,
         }],
+        distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-3", config));
     let mut target = Arc::from("upstream-llm");

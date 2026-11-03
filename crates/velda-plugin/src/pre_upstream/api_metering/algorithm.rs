@@ -90,6 +90,8 @@ pub struct AccountState {
     pub last_access_sec: u64,
     /// Wallet credit balance in micro-credits (can become negative on overage pass-through).
     pub balance_micro_credits: i64,
+    /// Uncommitted delta of micro-credits deducted locally since last shadow sync.
+    pub delta_micro_credits_deducted: i64,
     /// States corresponding to the tier's configured windows.
     pub windows: Vec<WindowState>,
 }
@@ -175,6 +177,7 @@ impl ShardedMeteringState {
             AccountState {
                 last_access_sec: now_sec,
                 balance_micro_credits: initial_balance_micro,
+                delta_micro_credits_deducted: 0,
                 windows: win_states,
             }
         });
@@ -196,6 +199,7 @@ impl ShardedMeteringState {
             match tier_cfg.exhausted_action {
                 ExhaustedAction::Passthrough => {
                     state.balance_micro_credits -= cost;
+                    state.delta_micro_credits_deducted += cost;
                     return MeteringDecision::OverageAllowed {
                         negative_balance: state.balance_micro_credits,
                     };
@@ -241,6 +245,7 @@ impl ShardedMeteringState {
         // 5. Commit pass: deduct cost and increment window counters
         if cost > 0 {
             state.balance_micro_credits -= cost;
+            state.delta_micro_credits_deducted += cost;
         }
 
         for (i, cfg) in tier_cfg.windows.iter().enumerate() {
@@ -251,6 +256,34 @@ impl ShardedMeteringState {
             min_remaining,
             window_name: min_remaining_win,
             balance_micro_credits: state.balance_micro_credits,
+        }
+    }
+
+    /// Collects all non-zero uncommitted micro-credit deltas across all 64 shards for batched shadow sync.
+    /// Returns `Vec<(account_hash, delta_micro_credits)>`.
+    pub fn collect_deltas(&self) -> Vec<(u64, i64)> {
+        let mut batch = Vec::new();
+        for shard in &self.shards {
+            let mut map = shard.lock.lock().unwrap();
+            for (&acc_hash, state) in map.iter_mut() {
+                if state.delta_micro_credits_deducted > 0 {
+                    batch.push((acc_hash, state.delta_micro_credits_deducted));
+                    state.delta_micro_credits_deducted = 0;
+                }
+            }
+        }
+        batch
+    }
+
+    /// Reconciles updated global balances returned from distributed Redis into RAM shards.
+    pub fn reconcile_balances(&self, updates: &[(u64, i64)]) {
+        for &(acc_hash, global_balance) in updates {
+            let shard_idx = (acc_hash as usize) & (NUM_SHARDS - 1);
+            let shard = &self.shards[shard_idx];
+            let mut map = shard.lock.lock().unwrap();
+            if let Some(state) = map.get_mut(&acc_hash) {
+                state.balance_micro_credits = global_balance;
+            }
         }
     }
 }

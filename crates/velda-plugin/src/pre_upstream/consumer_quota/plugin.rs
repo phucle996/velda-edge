@@ -24,6 +24,7 @@ use super::key::resolve_quota_key;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
+use crate::pre_upstream::distributed::{DistributedSyncConfig, RedisClient};
 
 /// Static configuration contract for [`ConsumerQuotaPlugin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub struct ConsumerQuotaConfig {
     pub key_headers: Vec<HeaderName>,
     /// Array of sliding, fixed, or token bucket quota windows applied simultaneously.
     pub windows: Vec<QuotaWindowConfig>,
+    /// Distributed multi-gateway synchronization configuration via Redis.
+    pub distributed: Option<DistributedSyncConfig>,
 }
 
 impl Default for ConsumerQuotaConfig {
@@ -55,6 +58,7 @@ impl Default for ConsumerQuotaConfig {
                     algorithm: QuotaAlgorithm::FixedWindow,
                 },
             ],
+            distributed: None,
         }
     }
 }
@@ -78,10 +82,12 @@ impl std::fmt::Debug for ConsumerQuotaPlugin {
 impl ConsumerQuotaPlugin {
     /// Constructs a new consumer quota plugin instance with an explicit configuration.
     pub fn new(id: impl Into<String>, config: ConsumerQuotaConfig) -> Self {
+        let state = Arc::new(ShardedQuotaState::new());
+        maybe_spawn_shadow_quota_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
-            state: Arc::new(ShardedQuotaState::new()),
+            state,
         }
     }
 
@@ -91,6 +97,7 @@ impl ConsumerQuotaPlugin {
         config: ConsumerQuotaConfig,
         state: Arc<ShardedQuotaState>,
     ) -> Self {
+        maybe_spawn_shadow_quota_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
@@ -162,14 +169,85 @@ impl ConsumerQuotaPlugin {
             });
         }
 
+        let distributed = config
+            .config
+            .get("distributed")
+            .map(|v| DistributedSyncConfig::from_json(Some(v)));
+
         Ok(Self::new(
             config.id.clone(),
             ConsumerQuotaConfig {
                 key_headers,
                 windows,
+                distributed,
             },
         ))
     }
+}
+
+/// Spawns an autonomous background Shadow Logistics Worker loop reconciling local deltas with distributed Redis.
+fn maybe_spawn_shadow_quota_sync(state: Arc<ShardedQuotaState>, config: &ConsumerQuotaConfig) {
+    let dist = match &config.distributed {
+        Some(d) if d.enabled => d,
+        _ => return,
+    };
+
+    let dist_cfg = dist.clone();
+    let windows = config.windows.clone();
+
+    tokio::spawn(async move {
+        let mut client = RedisClient::new(dist_cfg.redis_addr);
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(dist_cfg.sync_interval_ms));
+
+        loop {
+            interval.tick().await;
+
+            let deltas = state.collect_deltas();
+            if deltas.is_empty() {
+                continue;
+            }
+
+            let now_sec = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            // Build string buffers for pipelining
+            let mut cmd_strings = Vec::with_capacity(deltas.len());
+            for &(key_hash, win_idx, delta) in &deltas {
+                let win = match windows.get(win_idx) {
+                    Some(w) => w,
+                    None => continue,
+                };
+                let epoch = now_sec.checked_div(win.window_seconds).unwrap_or(now_sec);
+                let key = format!("{}:quota:{}:{}", dist_cfg.key_prefix, win.name, epoch);
+                let field = key_hash.to_string();
+                cmd_strings.push((key, field, delta as i64, win_idx, key_hash));
+            }
+
+            let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
+                .iter()
+                .map(|(k, f, d, _, _)| (k.as_str(), f.as_str(), *d))
+                .collect();
+
+            match client.pipelined_hincrby(&cmd_refs).await {
+                Ok(results) => {
+                    let mut updates = Vec::with_capacity(results.len());
+                    for (idx, &res) in results.iter().enumerate() {
+                        if res > 0 {
+                            let (_, _, _, win_idx, key_hash) = cmd_strings[idx];
+                            updates.push((key_hash, win_idx, res as u64));
+                        }
+                    }
+                    state.reconcile_globals(&updates);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Shadow logistics failed to flush quota deltas to Redis");
+                }
+            }
+        }
+    });
 }
 
 impl PreUpstreamPlugin for ConsumerQuotaPlugin {

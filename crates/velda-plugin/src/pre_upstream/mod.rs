@@ -17,6 +17,7 @@ pub mod api_metering;
 pub mod canary;
 pub mod consumer_quota;
 pub mod csrf;
+pub mod distributed;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
 pub mod hmac_auth;
@@ -41,6 +42,7 @@ pub use consumer_quota::{
     ShardedQuotaState, WindowState,
 };
 pub use csrf::{CsrfConfig, CsrfPlugin};
+pub use distributed::{DistributedSyncConfig, RedisClient, RedisError};
 pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,

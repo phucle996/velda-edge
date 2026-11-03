@@ -73,14 +73,17 @@ pub enum WindowState {
         curr_epoch: u64,
         curr_count: u64,
         prev_count: u64,
+        delta_consumed: u64,
     },
     Fixed {
         curr_epoch: u64,
         curr_count: u64,
+        delta_consumed: u64,
     },
     Bucket {
         nano_tokens: u64,
         last_refill: Instant,
+        delta_consumed: u64,
     },
 }
 
@@ -94,6 +97,7 @@ impl WindowState {
                     curr_epoch: epoch,
                     curr_count: 0,
                     prev_count: 0,
+                    delta_consumed: 0,
                 }
             }
             QuotaAlgorithm::FixedWindow => {
@@ -101,12 +105,47 @@ impl WindowState {
                 Self::Fixed {
                     curr_epoch: epoch,
                     curr_count: 0,
+                    delta_consumed: 0,
                 }
             }
             QuotaAlgorithm::TokenBucket => Self::Bucket {
                 nano_tokens: cfg.limit.saturating_mul(NANO_TOKENS_PER_UNIT),
                 last_refill: now_instant,
+                delta_consumed: 0,
             },
+        }
+    }
+
+    /// Returns uncommitted delta consumed since last shadow sync.
+    #[inline]
+    pub fn delta_consumed(&self) -> u64 {
+        match self {
+            Self::Sliding { delta_consumed, .. }
+            | Self::Fixed { delta_consumed, .. }
+            | Self::Bucket { delta_consumed, .. } => *delta_consumed,
+        }
+    }
+
+    /// Resets uncommitted delta to zero after shadow collection.
+    #[inline]
+    pub fn reset_delta(&mut self) {
+        match self {
+            Self::Sliding { delta_consumed, .. }
+            | Self::Fixed { delta_consumed, .. }
+            | Self::Bucket { delta_consumed, .. } => *delta_consumed = 0,
+        }
+    }
+
+    /// Reconciles updated global count returned by distributed store into local memory.
+    #[inline]
+    pub fn reconcile_global(&mut self, global_count: u64) {
+        match self {
+            Self::Sliding { curr_count, .. } | Self::Fixed { curr_count, .. }
+                if global_count > *curr_count =>
+            {
+                *curr_count = global_count;
+            }
+            _ => {}
         }
     }
 
@@ -129,6 +168,7 @@ impl WindowState {
                 curr_epoch,
                 curr_count,
                 prev_count,
+                delta_consumed,
             } => {
                 let actual_epoch = now_sec / cfg.window_seconds;
                 if actual_epoch > *curr_epoch {
@@ -153,6 +193,7 @@ impl WindowState {
 
                 if total_estimated < cfg.limit {
                     *curr_count = curr_count.saturating_add(1);
+                    *delta_consumed = delta_consumed.saturating_add(1);
                     let remaining = cfg.limit.saturating_sub(total_estimated + 1);
                     (true, remaining, reset_seconds)
                 } else {
@@ -162,6 +203,7 @@ impl WindowState {
             Self::Fixed {
                 curr_epoch,
                 curr_count,
+                delta_consumed,
             } => {
                 let actual_epoch = now_sec / cfg.window_seconds;
                 if actual_epoch > *curr_epoch {
@@ -174,6 +216,7 @@ impl WindowState {
 
                 if *curr_count < cfg.limit {
                     *curr_count = curr_count.saturating_add(1);
+                    *delta_consumed = delta_consumed.saturating_add(1);
                     let remaining = cfg.limit.saturating_sub(*curr_count);
                     (true, remaining, reset_seconds)
                 } else {
@@ -183,6 +226,7 @@ impl WindowState {
             Self::Bucket {
                 nano_tokens,
                 last_refill,
+                delta_consumed,
             } => {
                 let elapsed_nanos = now_instant
                     .saturating_duration_since(*last_refill)
@@ -199,6 +243,7 @@ impl WindowState {
                 let cost_nano = NANO_TOKENS_PER_UNIT;
                 if *nano_tokens >= cost_nano {
                     *nano_tokens -= cost_nano;
+                    *delta_consumed = delta_consumed.saturating_add(1);
                     let remaining = *nano_tokens / NANO_TOKENS_PER_UNIT;
                     (true, remaining, 0)
                 } else {
@@ -342,6 +387,40 @@ impl ShardedQuotaState {
         QuotaDecision::Allowed {
             min_remaining,
             window_name: min_remaining_win,
+        }
+    }
+
+    /// Collects all non-zero uncommitted deltas across all 64 shards for batched shadow sync.
+    /// Returns `Vec<(key_hash, window_index, delta)>`.
+    pub fn collect_deltas(&self) -> Vec<(u64, usize, u64)> {
+        let mut batch = Vec::new();
+        for shard in &self.shards {
+            let mut map = shard.lock.lock().unwrap();
+            for (&key_hash, state) in map.iter_mut() {
+                for (win_idx, win) in state.windows.iter_mut().enumerate() {
+                    let delta = win.delta_consumed();
+                    if delta > 0 {
+                        batch.push((key_hash, win_idx, delta));
+                        win.reset_delta();
+                    }
+                }
+            }
+        }
+        batch
+    }
+
+    /// Reconciles updated global counts returned from distributed Redis into RAM shards.
+    pub fn reconcile_globals(&self, updates: &[(u64, usize, u64)]) {
+        for &(key_hash, win_idx, global_count) in updates {
+            let shard_idx = (key_hash as usize) & (NUM_SHARDS - 1);
+            let shard = &self.shards[shard_idx];
+            let mut map = shard.lock.lock().unwrap();
+            let win_opt = map
+                .get_mut(&key_hash)
+                .and_then(|s| s.windows.get_mut(win_idx));
+            if let Some(win) = win_opt {
+                win.reconcile_global(global_count);
+            }
         }
     }
 }

@@ -52,6 +52,7 @@ fn test_api_metering_free_tier_rejection_402() {
         default_tier: "free".to_string(),
         initial_balance_micro_credits: 0,
         tiers,
+        distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-1", config));
     let mut target = Arc::from("upstream-ai");
@@ -137,6 +138,7 @@ fn test_api_metering_pro_tier_rejection_429() {
         default_tier: "free".to_string(),
         initial_balance_micro_credits: 0,
         tiers,
+        distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-2", config));
     let mut target = Arc::from("upstream-ai");
@@ -204,6 +206,7 @@ fn test_api_metering_enterprise_overage_passthrough() {
         default_tier: "enterprise".to_string(),
         initial_balance_micro_credits: 100_000, // 1 request credit funded
         tiers,
+        distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-3", config));
     let mut target = Arc::from("upstream-ai");
@@ -252,6 +255,7 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
         default_tier: "payg".to_string(),
         initial_balance_micro_credits: 1_000_000, // 1.0 credit funded
         tiers,
+        distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-credits-test", config));
     let mut target = Arc::from("upstream-ai");

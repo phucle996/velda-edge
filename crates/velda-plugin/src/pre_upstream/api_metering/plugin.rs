@@ -30,6 +30,7 @@ use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 use crate::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
+use crate::pre_upstream::distributed::{DistributedSyncConfig, RedisClient};
 
 /// Static configuration contract for [`ApiMeteringPlugin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,8 @@ pub struct ApiMeteringConfig {
     pub initial_balance_micro_credits: i64,
     /// Tier definitions indexed by lowercase name.
     pub tiers: FxHashMap<String, TierConfig>,
+    /// Distributed multi-gateway synchronization configuration via Redis.
+    pub distributed: Option<DistributedSyncConfig>,
 }
 
 impl Default for ApiMeteringConfig {
@@ -102,6 +105,7 @@ impl Default for ApiMeteringConfig {
             default_tier: "free".to_string(),
             initial_balance_micro_credits: 0,
             tiers,
+            distributed: None,
         }
     }
 }
@@ -125,10 +129,12 @@ impl std::fmt::Debug for ApiMeteringPlugin {
 impl ApiMeteringPlugin {
     /// Constructs a new API metering plugin instance with an explicit configuration.
     pub fn new(id: impl Into<String>, config: ApiMeteringConfig) -> Self {
+        let state = Arc::new(ShardedMeteringState::new());
+        maybe_spawn_shadow_metering_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
-            state: Arc::new(ShardedMeteringState::new()),
+            state,
         }
     }
 
@@ -138,6 +144,7 @@ impl ApiMeteringPlugin {
         config: ApiMeteringConfig,
         state: Arc<ShardedMeteringState>,
     ) -> Self {
+        maybe_spawn_shadow_metering_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
@@ -259,6 +266,11 @@ impl ApiMeteringPlugin {
             tiers = ApiMeteringConfig::default().tiers;
         }
 
+        let distributed = config
+            .config
+            .get("distributed")
+            .map(|v| DistributedSyncConfig::from_json(Some(v)));
+
         Ok(Self::new(
             config.id.clone(),
             ApiMeteringConfig {
@@ -267,6 +279,7 @@ impl ApiMeteringPlugin {
                 default_tier,
                 initial_balance_micro_credits,
                 tiers,
+                distributed,
             },
         ))
     }
@@ -403,4 +416,57 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
             },
         }
     }
+}
+
+/// Spawns an autonomous background Shadow Logistics Worker loop reconciling local credit deltas with distributed Redis.
+fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &ApiMeteringConfig) {
+    let dist = match &config.distributed {
+        Some(d) if d.enabled => d,
+        _ => return,
+    };
+
+    let dist_cfg = dist.clone();
+
+    tokio::spawn(async move {
+        let mut client = RedisClient::new(dist_cfg.redis_addr);
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(dist_cfg.sync_interval_ms));
+
+        loop {
+            interval.tick().await;
+
+            let deltas = state.collect_deltas();
+            if deltas.is_empty() {
+                continue;
+            }
+
+            // Format HINCRBY {prefix}:metering:balances {acc_hash} -{delta}
+            let mut cmd_strings = Vec::with_capacity(deltas.len());
+            for &(acc_hash, delta) in &deltas {
+                let key = format!("{}:metering:balances", dist_cfg.key_prefix);
+                let field = acc_hash.to_string();
+                // Deduct delta from global balance
+                cmd_strings.push((key, field, -delta, acc_hash));
+            }
+
+            let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
+                .iter()
+                .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
+                .collect();
+
+            match client.pipelined_hincrby(&cmd_refs).await {
+                Ok(results) => {
+                    let mut updates = Vec::with_capacity(results.len());
+                    for (idx, &res) in results.iter().enumerate() {
+                        let (_, _, _, acc_hash) = cmd_strings[idx];
+                        updates.push((acc_hash, res));
+                    }
+                    state.reconcile_balances(&updates);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
+                }
+            }
+        }
+    });
 }
