@@ -426,47 +426,69 @@ fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &A
     };
 
     let dist_cfg = dist.clone();
+    let weak_state = Arc::downgrade(&state);
 
-    tokio::spawn(async move {
-        let mut client = RedisClient::new(dist_cfg.redis_addr);
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(dist_cfg.sync_interval_ms));
-
-        loop {
-            interval.tick().await;
-
-            let deltas = state.collect_deltas();
-            if deltas.is_empty() {
-                continue;
-            }
-
-            // Format HINCRBY {prefix}:metering:balances {acc_hash} -{delta}
-            let mut cmd_strings = Vec::with_capacity(deltas.len());
-            for &(acc_hash, delta) in &deltas {
-                let key = format!("{}:metering:balances", dist_cfg.key_prefix);
-                let field = acc_hash.to_string();
-                // Deduct delta from global balance
-                cmd_strings.push((key, field, -delta, acc_hash));
-            }
-
-            let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
-                .iter()
-                .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
-                .collect();
-
-            match client.pipelined_hincrby(&cmd_refs).await {
-                Ok(results) => {
-                    let mut updates = Vec::with_capacity(results.len());
-                    for (idx, &res) in results.iter().enumerate() {
-                        let (_, _, _, acc_hash) = cmd_strings[idx];
-                        updates.push((acc_hash, res));
-                    }
-                    state.reconcile_balances(&updates);
-                }
+    let _ = std::thread::Builder::new()
+        .name("velda-metering-sync".to_string())
+        .spawn(move || {
+            velda_core::set_current_thread_idle_priority();
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
+                    tracing::error!(error = %e, "Failed to build tokio runtime for shadow metering sync");
+                    return;
                 }
-            }
-        }
-    });
+            };
+
+            rt.block_on(async move {
+                let mut client = RedisClient::new(dist_cfg.redis_addr);
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_millis(dist_cfg.sync_interval_ms));
+
+                loop {
+                    interval.tick().await;
+
+                    let state = match weak_state.upgrade() {
+                        Some(s) => s,
+                        None => break,
+                    };
+
+                    let deltas = state.collect_deltas();
+                    if deltas.is_empty() {
+                        continue;
+                    }
+
+                    // Format HINCRBY {prefix}:metering:balances {acc_hash} -{delta}
+                    let mut cmd_strings = Vec::with_capacity(deltas.len());
+                    for &(acc_hash, delta) in &deltas {
+                        let key = format!("{}:metering:balances", dist_cfg.key_prefix);
+                        let field = acc_hash.to_string();
+                        // Deduct delta from global balance
+                        cmd_strings.push((key, field, -delta, acc_hash));
+                    }
+
+                    let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
+                        .iter()
+                        .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
+                        .collect();
+
+                    match client.pipelined_hincrby(&cmd_refs).await {
+                        Ok(results) => {
+                            let mut updates = Vec::with_capacity(results.len());
+                            for (idx, &res) in results.iter().enumerate() {
+                                let (_, _, _, acc_hash) = cmd_strings[idx];
+                                updates.push((acc_hash, res));
+                            }
+                            state.reconcile_balances(&updates);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
+                        }
+                    }
+                }
+            });
+        });
 }
