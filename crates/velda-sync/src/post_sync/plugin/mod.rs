@@ -105,6 +105,8 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "w3c_trace_context" => Some("pre_upstream"),
         "csrf" => Some("pre_upstream"),
         "csrf_protection" => Some("pre_upstream"),
+        "consumer_quota" => Some("pre_upstream"),
+        "api_metering" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),

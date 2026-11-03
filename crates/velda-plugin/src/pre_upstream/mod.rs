@@ -13,7 +13,9 @@ use velda_core::{Action, L7Request};
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod api_key_auth;
+pub mod api_metering;
 pub mod canary;
+pub mod consumer_quota;
 pub mod csrf;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
@@ -29,7 +31,15 @@ pub mod url_rewrite;
 pub mod w3c_trace_context;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
+pub use api_metering::{
+    AccountState, ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, MICRO_CREDITS_PER_UNIT,
+    MeteringDecision, ShardedMeteringState, TierConfig,
+};
 pub use canary::{CanaryConfig, CanaryPlugin, HashSource, HashStrategy, HeaderRule, RuleOperator};
+pub use consumer_quota::{
+    ConsumerQuotaConfig, ConsumerQuotaPlugin, QuotaAlgorithm, QuotaDecision, QuotaWindowConfig,
+    ShardedQuotaState, WindowState,
+};
 pub use csrf::{CsrfConfig, CsrfPlugin};
 pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
 pub use header_mutation::{
@@ -134,6 +144,8 @@ pub fn instantiate(
         "csrf" | "csrf_protection" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
         "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
+        "consumer_quota" => Ok(Arc::new(ConsumerQuotaPlugin::from_config(config)?)),
+        "api_metering" => Ok(Arc::new(ApiMeteringPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id
