@@ -67,12 +67,6 @@ pub fn token_fingerprint_128(token: &str) -> u128 {
     ((h1 as u128) << 64) | (h2 as u128)
 }
 
-/// Compatibility alias for 128-bit fingerprint.
-#[inline(always)]
-pub fn token_fingerprint(token: &str) -> u128 {
-    token_fingerprint_128(token)
-}
-
 /// Computes the optimal shard count dynamically scaled to CPU cores and total capacity.
 pub fn compute_optimal_shards(cores: usize, max_total_entries: usize) -> usize {
     let raw_shards = (cores.max(1) * 4).next_power_of_two();

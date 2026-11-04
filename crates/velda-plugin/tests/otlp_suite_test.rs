@@ -22,7 +22,8 @@ use velda_plugin::background::otlp_metrics_exporter::{
 };
 use velda_plugin::header::{TRACEPARENT, X_SPAN_ID, X_TRACE_ID};
 use velda_plugin::post_response::opentelemetry_logger::{
-    OtlpLogClient, OtlpLogItem, OtlpLogsGrpcClient, format_otlp_logs_json, format_otlp_logs_proto,
+    OtlpLogClient, OtlpLogsGrpcClient, PackedOtlpRecord, decode_hex, format_otlp_records_json,
+    format_otlp_records_proto,
 };
 use velda_plugin::post_response::opentelemetry_tracer::{
     OtlpSpanItem, OtlpTraceClient, OtlpTracesGrpcClient, format_otlp_spans_json,
@@ -189,34 +190,39 @@ async fn test_opentelemetry_logger_batching_and_send() {
 
     let mut client = OtlpLogClient::new(&url, Duration::from_secs(5), Duration::from_secs(10))
         .expect("Client initialized");
-    let items = vec![
-        OtlpLogItem {
-            time_unix_nano: 1710000000000000000,
-            status: 200,
-            method: "GET".to_string(),
-            path: "/api/items".to_string(),
-            client_ip: Some("192.168.1.50".to_string()),
-            route_id: Some("items-route".to_string()),
-            upstream: Some("10.0.0.10:8080".to_string()),
-            latency_ms: Some(2.5),
-            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-            span_id: Some("00f067aa0ba902b7".to_string()),
-        },
-        OtlpLogItem {
-            time_unix_nano: 1710000000001000000,
-            status: 500,
-            method: "POST".to_string(),
-            path: "/api/checkout".to_string(),
-            client_ip: Some("192.168.1.51".to_string()),
-            route_id: Some("checkout-route".to_string()),
-            upstream: Some("10.0.0.11:8080".to_string()),
-            latency_ms: Some(15.2),
-            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-            span_id: Some("5fb397be34d23b0f".to_string()),
-        },
-    ];
 
-    let payload = format_otlp_logs_json(&items, "test-edge");
+    let mut rec1 = PackedOtlpRecord::empty();
+    rec1.time_unix_nano = 1710000000000000000;
+    rec1.status = 200;
+    rec1.method = PackedOtlpRecord::encode_method(&Method::GET);
+    rec1.set_path(b"/api/items");
+    rec1.set_client_ip("192.168.1.50".parse().unwrap());
+    rec1.set_route_id(b"items-route");
+    rec1.set_upstream(b"10.0.0.10:8080");
+    rec1.duration_us = 2500;
+    let mut raw_trace = [0u8; 16];
+    decode_hex(b"4bf92f3577b34da6a3ce929d0e0e4736", &mut raw_trace);
+    rec1.set_trace_id(&raw_trace);
+    let mut raw_span = [0u8; 8];
+    decode_hex(b"00f067aa0ba902b7", &mut raw_span);
+    rec1.set_span_id(&raw_span);
+
+    let mut rec2 = PackedOtlpRecord::empty();
+    rec2.time_unix_nano = 1710000000001000000;
+    rec2.status = 500;
+    rec2.method = PackedOtlpRecord::encode_method(&Method::POST);
+    rec2.set_path(b"/api/checkout");
+    rec2.set_client_ip("192.168.1.51".parse().unwrap());
+    rec2.set_route_id(b"checkout-route");
+    rec2.set_upstream(b"10.0.0.11:8080");
+    rec2.duration_us = 15200;
+    rec2.set_trace_id(&raw_trace);
+    let mut raw_span2 = [0u8; 8];
+    decode_hex(b"5fb397be34d23b0f", &mut raw_span2);
+    rec2.set_span_id(&raw_span2);
+
+    let mut payload = String::with_capacity(1024);
+    format_otlp_records_json(&[rec1, rec2], "test-edge", &mut payload);
     let headers = HeaderMap::new();
 
     let status = client
@@ -421,20 +427,23 @@ async fn test_otlp_logs_and_traces_grpc_export() {
     let (logs_endpoint, logs_count, _logs_shutdown) =
         spawn_mock_grpc_collector(OtlpLogsGrpcClient::RPC_PATH).await;
 
-    let log_item = OtlpLogItem {
-        time_unix_nano: 1729579200000000000,
-        status: 200,
-        method: "POST".to_string(),
-        path: "/api/pay".to_string(),
-        client_ip: Some("127.0.0.1".to_string()),
-        route_id: Some("pay-route".to_string()),
-        upstream: Some("10.0.0.1:80".to_string()),
-        latency_ms: Some(2.1),
-        trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-        span_id: Some("00f067aa0ba902b7".to_string()),
-    };
+    let mut rec = PackedOtlpRecord::empty();
+    rec.time_unix_nano = 1729579200000000000;
+    rec.status = 200;
+    rec.method = PackedOtlpRecord::encode_method(&Method::POST);
+    rec.set_path(b"/api/pay");
+    rec.set_client_ip("127.0.0.1".parse().unwrap());
+    rec.set_route_id(b"pay-route");
+    rec.set_upstream(b"10.0.0.1:80");
+    rec.duration_us = 2100;
+    let mut raw_trace = [0u8; 16];
+    decode_hex(b"4bf92f3577b34da6a3ce929d0e0e4736", &mut raw_trace);
+    rec.set_trace_id(&raw_trace);
+    let mut raw_span = [0u8; 8];
+    decode_hex(b"00f067aa0ba902b7", &mut raw_span);
+    rec.set_span_id(&raw_span);
 
-    let log_proto_bytes = format_otlp_logs_proto(&[log_item], "pay-service");
+    let log_proto_bytes = format_otlp_records_proto(&[rec], "pay-service");
     let mut log_client = OtlpLogsGrpcClient::new(
         &logs_endpoint,
         Duration::from_secs(5),

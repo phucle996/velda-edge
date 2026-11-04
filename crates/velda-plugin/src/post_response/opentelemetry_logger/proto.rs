@@ -5,7 +5,7 @@
 
 use prost::Message;
 
-use super::record::{OtlpLogItem, PackedOtlpRecord, decode_hex};
+use super::record::PackedOtlpRecord;
 
 /// Root export request for OpenTelemetry Logs Service.
 #[derive(Clone, PartialEq, Message)]
@@ -224,50 +224,4 @@ pub fn format_otlp_records_proto(records: &[PackedOtlpRecord], service_name: &st
         .encode(&mut buf)
         .expect("protobuf encoding is infallible");
     buf
-}
-
-// Legacy compatibility for tests
-pub fn format_otlp_logs_proto(records: &[OtlpLogItem], service_name: &str) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(records.len());
-    for r in records {
-        let mut p = PackedOtlpRecord::empty();
-        p.time_unix_nano = r.time_unix_nano as u64;
-        p.status = r.status;
-        p.duration_us = r.latency_ms.map(|ms| (ms * 1000.0) as u32).unwrap_or(0);
-        if let Ok(method) = r.method.parse::<http::Method>() {
-            p.method = PackedOtlpRecord::encode_method(&method);
-        }
-        p.set_path(r.path.as_bytes());
-        if let Some(ip) = &r.client_ip
-            && let Ok(parsed) = ip.parse::<std::net::IpAddr>()
-        {
-            p.set_client_ip(parsed);
-        }
-        if let Some(rt) = &r.route_id {
-            p.set_route_id(rt.as_bytes());
-        }
-        if let Some(up) = &r.upstream {
-            p.set_upstream(up.as_bytes());
-        }
-        if let Some(tr) = &r.trace_id {
-            let mut raw = [0u8; 16];
-            let n = decode_hex(tr.as_bytes(), &mut raw);
-            if n > 0 {
-                p.set_trace_id(&raw[..n]);
-            } else {
-                p.set_trace_id(tr.as_bytes());
-            }
-        }
-        if let Some(sp) = &r.span_id {
-            let mut raw = [0u8; 8];
-            let n = decode_hex(sp.as_bytes(), &mut raw);
-            if n > 0 {
-                p.set_span_id(&raw[..n]);
-            } else {
-                p.set_span_id(sp.as_bytes());
-            }
-        }
-        packed.push(p);
-    }
-    format_otlp_records_proto(&packed, service_name)
 }
