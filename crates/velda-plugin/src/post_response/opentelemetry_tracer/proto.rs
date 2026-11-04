@@ -1,11 +1,11 @@
-//! OpenTelemetry ResourceSpans Protobuf Message Models & Serializer (`opentelemetry_tracer`).
+//! OpenTelemetry ResourceSpans Protobuf Message Models & Serializer (`opentelemetry_tracer::proto`).
 //!
-//! Encodes slices of [`OtlpSpanItem`] records into compliant OpenTelemetry binary Protocol Buffers:
+//! Encodes slices of [`PackedOtlpSpan`] records into compliant OpenTelemetry binary Protocol Buffers:
 //! `opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest`
 
 use prost::Message;
 
-use super::span::OtlpSpanItem;
+use super::span::{OtlpSpanItem, PackedOtlpSpan, decode_hex};
 
 /// Root export request for OpenTelemetry Trace Service.
 #[derive(Clone, PartialEq, Message)]
@@ -104,6 +104,7 @@ pub struct AnyValue {
 
 pub mod any_value {
     use prost::Oneof;
+
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Value {
         #[prost(string, tag = "1")]
@@ -139,68 +140,52 @@ impl KeyValue {
     }
 }
 
-fn decode_hex(hex: &str, expected_len: usize) -> Vec<u8> {
-    if hex.len() == expected_len * 2 {
-        let mut out = Vec::with_capacity(expected_len);
-        for i in 0..expected_len {
-            if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
-                out.push(b);
-            } else {
-                return Vec::new();
-            }
-        }
-        out
-    } else {
-        Vec::new()
-    }
-}
-
-/// Encodes a slice of [`OtlpSpanItem`] records into compliant OpenTelemetry binary Protobuf bytes.
-pub fn format_otlp_spans_proto(spans: &[OtlpSpanItem], service_name: &str) -> Vec<u8> {
+/// Encodes a slice of [`PackedOtlpSpan`] into compliant binary Protobuf bytes.
+pub fn format_packed_spans_proto(spans: &[PackedOtlpSpan], service_name: &str) -> Vec<u8> {
     let mut otlp_spans = Vec::with_capacity(spans.len());
 
     for item in spans {
-        let status_code = if item.status_code < 400 {
-            1 // STATUS_CODE_OK
-        } else {
-            2 // STATUS_CODE_ERROR
-        };
+        let status_code = if item.status_code < 400 { 1 } else { 2 };
+        let method = item.method_str();
+        let path = item.path();
 
         let mut attributes = vec![
-            KeyValue::new_string("http.request.method", &item.method),
+            KeyValue::new_string("http.request.method", method),
             KeyValue::new_int("http.response.status_code", item.status_code as i64),
-            KeyValue::new_string("url.path", &item.path),
+            KeyValue::new_string("url.path", path),
         ];
 
-        if let Some(ip) = &item.client_ip {
-            attributes.push(KeyValue::new_string("client.address", ip));
+        if item.ip_kind != 0 {
+            let mut ip_str = String::with_capacity(40);
+            item.format_client_ip(&mut ip_str);
+            attributes.push(KeyValue::new_string("client.address", ip_str));
         }
 
-        if let Some(route) = &item.route_id {
+        let route = item.route_id();
+        if !route.is_empty() {
             attributes.push(KeyValue::new_string("http.route", route));
         }
 
-        if let Some(upstream) = &item.upstream {
+        let upstream = item.upstream();
+        if !upstream.is_empty() {
             attributes.push(KeyValue::new_string("network.peer.address", upstream));
         }
 
-        let trace_id_bytes = decode_hex(&item.trace_id, 16);
-        let span_id_bytes = decode_hex(&item.span_id, 8);
-        let parent_span_id_bytes = item
-            .parent_span_id
-            .as_deref()
-            .map(|s| decode_hex(s, 8))
-            .unwrap_or_default();
+        let parent_span_id = if item.has_parent == 1 {
+            item.parent_span_id.to_vec()
+        } else {
+            Vec::new()
+        };
 
         otlp_spans.push(Span {
-            trace_id: trace_id_bytes,
-            span_id: span_id_bytes,
+            trace_id: item.trace_id.to_vec(),
+            span_id: item.span_id.to_vec(),
             trace_state: String::new(),
-            parent_span_id: parent_span_id_bytes,
-            name: item.name.clone(),
+            parent_span_id,
+            name: format!("{method} {path}"),
             kind: 2, // SPAN_KIND_SERVER
-            start_time_unix_nano: item.start_time_unix_nano as u64,
-            end_time_unix_nano: item.end_time_unix_nano as u64,
+            start_time_unix_nano: item.start_time_unix_nano,
+            end_time_unix_nano: item.end_time_unix_nano,
             attributes,
             dropped_attributes_count: 0,
             status: Some(Status {
@@ -235,6 +220,57 @@ pub fn format_otlp_spans_proto(spans: &[OtlpSpanItem], service_name: &str) -> Ve
         .encode(&mut buf)
         .expect("protobuf encoding is infallible");
     buf
+}
+
+/// Encodes a slice of legacy [`OtlpSpanItem`] records into compliant binary Protobuf bytes.
+///
+/// Retained for test backward-compatibility.
+pub fn format_otlp_spans_proto(spans: &[OtlpSpanItem], service_name: &str) -> Vec<u8> {
+    let mut packed_list = Vec::with_capacity(spans.len());
+    for s in spans {
+        let mut p = PackedOtlpSpan::empty();
+        p.start_time_unix_nano = s.start_time_unix_nano as u64;
+        p.end_time_unix_nano = s.end_time_unix_nano as u64;
+        p.status_code = s.status_code;
+
+        if let Ok(method) = s.method.parse::<http::Method>() {
+            p.method = PackedOtlpSpan::encode_method(&method);
+        }
+        p.set_path(s.path.as_bytes());
+
+        if let Some(ip) = &s.client_ip
+            && let Ok(addr) = ip.parse::<std::net::IpAddr>()
+        {
+            p.set_client_ip(addr);
+        }
+        if let Some(route) = &s.route_id {
+            p.set_route_id(route.as_bytes());
+        }
+        if let Some(up) = &s.upstream {
+            p.set_upstream(up.as_bytes());
+        }
+
+        let mut trace_raw = [0u8; 16];
+        if decode_hex(s.trace_id.as_bytes(), &mut trace_raw) == 16 {
+            p.set_trace_id(&trace_raw);
+        }
+
+        let mut span_raw = [0u8; 8];
+        if decode_hex(s.span_id.as_bytes(), &mut span_raw) == 8 {
+            p.set_span_id(&span_raw);
+        }
+
+        if let Some(parent) = &s.parent_span_id {
+            let mut parent_raw = [0u8; 8];
+            if decode_hex(parent.as_bytes(), &mut parent_raw) == 8 {
+                p.set_parent_span_id(&parent_raw);
+            }
+        }
+
+        packed_list.push(p);
+    }
+
+    format_packed_spans_proto(&packed_list, service_name)
 }
 
 #[cfg(test)]

@@ -23,7 +23,9 @@ use velda_sync::post_sync::plugin::PluginConfig;
 use super::traceparent::TraceParentCodec;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
-use crate::header::{TRACEPARENT, TRACESTATE, X_REQUEST_ID, X_SPAN_ID, X_TRACE_ID};
+use crate::header::{
+    TRACEPARENT, TRACESTATE, X_PARENT_SPAN_ID, X_REQUEST_ID, X_SPAN_ID, X_TRACE_ID,
+};
 use crate::pre_upstream::PreUpstreamPlugin;
 
 /// Declarative configuration for [`W3cTraceContextPlugin`].
@@ -83,32 +85,37 @@ impl PreUpstreamPlugin for W3cTraceContextPlugin {
 
         let flags_str = if self.config.sampled { "01" } else { "00" };
 
-        let (trace_id_str, new_traceparent_str) = match existing_traceparent {
-            Some(parsed) => {
-                let tp = TraceParentCodec::format(parsed.trace_id, new_span_str, parsed.flags);
-                (parsed.trace_id.to_string(), tp)
-            }
-            None => {
-                if !self.config.generate_if_missing {
-                    return Action::Continue;
+        let (trace_id_str, new_traceparent_str, parent_span_str): (String, String, Option<String>) =
+            match existing_traceparent {
+                Some(parsed) => {
+                    let tp = TraceParentCodec::format(parsed.trace_id, new_span_str, parsed.flags);
+                    (
+                        parsed.trace_id.to_string(),
+                        tp,
+                        Some(parsed.parent_id.to_string()),
+                    )
                 }
-                // Check if an existing Request ID is available from state or X-REQUEST-ID header
-                let trace_id = if req.state.request_id.0 != 0 {
-                    req.state.request_id.to_string()
-                } else if let Some(req_id) =
-                    req.headers.get(&X_REQUEST_ID).and_then(|v| v.to_str().ok())
-                    && let Ok(req_bytes) = req_id.as_bytes().try_into()
-                    && super::traceparent::is_valid_nonzero_hex_32(req_bytes)
-                {
-                    req_id.to_string()
-                } else {
-                    TraceParentCodec::generate_trace_id()
-                };
+                None => {
+                    if !self.config.generate_if_missing {
+                        return Action::Continue;
+                    }
+                    // Check if an existing Request ID is available from state or X-REQUEST-ID header
+                    let trace_id = if req.state.request_id.0 != 0 {
+                        req.state.request_id.to_string()
+                    } else if let Some(req_id) =
+                        req.headers.get(&X_REQUEST_ID).and_then(|v| v.to_str().ok())
+                        && let Ok(req_bytes) = req_id.as_bytes().try_into()
+                        && super::traceparent::is_valid_nonzero_hex_32(req_bytes)
+                    {
+                        req_id.to_string()
+                    } else {
+                        TraceParentCodec::generate_trace_id()
+                    };
 
-                let tp = TraceParentCodec::format(&trace_id, new_span_str, flags_str);
-                (trace_id, tp)
-            }
-        };
+                    let tp = TraceParentCodec::format(&trace_id, new_span_str, flags_str);
+                    (trace_id, tp, None)
+                }
+            };
 
         if let Ok(tp_val) = HeaderValue::from_str(&new_traceparent_str) {
             req.headers.insert(TRACEPARENT, tp_val);
@@ -120,6 +127,14 @@ impl PreUpstreamPlugin for W3cTraceContextPlugin {
 
         if let Ok(s_val) = HeaderValue::from_str(new_span_str) {
             req.headers.insert(X_SPAN_ID, s_val);
+        }
+
+        if let Some(ref parent_span) = parent_span_str {
+            if let Ok(p_val) = HeaderValue::from_str(parent_span) {
+                req.headers.insert(X_PARENT_SPAN_ID, p_val);
+            }
+        } else {
+            req.headers.remove(&X_PARENT_SPAN_ID);
         }
 
         if !self.config.forward_tracestate {

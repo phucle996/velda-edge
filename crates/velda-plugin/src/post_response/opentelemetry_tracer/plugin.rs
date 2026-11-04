@@ -1,84 +1,65 @@
 //! OpenTelemetry Span Reporter Post-Response Plugin (`opentelemetry_tracer`).
 //!
-//! Provides lock-free, zero-blocking OpenTelemetry span reporting during `post_response`.
+//! Provides zero-blocking, zero-heap-allocation OpenTelemetry span reporting during `post_response`.
 //! Reconstructs end-to-end edge request spans from lifecycle metadata headers,
-//! dispatching [`OtlpSpanItem`] records into a bounded channel for asynchronous Shadow Worker
-//! batch flushing without performing synchronous I/O or stalling Data Plane traffic workers.
+//! writes 256-byte cacheline-aligned [`PackedOtlpSpan`] records to page-aligned RAM slots
+//! via non-temporal vector instructions (`_mm256_stream_si256`), and hands off the slot index
+//! to the background Shadow Worker in ~1ns without stalling Data Plane frontline traffic workers.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use http::HeaderMap;
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::client::OtlpTraceClient;
-use super::client_grpc::OtlpTracesGrpcClient;
-use super::proto::format_otlp_spans_proto;
-use super::span::{OtlpSpanItem, format_otlp_spans_json};
+use super::config::OpentelemetryTracerConfig;
+use super::drainer::ShadowOtlpTracerDrainer;
+use super::ring_buffer::ShardedRingBuffer;
+use super::sampling::SamplingTable;
+use super::span::{PackedOtlpSpan, decode_hex};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::header::{
-    X_REQUEST_ID, X_RESPONSE_TIME, X_ROUTE_ID, X_SPAN_ID, X_TRACE_ID, X_UPSTREAM_ADDR,
+    TRACEPARENT, X_PARENT_SPAN_ID, X_REQUEST_ID, X_RESPONSE_TIME, X_ROUTE_ID, X_SPAN_ID,
+    X_TRACE_ID, X_UPSTREAM_ADDR,
 };
 use crate::hook::try_dispatch_shadow;
 use crate::post_response::PostResponsePlugin;
-
-/// Declarative configuration for [`OpentelemetryTracerPlugin`].
-///
-/// # Strict Invariant: 100% Explicit Declaration
-/// Every parameter must be explicitly declared in the configuration JSON.
-/// Zero defaults are permitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpentelemetryTracerConfig {
-    /// OTLP transport protocol (must be explicitly declared as `"http"` or `"grpc"`).
-    pub protocol: String,
-    /// OTLP collector endpoint URL (e.g. `http://127.0.0.1:4318/v1/traces` or `grpc://127.0.0.1:4317`).
-    pub endpoint: String,
-    /// Batch size threshold triggering an immediate flush (between 1 and 4096).
-    pub batch_size: usize,
-    /// Maximum duration in milliseconds before flushing pending spans (between 10 and 60000).
-    pub flush_interval_ms: u64,
-    /// Bounded capacity of the lock-free span dispatch queue (between 128 and 262144).
-    pub buffer_capacity: usize,
-    /// TCP and TLS connection establishment timeout in milliseconds (100 to 60000).
-    pub connect_timeout_ms: u64,
-    /// Request export completion timeout in milliseconds (100 to 60000).
-    pub request_timeout_ms: u64,
-    /// Service name reported in OpenTelemetry Resource attributes.
-    pub service_name: String,
-    /// Custom HTTP or gRPC headers (use `{}` if none).
-    pub headers: HashMap<String, String>,
-}
 
 /// Post-Response OpenTelemetry Tracer Plugin.
 pub struct OpentelemetryTracerPlugin {
     pub id: String,
     pub config: OpentelemetryTracerConfig,
-    sender: mpsc::Sender<OtlpSpanItem>,
+    sampling: SamplingTable,
+    ring_buffer: Arc<ShardedRingBuffer>,
     dropped_count: Arc<AtomicU64>,
     logged_count: Arc<AtomicU64>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl OpentelemetryTracerPlugin {
     /// Constructs a new `OpentelemetryTracerPlugin` and starts the asynchronous Shadow flusher.
     pub fn new(id: impl Into<String>, config: OpentelemetryTracerConfig) -> Self {
-        let (plugin, rx) = Self::new_with_receiver(id, config);
-        let endpoint = plugin.config.endpoint.clone();
-        let protocol = plugin.config.protocol.clone();
-        let batch_size = plugin.config.batch_size;
-        let flush_interval = Duration::from_millis(plugin.config.flush_interval_ms.max(10));
-        let service_name = plugin.config.service_name.clone();
+        let id_str = id.into();
+        let topology = velda_core::global_hardware_topology();
+        let num_workers = topology.worker_threads.max(1);
 
-        let connect_timeout = Duration::from_millis(plugin.config.connect_timeout_ms);
-        let request_timeout = Duration::from_millis(plugin.config.request_timeout_ms);
+        let ring_buffer = Arc::new(ShardedRingBuffer::new(
+            num_workers,
+            config.buffer_capacity.max(128),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dropped_count = Arc::new(AtomicU64::new(0));
+        let logged_count = Arc::new(AtomicU64::new(0));
+
+        let sampling = config
+            .build_sampling_table()
+            .unwrap_or_else(|_| SamplingTable::empty());
 
         let mut custom_headers = HeaderMap::new();
-        for (k, v) in &plugin.config.headers {
+        for (k, v) in &config.headers {
             if let Ok(name) = http::header::HeaderName::from_bytes(k.as_bytes())
                 && let Ok(val) = http::header::HeaderValue::from_str(v)
             {
@@ -86,48 +67,40 @@ impl OpentelemetryTracerPlugin {
             }
         }
 
+        let drainer = ShadowOtlpTracerDrainer::new(
+            config.protocol.clone(),
+            config.endpoint.clone(),
+            config.batch_size,
+            Duration::from_millis(config.flush_interval_ms.max(10)),
+            Duration::from_millis(config.connect_timeout_ms),
+            Duration::from_millis(config.request_timeout_ms),
+            config.service_name.clone(),
+            custom_headers,
+            ring_buffer.clone(),
+            shutdown.clone(),
+        );
+
         let flusher_task = Box::pin(async move {
-            Self::run_flusher_loop(
-                rx,
-                protocol,
-                endpoint,
-                batch_size,
-                flush_interval,
-                connect_timeout,
-                request_timeout,
-                service_name,
-                custom_headers,
-            )
-            .await;
+            drainer.run().await;
         });
 
         // Priority 1: Dispatch onto Shadow Worker runtime via non-blocking try_dispatch_shadow
         if let Err(task) = try_dispatch_shadow(flusher_task) {
-            // Priority 2: Fallback to current Tokio runtime if Shadow Worker hook is uninitialized (testing)
+            // Priority 2: Fallback to Tokio current runtime if Shadow Worker hook is uninitialized
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(task);
             }
         }
 
-        plugin
-    }
-
-    /// Constructs an `OpentelemetryTracerPlugin` returning the receiving channel end for testing.
-    pub fn new_with_receiver(
-        id: impl Into<String>,
-        config: OpentelemetryTracerConfig,
-    ) -> (Self, mpsc::Receiver<OtlpSpanItem>) {
-        let (sender, receiver) = mpsc::channel(config.buffer_capacity.max(16));
-        (
-            Self {
-                id: id.into(),
-                config,
-                sender,
-                dropped_count: Arc::new(AtomicU64::new(0)),
-                logged_count: Arc::new(AtomicU64::new(0)),
-            },
-            receiver,
-        )
+        Self {
+            id: id_str,
+            config,
+            sampling,
+            ring_buffer,
+            dropped_count,
+            logged_count,
+            shutdown,
+        }
     }
 
     /// Deserializes and validates this plugin from declarative [`PluginConfig`].
@@ -139,137 +112,7 @@ impl OpentelemetryTracerPlugin {
         Ok(Self::new(&config.id, parsed))
     }
 
-    /// Executes the background batching loop on the Shadow Worker.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_flusher_loop(
-        mut rx: mpsc::Receiver<OtlpSpanItem>,
-        protocol: String,
-        endpoint: String,
-        batch_size: usize,
-        flush_interval: Duration,
-        connect_timeout: Duration,
-        request_timeout: Duration,
-        service_name: String,
-        custom_headers: HeaderMap,
-    ) {
-        let is_grpc = protocol.eq_ignore_ascii_case("grpc")
-            || endpoint.starts_with("grpc://")
-            || endpoint.starts_with("grpcs://");
-
-        let mut batch = Vec::with_capacity(batch_size);
-        let mut ticker = tokio::time::interval(flush_interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        if is_grpc {
-            let mut client = match OtlpTracesGrpcClient::new(
-                &endpoint,
-                connect_timeout,
-                request_timeout,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(endpoint = %endpoint, error = %e, "Failed to initialize OTLP gRPC trace client");
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    item = rx.recv() => {
-                        match item {
-                            Some(record) => {
-                                batch.push(record);
-                                if batch.len() >= batch_size {
-                                    Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                            }
-                            None => {
-                                if !batch.is_empty() {
-                                    Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        if !batch.is_empty() {
-                            Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let mut client = match OtlpTraceClient::new(&endpoint, connect_timeout, request_timeout)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(endpoint = %endpoint, error = %e, "Failed to initialize OTLP HTTP trace client");
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    item = rx.recv() => {
-                        match item {
-                            Some(record) => {
-                                batch.push(record);
-                                if batch.len() >= batch_size {
-                                    Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                            }
-                            None => {
-                                if !batch.is_empty() {
-                                    Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        if !batch.is_empty() {
-                            Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Flushes a batch of span records to the OTLP collector via HTTP/JSON.
-    async fn flush_batch_http(
-        client: &mut OtlpTraceClient,
-        batch: &mut Vec<OtlpSpanItem>,
-        service_name: &str,
-        custom_headers: &HeaderMap,
-    ) {
-        let json_str = format_otlp_spans_json(batch, service_name);
-        batch.clear();
-
-        if let Err(e) = client
-            .send_traces(json_str.as_bytes(), custom_headers)
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to flush OTLP traces batch to collector via HTTP");
-        }
-    }
-
-    /// Flushes a batch of span records to the OTLP collector via gRPC/Protobuf.
-    async fn flush_batch_grpc(
-        client: &mut OtlpTracesGrpcClient,
-        batch: &mut Vec<OtlpSpanItem>,
-        service_name: &str,
-        custom_headers: &HeaderMap,
-    ) {
-        let proto_bytes = format_otlp_spans_proto(batch, service_name);
-        batch.clear();
-
-        if let Err(e) = client.send_traces(&proto_bytes, custom_headers).await {
-            tracing::warn!(error = %e, "Failed to flush OTLP traces batch to collector via gRPC");
-        }
-    }
-
-    /// Returns cumulative number of records dropped due to queue saturation.
+    /// Returns cumulative number of records dropped due to ring buffer saturation.
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
     }
@@ -277,6 +120,17 @@ impl OpentelemetryTracerPlugin {
     /// Returns cumulative number of successfully queued span records.
     pub fn logged_count(&self) -> u64 {
         self.logged_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns reference to internal ring buffer container for testing and inspection.
+    pub fn ring_buffer(&self) -> &Arc<ShardedRingBuffer> {
+        &self.ring_buffer
+    }
+}
+
+impl Drop for OpentelemetryTracerPlugin {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 
@@ -286,95 +140,158 @@ impl PostResponsePlugin for OpentelemetryTracerPlugin {
     }
 
     fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
-        let now_nano = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-
         let status = resp.status.as_u16();
 
-        let method = req_headers
-            .get("x-original-method")
-            .or_else(|| req_headers.get("x-forwarded-method"))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("GET")
-            .to_string();
+        // 1. Direct-index status-aware sampling check (Instant escape in ~1.4ns)
+        if !self.sampling.should_sample(status) {
+            return;
+        }
 
-        let path = req_headers
-            .get("x-original-path")
-            .or_else(|| req_headers.get("x-forwarded-uri"))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("/")
-            .to_string();
+        // 2. Construct 256-byte aligned POD span directly on CPU Stack (hot in L1 cache)
+        let mut span = PackedOtlpSpan::empty();
+        span.status_code = status;
+        span.otlp_status = if status < 400 { 1 } else { 2 };
+        span.span_kind = 2; // SPAN_KIND_SERVER
 
-        let client_ip = req_headers
-            .get("x-forwarded-for")
-            .or_else(|| req_headers.get("x-real-ip"))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
+        // Timestamps (Nanoseconds from system clock or coarse fallback)
+        let now_nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or_else(|_| velda_core::coarse_now_sec().saturating_mul(1_000_000_000));
+        span.end_time_unix_nano = now_nano;
 
-        let route_id = resp
-            .headers
-            .get(&X_ROUTE_ID)
-            .or_else(|| req_headers.get(&X_ROUTE_ID))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let upstream = resp
-            .headers
-            .get(&X_UPSTREAM_ADDR)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let latency_ms = resp
+        if let Some(lat) = resp
             .headers
             .get(&X_RESPONSE_TIME)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<f64>().ok());
+            && let Ok(ms) = lat.trim_end_matches("ms").trim().parse::<f64>()
+        {
+            let dur_nanos = (ms * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64;
+            span.start_time_unix_nano = now_nano.saturating_sub(dur_nanos);
+        } else {
+            span.start_time_unix_nano = now_nano;
+        }
 
-        let start_time_nano = match latency_ms {
-            Some(ms) => {
-                let dur_nanos = (ms * 1_000_000.0) as u128;
-                now_nano.saturating_sub(dur_nanos)
+        // Method
+        if let Some(m) = req_headers
+            .get("x-forwarded-method")
+            .or_else(|| req_headers.get("x-original-method"))
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(method) = http::Method::from_bytes(m.as_bytes()) {
+                span.method = PackedOtlpSpan::encode_method(&method);
             }
-            None => now_nano,
-        };
+        } else {
+            span.method = 1; // Default GET
+        }
 
-        let trace_id = req_headers
+        // URL Path
+        if let Some(path_bytes) = req_headers
+            .get("x-forwarded-uri")
+            .or_else(|| req_headers.get("x-original-path"))
+            .map(|v| v.as_bytes())
+        {
+            span.set_path(path_bytes);
+        } else {
+            span.set_path(b"/");
+        }
+
+        // Client IP
+        if let Some(ip_str) = req_headers
+            .get("x-forwarded-for")
+            .or_else(|| req_headers.get("x-real-ip"))
+            .and_then(|v| v.to_str().ok())
+        {
+            let first_ip = ip_str.split(',').next().unwrap_or("").trim();
+            if let Ok(ip) = first_ip.parse::<std::net::IpAddr>() {
+                span.set_client_ip(ip);
+            }
+        }
+
+        // Matched Route ID
+        if let Some(rt) = resp
+            .headers
+            .get(&X_ROUTE_ID)
+            .or_else(|| req_headers.get(&X_ROUTE_ID))
+        {
+            span.set_route_id(rt.as_bytes());
+        }
+
+        // Upstream Target Address
+        if let Some(up) = resp.headers.get(&X_UPSTREAM_ADDR) {
+            span.set_upstream(up.as_bytes());
+        }
+
+        // 3. W3C Trace ID & Span ID Resolution (Zero-copy hex decode from HeaderWorkspace)
+        if let Some(t_val) = req_headers
             .get(&X_TRACE_ID)
             .or_else(|| req_headers.get(&X_REQUEST_ID))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("00000000000000000000000000000001")
-            .to_string();
+        {
+            let bytes = t_val.as_bytes();
+            if bytes.len() == 32 {
+                let mut raw = [0u8; 16];
+                if decode_hex(bytes, &mut raw) == 16 {
+                    span.set_trace_id(&raw);
+                } else {
+                    span.set_trace_id(bytes);
+                }
+            } else {
+                span.set_trace_id(bytes);
+            }
+        }
 
-        let span_id = req_headers
-            .get(&X_SPAN_ID)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("0000000000000001")
-            .to_string();
+        if let Some(s_val) = req_headers.get(&X_SPAN_ID) {
+            let bytes = s_val.as_bytes();
+            if bytes.len() == 16 {
+                let mut raw = [0u8; 8];
+                if decode_hex(bytes, &mut raw) == 8 {
+                    span.set_span_id(&raw);
+                } else {
+                    span.set_span_id(bytes);
+                }
+            } else {
+                span.set_span_id(bytes);
+            }
+        }
 
-        let name = format!("{method} {path}");
+        // 4. Parent Span ID (Enables distributed hierarchical trace tree linking)
+        if let Some(p_val) = req_headers.get(&X_PARENT_SPAN_ID) {
+            let bytes = p_val.as_bytes();
+            if bytes.len() == 16 {
+                let mut raw = [0u8; 8];
+                if decode_hex(bytes, &mut raw) == 8 {
+                    span.set_parent_span_id(&raw);
+                }
+            }
+        }
 
-        let item = OtlpSpanItem {
-            trace_id,
-            span_id,
-            parent_span_id: None,
-            name,
-            start_time_unix_nano: start_time_nano,
-            end_time_unix_nano: now_nano,
-            status_code: status,
-            method,
-            path,
-            route_id,
-            client_ip,
-            upstream,
-        };
+        // Fallback: Parse directly from TRACEPARENT if X_TRACE_ID / X_SPAN_ID were omitted
+        if (span.trace_id == [0; 16] || span.span_id == [0; 8])
+            && let Some(tp_val) = req_headers.get(&TRACEPARENT)
+        {
+            let bytes = tp_val.as_bytes();
+            if bytes.len() >= 53 && bytes.starts_with(b"00-") {
+                if span.trace_id == [0; 16] {
+                    let mut raw = [0u8; 16];
+                    if decode_hex(&bytes[3..35], &mut raw) == 16 {
+                        span.set_trace_id(&raw);
+                    }
+                }
+                if span.span_id == [0; 8] {
+                    let mut raw = [0u8; 8];
+                    if decode_hex(&bytes[36..52], &mut raw) == 8 {
+                        span.set_span_id(&raw);
+                    }
+                }
+            }
+        }
 
-        match self.sender.try_send(item) {
+        // 5. Stream 256-byte POD span directly to SPSC ring buffer in RAM via AVX2 non-temporal store
+        match self.ring_buffer.try_push(&span) {
             Ok(()) => {
                 self.logged_count.fetch_add(1, Ordering::Relaxed);
             }
-            Err(_) => {
+            Err(()) => {
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -395,6 +312,7 @@ impl PostResponsePlugin for OpentelemetryTracerPlugin {
 mod tests {
     use super::*;
     use http::{HeaderValue, StatusCode};
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_opentelemetry_tracer_capture() {
@@ -408,9 +326,10 @@ mod tests {
             request_timeout_ms: 10000,
             service_name: "test-gateway".to_string(),
             headers: HashMap::new(),
+            sampling: HashMap::new(),
         };
 
-        let (plugin, mut rx) = OpentelemetryTracerPlugin::new_with_receiver("otel_tracer", config);
+        let plugin = OpentelemetryTracerPlugin::new("otel_tracer", config);
 
         let mut req_headers = velda_core::HeaderWorkspace::empty();
         req_headers.insert("x-original-method", HeaderValue::from_static("GET"));
@@ -420,6 +339,10 @@ mod tests {
             HeaderValue::from_static("4bf92f3577b34da6a3ce929d0e0e4736"),
         );
         req_headers.insert(X_SPAN_ID, HeaderValue::from_static("00f067aa0ba902b7"));
+        req_headers.insert(
+            X_PARENT_SPAN_ID,
+            HeaderValue::from_static("5fb397be34d23b0f"),
+        );
 
         let mut resp = L7Response::empty(StatusCode::OK);
         resp.headers
@@ -433,12 +356,46 @@ mod tests {
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 0);
 
-        let received = rx.recv().await.expect("Span received");
+        let mut batch = vec![PackedOtlpSpan::empty(); 10];
+        let drained = plugin.ring_buffer().pop_all(&mut batch);
+        assert_eq!(drained, 1);
+
+        let received = &batch[0];
         assert_eq!(received.status_code, 200);
-        assert_eq!(received.name, "GET /api/users");
-        assert_eq!(received.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
-        assert_eq!(received.span_id, "00f067aa0ba902b7");
-        assert_eq!(received.route_id.as_deref(), Some("users-route"));
-        assert_eq!(received.upstream.as_deref(), Some("10.0.0.5:8080"));
+        assert_eq!(received.path(), "/api/users");
+        assert_eq!(received.method_str(), "GET");
+        assert_eq!(received.route_id(), "users-route");
+        assert_eq!(received.upstream(), "10.0.0.5:8080");
+        assert_eq!(received.has_parent, 1);
+
+        let mut trace_hex = [0u8; 32];
+        for (i, b) in received.trace_id.iter().enumerate() {
+            let s = format!("{:02x}", b);
+            trace_hex[i * 2] = s.as_bytes()[0];
+            trace_hex[i * 2 + 1] = s.as_bytes()[1];
+        }
+        assert_eq!(
+            std::str::from_utf8(&trace_hex).unwrap(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+
+        let mut span_hex = [0u8; 16];
+        for (i, b) in received.span_id.iter().enumerate() {
+            let s = format!("{:02x}", b);
+            span_hex[i * 2] = s.as_bytes()[0];
+            span_hex[i * 2 + 1] = s.as_bytes()[1];
+        }
+        assert_eq!(std::str::from_utf8(&span_hex).unwrap(), "00f067aa0ba902b7");
+
+        let mut parent_hex = [0u8; 16];
+        for (i, b) in received.parent_span_id.iter().enumerate() {
+            let s = format!("{:02x}", b);
+            parent_hex[i * 2] = s.as_bytes()[0];
+            parent_hex[i * 2 + 1] = s.as_bytes()[1];
+        }
+        assert_eq!(
+            std::str::from_utf8(&parent_hex).unwrap(),
+            "5fb397be34d23b0f"
+        );
     }
 }

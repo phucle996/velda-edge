@@ -26,6 +26,9 @@ pub const X_TRACE_ID: HeaderName = HeaderName::from_static("x-trace-id");
 /// Canonical distributed span ID header.
 pub const X_SPAN_ID: HeaderName = HeaderName::from_static("x-span-id");
 
+/// Canonical distributed parent span ID header.
+pub const X_PARENT_SPAN_ID: HeaderName = HeaderName::from_static("x-parent-span-id");
+
 /// Standard W3C TraceContext traceparent header.
 pub const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
 
