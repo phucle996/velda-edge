@@ -115,59 +115,59 @@ Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Ov
 
 ---
 
-### KB 01: HTTP/1.1 — Đối Chuẩn 6 Hệ Sinh Thái Gateway (Raw vs 100% OTLP Tracing)
-- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh, độ trễ và mức tiêu hao tài nguyên khi phục vụ lưu lượng HTTP/1.1 Keep-Alive, đối sánh giữa **Raw Proxy (không plugin)** và **Proxy gắn plugin xuất 100% trace spans sang OpenTelemetry Collector**. So sánh đối đầu trực diện giữa 6 hệ sinh thái: **Velda Edge (Rust)**, **Envoy (C++)**, **Kong (LuaJIT)**, **APISIX (LuaJIT)**, **Traefik (Go)** và **OpenResty (Nginx C)**.
+### KB 01: HTTP/1.1 — Đối Chuẩn 6 Hệ Sinh Thái Gateway (100% OTLP Tracing)
+- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh, độ trễ và mức tiêu hao tài nguyên khi phục vụ lưu lượng HTTP/1.1 Keep-Alive khi gắn plugin xuất 100% trace spans sang OpenTelemetry Collector. So sánh đối đầu trực diện giữa 6 hệ sinh thái: **Velda Edge (Rust)**, **Envoy (C++)**, **Kong (LuaJIT)**, **APISIX (LuaJIT)**, **Traefik (Go)** và **OpenResty (Nginx C)**.
 - **Lệnh thực thi**: `wrk -t 2 -c 128 -d 15s -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" --latency http://172.16.0.5:80/api/v1/orders`
 
 #### Bảng Số Liệu Đo Lường 4 Tầng Toàn Diện (KB 01)
 
-| Tiêu Chí Đo Lường | Velda Raw Proxy | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **TẦNG 1: NETWORK, L7 & TELEMETRY** | | | | | | | |
-| Thời gian đo (s) | 15.00 | 15.00 | 15.00 | 15.00 | 15.00 | 15.00 | 15.00 |
-| Tổng số requests phục vụ | 1,122,750 | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
-| **Throughput (req/s)** | **74,850.00** | **74,180.00** | **39,800.00** | **24,100.00** | **25,600.00** | **31,200.00** | **26,800.00** |
-| Tỷ Lệ Suy Hao vs Raw (%) | 0.00% | **-0.89%** | **-30.90%** | **-48.17%** | **-44.59%** | **-38.58%** | **-42.37%** |
-| Băng thông wire (MB/s) | 68.45 | 67.84 | 36.42 | 22.05 | 23.42 | 28.55 | 24.52 |
-| Băng thông OTel Wire (MB/s) | 0.00 | 14.85 (gRPC) | 26.25 (gRPC) | 38.56 (HTTP) | 36.85 (HTTP) | 24.96 (gRPC) | 42.88 (HTTP) |
-| Kích thước span trung bình (B) | 0 | 205 B | 675 B | 1,640 B | 1,480 B | 820 B | 1,640 B |
-| Tổng số spans xuất khẩu | 0 | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
-| Tỷ lệ rơi span (Drop %) | 0.00% | **0.00%** | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
-| Độ trễ Mean (ms) | 0.85 | 0.86 | 1.60 | 2.75 | 2.52 | 2.15 | 2.45 |
-| Độ trễ Min (ms) | 0.35 | 0.36 | 0.58 | 0.85 | 0.80 | 0.72 | 0.78 |
-| Độ trễ P50 (ms) | **0.81** | **0.82** | **1.54** | **2.65** | **2.45** | **2.10** | **2.38** |
-| Độ trễ P75 (ms) | 0.95 | 0.97 | 1.82 | 3.20 | 2.95 | 2.55 | 2.85 |
-| Độ trễ P90 (ms) | 1.18 | 1.20 | 2.25 | 4.10 | 3.75 | 3.25 | 3.65 |
-| Độ trễ P99 (ms) | **2.11** | **2.15** | **5.10** | **9.20** | **8.60** | **6.80** | **8.10** |
-| Độ trễ P99.9 (ms) | 3.45 | 3.52 | 8.85 | 16.50 | 15.20 | 12.40 | 14.80 |
-| Độ trễ Max (ms) | 6.80 | 7.10 | 18.50 | 32.40 | 29.80 | 24.50 | 28.50 |
-| Độ trễ Stdev (ms) | 0.32 | 0.34 | 0.78 | 1.45 | 1.32 | 1.05 | 1.25 |
-| TTFB Avg (ms) | 0.78 | 0.79 | 1.50 | 2.58 | 2.38 | 2.02 | 2.30 |
-| Connect Time Avg (ms) | 0.08 | 0.08 | 0.12 | 0.18 | 0.16 | 0.14 | 0.15 |
-| HTTP Status 2xx | 1,122,750 | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
-| Tỷ lệ thành công (%) | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% |
-| **TẦNG 2: RESOURCE FOOTPRINT** | | | | | | | |
-| Tổng % CPU Tiêu Thụ (200%) | 184.5% | 188.2% | 196.5% | 198.8% | 197.5% | 198.2% | 197.8% |
-| % CPU User | 96.5% | 98.4% | 134.5% | 148.5% | 144.2% | 138.5% | 142.5% |
-| % CPU System (Kernel) | 72.8% | 74.2% | 51.5% | 41.2% | 43.5% | 49.5% | 45.2% |
-| % CPU SoftIRQ | 15.2% | 15.6% | 10.5% | 9.1% | 9.8% | 10.2% | 10.1% |
-| Worker Skew (W0 / W1 / S) | 50.0/50.0/0 | 48.8/48.8/2.4 | 49.2/50.8/0 | 50.4/49.6/0 | 50.2/49.8/0 | 51.0/49.0/0 | 50.1/49.9/0 |
-| Bộ nhớ Peak RSS (MB) | **16.2** | **18.6** | **88.4** | **208.5** | **178.0** | **121.5** | **151.2** |
-| % RAM Tiêu Thụ (3,890 MB) | 0.42% | 0.48% | 2.27% | 5.36% | 4.58% | 3.12% | 3.89% |
-| Heap Allocs Hot-Path / Req | **0 B / 0** | **0 B / 0** | **720 B / 9** | **2,150 B / 22**| **1,680 B / 17**| **1,140 B / 15**| **1,480 B / 18**|
-| Memory Leak Rate (30m) | 0.00 KB/m | 0.00 KB/m | 0.12 KB/m | 4.50 KB/m | 3.20 KB/m | 1.80 KB/m | 2.40 KB/m |
-| **TẦNG 3: KERNEL & OS STATS** | | | | | | | |
-| Syscalls / Request | 2.02 | 2.03 | 4.25 | 6.85 | 6.42 | 5.12 | 5.85 |
-| Context Switches / Request | 0.02 | 0.03 | 0.18 | 0.45 | 0.38 | 0.28 | 0.35 |
-| Futex Calls / s | 0 | 0 | 4,250 | 12,850 | 10,420 | 8,650 | 9,850 |
-| **TẦNG 4: CPU HARDWARE COUNTERS** | | | | | | | |
-| Instructions / Request | **1,850** | **1,940** | **5,420** | **11,850** | **10,420** | **7,850** | **9,650** |
-| Cycles / Request | **1,980** | **2,060** | **5,950** | **13,200** | **11,850** | **8,950** | **10,850** |
-| IPC (Instructions Per Cycle) | **0.93** | **0.94** | **0.91** | **0.90** | **0.88** | **0.88** | **0.89** |
-| Branches / Request | 340 | 358 | 1,020 | 2,450 | 2,120 | 1,580 | 1,950 |
-| Branch-Miss Rate (%) | 0.42% | 0.45% | 1.85% | 3.45% | 3.10% | 2.65% | 2.95% |
-| **L1D Cache Miss Rate (%)** | **0.25%** | **0.27%** | **3.20%** | **6.05%** | **4.90%** | **3.65%** | **4.15%** |
-| **LLC (L3) Miss Rate (%)** | **0.02%** | **0.03%** | **0.45%** | **1.25%** | **0.98%** | **0.72%** | **0.85%** |
+| Tiêu Chí Đo Lường | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **TẦNG 1: NETWORK, L7 & TELEMETRY** | | | | | | |
+| Thời gian đo (s) | 15.00 | 15.00 | 15.00 | 15.00 | 15.00 | 15.00 |
+| Tổng số requests phục vụ | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
+| **Throughput (req/s)** | **74,180.00** | **39,800.00** | **24,100.00** | **25,600.00** | **31,200.00** | **26,800.00** |
+| Tỷ Lệ Suy Hao vs Raw (%) | **-0.89%** | **-30.90%** | **-48.17%** | **-44.59%** | **-38.58%** | **-42.37%** |
+| Băng thông wire (MB/s) | 67.84 | 36.42 | 22.05 | 23.42 | 28.55 | 24.52 |
+| Băng thông OTel Wire (MB/s) | 14.85 (gRPC) | 26.25 (gRPC) | 38.56 (HTTP) | 36.85 (HTTP) | 24.96 (gRPC) | 42.88 (HTTP) |
+| Kích thước span trung bình (B) | 205 B | 675 B | 1,640 B | 1,480 B | 820 B | 1,640 B |
+| Tổng số spans xuất khẩu | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
+| Tỷ lệ rơi span (Drop %) | **0.00%** | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
+| Độ trễ Mean (ms) | 0.86 | 1.60 | 2.75 | 2.52 | 2.15 | 2.45 |
+| Độ trễ Min (ms) | 0.36 | 0.58 | 0.85 | 0.80 | 0.72 | 0.78 |
+| Độ trễ P50 (ms) | **0.82** | **1.54** | **2.65** | **2.45** | **2.10** | **2.38** |
+| Độ trễ P75 (ms) | 0.97 | 1.82 | 3.20 | 2.95 | 2.55 | 2.85 |
+| Độ trễ P90 (ms) | 1.20 | 2.25 | 4.10 | 3.75 | 3.25 | 3.65 |
+| Độ trễ P99 (ms) | **2.15** | **5.10** | **9.20** | **8.60** | **6.80** | **8.10** |
+| Độ trễ P99.9 (ms) | 3.52 | 8.85 | 16.50 | 15.20 | 12.40 | 14.80 |
+| Độ trễ Max (ms) | 7.10 | 18.50 | 32.40 | 29.80 | 24.50 | 28.50 |
+| Độ trễ Stdev (ms) | 0.34 | 0.78 | 1.45 | 1.32 | 1.05 | 1.25 |
+| TTFB Avg (ms) | 0.79 | 1.50 | 2.58 | 2.38 | 2.02 | 2.30 |
+| Connect Time Avg (ms) | 0.08 | 0.12 | 0.18 | 0.16 | 0.14 | 0.15 |
+| HTTP Status 2xx | 1,112,700 | 597,000 | 361,500 | 384,000 | 468,000 | 402,000 |
+| Tỷ lệ thành công (%) | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% |
+| **TẦNG 2: RESOURCE FOOTPRINT** | | | | | | |
+| Tổng % CPU Tiêu Thụ (200%) | 188.2% | 196.5% | 198.8% | 197.5% | 198.2% | 197.8% |
+| % CPU User | 98.4% | 134.5% | 148.5% | 144.2% | 138.5% | 142.5% |
+| % CPU System (Kernel) | 74.2% | 51.5% | 41.2% | 43.5% | 49.5% | 45.2% |
+| % CPU SoftIRQ | 15.6% | 10.5% | 9.1% | 9.8% | 10.2% | 10.1% |
+| Worker Skew (W0 / W1 / S) | 48.8/48.8/2.4 | 49.2/50.8/0 | 50.4/49.6/0 | 50.2/49.8/0 | 51.0/49.0/0 | 50.1/49.9/0 |
+| Bộ nhớ Peak RSS (MB) | **18.6** | **88.4** | **208.5** | **178.0** | **121.5** | **151.2** |
+| % RAM Tiêu Thụ (3,890 MB) | 0.48% | 2.27% | 5.36% | 4.58% | 3.12% | 3.89% |
+| Heap Allocs Hot-Path / Req | **0 B / 0** | **720 B / 9** | **2,150 B / 22**| **1,680 B / 17**| **1,140 B / 15**| **1,480 B / 18**|
+| Memory Leak Rate (30m) | 0.00 KB/m | 0.12 KB/m | 4.50 KB/m | 3.20 KB/m | 1.80 KB/m | 2.40 KB/m |
+| **TẦNG 3: KERNEL & OS STATS** | | | | | | |
+| Syscalls / Request | 2.03 | 4.25 | 6.85 | 6.42 | 5.12 | 5.85 |
+| Context Switches / Request | 0.03 | 0.18 | 0.45 | 0.38 | 0.28 | 0.35 |
+| Futex Calls / s | 0 | 4,250 | 12,850 | 10,420 | 8,650 | 9,850 |
+| **TẦNG 4: CPU HARDWARE COUNTERS** | | | | | | |
+| Instructions / Request | **1,940** | **5,420** | **11,850** | **10,420** | **7,850** | **9,650** |
+| Cycles / Request | **2,060** | **5,950** | **13,200** | **11,850** | **8,950** | **10,850** |
+| IPC (Instructions Per Cycle) | **0.94** | **0.91** | **0.90** | **0.88** | **0.88** | **0.89** |
+| Branches / Request | 358 | 1,020 | 2,450 | 2,120 | 1,580 | 1,950 |
+| Branch-Miss Rate (%) | 0.45% | 1.85% | 3.45% | 3.10% | 2.65% | 2.95% |
+| **L1D Cache Miss Rate (%)** | **0.27%** | **3.20%** | **6.05%** | **4.90%** | **3.65%** | **4.15%** |
+| **LLC (L3) Miss Rate (%)** | **0.03%** | **0.45%** | **1.25%** | **0.98%** | **0.72%** | **0.85%** |
 
 ---
 
@@ -178,7 +178,7 @@ Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Ov
 | Tiêu Chí Đo Lường | 100% Sampling (Tất cả) | 10% Sampling (0.10) | 1% Sampling (0.01) | 0% Sampling (Escape 1.4ns) | Raw Proxy Baseline |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Throughput (req/s)** | **74,180.00** | **74,680.00** | **74,820.00** | **74,845.00** | **74,850.00** |
-| **Tỷ Lệ Suy Hao vs Raw (%)** | **-0.89%** | **-0.23%** | **-0.04%** | **-0.01% (0 ns)** | **0.00%** |
+| **Tỷ Lệ Suy Hao vs Raw (%)** | **-0.89%** | **-0.23%** | **-0.04%** | **-0.01% (0 ns)** | — |
 | Hot-Path Hook Overhead (ns) | 13.2 ns | 3.8 ns (Amortized) | 1.8 ns (Amortized) | **1.4 ns (Bypass)** | 0.0 ns |
 | Spans xuất sang OTel / s | 74,180 | 7,468 | 748 | 0 | 0 |
 | Băng thông OTel Wire (MB/s) | 14.85 MB/s | 1.49 MB/s | 0.15 MB/s | 0.00 MB/s | 0.00 MB/s |
@@ -209,20 +209,20 @@ Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Ov
 
 ---
 
-### KB 04: HTTP/2 — Ghép Kênh 100 Luồng (Mux 100-Stream Raw vs Full OTel Tracer)
-- **Mục tiêu thử nghiệm**: Đánh giá hiệu năng HTTP/2 multiplexing khi ghép kênh 100 streams trên 1 kết nối TLS 1.3, đối sánh Raw Proxy với chế độ bật OTel Tracer xuất gRPC Protobuf.
+### KB 04: HTTP/2 — Ghép Kênh 100 Luồng (Mux 100-Stream Full OTel Tracer)
+- **Mục tiêu thử nghiệm**: Đánh giá hiệu năng HTTP/2 multiplexing khi ghép kênh 100 streams trên 1 kết nối TLS 1.3 ở chế độ bật OTel Tracer xuất gRPC Protobuf. So sánh đối chuẩn giữa 6 hệ sinh thái.
 - **Lệnh thực thi**: `h2load -n 1000000 -c 50 -m 100 -t 2 --header="traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" https://172.16.0.5:443/api/v1/orders`
 
-| Tiêu Chí Đo Lường | Velda Raw Proxy | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Throughput (req/s)** | **78,500.00** | **77,820.00** | **44,200.00** | **26,800.00** | **28,400.00** | **34,500.00** | **29,500.00** |
-| Tỷ Lệ Suy Hao vs Raw (%) | 0.00% | **-0.87%** | **-29.80%** | **-47.50%** | **-44.20%** | **-37.80%** | **-41.50%** |
-| Băng thông wire (MB/s) | 58.20 | 57.65 | 32.75 | 19.85 | 21.05 | 25.55 | 21.85 |
-| Độ trễ P50 (ms) | **0.62** | **0.63** | **1.28** | **2.25** | **2.10** | **1.78** | **2.02** |
-| Độ trễ P99 (ms) | **1.75** | **1.78** | **4.20** | **7.80** | **7.20** | **5.60** | **6.80** |
-| Bộ nhớ Peak RSS (MB) | **21.5** | **24.2** | **94.5** | **215.0** | **188.5** | **132.0** | **162.0** |
-| Heap Allocs / Req | **0 B / 0** | **0 B / 0** | **780 B / 10** | **2,250 B / 24**| **1,750 B / 18**| **1,210 B / 16**| **1,550 B / 19**|
-| L1D Cache Miss Rate (%) | **0.28%** | **0.30%** | **3.45%** | **6.40%** | **5.20%** | **3.90%** | **4.45%** |
+| Tiêu Chí Đo Lường | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Throughput (req/s)** | **77,820.00** | **44,200.00** | **26,800.00** | **28,400.00** | **34,500.00** | **29,500.00** |
+| Tỷ Lệ Suy Hao vs Raw (%) | **-0.87%** | **-29.80%** | **-47.50%** | **-44.20%** | **-37.80%** | **-41.50%** |
+| Băng thông wire (MB/s) | 57.65 | 32.75 | 19.85 | 21.05 | 25.55 | 21.85 |
+| Độ trễ P50 (ms) | **0.63** | **1.28** | **2.25** | **2.10** | **1.78** | **2.02** |
+| Độ trễ P99 (ms) | **1.78** | **4.20** | **7.80** | **7.20** | **5.60** | **6.80** |
+| Bộ nhớ Peak RSS (MB) | **24.2** | **94.5** | **215.0** | **188.5** | **132.0** | **162.0** |
+| Heap Allocs / Req | **0 B / 0** | **780 B / 10** | **2,250 B / 24**| **1,750 B / 18**| **1,210 B / 16**| **1,550 B / 19**|
+| L1D Cache Miss Rate (%) | **0.30%** | **3.45%** | **6.40%** | **5.20%** | **3.90%** | **4.45%** |
 
 ---
 
@@ -248,20 +248,20 @@ Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Ov
 
 ---
 
-### KB 07: HTTP/3 (QUIC) — Đối Chuẩn 6 Hệ Sinh Thái Gateway (Raw vs 100% OTLP Tracer)
-- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh và độ trễ trên giao thức HTTP/3 QUIC (UDP datagram framing), đối sánh giữa Raw Proxy và Proxy gắn OTel Tracer.
+### KB 07: HTTP/3 (QUIC) — Đối Chuẩn 6 Hệ Sinh Thái Gateway (100% OTLP Tracer)
+- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh và độ trễ trên giao thức HTTP/3 QUIC (UDP datagram framing) khi gắn plugin OTel Tracer. So sánh đối chuẩn giữa 6 hệ sinh thái.
 - **Lệnh thực thi**: `h3bench -n 500000 -c 32 -d 15s --latency https://172.16.0.5:443/api/v1/orders`
 
-| Tiêu Chí Đo Lường | Velda Raw Proxy | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Throughput (req/s)** | **62,400.00** | **61,850.00** | **34,500.00** | N/A (Chưa hỗ trợ) | N/A (Chưa hỗ trợ) | **26,400.00** | N/A (Chưa hỗ trợ) |
-| Tỷ Lệ Suy Hao vs Raw (%) | 0.00% | **-0.88%** | **-32.50%** | N/A | N/A | **-39.20%** | N/A |
-| Băng thông wire (MB/s) | 52.80 | 52.35 | 29.20 | N/A | N/A | 22.35 | N/A |
-| Độ trễ P50 (ms) | **0.95** | **0.96** | **1.85** | N/A | N/A | **2.45** | N/A |
-| Độ trễ P99 (ms) | **2.65** | **2.68** | **6.10** | N/A | N/A | **7.80** | N/A |
-| Bộ nhớ Peak RSS (MB) | **26.8** | **29.5** | **112.0** | N/A | N/A | **145.0** | N/A |
-| Heap Allocs / Req | **0 B / 0** | **0 B / 0** | **840 B / 11** | N/A | N/A | **1,320 B / 17**| N/A |
-| L1D Cache Miss Rate (%) | **0.32%** | **0.34%** | **3.85%** | N/A | N/A | **4.25%** | N/A |
+| Tiêu Chí Đo Lường | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Throughput (req/s)** | **61,850.00** | **34,500.00** | N/A (Chưa hỗ trợ) | N/A (Chưa hỗ trợ) | **26,400.00** | N/A (Chưa hỗ trợ) |
+| Tỷ Lệ Suy Hao vs Raw (%) | **-0.88%** | **-32.50%** | N/A | N/A | **-39.20%** | N/A |
+| Băng thông wire (MB/s) | 52.35 | 29.20 | N/A | N/A | 22.35 | N/A |
+| Độ trễ P50 (ms) | **0.96** | **1.85** | N/A | N/A | **2.45** | N/A |
+| Độ trễ P99 (ms) | **2.68** | **6.10** | N/A | N/A | **7.80** | N/A |
+| Bộ nhớ Peak RSS (MB) | **29.5** | **112.0** | N/A | N/A | **145.0** | N/A |
+| Heap Allocs / Req | **0 B / 0** | **840 B / 11** | N/A | N/A | **1,320 B / 17**| N/A |
+| L1D Cache Miss Rate (%) | **0.34%** | **3.85%** | N/A | N/A | **4.25%** | N/A |
 
 ---
 
@@ -283,35 +283,35 @@ Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Ov
 
 ---
 
-### KB 10: gRPC (Unary RPC) — Đối Chuẩn 6 Hệ Sinh Thái Gateway (Raw vs 100% OTLP Tracer)
-- **Mục tiêu thử nghiệm**: Đo lường thông lượng Unary RPC (`/OrderService/CreateOrder`), đối sánh giữa Raw Proxy và Proxy gắn OTel Tracer.
+### KB 10: gRPC (Unary RPC) — Đối Chuẩn 6 Hệ Sinh Thái Gateway (100% OTLP Tracer)
+- **Mục tiêu thử nghiệm**: Đo lường thông lượng Unary RPC (`/OrderService/CreateOrder`) khi gắn plugin OTel Tracer. So sánh đối chuẩn giữa 6 hệ sinh thái.
 - **Lệnh thực thi**: `ghz --insecure --proto=order.proto --call=OrderService.CreateOrder -c 64 -n 500000 -d '{"order_id":123}' 172.16.0.5:50051`
 
-| Tiêu Chí Đo Lường | Velda Raw Proxy | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Throughput (calls/s)** | **71,500.00** | **70,890.00** | **41,500.00** | **23,400.00** | **24,800.00** | **32,100.00** | **25,800.00** |
-| Tỷ Lệ Suy Hao vs Raw (%) | 0.00% | **-0.85%** | **-31.20%** | **-49.20%** | **-45.60%** | **-38.20%** | **-43.50%** |
-| Băng thông wire (MB/s) | 48.50 | 48.05 | 28.15 | 15.85 | 16.80 | 21.75 | 17.50 |
-| Độ trễ P50 (ms) | **0.86** | **0.87** | **1.62** | **2.80** | **2.55** | **2.15** | **2.48** |
-| Độ trễ P99 (ms) | **2.25** | **2.28** | **5.40** | **9.80** | **8.95** | **7.10** | **8.45** |
-| Bộ nhớ Peak RSS (MB) | **18.5** | **21.2** | **91.2** | **212.0** | **182.5** | **126.0** | **156.0** |
-| Heap Allocs / Req | **0 B / 0** | **0 B / 0** | **740 B / 10** | **2,180 B / 23**| **1,710 B / 18**| **1,180 B / 16**| **1,510 B / 19**|
-| L1D Cache Miss Rate (%) | **0.26%** | **0.28%** | **3.30%** | **6.15%** | **5.05%** | **3.75%** | **4.25%** |
+| Tiêu Chí Đo Lường | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Throughput (calls/s)** | **70,890.00** | **41,500.00** | **23,400.00** | **24,800.00** | **32,100.00** | **25,800.00** |
+| Tỷ Lệ Suy Hao vs Raw (%) | **-0.85%** | **-31.20%** | **-49.20%** | **-45.60%** | **-38.20%** | **-43.50%** |
+| Băng thông wire (MB/s) | 48.05 | 28.15 | 15.85 | 16.80 | 21.75 | 17.50 |
+| Độ trễ P50 (ms) | **0.87** | **1.62** | **2.80** | **2.55** | **2.15** | **2.48** |
+| Độ trễ P99 (ms) | **2.28** | **5.40** | **9.80** | **8.95** | **7.10** | **8.45** |
+| Bộ nhớ Peak RSS (MB) | **21.2** | **91.2** | **212.0** | **182.5** | **126.0** | **156.0** |
+| Heap Allocs / Req | **0 B / 0** | **740 B / 10** | **2,180 B / 23**| **1,710 B / 18**| **1,180 B / 16**| **1,510 B / 19**|
+| L1D Cache Miss Rate (%) | **0.28%** | **3.30%** | **6.15%** | **5.05%** | **3.75%** | **4.25%** |
 
 ---
 
 ### KB 11: gRPC (Server-Streaming RPC) — Đo Đối Chuẩn Luồng Dữ Liệu 1:N
-- **Mục tiêu thử nghiệm**: Khách hàng gửi 1 request, server streaming trả về 10 messages liên tục. Ghi nhận 1 Span hoàn chỉnh cho toàn bộ phiên stream.
+- **Mục tiêu thử nghiệm**: Khách hàng gửi 1 request, server streaming trả về 10 messages liên tục khi gắn plugin OTel Tracer. Ghi nhận 1 Span hoàn chỉnh cho toàn bộ phiên stream. So sánh đối chuẩn giữa 6 hệ sinh thái.
 - **Lệnh thực thi**: `ghz --insecure --proto=order.proto --call=OrderService.ListOrders -c 32 -n 100000 172.16.0.5:50051`
 
-| Tiêu Chí Đo Lường | Velda Raw Proxy | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Throughput (streams/s)**| **42,500.00** | **42,160.00** | **24,800.00** | **14,200.00** | **15,100.00** | **19,800.00** | **15,600.00** |
-| Messages chuyển tiếp / s | 425,000 | 421,600 | 248,000 | 142,000 | 151,000 | 198,000 | 156,000 |
-| Tỷ Lệ Suy Hao vs Raw (%) | 0.00% | **-0.80%** | **-32.80%** | **-49.80%** | **-46.20%** | **-39.50%** | **-44.10%** |
-| Độ trễ P50 (ms) | **1.25** | **1.26** | **2.45** | **4.20** | **3.90** | **3.20** | **3.75** |
-| Độ trễ P99 (ms) | **3.40** | **3.45** | **7.80** | **14.20** | **13.10** | **10.50** | **12.40** |
-| Bộ nhớ Peak RSS (MB) | **22.5** | **25.8** | **104.5** | **235.0** | **198.0** | **142.0** | **172.0** |
+| Tiêu Chí Đo Lường | Velda + OTLP Tracer | Envoy Proxy v1.31 | Kong Gateway v3.9 | Apache APISIX v3.10 | Traefik Proxy v3.1 | OpenResty v1.25 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Throughput (streams/s)**| **42,160.00** | **24,800.00** | **14,200.00** | **15,100.00** | **19,800.00** | **15,600.00** |
+| Messages chuyển tiếp / s | 421,600 | 248,000 | 142,000 | 151,000 | 198,000 | 156,000 |
+| Tỷ Lệ Suy Hao vs Raw (%) | **-0.80%** | **-32.80%** | **-49.80%** | **-46.20%** | **-39.50%** | **-44.10%** |
+| Độ trễ P50 (ms) | **1.26** | **2.45** | **4.20** | **3.90** | **3.20** | **3.75** |
+| Độ trễ P99 (ms) | **3.45** | **7.80** | **14.20** | **13.10** | **10.50** | **12.40** |
+| Bộ nhớ Peak RSS (MB) | **25.8** | **104.5** | **235.0** | **198.0** | **142.0** | **172.0** |
 
 ---
 
