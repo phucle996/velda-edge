@@ -530,19 +530,19 @@ mod tests {
 
     #[test]
     fn test_cache_coordination_store_uncompressed_then_compress_on_return() {
-        use crate::http_cache::HttpCacheZone;
+        use crate::http_cache::HttpCacheStorage;
         use crate::post_response::HttpCacheStoreConfig;
         use crate::post_response::HttpCacheStorePlugin;
 
-        let zone = Arc::new(HttpCacheZone::new(
-            "compress_zone",
+        let storage = Arc::new(HttpCacheStorage::new(
+            "compress_storage",
             1024 * 1024,
             Duration::from_secs(60),
         ));
-        let store_plugin = HttpCacheStorePlugin::with_zone(
+        let store_plugin = HttpCacheStorePlugin::with_storage(
             "store-1",
             HttpCacheStoreConfig::default(),
-            Arc::clone(&zone),
+            Arc::clone(&storage),
         );
         let compress_plugin = ResponseCompressionPlugin::new(
             "compress-1",
@@ -575,9 +575,9 @@ mod tests {
         store_plugin.on_response(&req_headers, &mut resp);
         assert_eq!(resp.headers.get("x-cache").unwrap(), "MISS");
 
-        // Verify the cache zone has UNCOMPRESSED bytes!
-        let hash = HttpCacheZone::hash_key("GET:api.example.com:/products");
-        let stored_entry = zone.get(hash).expect("Must be stored in cache");
+        // Verify the cache storage has UNCOMPRESSED bytes!
+        let hash = HttpCacheStorage::hash_key("GET:api.example.com:/products");
+        let stored_entry = storage.get(hash).expect("Must be stored in cache");
         assert_eq!(
             stored_entry.raw_body.as_ref().unwrap(),
             &bytes::Bytes::from(original_json.clone())

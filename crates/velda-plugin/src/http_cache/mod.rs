@@ -1,17 +1,29 @@
 //! HTTP Caching Infrastructure Module (`velda-plugin::http_cache`).
 //!
-//! Provides the underlying shared memory cache storage engine ([`HttpCacheZone`]),
-//! key hashing, query normalization, and zone registration for [`http_cache_lookup`]
+//! Provides the underlying shared memory cache storage engine ([`HttpCacheStorage`]),
+//! entity representations, RFC 9111 parsing, hardware DRAM confinement,
+//! key hashing, query normalization, and storage registration for [`http_cache_lookup`]
 //! and [`http_cache_store`] plugins.
 
+pub mod cache_control;
 pub mod constants;
-pub mod zone;
+pub mod dram;
+pub mod entity;
+pub mod key;
+pub mod storage;
 
-pub use constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
-pub use zone::{
-    CacheEntry, CacheShard, CompressedVariants, HttpCacheZone, HttpCacheZoneRegistry, NUM_SHARDS,
-    StoreVariantParams, filter_cacheable_headers, normalize_query, parse_cache_control_ttl,
+pub use cache_control::{
+    CC_FLAG_MAX_AGE, CC_FLAG_NO_CACHE, CC_FLAG_NO_STORE, CC_FLAG_PRIVATE, CC_FLAG_PUBLIC,
+    CC_FLAG_S_MAXAGE, CacheControlFast, parse_cache_control_fast, parse_cache_control_ttl,
 };
+pub use constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
+pub use dram::{create_dram_confined_bytes, stream_payload_to_dram};
+pub use entity::{CacheEntry, CompressedVariants, StoreVariantParams};
+pub use key::{
+    compute_cache_key, compute_cache_key_with_headers, filter_cacheable_headers, hash_key,
+    normalize_query,
+};
+pub use storage::{CacheShard, HttpCacheRegistry, HttpCacheStorage, NUM_SHARDS};
 
 #[cfg(test)]
 mod tests {
@@ -28,21 +40,21 @@ mod tests {
 
     #[test]
     fn test_end_to_end_http_cache_flow() {
-        let zone = Arc::new(HttpCacheZone::new(
-            "e2e_zone",
+        let storage = Arc::new(HttpCacheStorage::new(
+            "e2e_storage",
             1024 * 1024,
             Duration::from_secs(120),
         ));
 
-        let lookup_plugin = HttpCacheLookupPlugin::with_zone(
+        let lookup_plugin = HttpCacheLookupPlugin::with_storage(
             "lookup",
             HttpCacheLookupConfig::default(),
-            Arc::clone(&zone),
+            Arc::clone(&storage),
         );
-        let store_plugin = HttpCacheStorePlugin::with_zone(
+        let store_plugin = HttpCacheStorePlugin::with_storage(
             "store",
             HttpCacheStoreConfig::default(),
-            Arc::clone(&zone),
+            Arc::clone(&storage),
         );
 
         // --- Step 1: Request 1 (Query with un-sorted params) -> CACHE MISS ---
@@ -101,7 +113,8 @@ mod tests {
         let mut target2: Arc<str> = Arc::from("default_upstream");
         let action2 = lookup_plugin.on_upstream_request(&mut req2, &mut target2);
         match action2 {
-            Action::Respond(cached_resp) => {
+            Action::ServeCached(cached) => {
+                let cached_resp = cached.into_l7_response();
                 assert_eq!(cached_resp.status, StatusCode::OK);
                 assert_eq!(cached_resp.headers.get("x-cache").unwrap(), "HIT");
                 assert_eq!(cached_resp.headers.get("age").unwrap(), "0");
@@ -125,7 +138,7 @@ mod tests {
                     _ => panic!("Expected cached Body::Bytes"),
                 }
             }
-            _ => panic!("Expected Action::Respond on cache hit"),
+            _ => panic!("Expected Action::ServeCached on cache hit"),
         }
 
         // --- Step 4: Request 3 (no-store from upstream) -> CACHE BYPASS ---
@@ -143,7 +156,7 @@ mod tests {
         store_plugin.on_response(&empty_req_headers, &mut bypass_resp);
         assert_eq!(bypass_resp.headers.get("x-cache").unwrap(), "BYPASS");
 
-        let hash_bypass = HttpCacheZone::hash_key("GET:api.example.com:/v1/checkout");
-        assert!(zone.get(hash_bypass).is_none());
+        let hash_bypass = HttpCacheStorage::hash_key("GET:api.example.com:/v1/checkout");
+        assert!(storage.get(hash_bypass).is_none());
     }
 }
