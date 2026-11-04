@@ -36,15 +36,16 @@ pub use error::PluginError;
 pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
 pub use header::*;
 pub use http_cache::{
-    CacheEntry, HttpCacheZone, HttpCacheZoneRegistry, filter_cacheable_headers, normalize_query,
+    CacheEntry, HttpCacheRegistry, HttpCacheStorage, filter_cacheable_headers, normalize_query,
 };
 pub use plan::RoutePluginPlan;
 pub use post_response::{
-    AccessLogConfig, AccessLogPlugin, CompressionAlgorithm, CorsConfig, CorsResponsePlugin,
-    HttpCacheStoreConfig, HttpCacheStorePlugin, LogFormat, LogRecord, OpentelemetryLoggerConfig,
-    OpentelemetryLoggerPlugin, OpentelemetryTracerConfig, OpentelemetryTracerPlugin,
-    PostResponsePlugin, ResponseCompressionConfig, ResponseCompressionPlugin,
-    ResponseHeaderMutationConfig, ResponseHeaderMutationPlugin, SecurityHeadersPlugin,
+    CompressionAlgorithm, CorsConfig, CorsResponsePlugin, HttpCacheStoreConfig,
+    HttpCacheStorePlugin, LogFormat, OpentelemetryLoggerConfig, OpentelemetryLoggerPlugin,
+    OpentelemetryTracerConfig, OpentelemetryTracerPlugin, PackedLogRecord, PostResponsePlugin,
+    ResponseCompressionConfig, ResponseCompressionPlugin, ResponseHeaderMutationConfig,
+    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, StdGrpcAccessLogConfig,
+    StdGrpcAccessLogPlugin, StdHttpAccessLogConfig, StdHttpAccessLogPlugin,
     run_post_response_plugins,
 };
 pub use pre_route::{

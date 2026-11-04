@@ -20,7 +20,7 @@
         ],
         "post_response": [
           "security_headers",
-          "access_log"
+          "std_http_access_log"
         ]
       }
     },
@@ -41,7 +41,7 @@
           "jwt_auth"
         ],
         "post_response": [
-          "access_log"
+          "std_http_access_log"
         ]
       }
     },
@@ -61,9 +61,7 @@
         "pre_upstream": [
           "jwt_auth"
         ],
-        "post_response": [
-          "access_log"
-        ]
+        "post_response": []
       }
     },
     {
@@ -83,7 +81,7 @@
           "jwt_auth"
         ],
         "post_response": [
-          "access_log"
+          "std_http_access_log"
         ]
       }
     },
@@ -100,9 +98,7 @@
       "upstream": "tcp-backend",
       "plugins": {
         "pre_upstream": [],
-        "post_response": [
-          "access_log"
-        ]
+        "post_response": []
       }
     }
   ]

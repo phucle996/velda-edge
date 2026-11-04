@@ -24,7 +24,7 @@ Ultra-high-performance, asynchronous structured access logger conforming to the 
 ### Out of Scope
 - **Trace Context Propagation**: Generating or validating W3C `traceparent` headers is owned by `w3c_trace_context` during `pre_upstream`.
 - **Span Reporting**: Exporting trace span graphs is owned by `opentelemetry_tracer`.
-- **Disk File Logging**: Local file access logging is owned by `access_log`.
+- **Standard Stream Access Logging**: Standard stream access logging is owned by `std_http_access_log`.
 
 ---
 

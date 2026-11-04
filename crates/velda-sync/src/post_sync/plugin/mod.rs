@@ -112,9 +112,11 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_cache_store" => Some("post_response"),
         "response_header_mutation" => Some("post_response"),
         "response_compression" => Some("post_response"),
-        "access_log" => Some("post_response"),
+        "std_http_access_log" => Some("post_response"),
+        "std_grpc_access_log" => Some("post_response"),
         "opentelemetry_logger" => Some("post_response"),
         "opentelemetry_tracer" => Some("post_response"),
+        "ai_token_metering" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
         "otlp_metrics_exporter" => Some("background"),
@@ -128,7 +130,9 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
 pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
     match id {
         "grpc_fault_injection" => Some("grpc"),
+        "std_grpc_access_log" => Some("grpc"),
         "http_fault_injection" => Some("http"),
+        "std_http_access_log" => Some("http"),
         "cors_preflight" => Some("http"),
         "cors" => Some("http"),
         "http_cache_lookup" => Some("http"),
@@ -136,6 +140,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "response_header_mutation" => Some("http"),
         "response_compression" => Some("http"),
         "request_termination" => Some("http"),
+        "ai_token_metering" => Some("http"),
         _ => None,
     }
 }
@@ -504,7 +509,7 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                 }
                 post_response::validate_response_compression_config(&plugin.id, &plugin.config)?;
             }
-            "access_log" => {
+            "std_http_access_log" => {
                 if plugin.phase != "post_response" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
@@ -514,7 +519,19 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                         ),
                     });
                 }
-                post_response::validate_access_log_config(&plugin.id, &plugin.config)?;
+                post_response::validate_std_http_access_log_config(&plugin.id, &plugin.config)?;
+            }
+            "std_grpc_access_log" => {
+                if plugin.phase != "post_response" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!(
+                            "Plugin '{}' must specify phase 'post_response'",
+                            plugin.id
+                        ),
+                    });
+                }
+                post_response::validate_std_grpc_access_log_config(&plugin.id, &plugin.config)?;
             }
             "health_probe" => {
                 if plugin.phase != "background" {

@@ -32,6 +32,7 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 brotli = "7.0"
 zstd = "0.13"
 itoa = "1.0"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -149,7 +149,7 @@ Velda Edge ships with **119 built-in attack signatures** and **15 malicious scan
       "waf_lite"
     ],
     "post_response": [
-      "access_log"
+      "std_http_access_log"
     ]
   }
 }

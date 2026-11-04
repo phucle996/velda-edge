@@ -132,14 +132,21 @@
       }
     },
     {
-      "id": "access_log",
+      "id": "std_http_access_log",
       "config": {
+        "target": "stdout",
         "format": "json",
+        "include_user_agent": true,
         "include_request_id": true,
         "include_route_id": true,
         "include_upstream": true,
         "include_latency": true,
-        "buffer_capacity": 4096
+        "buffer_capacity": 4096,
+        "sampling": {
+          "200": 0.05,
+          "429": 1.0,
+          "502": 1.0
+        }
       }
     },
     {

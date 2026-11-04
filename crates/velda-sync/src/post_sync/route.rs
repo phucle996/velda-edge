@@ -822,7 +822,7 @@ mod tests {
                     "upstream": "users",
                     "plugins": {
                         "pre_upstream": ["jwt_auth", "rate_limit"],
-                        "post_response": ["security_headers", "access_log"]
+                        "post_response": ["security_headers", "std_http_access_log"]
                     }
                 },
                 {
@@ -840,7 +840,12 @@ mod tests {
         assert_eq!(routes.len(), 2);
         assert_eq!(
             routes[0].plugins,
-            vec!["jwt_auth", "rate_limit", "security_headers", "access_log"]
+            vec![
+                "jwt_auth",
+                "rate_limit",
+                "security_headers",
+                "std_http_access_log"
+            ]
         );
         assert_eq!(routes[1].plugins, vec!["jwt_auth", "rate_limit"]);
     }

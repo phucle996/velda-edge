@@ -9,7 +9,7 @@ High-performance HTTP request short-circuiting plugin evaluated during the `pre_
 >
 > **Never Specify `phase` in User Configuration**: The execution phase is statically inferred by Velda as `pre_upstream`.
 >
-> **System-Level Request ID Invariant**: The synthetic response automatically carries the incoming request's `x-request-id`, ensuring full observability continuity across `post_response` plugins (such as `access_log` and `security_headers`).
+> **System-Level Request ID Invariant**: The synthetic response automatically carries the incoming request's `x-request-id`, ensuring full observability continuity across `post_response` plugins (such as `std_http_access_log` and `security_headers`).
 
 ---
 
