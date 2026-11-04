@@ -79,7 +79,7 @@ impl OpentelemetryTracerPlugin {
             shutdown.clone(),
         );
 
-        drainer.spawn_shadow();
+        drainer.dispatch_to_shadow();
 
         Self {
             id: id_str,

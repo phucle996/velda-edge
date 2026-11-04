@@ -56,11 +56,11 @@ impl ShadowOtlpTracerDrainer {
         }
     }
 
-    /// Spawns the drainer flusher onto the dedicated Shadow Logistics Worker runtime.
+    /// Dispatches the drainer flusher task onto the dedicated Shadow Logistics Worker runtime.
     ///
     /// Priority 1: Dispatches onto the core-local Shadow Worker (`SCHED_IDLE`) via `try_dispatch_shadow`.
     /// Priority 2: Falls back to the current Tokio runtime only in unit test harnesses.
-    pub fn spawn_shadow(self) {
+    pub fn dispatch_to_shadow(self) {
         let flusher_task = Box::pin(async move {
             self.run().await;
         });
