@@ -92,8 +92,10 @@ impl PreUpstreamPlugin for W3cTraceContextPlugin {
                 if !self.config.generate_if_missing {
                     return Action::Continue;
                 }
-                // Check if an existing X-REQUEST-ID is available (validated in 1 SIMD register pass)
-                let trace_id = if let Some(req_id) =
+                // Check if an existing Request ID is available from state or X-REQUEST-ID header
+                let trace_id = if req.state.request_id.0 != 0 {
+                    req.state.request_id.to_string()
+                } else if let Some(req_id) =
                     req.headers.get(&X_REQUEST_ID).and_then(|v| v.to_str().ok())
                     && let Ok(req_bytes) = req_id.as_bytes().try_into()
                     && super::traceparent::is_valid_nonzero_hex_32(req_bytes)

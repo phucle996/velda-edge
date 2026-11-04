@@ -8,7 +8,6 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
@@ -29,15 +28,6 @@ use crate::pre_upstream::PreUpstreamPlugin;
 /// Standard SHA-256 hex digest of an empty byte array `b""`.
 const EMPTY_SHA256_HEX: &[u8; 64] =
     b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-/// Helper to get current Unix epoch seconds.
-#[inline(always)]
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// Zero-allocation, branchless ASCII decimal digit parser for timestamps and lengths.
 #[inline(always)]
@@ -252,7 +242,8 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
-        let now = current_epoch_secs();
+        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        let now = req.ingress_time_sec;
 
         // 1. Extract Access Key ID (Pure byte trimming, zero UTF-8 validation overhead!)
         let access_key_id = match req.headers.get(&self.access_key_header) {
@@ -453,7 +444,7 @@ mod tests {
         nonce: &str,
         signed_header_names: &[&str],
     ) -> L7Request {
-        let now = current_epoch_secs();
+        let now = velda_core::coarse_now_sec();
         let payload_hash = to_hex(&compute_sha256(body_bytes));
         let mut headers = HeaderMap::new();
         let uri: Uri = uri_str.parse().unwrap();

@@ -74,12 +74,38 @@ flowchart LR
 | **P8** | **Existing Vary: Origin Idempotency** | `https://app.example.com` | `vary: Origin, Accept-Encoding` | `allow_origins: ["https://app.example.com"]` | `vary: Origin, Accept-Encoding`<br>*(No duplicate Vary header appended)* | **PASS** |
 | **P9** | **Expose Headers Injection** | `https://app.example.com` | `(none)` | `expose_headers: ["x-request-id", "x-total-count"]` | `access-control-expose-headers: x-request-id, x-total-count` | **PASS** |
 | **P10**| **Max-Age Injection** | `https://app.example.com` | `(none)` | `max_age_secs: 86400` | `access-control-max-age: 86400` | **PASS** |
+| **P11**| **SWAR 64-Bit Origin Word Scanner** | `https://app.example.com` | `vary: accept-encoding, ORIGIN, user-agent` | `allow_origins: ["https://app.example.com"]` | `vary: accept-encoding, ORIGIN, user-agent`<br>*(Phát hiện chuẩn xác 64-bit SWAR, không duplicate)* | **PASS** |
+| **P12**| **Fast-Path Vary Single Hash (No Vary)** | `https://app.example.com` | `(none)` | `allow_origins: ["https://app.example.com"]` | `vary: Origin`<br>*(Single hash lookup fast-path, 0 loops)* | **PASS** |
 
 ---
 
 ## 4. Edge-Case Invariant Verification
 
-### 4.1 Cache Poisoning Prevention & Vary Header Idempotency
+### 4.1 SWAR 64-Bit Integer Origin Scanner & Vary Preservation
+Cơ chế SWAR 64-bit sử dụng mặt nạ lowercase `0x0000_2020_2020_2020` và hằng số `0x0000_6e69_6769_726f` để nhận diện token `"origin"` trong đúng 1 chu kỳ ALU:
+
+```rust
+#[test]
+fn test_swar_origin_scanner() {
+    assert!(is_token_origin_swar(b"origin"));
+    assert!(is_token_origin_swar(b"Origin"));
+    assert!(is_token_origin_swar(b"ORIGIN"));
+    assert!(is_token_origin_swar(b"oRiGiN"));
+    assert!(!is_token_origin_swar(b"origix"));
+    assert!(!is_token_origin_swar(b"accept"));
+
+    assert!(contains_origin_or_star(b"origin"));
+    assert!(contains_origin_or_star(b"Origin"));
+    assert!(contains_origin_or_star(b"Accept-Encoding, Origin"));
+    assert!(contains_origin_or_star(b"Accept-Encoding, origin, User-Agent"));
+    assert!(contains_origin_or_star(b"*"));
+    assert!(contains_origin_or_star(b"Accept-Encoding, *"));
+    assert!(!contains_origin_or_star(b"Accept-Encoding, User-Agent"));
+    assert!(!contains_origin_or_star(b"Accept-Language"));
+}
+```
+
+### 4.2 Cache Poisoning Prevention & Vary Header Idempotency
 When an upstream service already emits a `Vary` header (such as `Vary: Accept-Encoding, User-Agent`), naive CORS plugins often overwrite it with `Vary: Origin`, destroying HTTP compression caching downstream.
 
 #### Test Verification Code:

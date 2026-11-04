@@ -79,6 +79,7 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
     // Probe host hardware topology once during cold-start bootstrap and cache in RAM
     let hardware = HardwareTopology::probe();
     let _ = init_hardware_topology(hardware);
+    velda_core::init_coarse_clock();
 
     let runtime_dir = config.runtime_dir();
 

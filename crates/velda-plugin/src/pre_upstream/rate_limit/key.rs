@@ -156,6 +156,9 @@ impl KeyStrategy {
 /// Resolves client IP address from standard forwarding headers.
 #[inline]
 pub fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
+    if let Some(ip) = req.state.client_ip {
+        return Some(ip);
+    }
     if let Some(val) = req.headers.get("x-forwarded-for")
         && let Ok(raw) = val.to_str()
     {

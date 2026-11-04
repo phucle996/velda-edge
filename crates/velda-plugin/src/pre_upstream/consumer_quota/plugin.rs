@@ -272,6 +272,9 @@ fn maybe_spawn_shadow_quota_sync(state: Arc<ShardedQuotaState>, config: &Consume
         });
 }
 
+static X_QUOTA_REMAINING: HeaderName = HeaderName::from_static("x-quota-remaining");
+static X_QUOTA_WINDOW: HeaderName = HeaderName::from_static("x-quota-window");
+
 impl PreUpstreamPlugin for ConsumerQuotaPlugin {
     fn id(&self) -> &str {
         &self.id
@@ -288,10 +291,8 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
     fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut Arc<str>) -> Action {
         let key_hash = resolve_quota_key(req, &self.config.key_headers);
 
-        let now_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        let now_sec = req.ingress_time_sec;
         let now_instant = Instant::now();
 
         match self
@@ -302,12 +303,11 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
                 min_remaining,
                 window_name,
             } => {
-                // Ingress Header Telemetry: Inject remaining capacity tag
-                if let Ok(val) = HeaderValue::from_str(&min_remaining.to_string()) {
-                    req.headers.insert("x-quota-remaining", val);
-                }
+                // Zero-allocation integer formatting via itoa in HeaderValue
+                req.headers
+                    .insert(&X_QUOTA_REMAINING, HeaderValue::from(min_remaining));
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
-                    req.headers.insert("x-quota-window", val);
+                    req.headers.insert(&X_QUOTA_WINDOW, val);
                 }
                 Action::Continue
             }
@@ -315,17 +315,13 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
                 window_name,
                 reset_seconds,
             } => {
-                // Bit-1 Bypass Header Injection on Rejection (RFC 6585)
-                if let Ok(val) = HeaderValue::from_str(&reset_seconds.to_string()) {
-                    req.headers.insert_bypass(RETRY_AFTER, val);
-                }
-                req.headers.insert_bypass(
-                    HeaderName::from_static("x-quota-remaining"),
-                    HeaderValue::from_static("0"),
-                );
+                // Bit-1 Bypass Header Injection on Rejection (RFC 6585) - Zero-alloc
+                req.headers
+                    .insert_bypass(RETRY_AFTER, HeaderValue::from(reset_seconds));
+                req.headers
+                    .insert_bypass(X_QUOTA_REMAINING.clone(), HeaderValue::from_static("0"));
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
-                    req.headers
-                        .insert_bypass(HeaderName::from_static("x-quota-window"), val);
+                    req.headers.insert_bypass(X_QUOTA_WINDOW.clone(), val);
                 }
 
                 Action::Reject(RejectReason::TooManyRequests)

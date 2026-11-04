@@ -180,6 +180,7 @@ pub async fn handle_http3_udp(
             // [INGRESS W3C REQUEST ID]
             // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
             let mut req = req_event.request;
+            req.state.client_ip = Some(peer.ip());
             let req_id_header = req.headers.request_id().clone();
 
             let responder = super::engine::Http3Responder::new(
@@ -299,6 +300,9 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
+                Action::ServeCached(cached) => {
+                    short_circuit_resp = Some(cached.into_l7_response());
+                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
@@ -337,6 +341,9 @@ async fn process_http3_request(
                 Action::Continue => {}
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
+                }
+                Action::ServeCached(cached) => {
+                    short_circuit_resp = Some(cached.into_l7_response());
                 }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.

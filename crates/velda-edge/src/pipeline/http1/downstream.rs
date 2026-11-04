@@ -160,7 +160,7 @@ pub async fn run_http1_loop<IO>(
         // [INGRESS W3C REQUEST ID GENERATION]
         // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
         // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-        let (_request_id, req_id_header) = velda_core::next_request_id();
+        let (request_id, req_id_header) = velda_core::next_request_id();
         conn.set_request_id(Some(req_id_header.clone()));
         let mut req_head = req_head;
         req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
@@ -273,15 +273,20 @@ pub async fn run_http1_loop<IO>(
             let mut short_circuit_resp = None;
 
             if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
-                // Optimization: Construct L7Request ONCE across both pre_route and pre_upstream phases
-                // to eliminate redundant URI/Method cloning and HeaderMap swapping.
+                // Optimization: Zero-clone move of method, uri, and headers into L7Request.
+                // Uses from_pre_injected_headers to bypass redundant x-request-id lookup.
+                let method = std::mem::replace(&mut req_head.method, http::Method::GET);
+                let uri = std::mem::take(&mut req_head.uri);
+                let headers = std::mem::take(&mut req_head.headers);
                 let mut l7_req = L7Request::new(
-                    req_head.method.clone(),
-                    req_head.uri.clone(),
+                    method,
+                    uri,
                     req_head.version,
-                    std::mem::take(&mut req_head.headers),
+                    velda_core::HeaderWorkspace::from_pre_injected_headers(headers),
                     velda_core::Body::Empty,
                 );
+                l7_req.state.request_id = request_id;
+                l7_req.state.client_ip = Some(meta.peer.ip());
 
                 if let Some(hooks) = &plan.pre_route_hooks {
                     let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -294,6 +299,9 @@ pub async fn run_http1_loop<IO>(
                         Action::Continue => {}
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
+                        }
+                        Action::ServeCached(cached) => {
+                            short_circuit_resp = Some(cached.into_l7_response());
                         }
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
@@ -358,6 +366,9 @@ pub async fn run_http1_loop<IO>(
                         Action::Continue => {}
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
+                        }
+                        Action::ServeCached(cached) => {
+                            short_circuit_resp = Some(cached.into_l7_response());
                         }
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.

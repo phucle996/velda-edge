@@ -143,7 +143,7 @@ async fn dispatch_grpc_tcp_request_stream(
     // [INGRESS W3C REQUEST ID GENERATION]
     // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
     // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-    let (_request_id, req_id_header) = velda_core::next_request_id();
+    let (request_id, req_id_header) = velda_core::next_request_id();
     server_stream
         .parts
         .headers
@@ -190,6 +190,8 @@ async fn dispatch_grpc_tcp_request_stream(
                 std::mem::take(&mut server_stream.parts.headers),
                 velda_core::Body::Empty,
             );
+            l7_req.state.request_id = request_id;
+            l7_req.state.client_ip = Some(meta.peer.ip());
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -202,6 +204,9 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Continue => {}
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
+                    }
+                    Action::ServeCached(cached) => {
+                        short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
@@ -246,6 +251,9 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Continue => {}
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
+                    }
+                    Action::ServeCached(cached) => {
+                        short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.

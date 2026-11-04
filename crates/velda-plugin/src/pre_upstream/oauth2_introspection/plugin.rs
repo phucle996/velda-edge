@@ -9,7 +9,6 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, RejectReason};
@@ -22,14 +21,6 @@ use super::scope::check_scopes;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
-
-#[inline(always)]
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// Helper function to build pre-materialized cached claims with precomputed headers and scopes.
 /// Executed during cold-miss introspection or asynchronously inside the Shadow Worker.
@@ -216,7 +207,7 @@ impl Oauth2IntrospectionPlugin {
         let revalidation_task = Box::pin(async move {
             match client.introspect(&token_owned) {
                 Ok(resp) => {
-                    let cur = current_epoch_secs();
+                    let cur = velda_core::coarse_now_sec();
                     if resp.active {
                         let new_entry = build_cached_claims(
                             &claims_to_headers,
@@ -262,7 +253,8 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
             }
         };
 
-        let now = current_epoch_secs();
+        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        let now = req.ingress_time_sec;
         let fp = super::cache::token_fingerprint(token);
 
         // Tier 1: Check Core-Local L1 Cache (Zero Lock, Zero Atomic, sub-2ns hot path)

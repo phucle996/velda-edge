@@ -291,9 +291,12 @@ impl HttpFaultCondition {
     }
 }
 
-/// Helper to extract client IP authoritatively from X-Real-IP or right-most X-Forwarded-For.
+/// Helper to extract client IP authoritatively from req.state, X-Real-IP, or right-most X-Forwarded-For.
 #[inline]
 fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
+    if let Some(ip) = req.state.client_ip {
+        return Some(ip);
+    }
     // Security Invariant: Prefer authoritative edge-assigned x-real-ip first to eliminate IP spoofing attacks.
     if let Some(real_ip) = req
         .headers

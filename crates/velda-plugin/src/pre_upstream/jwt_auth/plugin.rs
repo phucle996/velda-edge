@@ -11,7 +11,6 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, RejectReason};
@@ -186,15 +185,6 @@ impl JwtAuthPlugin {
     }
 }
 
-/// Fast wall-clock epoch time in seconds.
-#[inline]
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
-}
-
 impl PreUpstreamPlugin for JwtAuthPlugin {
     #[inline]
     fn id(&self) -> &str {
@@ -214,7 +204,8 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         };
 
         let token_hash = JwtCache::hash_token(token_str);
-        let now = current_epoch_secs();
+        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        let now = req.ingress_time_sec;
 
         // 1. Negative Cache check: fail-fast on known bad tokens
         if self.cache.is_negative(token_hash, now) {

@@ -116,18 +116,18 @@ impl OriginPattern {
     pub fn matches(&self, origin: &str) -> bool {
         match self {
             Self::Any => true,
-            Self::Exact(expected) => expected.eq_ignore_ascii_case(origin),
+            Self::Exact(expected) => expected == origin || expected.eq_ignore_ascii_case(origin),
             Self::Subdomain { prefix, suffix } => {
                 if origin.len() <= prefix.len() + suffix.len() {
                     return false;
                 }
                 let (o_prefix, rest) = origin.split_at(prefix.len());
-                if !o_prefix.eq_ignore_ascii_case(prefix) {
+                if o_prefix != prefix && !o_prefix.eq_ignore_ascii_case(prefix) {
                     return false;
                 }
                 let wildcard_len = origin.len() - prefix.len() - suffix.len();
                 let (wildcard_part, o_suffix) = rest.split_at(wildcard_len);
-                if !o_suffix.eq_ignore_ascii_case(suffix) {
+                if o_suffix != suffix && !o_suffix.eq_ignore_ascii_case(suffix) {
                     return false;
                 }
                 is_valid_subdomain(wildcard_part)

@@ -151,7 +151,7 @@ pub async fn run_http2_loop<IO>(
                         }
                     }
 
-                    let (_request_id, req_id_header) = velda_core::next_request_id();
+                    let (request_id, req_id_header) = velda_core::next_request_id();
                     req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
                     responder = responder
                         .with_request_id(Some(req_id_header.clone()))
@@ -304,6 +304,7 @@ pub async fn run_http2_loop<IO>(
                         default_upstream_name: Arc::from(route.upstream_name.as_str()),
                         http_upstreams: Arc::clone(&rt.upstreams.http),
                         plan: rt.plugins.get_plan(route.id).clone(),
+                        request_id,
                     };
                     tokio::spawn(async move {
                         serve_http2_stream(req_head, receiver, responder, ctx).await;
@@ -350,6 +351,7 @@ struct Http2StreamContext {
     default_upstream_name: Arc<str>,
     http_upstreams: Arc<crate::upstream::SubUpstreamTable<HttpUpstream>>,
     plan: Arc<RoutePluginPlan>,
+    request_id: velda_core::RequestId,
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
@@ -367,6 +369,7 @@ async fn serve_http2_stream(
         default_upstream_name,
         http_upstreams,
         plan,
+        request_id,
     } = ctx;
     let mut target_upstream: Arc<str> = Arc::clone(&default_upstream_name);
 
@@ -384,15 +387,20 @@ async fn serve_http2_stream(
         let mut short_circuit_resp = None;
 
         if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
-            // Optimization: Construct L7Request ONCE across both pre_route and pre_upstream phases
-            // to eliminate redundant URI/Method cloning and HeaderMap swapping.
+            // Optimization: Zero-clone move of method, uri, and headers into L7Request.
+            // Uses from_pre_injected_headers to bypass redundant x-request-id lookup.
+            let method = std::mem::replace(&mut req_head.method, http::Method::GET);
+            let uri = std::mem::take(&mut req_head.uri);
+            let headers = std::mem::take(&mut req_head.headers);
             let mut l7_req = L7Request::new(
-                req_head.method.clone(),
-                req_head.uri.clone(),
+                method,
+                uri,
                 http::Version::HTTP_2,
-                std::mem::take(&mut req_head.headers),
+                velda_core::HeaderWorkspace::from_pre_injected_headers(headers),
                 velda_core::Body::Empty,
             );
+            l7_req.state.request_id = request_id;
+            l7_req.state.client_ip = Some(meta.peer.ip());
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -405,6 +413,9 @@ async fn serve_http2_stream(
                     Action::Continue => {}
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
+                    }
+                    Action::ServeCached(cached) => {
+                        short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
@@ -460,6 +471,9 @@ async fn serve_http2_stream(
                     Action::Continue => {}
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
+                    }
+                    Action::ServeCached(cached) => {
+                        short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.

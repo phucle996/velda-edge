@@ -20,7 +20,7 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, StatusCode};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use velda_core::{Action, L7Request, L7Response, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -285,6 +285,15 @@ impl ApiMeteringPlugin {
     }
 }
 
+static X_METERING_TIER: HeaderName = HeaderName::from_static("x-metering-tier");
+static X_METERING_REMAINING: HeaderName = HeaderName::from_static("x-metering-remaining");
+static X_METERING_WINDOW: HeaderName = HeaderName::from_static("x-metering-window");
+static X_METERING_BALANCE: HeaderName = HeaderName::from_static("x-metering-balance");
+static X_METERING_OVERAGE: HeaderName = HeaderName::from_static("x-metering-overage");
+static X_METERING_EXHAUSTED_WINDOW: HeaderName =
+    HeaderName::from_static("x-metering-exhausted-window");
+static X_METERING_EXHAUSTED: HeaderName = HeaderName::from_static("x-metering-exhausted");
+
 impl PreUpstreamPlugin for ApiMeteringPlugin {
     fn id(&self) -> &str {
         &self.id
@@ -314,10 +323,8 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
             .or_else(|| self.config.tiers.get(&self.config.default_tier))
             .unwrap_or(&default_cfg);
 
-        let now_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        let now_sec = req.ingress_time_sec;
         let now_instant = Instant::now();
 
         match self.state.evaluate(
@@ -333,28 +340,33 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                 balance_micro_credits,
             } => {
                 if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                    req.headers.insert("x-metering-tier", val);
+                    req.headers.insert(&X_METERING_TIER, val);
                 }
-                if let Ok(val) = HeaderValue::from_str(&min_remaining.to_string()) {
-                    req.headers.insert("x-metering-remaining", val);
-                }
+                req.headers
+                    .insert(&X_METERING_REMAINING, HeaderValue::from(min_remaining));
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
-                    req.headers.insert("x-metering-window", val);
+                    req.headers.insert(&X_METERING_WINDOW, val);
                 }
-                if let Ok(val) = HeaderValue::from_str(&balance_micro_credits.to_string()) {
-                    req.headers.insert("x-metering-balance", val);
-                }
+                let balance_val = if balance_micro_credits >= 0 {
+                    HeaderValue::from(balance_micro_credits as u64)
+                } else {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    HeaderValue::from_str(itoa_buf.format(balance_micro_credits))
+                        .unwrap_or_else(|_| HeaderValue::from_static("0"))
+                };
+                req.headers.insert(&X_METERING_BALANCE, balance_val);
                 Action::Continue
             }
             MeteringDecision::OverageAllowed { negative_balance } => {
                 if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                    req.headers.insert("x-metering-tier", val);
+                    req.headers.insert(&X_METERING_TIER, val);
                 }
                 req.headers
-                    .insert("x-metering-overage", HeaderValue::from_static("true"));
-                if let Ok(val) = HeaderValue::from_str(&negative_balance.to_string()) {
-                    req.headers.insert("x-metering-balance", val);
-                }
+                    .insert(&X_METERING_OVERAGE, HeaderValue::from_static("true"));
+                let mut itoa_buf = itoa::Buffer::new();
+                let balance_val = HeaderValue::from_str(itoa_buf.format(negative_balance))
+                    .unwrap_or_else(|_| HeaderValue::from_static("0"));
+                req.headers.insert(&X_METERING_BALANCE, balance_val);
                 Action::Continue
             }
             MeteringDecision::Exhausted {
@@ -375,38 +387,30 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                         CONTENT_TYPE,
                         HeaderValue::from_static("application/json; charset=utf-8"),
                     );
-                    resp.headers.insert(
-                        CONTENT_LENGTH,
-                        HeaderValue::from_str(&len.to_string()).unwrap(),
-                    );
+                    resp.headers.insert(CONTENT_LENGTH, HeaderValue::from(len));
                     if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                        resp.headers.insert("x-metering-tier", val);
+                        resp.headers.insert(&X_METERING_TIER, val);
                     }
                     if let Ok(val) = HeaderValue::from_str(&window_name) {
-                        resp.headers.insert("x-metering-exhausted-window", val);
+                        resp.headers.insert(&X_METERING_EXHAUSTED_WINDOW, val);
                     }
                     if reset_seconds > 0 {
-                        let sec_str = reset_seconds.to_string();
-                        if let Ok(val) = HeaderValue::from_str(&sec_str) {
-                            resp.headers.insert(RETRY_AFTER, val);
-                        }
+                        resp.headers
+                            .insert(RETRY_AFTER, HeaderValue::from(reset_seconds));
                     }
 
                     Action::Respond(resp)
                 }
                 ExhaustedAction::Reject429 => {
                     if reset_seconds > 0 {
-                        let sec_str = reset_seconds.to_string();
-                        if let Ok(val) = HeaderValue::from_str(&sec_str) {
-                            req.headers.insert_bypass(RETRY_AFTER, val);
-                        }
+                        req.headers
+                            .insert_bypass(RETRY_AFTER, HeaderValue::from(reset_seconds));
                     }
                     if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                        req.headers
-                            .insert_bypass(HeaderName::from_static("x-metering-tier"), val);
+                        req.headers.insert_bypass(X_METERING_TIER.clone(), val);
                     }
                     req.headers.insert_bypass(
-                        HeaderName::from_static("x-metering-exhausted"),
+                        X_METERING_EXHAUSTED.clone(),
                         HeaderValue::from_static("true"),
                     );
 
