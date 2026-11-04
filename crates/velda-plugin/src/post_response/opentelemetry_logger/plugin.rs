@@ -1,25 +1,23 @@
 //! OpenTelemetry Logger Post-Response Plugin (`opentelemetry_logger`).
 //!
-//! Provides lock-free, zero-blocking OpenTelemetry structured access logging during `post_response`.
-//! Extracts response status, method, path, latency, route, client IP, and W3C trace identifiers,
-//! dispatching [`OtlpLogItem`] records into a bounded channel for asynchronous Shadow Worker
-//! batch flushing without performing synchronous I/O or stalling Data Plane traffic workers.
+//! Provides zero-blocking, zero-heap-allocation OpenTelemetry structured access logging during `post_response`.
+//! Constructs a 256-byte cacheline-aligned record on the CPU stack, streams directly to page-aligned RAM
+//! via non-temporal vector instructions (`_mm256_stream_si256`), and hands off the memory slot index
+//! to the background Shadow Worker in ~1ns.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use http::HeaderMap;
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use velda_core::L7Response;
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::client::OtlpLogClient;
-use super::client_grpc::OtlpLogsGrpcClient;
-use super::proto::format_otlp_logs_proto;
-use super::record::{OtlpLogItem, format_otlp_logs_json};
+use super::config::OpentelemetryLoggerConfig;
+use super::drainer::ShadowOtlpDrainer;
+use super::record::{PackedOtlpRecord, decode_hex};
+use super::ring_buffer::ShardedRingBuffer;
+use super::sampling::SamplingTable;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::header::{
@@ -28,57 +26,38 @@ use crate::header::{
 use crate::hook::try_dispatch_shadow;
 use crate::post_response::PostResponsePlugin;
 
-/// Declarative configuration for [`OpentelemetryLoggerPlugin`].
-///
-/// # Strict Invariant: 100% Explicit Declaration
-/// Every parameter must be explicitly declared in the configuration JSON.
-/// Zero defaults are permitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpentelemetryLoggerConfig {
-    /// OTLP transport protocol (must be explicitly declared as `"http"` or `"grpc"`).
-    pub protocol: String,
-    /// OTLP collector endpoint URL (e.g. `http://127.0.0.1:4318/v1/logs` or `grpc://127.0.0.1:4317`).
-    pub endpoint: String,
-    /// Batch size threshold triggering an immediate flush (between 1 and 4096).
-    pub batch_size: usize,
-    /// Maximum duration in milliseconds before flushing pending records (between 10 and 60000).
-    pub flush_interval_ms: u64,
-    /// Bounded capacity of the lock-free log dispatch queue (between 128 and 262144).
-    pub buffer_capacity: usize,
-    /// TCP and TLS connection establishment timeout in milliseconds (100 to 60000).
-    pub connect_timeout_ms: u64,
-    /// Request export completion timeout in milliseconds (100 to 60000).
-    pub request_timeout_ms: u64,
-    /// Service name reported in OpenTelemetry Resource attributes.
-    pub service_name: String,
-    /// Custom HTTP or gRPC headers (use `{}` if none).
-    pub headers: HashMap<String, String>,
-}
-
 /// Post-Response OpenTelemetry Structured Logger Plugin.
 pub struct OpentelemetryLoggerPlugin {
     pub id: String,
     pub config: OpentelemetryLoggerConfig,
-    sender: mpsc::Sender<OtlpLogItem>,
+    sampling: SamplingTable,
+    ring_buffer: Arc<ShardedRingBuffer>,
     dropped_count: Arc<AtomicU64>,
     logged_count: Arc<AtomicU64>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl OpentelemetryLoggerPlugin {
     /// Constructs a new `OpentelemetryLoggerPlugin` and starts the asynchronous Shadow flusher.
     pub fn new(id: impl Into<String>, config: OpentelemetryLoggerConfig) -> Self {
-        let (plugin, rx) = Self::new_with_receiver(id, config);
-        let endpoint = plugin.config.endpoint.clone();
-        let protocol = plugin.config.protocol.clone();
-        let batch_size = plugin.config.batch_size;
-        let flush_interval = Duration::from_millis(plugin.config.flush_interval_ms.max(10));
-        let service_name = plugin.config.service_name.clone();
+        let id_str = id.into();
+        let topology = velda_core::global_hardware_topology();
+        let num_workers = topology.worker_threads.max(1);
 
-        let connect_timeout = Duration::from_millis(plugin.config.connect_timeout_ms);
-        let request_timeout = Duration::from_millis(plugin.config.request_timeout_ms);
+        let ring_buffer = Arc::new(ShardedRingBuffer::new(
+            num_workers,
+            config.buffer_capacity.max(128),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dropped_count = Arc::new(AtomicU64::new(0));
+        let logged_count = Arc::new(AtomicU64::new(0));
+
+        let sampling = config
+            .build_sampling_table()
+            .unwrap_or_else(|_| SamplingTable::empty());
 
         let mut custom_headers = HeaderMap::new();
-        for (k, v) in &plugin.config.headers {
+        for (k, v) in &config.headers {
             if let Ok(name) = http::header::HeaderName::from_bytes(k.as_bytes())
                 && let Ok(val) = http::header::HeaderValue::from_str(v)
             {
@@ -86,48 +65,40 @@ impl OpentelemetryLoggerPlugin {
             }
         }
 
+        let drainer = ShadowOtlpDrainer::new(
+            config.protocol.clone(),
+            config.endpoint.clone(),
+            config.batch_size,
+            Duration::from_millis(config.flush_interval_ms.max(10)),
+            Duration::from_millis(config.connect_timeout_ms),
+            Duration::from_millis(config.request_timeout_ms),
+            config.service_name.clone(),
+            custom_headers,
+            ring_buffer.clone(),
+            shutdown.clone(),
+        );
+
         let flusher_task = Box::pin(async move {
-            Self::run_flusher_loop(
-                rx,
-                protocol,
-                endpoint,
-                batch_size,
-                flush_interval,
-                connect_timeout,
-                request_timeout,
-                service_name,
-                custom_headers,
-            )
-            .await;
+            drainer.run().await;
         });
 
         // Priority 1: Dispatch onto Shadow Worker runtime via non-blocking try_dispatch_shadow
         if let Err(task) = try_dispatch_shadow(flusher_task) {
-            // Priority 2: Fallback to Tokio current runtime if Shadow Worker hook is uninitialized (e.g. testing)
+            // Priority 2: Fallback to Tokio current runtime if Shadow Worker hook is uninitialized
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(task);
             }
         }
 
-        plugin
-    }
-
-    /// Constructs an `OpentelemetryLoggerPlugin` returning the receiving channel end for test inspection.
-    pub fn new_with_receiver(
-        id: impl Into<String>,
-        config: OpentelemetryLoggerConfig,
-    ) -> (Self, mpsc::Receiver<OtlpLogItem>) {
-        let (sender, receiver) = mpsc::channel(config.buffer_capacity.max(16));
-        (
-            Self {
-                id: id.into(),
-                config,
-                sender,
-                dropped_count: Arc::new(AtomicU64::new(0)),
-                logged_count: Arc::new(AtomicU64::new(0)),
-            },
-            receiver,
-        )
+        Self {
+            id: id_str,
+            config,
+            sampling,
+            ring_buffer,
+            dropped_count,
+            logged_count,
+            shutdown,
+        }
     }
 
     /// Deserializes and validates this plugin from declarative [`PluginConfig`].
@@ -139,130 +110,9 @@ impl OpentelemetryLoggerPlugin {
         Ok(Self::new(&config.id, parsed))
     }
 
-    /// Executes the background batching loop on the Shadow Worker.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_flusher_loop(
-        mut rx: mpsc::Receiver<OtlpLogItem>,
-        protocol: String,
-        endpoint: String,
-        batch_size: usize,
-        flush_interval: Duration,
-        connect_timeout: Duration,
-        request_timeout: Duration,
-        service_name: String,
-        custom_headers: HeaderMap,
-    ) {
-        let is_grpc = protocol.eq_ignore_ascii_case("grpc")
-            || endpoint.starts_with("grpc://")
-            || endpoint.starts_with("grpcs://");
-
-        let mut batch = Vec::with_capacity(batch_size);
-        let mut ticker = tokio::time::interval(flush_interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        if is_grpc {
-            let mut client = match OtlpLogsGrpcClient::new(
-                &endpoint,
-                connect_timeout,
-                request_timeout,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(endpoint = %endpoint, error = %e, "Failed to initialize OTLP gRPC log client");
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    item = rx.recv() => {
-                        match item {
-                            Some(record) => {
-                                batch.push(record);
-                                if batch.len() >= batch_size {
-                                    Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                            }
-                            None => {
-                                if !batch.is_empty() {
-                                    Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        if !batch.is_empty() {
-                            Self::flush_batch_grpc(&mut client, &mut batch, &service_name, &custom_headers).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let mut client = match OtlpLogClient::new(&endpoint, connect_timeout, request_timeout) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(endpoint = %endpoint, error = %e, "Failed to initialize OTLP HTTP log client");
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    item = rx.recv() => {
-                        match item {
-                            Some(record) => {
-                                batch.push(record);
-                                if batch.len() >= batch_size {
-                                    Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                            }
-                            None => {
-                                if !batch.is_empty() {
-                                    Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        if !batch.is_empty() {
-                            Self::flush_batch_http(&mut client, &mut batch, &service_name, &custom_headers).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Flushes a batch of log records to the OTLP collector via HTTP/JSON.
-    async fn flush_batch_http(
-        client: &mut OtlpLogClient,
-        batch: &mut Vec<OtlpLogItem>,
-        service_name: &str,
-        custom_headers: &HeaderMap,
-    ) {
-        let json_str = format_otlp_logs_json(batch, service_name);
-        batch.clear();
-
-        if let Err(e) = client.send_logs(json_str.as_bytes(), custom_headers).await {
-            tracing::warn!(error = %e, "Failed to flush OTLP logs batch to collector via HTTP");
-        }
-    }
-
-    /// Flushes a batch of log records to the OTLP collector via gRPC/Protobuf.
-    async fn flush_batch_grpc(
-        client: &mut OtlpLogsGrpcClient,
-        batch: &mut Vec<OtlpLogItem>,
-        service_name: &str,
-        custom_headers: &HeaderMap,
-    ) {
-        let proto_bytes = format_otlp_logs_proto(batch, service_name);
-        batch.clear();
-
-        if let Err(e) = client.send_logs(&proto_bytes, custom_headers).await {
-            tracing::warn!(error = %e, "Failed to flush OTLP logs batch to collector via gRPC");
-        }
+    /// Accessor for testing: pushes directly to ring buffer.
+    pub fn try_push_record(&self, record: &PackedOtlpRecord) -> bool {
+        self.ring_buffer.try_push(record).is_ok()
     }
 
     /// Returns cumulative number of records dropped due to queue saturation.
@@ -274,6 +124,16 @@ impl OpentelemetryLoggerPlugin {
     pub fn logged_count(&self) -> u64 {
         self.logged_count.load(Ordering::Relaxed)
     }
+
+    pub fn ring_buffer(&self) -> Arc<ShardedRingBuffer> {
+        self.ring_buffer.clone()
+    }
+}
+
+impl Drop for OpentelemetryLoggerPlugin {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
 }
 
 impl PostResponsePlugin for OpentelemetryLoggerPlugin {
@@ -282,81 +142,121 @@ impl PostResponsePlugin for OpentelemetryLoggerPlugin {
     }
 
     fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
-        let now_nano = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-
         let status = resp.status.as_u16();
 
-        let method = req_headers
-            .get("x-original-method")
-            .or_else(|| req_headers.get("x-forwarded-method"))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("GET")
-            .to_string();
+        // 1. Instant Hot-Path Escape: Status-Aware Sampling in ~1.5ns
+        if !self.sampling.should_sample(status) {
+            return;
+        }
 
-        let path = req_headers
-            .get("x-original-path")
-            .or_else(|| req_headers.get("x-forwarded-uri"))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("/")
-            .to_string();
+        // 2. Construct 256-byte aligned POD record directly on CPU Stack (hot in L1 cache)
+        let mut record = PackedOtlpRecord::empty();
+        record.status = status;
 
-        let client_ip = req_headers
+        // Nanosecond timestamp from system clock or coarse fallback
+        record.time_unix_nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or_else(|_| velda_core::coarse_now_sec().saturating_mul(1_000_000_000));
+
+        // Method
+        if let Some(m) = req_headers
+            .get("x-forwarded-method")
+            .or_else(|| req_headers.get("x-original-method"))
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(method) = http::Method::from_bytes(m.as_bytes()) {
+                record.method = PackedOtlpRecord::encode_method(&method);
+            }
+        } else {
+            record.method = 1; // Default GET
+        }
+
+        // URL Path
+        if let Some(path_bytes) = req_headers
+            .get("x-forwarded-uri")
+            .or_else(|| req_headers.get("x-original-path"))
+            .map(|v| v.as_bytes())
+        {
+            record.set_path(path_bytes);
+        } else {
+            record.set_path(b"/");
+        }
+
+        // Client IP
+        if let Some(ip_str) = req_headers
             .get("x-forwarded-for")
             .or_else(|| req_headers.get("x-real-ip"))
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
+        {
+            let first_ip = ip_str.split(',').next().unwrap_or("").trim();
+            if let Ok(ip) = first_ip.parse::<std::net::IpAddr>() {
+                record.set_client_ip(ip);
+            }
+        }
 
-        let route_id = resp
+        // Matched Route ID
+        if let Some(rt) = resp
             .headers
             .get(&X_ROUTE_ID)
             .or_else(|| req_headers.get(&X_ROUTE_ID))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        {
+            record.set_route_id(rt.as_bytes());
+        }
 
-        let upstream = resp
-            .headers
-            .get(&X_UPSTREAM_ADDR)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        // Upstream Address
+        if let Some(up) = resp.headers.get(&X_UPSTREAM_ADDR) {
+            record.set_upstream(up.as_bytes());
+        }
 
-        let latency_ms = resp
+        // Latency
+        if let Some(lat) = resp
             .headers
             .get(&X_RESPONSE_TIME)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<f64>().ok());
+            && let Ok(ms) = lat.trim_end_matches("ms").trim().parse::<f64>()
+        {
+            record.duration_us = (ms * 1000.0).clamp(0.0, u32::MAX as f64) as u32;
+        }
 
-        let trace_id = req_headers
+        // W3C Trace ID & Span ID
+        if let Some(trace_id_val) = req_headers
             .get(&X_TRACE_ID)
             .or_else(|| req_headers.get(&X_REQUEST_ID))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        {
+            let bytes = trace_id_val.as_bytes();
+            if bytes.len() == 32 {
+                let mut raw = [0u8; 16];
+                if decode_hex(bytes, &mut raw) == 16 {
+                    record.set_trace_id(&raw);
+                } else {
+                    record.set_trace_id(bytes);
+                }
+            } else {
+                record.set_trace_id(bytes);
+            }
+        }
 
-        let span_id = req_headers
-            .get(&X_SPAN_ID)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        if let Some(span_id_val) = req_headers.get(&X_SPAN_ID) {
+            let bytes = span_id_val.as_bytes();
+            if bytes.len() == 16 {
+                let mut raw = [0u8; 8];
+                if decode_hex(bytes, &mut raw) == 8 {
+                    record.set_span_id(&raw);
+                } else {
+                    record.set_span_id(bytes);
+                }
+            } else {
+                record.set_span_id(bytes);
+            }
+        }
 
-        let item = OtlpLogItem {
-            time_unix_nano: now_nano,
-            status,
-            method,
-            path,
-            client_ip,
-            route_id,
-            upstream,
-            latency_ms,
-            trace_id,
-            span_id,
-        };
-
-        match self.sender.try_send(item) {
+        // 3. Write directly to RAM ring buffer slot via _mm256_stream_si256 and hand off index
+        match self.ring_buffer.try_push(&record) {
             Ok(()) => {
                 self.logged_count.fetch_add(1, Ordering::Relaxed);
             }
-            Err(_) => {
+            Err(()) => {
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -369,7 +269,7 @@ impl PostResponsePlugin for OpentelemetryLoggerPlugin {
 
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
-        SupportedProtocols::ALL_L7
+        SupportedProtocols::ALL_HTTP
     }
 }
 
@@ -389,14 +289,15 @@ mod tests {
             connect_timeout_ms: 5000,
             request_timeout_ms: 10000,
             service_name: "test-gateway".to_string(),
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            sampling: std::collections::HashMap::new(),
         };
 
-        let (plugin, mut rx) = OpentelemetryLoggerPlugin::new_with_receiver("otel_log", config);
+        let plugin = OpentelemetryLoggerPlugin::new("otel_log", config);
 
         let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert("x-original-method", HeaderValue::from_static("POST"));
-        req_headers.insert("x-original-path", HeaderValue::from_static("/api/orders"));
+        req_headers.insert("x-forwarded-method", HeaderValue::from_static("POST"));
+        req_headers.insert("x-forwarded-uri", HeaderValue::from_static("/api/orders"));
         req_headers.insert(
             X_REQUEST_ID,
             HeaderValue::from_static("4bf92f3577b34da6a3ce929d0e0e4736"),
@@ -409,23 +310,23 @@ mod tests {
         resp.headers
             .insert(X_UPSTREAM_ADDR, HeaderValue::from_static("10.0.1.2:8080"));
         resp.headers
-            .insert(X_RESPONSE_TIME, HeaderValue::from_static("3.45"));
+            .insert(X_RESPONSE_TIME, HeaderValue::from_static("3.45ms"));
 
         plugin.on_response(&req_headers, &mut resp);
         assert_eq!(plugin.logged_count(), 1);
         assert_eq!(plugin.dropped_count(), 0);
 
-        let received = rx.recv().await.expect("Item received");
-        assert_eq!(received.status, 201);
-        assert_eq!(received.method, "POST");
-        assert_eq!(received.path, "/api/orders");
-        assert_eq!(received.route_id.as_deref(), Some("orders-route"));
-        assert_eq!(received.upstream.as_deref(), Some("10.0.1.2:8080"));
-        assert_eq!(received.latency_ms, Some(3.45));
-        assert_eq!(
-            received.trace_id.as_deref(),
-            Some("4bf92f3577b34da6a3ce929d0e0e4736")
-        );
-        assert_eq!(received.span_id.as_deref(), Some("00f067aa0ba902b7"));
+        let mut batch = [PackedOtlpRecord::empty(); 1];
+        let drained = plugin.ring_buffer().pop_all(&mut batch);
+        assert_eq!(drained, 1);
+        assert_eq!(batch[0].status, 201);
+        assert_eq!(batch[0].method_str(), "POST");
+        assert_eq!(batch[0].path(), "/api/orders");
+        assert_eq!(batch[0].route_id(), "orders-route");
+        assert_eq!(batch[0].upstream(), "10.0.1.2:8080");
+        assert_eq!(batch[0].duration_us, 3450);
+        let mut expected_span = [0u8; 8];
+        decode_hex(b"00f067aa0ba902b7", &mut expected_span);
+        assert_eq!(batch[0].span_id(), &expected_span[..]);
     }
 }

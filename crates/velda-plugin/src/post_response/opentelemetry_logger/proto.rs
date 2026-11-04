@@ -1,11 +1,11 @@
-//! OpenTelemetry ResourceLogs Protobuf Message Models & Serializer (`opentelemetry_logger`).
+//! OpenTelemetry ResourceLogs Protobuf Message Models & Serializer (`opentelemetry_logger::proto`).
 //!
-//! Encodes slices of [`OtlpLogItem`] records into compliant OpenTelemetry binary Protocol Buffers:
+//! Encodes slices of [`PackedOtlpRecord`] into compliant OpenTelemetry binary Protocol Buffers:
 //! `opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest`
 
 use prost::Message;
 
-use super::record::OtlpLogItem;
+use super::record::{OtlpLogItem, PackedOtlpRecord, decode_hex};
 
 /// Root export request for OpenTelemetry Logs Service.
 #[derive(Clone, PartialEq, Message)]
@@ -139,66 +139,53 @@ impl KeyValue {
     }
 }
 
-fn decode_hex(hex: &str, expected_len: usize) -> Vec<u8> {
-    if hex.len() == expected_len * 2 {
-        let mut out = Vec::with_capacity(expected_len);
-        for i in 0..expected_len {
-            if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
-                out.push(b);
-            } else {
-                return Vec::new();
-            }
-        }
-        out
-    } else {
-        Vec::new()
-    }
-}
-
-/// Encodes a slice of [`OtlpLogItem`] records into compliant OpenTelemetry binary Protobuf bytes.
-pub fn format_otlp_logs_proto(records: &[OtlpLogItem], service_name: &str) -> Vec<u8> {
+/// Encodes a slice of [`PackedOtlpRecord`] directly into Protobuf wire bytes without intermediate string allocations.
+pub fn format_otlp_records_proto(records: &[PackedOtlpRecord], service_name: &str) -> Vec<u8> {
     let mut log_records = Vec::with_capacity(records.len());
+    let mut ip_buf = String::with_capacity(40);
 
     for item in records {
         let (severity_number, severity_text) = item.severity();
-        let body_str = format!("{} {} -> {}", item.method, item.path, item.status);
+        let method = item.method_str();
+        let path = item.path();
+        let body_str = format!("{} {} -> {}", method, path, item.status);
 
         let mut attributes = vec![
-            KeyValue::new_string("http.request.method", &item.method),
+            KeyValue::new_string("http.request.method", method),
             KeyValue::new_int("http.response.status_code", item.status as i64),
-            KeyValue::new_string("url.path", &item.path),
+            KeyValue::new_string("url.path", path),
         ];
 
-        if let Some(ip) = &item.client_ip {
-            attributes.push(KeyValue::new_string("client.address", ip));
+        if item.ip_kind != 0 {
+            ip_buf.clear();
+            item.format_client_ip(&mut ip_buf);
+            attributes.push(KeyValue::new_string("client.address", ip_buf.as_str()));
         }
 
-        if let Some(route) = &item.route_id {
+        let route = item.route_id();
+        if !route.is_empty() {
             attributes.push(KeyValue::new_string("http.route", route));
         }
 
-        if let Some(upstream) = &item.upstream {
-            attributes.push(KeyValue::new_string("network.peer.address", upstream));
+        let up = item.upstream();
+        if !up.is_empty() {
+            attributes.push(KeyValue::new_string("network.peer.address", up));
         }
 
-        if let Some(lat) = item.latency_ms {
-            attributes.push(KeyValue::new_double("http.server.request.duration_ms", lat));
+        if item.duration_us > 0 {
+            let lat_ms = item.duration_us as f64 / 1000.0;
+            attributes.push(KeyValue::new_double(
+                "http.server.request.duration_ms",
+                lat_ms,
+            ));
         }
 
-        let trace_id_bytes = item
-            .trace_id
-            .as_deref()
-            .map(|s| decode_hex(s, 16))
-            .unwrap_or_default();
-        let span_id_bytes = item
-            .span_id
-            .as_deref()
-            .map(|s| decode_hex(s, 8))
-            .unwrap_or_default();
+        let trace_id_bytes = item.trace_id().to_vec();
+        let span_id_bytes = item.span_id().to_vec();
 
         log_records.push(LogRecord {
-            time_unix_nano: item.time_unix_nano as u64,
-            observed_time_unix_nano: item.time_unix_nano as u64,
+            time_unix_nano: item.time_unix_nano,
+            observed_time_unix_nano: item.time_unix_nano,
             severity_number: severity_number as i32,
             severity_text: severity_text.to_string(),
             body: Some(AnyValue {
@@ -239,34 +226,48 @@ pub fn format_otlp_logs_proto(records: &[OtlpLogItem], service_name: &str) -> Ve
     buf
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_otlp_logs_proto() {
-        let item = OtlpLogItem {
-            time_unix_nano: 1729579200000000000,
-            status: 200,
-            method: "GET".to_string(),
-            path: "/api/v1/orders".to_string(),
-            client_ip: Some("192.168.1.100".to_string()),
-            route_id: Some("orders-route".to_string()),
-            upstream: Some("10.0.0.5:8080".to_string()),
-            latency_ms: Some(1.25),
-            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-            span_id: Some("00f067aa0ba902b7".to_string()),
-        };
-
-        let bytes = format_otlp_logs_proto(&[item], "order-service");
-        assert!(!bytes.is_empty());
-
-        let decoded = ExportLogsServiceRequest::decode(&bytes[..]).expect("Must decode");
-        assert_eq!(decoded.resource_logs.len(), 1);
-        let lr = &decoded.resource_logs[0].scope_logs[0].log_records[0];
-        assert_eq!(lr.severity_number, 9);
-        assert_eq!(lr.severity_text, "INFO");
-        assert_eq!(lr.trace_id.len(), 16);
-        assert_eq!(lr.span_id.len(), 8);
+// Legacy compatibility for tests
+pub fn format_otlp_logs_proto(records: &[OtlpLogItem], service_name: &str) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(records.len());
+    for r in records {
+        let mut p = PackedOtlpRecord::empty();
+        p.time_unix_nano = r.time_unix_nano as u64;
+        p.status = r.status;
+        p.duration_us = r.latency_ms.map(|ms| (ms * 1000.0) as u32).unwrap_or(0);
+        if let Ok(method) = r.method.parse::<http::Method>() {
+            p.method = PackedOtlpRecord::encode_method(&method);
+        }
+        p.set_path(r.path.as_bytes());
+        if let Some(ip) = &r.client_ip
+            && let Ok(parsed) = ip.parse::<std::net::IpAddr>()
+        {
+            p.set_client_ip(parsed);
+        }
+        if let Some(rt) = &r.route_id {
+            p.set_route_id(rt.as_bytes());
+        }
+        if let Some(up) = &r.upstream {
+            p.set_upstream(up.as_bytes());
+        }
+        if let Some(tr) = &r.trace_id {
+            let mut raw = [0u8; 16];
+            let n = decode_hex(tr.as_bytes(), &mut raw);
+            if n > 0 {
+                p.set_trace_id(&raw[..n]);
+            } else {
+                p.set_trace_id(tr.as_bytes());
+            }
+        }
+        if let Some(sp) = &r.span_id {
+            let mut raw = [0u8; 8];
+            let n = decode_hex(sp.as_bytes(), &mut raw);
+            if n > 0 {
+                p.set_span_id(&raw[..n]);
+            } else {
+                p.set_span_id(sp.as_bytes());
+            }
+        }
+        packed.push(p);
     }
+    format_otlp_records_proto(&packed, service_name)
 }
