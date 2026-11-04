@@ -56,10 +56,20 @@ impl ShadowOtlpDrainer {
         }
     }
 
-    pub fn spawn(self) {
-        tokio::spawn(async move {
+    /// Spawns the drainer flusher onto the dedicated Shadow Logistics Worker runtime.
+    ///
+    /// Priority 1: Dispatches onto the core-local Shadow Worker (`SCHED_IDLE`) via `try_dispatch_shadow`.
+    /// Priority 2: Falls back to the current Tokio runtime only in unit test harnesses.
+    pub fn spawn_shadow(self) {
+        let flusher_task = Box::pin(async move {
             self.run().await;
         });
+
+        if let Err(task) = crate::hook::try_dispatch_shadow(flusher_task) {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(task);
+            }
+        }
     }
 
     pub async fn run(self) {

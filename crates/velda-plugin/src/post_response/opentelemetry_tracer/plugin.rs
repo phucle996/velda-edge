@@ -25,7 +25,6 @@ use crate::header::{
     TRACEPARENT, X_PARENT_SPAN_ID, X_REQUEST_ID, X_RESPONSE_TIME, X_ROUTE_ID, X_SPAN_ID,
     X_TRACE_ID, X_UPSTREAM_ADDR,
 };
-use crate::hook::try_dispatch_shadow;
 use crate::post_response::PostResponsePlugin;
 
 /// Post-Response OpenTelemetry Tracer Plugin.
@@ -80,17 +79,7 @@ impl OpentelemetryTracerPlugin {
             shutdown.clone(),
         );
 
-        let flusher_task = Box::pin(async move {
-            drainer.run().await;
-        });
-
-        // Priority 1: Dispatch onto Shadow Worker runtime via non-blocking try_dispatch_shadow
-        if let Err(task) = try_dispatch_shadow(flusher_task) {
-            // Priority 2: Fallback to Tokio current runtime if Shadow Worker hook is uninitialized
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(task);
-            }
-        }
+        drainer.spawn_shadow();
 
         Self {
             id: id_str,
