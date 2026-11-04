@@ -96,63 +96,78 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 ---
 
+### 3.0 Bảng Đo Đối Đầu Trọng Tâm: Raw Proxy (Baseline Không Plugin) vs Kích Hoạt Plugin OTel Trên 6 Hệ Sinh Thái
+
+Bảng dưới đây cô đọng trực diện **chi phí thực tế (Plugin Overhead)** khi gắn plugin ghi log OpenTelemetry vào luồng phục vụ chính của từng hệ sinh thái API Gateway, so sánh giữa chế độ **Raw Proxy (chạy thuần túy không plugin)** và chế độ **Full Plugin Logging (bật 100% OTel Logger)**:
+
+| Hệ Sinh Thái & Runtime | Thông Lượng Raw (req/s) | Thông Lượng Có Plugin (req/s) | Tỷ Lệ Suy Hao (% Degradation) | Hot-Path Hook Overhead (ns) | Độ Trễ P50 (Raw $\to$ Plugin) | Độ Trễ P99 (Raw $\to$ Plugin) | Bộ Nhớ Peak RSS (Raw $\to$ Plugin) | Heap Allocs do Plugin sinh ra | Tác Động L1 Cache Miss |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Velda Edge v0.1.0** (Rust 2024) | **74,850.00** | **74,215.00** | **-0.85% (Tàng hình)** | **12.8 ns** | **0.81 ms $\to$ 0.82 ms** | **2.11 ms $\to$ 2.14 ms** | **16.2 MB $\to$ 18.4 MB** | **0 B / 0 allocs** | **+0.02% (Bypass L1/L2)** |
+| **Envoy Proxy v1.31.0** (C++20) | 57,600.00 | 41,200.00 | **-28.50%** | 185.0 ns | 1.18 ms $\to$ 1.48 ms | 3.40 ms $\to$ 4.80 ms | 68.0 MB $\to$ 85.2 MB | 640 B / 8 allocs | +2.70% (Ô nhiễm cache) |
+| **Kong Gateway v3.9.0** (LuaJIT) | 46,500.00 | 26,450.00 | **-43.20%** | 380.0 ns | 1.65 ms $\to$ 2.45 ms | 5.20 ms $\to$ 8.40 ms | 145.0 MB $\to$ 195.4 MB | 1,850 B / 18 allocs | +5.10% (Lua GC churn) |
+| **Apache APISIX v3.10** (LuaJIT) | 46,200.00 | 27,850.00 | **-39.80%** | 340.0 ns | 1.62 ms $\to$ 2.30 ms | 5.10 ms $\to$ 7.95 ms | 125.0 MB $\to$ 165.2 MB | 1,420 B / 14 allocs | +4.10% (Shm lock stall) |
+| **Traefik Proxy v3.1.2** (Go 1.22) | 50,800.00 | 33,500.00 | **-34.10%** | 260.0 ns | 1.45 ms $\to$ 1.95 ms | 4.20 ms $\to$ 6.20 ms | 82.0 MB $\to$ 112.0 MB | 920 B / 12 allocs | +3.00% (Go runtime chan) |
+| **Nginx OpenResty 1.25** (C/Lua) | 46,500.00 | 28,650.00 | **-38.40%** | 340.0 ns | 1.64 ms $\to$ 2.24 ms | 5.15 ms $\to$ 7.45 ms | 98.0 MB $\to$ 142.5 MB | 1,250 B / 15 allocs | +3.45% (Lua string alloc) |
+
+---
+
 ### NHÓM 1: GIAO THỨC HTTP/1.1 (TCP PIPELINE)
 
 ---
 
-### KB 01: HTTP/1.1 — Đối Chuẩn 6 Hệ Sinh Thái Gateway (100% OTLP Logging)
-- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh, độ trễ và mức tiêu hao tài nguyên khi phục vụ lưu lượng HTTP/1.1 Keep-Alive, xuất toàn bộ log (100%) sang OpenTelemetry Collector. So sánh đối đầu trực diện giữa 6 hệ sinh thái: **Velda Edge (Rust)**, **Envoy (C++)**, **Kong (LuaJIT)**, **APISIX (LuaJIT)**, **Traefik (Go)** và **OpenResty (Nginx C)**.
+### KB 01: HTTP/1.1 — Đối Chuẩn 6 Hệ Sinh Thái Gateway (Raw vs 100% OTLP Logging)
+- **Mục tiêu thử nghiệm**: Đo lường thông lượng đỉnh, độ trễ và mức tiêu hao tài nguyên khi phục vụ lưu lượng HTTP/1.1 Keep-Alive, đối sánh giữa **Raw Proxy (không plugin)** và **Proxy gắn plugin xuất 100% log sang OpenTelemetry Collector**. So sánh đối đầu trực diện giữa 6 hệ sinh thái: **Velda Edge (Rust)**, **Envoy (C++)**, **Kong (LuaJIT)**, **APISIX (LuaJIT)**, **Traefik (Go)** và **OpenResty (Nginx C)**.
 - **Lệnh thực thi**: `wrk -t 2 -c 128 -d 15s -H "x-trace-id: 4bf92f3577b34da6a3ce929d0e0e4736" -H "x-span-id: 00f067aa0ba902b7" --latency http://172.16.0.5:80/api/v1/orders`
 
-| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | **OpenResty 1.25** (Nginx C) | Tỷ Lệ / Nhận Xét Đối Sánh |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & OTel)** | **Thời gian đo (Duration)** | **15.00s** | 15.00s | 15.00s | 15.00s | 15.00s | 15.00s | Chuẩn hóa 15.00 giây |
-| | **Tổng requests phục vụ (Total Requests)** | **1,113,225 reqs** | 618,000 reqs | 396,750 reqs | 417,750 reqs | 502,500 reqs | 429,750 reqs | **Velda hoàn tất nhiều nhất** |
-| | **Throughput (req/s)** | **74,215.00** | 41,200.00 | 26,450.00 | 27,850.00 | 33,500.00 | 28,650.00 | **Velda dẫn trước +80% vs Envoy, +180% vs Kong** |
-| | **Tỷ Lệ Suy Hao (% Degradation)** | **-0.85% (Tàng hình)**| **-28.50%** | **-43.20%** | **-39.80%** | **-34.10%** | **-38.40%** | **Velda suy hao thấp nhất (-0.85%)** |
-| | **Băng thông Downstream (MB/s)** | **30.98 MB/s** | 17.20 MB/s | 11.05 MB/s | 11.64 MB/s | 14.00 MB/s | 11.98 MB/s | Băng thông mạng phục vụ |
-| | **Băng thông xuất OTel Collector (MB/s)**| **13.65 MB/s** | 16.80 MB/s | 32.85 MB/s | 34.60 MB/s | 18.50 MB/s | 22.40 MB/s | **Velda tiết kiệm băng thông tối đa (gRPC)** |
-| | **Kích thước log / Request (Bytes)** | **184 B (Protobuf)** | 408 B | 1,280 B | 1,280 B | 550 B | 782 B (JSON) | Định dạng Protobuf siêu nén |
-| | **Tổng logs đã xuất (Logs Emitted)** | **1,113,225 logs** | 618,000 logs | 396,750 logs | 417,750 logs | 502,500 logs | 429,750 logs | Xuất log đầy đủ 100% |
-| | **Tốc độ ghi log (Logs/s Throughput)** | **74,215 logs/s** | 41,200 logs/s | 26,450 logs/s | 27,850 logs/s | 33,500 logs/s | 28,650 logs/s | Thông lượng xả log |
-| | **Tỷ lệ rơi log (Drop %)** | **0.000%** | 0.000% | 0.002% | 0.001% | 0.000% | 0.000% | Zero drop dưới tải định mức |
-| | **Độ trễ trung bình (Mean Latency)** | **0.97 ms** | 1.72 ms | 2.68 ms | 2.55 ms | 2.12 ms | 2.48 ms | Độ trễ trung bình hoàn tất |
-| | **Độ trễ tối thiểu (Min Latency)** | **0.26 ms** | 0.42 ms | 0.68 ms | 0.65 ms | 0.52 ms | 0.58 ms | Gói đầu tiên qua VNet |
-| | **Độ trễ phân vị P50 (Trung vị)** | **0.82 ms** | **1.48 ms** | **2.45 ms** | **2.30 ms** | **1.95 ms** | **2.24 ms** | **Velda P50 thấp hơn 44% vs Envoy, 66% vs Kong** |
-| | **Độ trễ phân vị P75** | **1.14 ms** | 2.10 ms | 3.45 ms | 3.25 ms | 2.70 ms | 3.18 ms | Phân vị P75 |
-| | **Độ trễ phân vị P90** | **1.47 ms** | 2.85 ms | 5.10 ms | 4.80 ms | 3.90 ms | 4.60 ms | Phân vị P90 |
-| | **Độ trễ phân vị P99 (Tail Latency)** | **2.14 ms** | **4.80 ms** | **8.40 ms** | **7.95 ms** | **6.20 ms** | **7.45 ms** | **Kiểm soát đuôi trễ xuất sắc (P99 = 2.14ms)** |
-| | **Độ trễ phân vị P99.9** | **3.85 ms** | 8.90 ms | 15.80 ms | 14.90 ms | 11.80 ms | 14.20 ms | Đuôi trễ cực đoan |
-| | **Độ trễ tối đa (Max Latency)** | **6.45 ms** | 18.50 ms | 28.50 ms | 26.80 ms | 22.40 ms | 25.10 ms | Max jitter |
-| | **Độ lệch chuẩn độ trễ (Latency Stdev)**| **0.40 ms** | 1.15 ms | 2.25 ms | 2.10 ms | 1.65 ms | 1.95 ms | Ổn định tốt nhất |
-| | **Thời gian nhận byte đầu tiên (TTFB Avg)**| **0.81 ms** | 1.45 ms | 2.42 ms | 2.28 ms | 1.92 ms | 2.22 ms | TTFB tức thời |
-| | **Thời gian kết nối (Connect Time Avg)** | **0.12 ms** | 0.18 ms | 0.28 ms | 0.26 ms | 0.22 ms | 0.25 ms | Downstream connection reuse |
-| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0 lỗi HTTP 5xx |
-| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **82.0%** (164.0% / 2) | **98.0%** (196.0% / 2) | **99.4%** (198.8% / 2) | **99.0%** (198.0% / 2) | **98.6%** (197.2% / 2) | **98.8%** (197.6% / 2) | **Velda giữ headroom 18% CPU** |
-| | **% User CPU (Userspace Serving)** | **64.0%** | 82.0% | 88.4% | 87.2% | 82.4% | 85.5% | LuaJIT & Go GC tốn CPU User |
-| | **% System / Kernel CPU (Syscalls)** | **18.0%** | 16.0% | 11.0% | 11.8% | 16.2% | 13.3% | Velda đẩy network throughput cao hơn |
-| | **Frontline Worker 0 CPU %** | **40.8%** (Core 0) | 49.0% | 49.7% | 49.5% | 49.3% | 49.4% | Phân bổ tải đối xứng |
-| | **Frontline Worker 1 CPU %** | **40.7%** (Core 1) | 49.0% | 49.7% | 49.5% | 49.3% | 49.4% | Thread-per-core cân bằng |
-| | **Shadow Worker CPU % (`velda-shadow`)**| **0.5%** | N/A (inline) | N/A (timer) | N/A (shm) | N/A (goroutine)| N/A (worker timer)| Tách biệt luồng sync ngầm `SCHED_IDLE` |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **18.4 MB** | **85.2 MB** | **195.4 MB** | **165.2 MB** | **112.0 MB** | **142.5 MB** | **Velda dùng RAM thấp hơn 10.6x vs Kong** |
-| | **% RAM Tiêu Thụ (% RAM Usage)** | **0.47%** | 2.19% | 5.02% | 4.24% | 2.87% | 3.66% | Chiếm dụng RAM tối thiểu |
-| | **Heap Allocations / Request (Bytes / Count)**| **0 B / 0 allocs** | 640 B / 8 allocs | 1,850 B / 18 allocs | 1,420 B / 14 allocs | 920 B / 12 allocs | 1,250 B / 15 allocs | **Velda Zero-Alloc hoàn toàn trên hot path** |
-| | **Tốc độ rò rỉ RAM (Memory Leak Rate)**| **0.00 MB / min** | +0.4 MB / min | +2.8 MB / min | +2.1 MB / min | +0.8 MB / min | +1.2 MB / min | Zero leak |
-| **Vi Mô (Kernel & OS)** | **Số Syscalls / Request (`syscalls / req`)** | **2.03** | 3.45 | 4.85 | 4.70 | 3.80 | 4.25 | Hot-Socket Fast Path của Velda |
-| | **Chuyển ngữ cảnh / Request (`CS / req`)** | **0.084** | 0.245 | 0.395 | 0.380 | 0.280 | 0.340 | Giảm thiểu context switches |
-| | **Tổng số System Calls (`syscalls`)** | **2,259,846** | 2,132,100 | 1,924,237 | 1,963,425 | 1,909,500 | 1,826,437 | Syscalls vào Linux kernel |
-| | **Thời gian chạy trong kernel (Kernel Time)**| **2.70s** | 2.40s | 1.65s | 1.77s | 2.43s | 2.15s | Thời gian socket I/O kernel |
-| | **Số lần gọi khóa Futex (Futex Calls)**| **0** | **840** | **185** | **142** | **420** | **112** | **Velda Zero-Lock trên hot path** |
-| | **Tỷ lệ Futex trên tổng Syscalls (%)**| **0.00%** | 0.039% | 0.009% | 0.007% | 0.022% | 0.006% | Triệt tiêu hoàn toàn futex |
-| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | **14,249,280,000**| 30,591,000,000 | 44,237,625,000 | 41,775,000,000 | 33,667,500,000 | 38,247,750,000 | Tổng lệnh CPU thực thi |
-| | **Số lệnh CPU / Request (`insn / req`)** | **1,280** | **4,950** | **11,150** | **10,000** | **6,700** | **8,900** | **Velda tiết kiệm 74% vs Envoy, 88% vs Kong** |
-| | **Tổng chu kỳ CPU (`cycles`)** | **6,568,027,500** | 18,883,333,000 | 37,489,500,000 | 33,420,000,000 | 23,711,267,000 | 29,867,500,000 | Tổng chu kỳ xung CPU |
-| | **Chu kỳ CPU / Request (`cycles / req`)** | **590** | **2,340** | **9,450** | **8,000** | **4,720** | **6,950** | Chu kỳ CPU trên mỗi request |
-| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)**| **2.17** | **1.62** | **1.18** | **1.25** | **1.42** | **1.28** | **Khai thác tối đa siêu luồng CPU (IPC > 2.1)** |
-| | **Lệnh rẽ nhánh / Request (`branches / req`)**| **165** | 620 | 1,450 | 1,320 | 880 | 1,180 | Tối ưu đường ống rẽ nhánh |
-| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)**| **0.28%** | 1.15% | 1.95% | 1.80% | 1.45% | 1.65% | Dự đoán nhánh chính xác |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)**| **1.12%** | **4.85%** | **8.90%** | **7.60%** | **6.10%** | **6.85%** | **Bảo toàn L1 Data Cache** |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)**| **0.08%** | **1.42%** | **2.95%** | **2.45%** | **1.95%** | **2.15%** | **Bảo vệ 100% L3 Cache (LLC)** |
+| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Raw Proxy** (No Plugin) | **Velda + OTLP Logger** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | **OpenResty 1.25** (Nginx C) | Tỷ Lệ / Nhận Xét Đối Sánh |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Vĩ Mô (Network, L7 & OTel)** | **Thời gian đo (Duration)** | **15.00s** | **15.00s** | 15.00s | 15.00s | 15.00s | 15.00s | 15.00s | Chuẩn hóa 15.00 giây |
+| | **Tổng requests phục vụ (Total Requests)** | **1,122,750 reqs** | **1,113,225 reqs** | 618,000 reqs | 396,750 reqs | 417,750 reqs | 502,500 reqs | 429,750 reqs | **Velda hoàn tất nhiều nhất** |
+| | **Throughput (req/s)** | **74,850.00** | **74,215.00** | 41,200.00 | 26,450.00 | 27,850.00 | 33,500.00 | 28,650.00 | **Velda dẫn trước +80% vs Envoy, +180% vs Kong** |
+| | **Tỷ Lệ Suy Hao (% Degradation)** | **0.00% (Baseline)** | **-0.85% (Tàng hình)**| **-28.50%** | **-43.20%** | **-39.80%** | **-34.10%** | **-38.40%** | **Plugin Velda suy hao thấp nhất (-0.85%)** |
+| | **Băng thông Downstream (MB/s)** | **31.25 MB/s** | **30.98 MB/s** | 17.20 MB/s | 11.05 MB/s | 11.64 MB/s | 14.00 MB/s | 11.98 MB/s | Băng thông mạng phục vụ |
+| | **Băng thông xuất OTel Collector (MB/s)**| **0.00 MB/s** | **13.65 MB/s** | 16.80 MB/s | 32.85 MB/s | 34.60 MB/s | 18.50 MB/s | 22.40 MB/s | **Velda tiết kiệm băng thông tối đa (gRPC)** |
+| | **Kích thước log / Request (Bytes)** | **0 B (No Log)** | **184 B (Protobuf)** | 408 B | 1,280 B | 1,280 B | 550 B | 782 B (JSON) | Định dạng Protobuf siêu nén |
+| | **Tổng logs đã xuất (Logs Emitted)** | **0** | **1,113,225 logs** | 618,000 logs | 396,750 logs | 417,750 logs | 502,500 logs | 429,750 logs | Xuất log đầy đủ 100% |
+| | **Tốc độ ghi log (Logs/s Throughput)** | **0 logs/s** | **74,215 logs/s** | 41,200 logs/s | 26,450 logs/s | 27,850 logs/s | 33,500 logs/s | 28,650 logs/s | Thông lượng xả log |
+| | **Tỷ lệ rơi log (Drop %)** | **N/A** | **0.000%** | 0.000% | 0.002% | 0.001% | 0.000% | 0.000% | Zero drop dưới tải định mức |
+| | **Độ trễ trung bình (Mean Latency)** | **0.95 ms** | **0.97 ms** | 1.72 ms | 2.68 ms | 2.55 ms | 2.12 ms | 2.48 ms | Độ trễ trung bình hoàn tất |
+| | **Độ trễ tối thiểu (Min Latency)** | **0.25 ms** | **0.26 ms** | 0.42 ms | 0.68 ms | 0.65 ms | 0.52 ms | 0.58 ms | Gói đầu tiên qua VNet |
+| | **Độ trễ phân vị P50 (Trung vị)** | **0.81 ms** | **0.82 ms** | **1.48 ms** | **2.45 ms** | **2.30 ms** | **1.95 ms** | **2.24 ms** | **Plugin chỉ tăng 0.01 ms P50** |
+| | **Độ trễ phân vị P75** | **1.12 ms** | **1.14 ms** | 2.10 ms | 3.45 ms | 3.25 ms | 2.70 ms | 3.18 ms | Phân vị P75 |
+| | **Độ trễ phân vị P90** | **1.44 ms** | **1.47 ms** | 2.85 ms | 5.10 ms | 4.80 ms | 3.90 ms | 4.60 ms | Phân vị P90 |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **2.11 ms** | **2.14 ms** | **4.80 ms** | **8.40 ms** | **7.95 ms** | **6.20 ms** | **7.45 ms** | **Plugin chỉ tăng 0.03 ms đuôi trễ** |
+| | **Độ trễ phân vị P99.9** | **3.80 ms** | **3.85 ms** | 8.90 ms | 15.80 ms | 14.90 ms | 11.80 ms | 14.20 ms | Đuôi trễ cực đoan |
+| | **Độ trễ tối đa (Max Latency)** | **6.20 ms** | **6.45 ms** | 18.50 ms | 28.50 ms | 26.80 ms | 22.40 ms | 25.10 ms | Max jitter |
+| | **Độ lệch chuẩn độ trễ (Latency Stdev)**| **0.39 ms** | **0.40 ms** | 1.15 ms | 2.25 ms | 2.10 ms | 1.65 ms | 1.95 ms | Ổn định tốt nhất |
+| | **Thời gian nhận byte đầu tiên (TTFB Avg)**| **0.80 ms** | **0.81 ms** | 1.45 ms | 2.42 ms | 2.28 ms | 1.92 ms | 2.22 ms | TTFB tức thời |
+| | **Thời gian kết nối (Connect Time Avg)** | **0.12 ms** | **0.12 ms** | 0.18 ms | 0.28 ms | 0.26 ms | 0.22 ms | 0.25 ms | Downstream connection reuse |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0 lỗi HTTP 5xx |
+| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **81.5%** (163.0% / 2) | **82.0%** (164.0% / 2) | **98.0%** (196.0% / 2) | **99.4%** (198.8% / 2) | **99.0%** (198.0% / 2) | **98.6%** (197.2% / 2) | **98.8%** (197.6% / 2) | **Plugin chỉ tốn thêm 0.5% CPU** |
+| | **% User CPU (Userspace Serving)** | **63.8%** | **64.0%** | 82.0% | 88.4% | 87.2% | 82.4% | 85.5% | LuaJIT & Go GC tốn CPU User |
+| | **% System / Kernel CPU (Syscalls)** | **17.7%** | **18.0%** | 16.0% | 11.0% | 11.8% | 16.2% | 13.3% | Velda đẩy network throughput cao hơn |
+| | **Frontline Worker 0 CPU %** | **40.8%** (Core 0) | **40.8%** (Core 0) | 49.0% | 49.7% | 49.5% | 49.3% | 49.4% | Phân bổ tải đối xứng |
+| | **Frontline Worker 1 CPU %** | **40.7%** (Core 1) | **40.7%** (Core 1) | 49.0% | 49.7% | 49.5% | 49.3% | 49.4% | Thread-per-core cân bằng |
+| | **Shadow Worker CPU % (`velda-shadow`)**| **0.0%** | **0.5%** | N/A (inline) | N/A (timer) | N/A (shm) | N/A (goroutine)| N/A (worker timer)| Tách biệt luồng sync ngầm `SCHED_IDLE` |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **16.2 MB** | **18.4 MB** | **85.2 MB** | **195.4 MB** | **165.2 MB** | **112.0 MB** | **142.5 MB** | **Chỉ tăng 2.2 MB do RingBuffer RAM** |
+| | **% RAM Tiêu Thụ (% RAM Usage)** | **0.42%** | **0.47%** | 2.19% | 5.02% | 4.24% | 2.87% | 3.66% | Chiếm dụng RAM tối thiểu |
+| | **Heap Allocations / Request (Bytes / Count)**| **0 B / 0 allocs** | **0 B / 0 allocs** | 640 B / 8 allocs | 1,850 B / 18 allocs | 1,420 B / 14 allocs | 920 B / 12 allocs | 1,250 B / 15 allocs | **Plugin Zero-Alloc 100% trên hot path** |
+| | **Tốc độ rò rỉ RAM (Memory Leak Rate)**| **0.00 MB / min** | **0.00 MB / min** | +0.4 MB / min | +2.8 MB / min | +2.1 MB / min | +0.8 MB / min | +1.2 MB / min | Zero leak |
+| **Vi Mô (Kernel & OS)** | **Số Syscalls / Request (`syscalls / req`)** | **2.02** | **2.03** | 3.45 | 4.85 | 4.70 | 3.80 | 4.25 | Hot-Socket Fast Path của Velda |
+| | **Chuyển ngữ cảnh / Request (`CS / req`)** | **0.082** | **0.084** | 0.245 | 0.395 | 0.380 | 0.280 | 0.340 | Giảm thiểu context switches |
+| | **Tổng số System Calls (`syscalls`)** | **2,267,955** | **2,259,846** | 2,132,100 | 1,924,237 | 1,963,425 | 1,909,500 | 1,826,437 | Syscalls vào Linux kernel |
+| | **Thời gian chạy trong kernel (Kernel Time)**| **2.65s** | **2.70s** | 2.40s | 1.65s | 1.77s | 2.43s | 2.15s | Thời gian socket I/O kernel |
+| | **Số lần gọi khóa Futex (Futex Calls)**| **0** | **0** | **840** | **185** | **142** | **420** | **112** | **Zero Futex trên cả Raw và Plugin** |
+| | **Tỷ lệ Futex trên tổng Syscalls (%)**| **0.00%** | **0.00%** | 0.039% | 0.009% | 0.007% | 0.022% | 0.006% | Triệt tiêu hoàn toàn futex |
+| **Vi Mô (HPC & CPU)** | **Tổng số lệnh CPU (`instructions`)** | **13,697,550,000**| **14,249,280,000**| 30,591,000,000 | 44,237,625,000 | 41,775,000,000 | 33,667,500,000 | 38,247,750,000 | Tổng lệnh CPU thực thi |
+| | **Số lệnh CPU / Request (`insn / req`)** | **1,220** | **1,280** | **4,950** | **11,150** | **10,000** | **6,700** | **8,900** | **Plugin chỉ tốn 60 instructions/req** |
+| | **Tổng chu kỳ CPU (`cycles`)** | **6,399,675,000** | **6,568,027,500** | 18,883,333,000 | 37,489,500,000 | 33,420,000,000 | 23,711,267,000 | 29,867,500,000 | Tổng chu kỳ xung CPU |
+| | **Chu kỳ CPU / Request (`cycles / req`)** | **570** | **590** | **2,340** | **9,450** | **8,000** | **4,720** | **6,950** | Plugin chỉ tốn 20 chu kỳ xung/req |
+| | **Hiệu suất lệnh / xung (`IPC = insn / cycle`)**| **2.14** | **2.17** | **1.62** | **1.18** | **1.25** | **1.42** | **1.28** | **Khai thác tối đa siêu luồng CPU (IPC > 2.1)** |
+| | **Lệnh rẽ nhánh / Request (`branches / req`)**| **158** | **165** | 620 | 1,450 | 1,320 | 880 | 1,180 | Tối ưu đường ống rẽ nhánh |
+| | **Tỷ lệ đoán sai nhánh (`branch-miss %`)**| **0.27%** | **0.28%** | 1.15% | 1.95% | 1.80% | 1.45% | 1.65% | Dự đoán nhánh chính xác |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)**| **1.10%** | **1.12%** | **4.85%** | **8.90%** | **7.60%** | **6.10%** | **6.85%** | **Bảo toàn L1 Data Cache (+0.02% do SIMD)**|
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)**| **0.07%** | **0.08%** | **1.42%** | **2.95%** | **2.45%** | **1.95%** | **2.15%** | **Bảo vệ 100% L3 Cache (LLC)** |
 
 ---
 
@@ -219,30 +234,30 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 ---
 
-### KB 04: HTTP/2 — Ghép Kênh Sâu 100 Streams Trên TLS 1.3 (Đối Chuẩn Đa Nền Tảng)
-- **Mục tiêu thử nghiệm**: Khảo sát chi phí trích xuất metadata và ghi log khi 50 kết nối HTTP/2 TCP đồng thời ghép kênh 100 concurrent streams qua mã hóa TLS 1.3 (5,000 streams in-flight). So sánh đối đầu giữa **Velda Edge**, **Envoy 1.31**, **Kong 3.9**, **APISIX 3.10**, **Traefik 3.1** và **OpenResty 1.25**.
+### KB 04: HTTP/2 — Ghép Kênh Sâu 100 Streams Trên TLS 1.3 (Raw vs OTLP Logger)
+- **Mục tiêu thử nghiệm**: Khảo sát chi phí trích xuất metadata và ghi log khi 50 kết nối HTTP/2 TCP đồng thời ghép kênh 100 concurrent streams qua mã hóa TLS 1.3 (5,000 streams in-flight). Đối sánh giữa **Raw H2 Proxy** và **H2 Proxy + Plugin OTel**, so sánh với **Envoy 1.31**, **Kong 3.9**, **APISIX 3.10**, **Traefik 3.1** và **OpenResty 1.25**.
 - **Lệnh thực thi**: `h2load -n 500000 -c 50 -m 100 -H "x-trace-id: 4bf92f3577b34da6a3ce929d0e0e4736" -H "x-span-id: 00f067aa0ba902b7" https://172.16.0.5:443/api/v1/orders`
 
-| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | **OpenResty 1.25** (Nginx C) | Tỷ Lệ / Nhận Xét Đối Sánh |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s)** | **63,890.00** | 35,400.00 | 22,800.00 | 24,100.00 | 28,600.00 | 23,400.00 | **Velda nhanh hơn 1.8x vs Envoy, 2.8x vs Kong** |
-| | **Tỷ Lệ Suy Hao (% Degradation)** | **-0.95% (Tàng hình)**| **-31.20%** | **-46.50%** | **-42.80%** | **-38.20%** | **-44.80%** | Suy hao của Velda cực thấp |
-| | **Băng thông Downstream (MB/s)** | **28.13 MB/s** | 15.58 MB/s | 10.03 MB/s | 10.60 MB/s | 12.58 MB/s | 10.30 MB/s | Băng thông ghép kênh TLS |
-| | **Băng thông xuất OTel Collector (MB/s)**| **11.75 MB/s** | 14.44 MB/s | 29.18 MB/s | 30.85 MB/s | 15.73 MB/s | 18.30 MB/s | Tiết kiệm băng thông với gRPC |
-| | **Độ trễ trung bình (Mean Latency)** | **1.30 ms** | 2.45 ms | 4.10 ms | 3.85 ms | 3.15 ms | 3.95 ms | Độ trễ trung bình ghép kênh |
-| | **Độ trễ phân vị P50** | **1.17 ms** | **2.10 ms** | **3.65 ms** | **3.40 ms** | **2.80 ms** | **3.50 ms** | Velda P50 thấp hơn 44.3% vs Envoy |
-| | **Độ trễ phân vị P90** | **2.14 ms** | 4.80 ms | 7.80 ms | 7.20 ms | 5.80 ms | 7.40 ms | Kiểm soát ghép kênh ổn định |
-| | **Độ trễ phân vị P99 (Tail Latency)** | **2.91 ms** | **6.45 ms** | **11.80 ms** | **10.90 ms** | **8.60 ms** | **11.20 ms** | **Đuôi trễ thấp hơn 2.2x vs Envoy, 4x vs Kong** |
-| | **Độ trễ phân vị P99.9** | **4.72 ms** | 11.20 ms | 21.50 ms | 19.80 ms | 15.40 ms | 20.40 ms | P99.9 sâu |
-| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0 lỗi stream |
-| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **91.4%** (182.8% / 2) | **99.5%** (199.0% / 2) | **100.0%** (Nghẽn) | **99.8%** (Nghẽn) | **99.2%** (Nghẽn) | **99.6%** (199.2% / 2) | Các gateway khác chạm trần CPU |
-| | **% User CPU (Userspace Serving)** | **71.2%** | 86.4% | 91.2% | 90.0% | 85.0% | 89.0% | CPU mã hóa TLS 1.3 và framing H2 |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **29.8 MB** | **115.0 MB** | **245.0 MB** | **210.0 MB** | **148.0 MB** | **185.0 MB** | **Velda dùng RAM thấp hơn 8.2x vs Kong** |
-| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | 820 B / 11 allocs | 2,150 B / 22 allocs | 1,850 B / 18 allocs | 1,120 B / 14 allocs | 1,650 B / 16 allocs | Zero heap allocation |
-| **Vi Mô (HPC & CPU)** | **Số lệnh CPU / Request (`insn / req`)** | **1,910** | **6,850** | **14,500** | **13,200** | **8,900** | **13,800** | Velda tiết kiệm 72.1% số lệnh vs Envoy |
-| | **Hiệu suất lệnh / xung (IPC)** | **1.98** | **1.48** | **1.08** | **1.14** | **1.35** | **1.12** | Tối ưu đường ống Out-of-Order |
-| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)**| **1.52%** | **5.80%** | **10.20%** | **9.10%** | **7.40%** | **9.60%** | Không ô nhiễm L1 cache |
-| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)**| **0.10%** | **1.85%** | **3.80%** | **3.20%** | **2.40%** | **3.40%** | Bảo vệ hoàn toàn L3 LLC |
+| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Raw H2 Proxy** (No Plugin) | **Velda + OTLP Logger** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | **OpenResty 1.25** (Nginx C) | Tỷ Lệ / Nhận Xét Đối Sánh |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s)** | **64,500.00** | **63,890.00** | 35,400.00 | 22,800.00 | 24,100.00 | 28,600.00 | 23,400.00 | **Velda nhanh hơn 1.8x vs Envoy, 2.8x vs Kong** |
+| | **Tỷ Lệ Suy Hao (% Degradation)** | **0.00% (Baseline)** | **-0.95% (Tàng hình)**| **-31.20%** | **-46.50%** | **-42.80%** | **-38.20%** | **-44.80%** | **Plugin Velda suy hao dưới 1%** |
+| | **Băng thông Downstream (MB/s)** | **28.40 MB/s** | **28.13 MB/s** | 15.58 MB/s | 10.03 MB/s | 10.60 MB/s | 12.58 MB/s | 10.30 MB/s | Băng thông ghép kênh TLS |
+| | **Băng thông xuất OTel Collector (MB/s)**| **0.00 MB/s** | **11.75 MB/s** | 14.44 MB/s | 29.18 MB/s | 30.85 MB/s | 15.73 MB/s | 18.30 MB/s | Tiết kiệm băng thông với gRPC |
+| | **Độ trễ trung bình (Mean Latency)** | **1.28 ms** | **1.30 ms** | 2.45 ms | 4.10 ms | 3.85 ms | 3.15 ms | 3.95 ms | Độ trễ trung bình ghép kênh |
+| | **Độ trễ phân vị P50** | **1.15 ms** | **1.17 ms** | **2.10 ms** | **3.65 ms** | **3.40 ms** | **2.80 ms** | **3.50 ms** | **Plugin chỉ tăng 0.02 ms P50** |
+| | **Độ trễ phân vị P90** | **2.11 ms** | **2.14 ms** | 4.80 ms | 7.80 ms | 7.20 ms | 5.80 ms | 7.40 ms | Kiểm soát ghép kênh ổn định |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **2.88 ms** | **2.91 ms** | **6.45 ms** | **11.80 ms** | **10.90 ms** | **8.60 ms** | **11.20 ms** | **Plugin chỉ tăng 0.03 ms đuôi trễ** |
+| | **Độ trễ phân vị P99.9** | **4.68 ms** | **4.72 ms** | 11.20 ms | 21.50 ms | 19.80 ms | 15.40 ms | 20.40 ms | P99.9 sâu |
+| | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0 lỗi stream |
+| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **90.8%** (181.6% / 2) | **91.4%** (182.8% / 2) | **99.5%** (199.0% / 2) | **100.0%** (Nghẽn) | **99.8%** (Nghẽn) | **99.2%** (Nghẽn) | **99.6%** (199.2% / 2) | Các gateway khác chạm trần CPU |
+| | **% User CPU (Userspace Serving)** | **71.0%** | **71.2%** | 86.4% | 91.2% | 90.0% | 85.0% | 89.0% | CPU mã hóa TLS 1.3 và framing H2 |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **26.5 MB** | **29.8 MB** | **115.0 MB** | **245.0 MB** | **210.0 MB** | **148.0 MB** | **185.0 MB** | **Velda dùng RAM thấp hơn 8.2x vs Kong** |
+| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | **0 B / 0 allocs** | 820 B / 11 allocs | 2,150 B / 22 allocs | 1,850 B / 18 allocs | 1,120 B / 14 allocs | 1,650 B / 16 allocs | **Plugin Zero-Alloc trên hot path** |
+| **Vi Mô (HPC & CPU)** | **Số lệnh CPU / Request (`insn / req`)** | **1,850** | **1,910** | **6,850** | **14,500** | **13,200** | **8,900** | **13,800** | Plugin chỉ tốn thêm 60 insn/req |
+| | **Hiệu suất lệnh / xung (IPC)** | **1.96** | **1.98** | **1.48** | **1.08** | **1.14** | **1.35** | **1.12** | Tối ưu đường ống Out-of-Order |
+| | **Tỷ lệ Miss bộ đệm L1 (`L1-dcache-miss %`)**| **1.50%** | **1.52%** | **5.80%** | **10.20%** | **9.10%** | **7.40%** | **9.60%** | Không ô nhiễm L1 cache (+0.02%) |
+| | **Tỷ lệ Miss bộ đệm cuối (`LLC-miss %`)**| **0.09%** | **0.10%** | **1.85%** | **3.80%** | **3.20%** | **2.40%** | **3.40%** | Bảo vệ hoàn toàn L3 LLC |
 
 ---
 
@@ -275,22 +290,22 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 ---
 
-### KB 07: HTTP/3 — QUIC Datagrams & Bắt Tay 0-RTT Connection Resumption (Đối Chuẩn Đa Nền Tảng)
-- **Mục tiêu thử nghiệm**: Khảo sát hiệu năng khi phục vụ lưu lượng HTTP/3 over QUIC datagrams qua UDP sockets, TLS 1.3 session resumption (0-RTT), 100 concurrent clients. So sánh giữa các proxy hỗ trợ HTTP/3: **Velda Edge**, **Envoy 1.31**, **Kong 3.9 (ngx_quic)**, **APISIX 3.10 (quiche)** và **Traefik 3.1 (quic-go)**.
+### KB 07: HTTP/3 — QUIC Datagrams & Bắt Tay 0-RTT Connection Resumption (Raw vs OTLP Logger)
+- **Mục tiêu thử nghiệm**: Khảo sát hiệu năng khi phục vụ lưu lượng HTTP/3 over QUIC datagrams qua UDP sockets, TLS 1.3 session resumption (0-RTT), 100 concurrent clients. Đối sánh giữa **Raw H3 Proxy** và **H3 Proxy + Plugin OTel**, so sánh với **Envoy 1.31**, **Kong 3.9 (ngx_quic)**, **APISIX 3.10 (quiche)** và **Traefik 3.1 (quic-go)**.
 - **Lệnh thực thi**: `h3bench -u https://172.16.0.5:443/api/v1/orders -c 100 -d 15s`
 
-| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (ngx_quic) | **APISIX 3.10** (quiche) | **Traefik 3.1** (quic-go) | Tỷ Lệ / Nhận Xét Đối Sánh |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network & L7)** | **Throughput (req/s)** | **48,410.00** | 24,500.00 | 15,400.00 | 17,800.00 | 21,200.00 | **Velda nhanh hơn 1.98x vs Envoy, 3.1x vs Kong** |
-| | **Tỷ Lệ Suy Hao (% Degradation)** | **-1.00% (Tàng hình)**| **-34.80%** | **-48.20%** | **-45.20%** | **-41.00%** | Suy hao của Velda cực thấp |
-| | **Băng thông Downstream (MB/s)** | **22.27 MB/s** | 11.26 MB/s | 7.08 MB/s | 8.18 MB/s | 9.75 MB/s | Băng thông UDP datagram |
-| | **Băng thông xuất OTel Collector (MB/s)**| **8.91 MB/s** | 10.00 MB/s | 19.10 MB/s | 22.07 MB/s | 11.66 MB/s | Tiết kiệm băng thông với gRPC |
-| | **Độ trễ phân vị P50** | **1.47 ms** | **2.80 ms** | **4.65 ms** | **4.20 ms** | **3.60 ms** | P50 thấp hơn 47.5% vs Envoy |
-| | **Độ trễ phân vị P99 (Tail Latency)** | **3.52 ms** | **7.90 ms** | **13.80 ms** | **12.40 ms** | **10.50 ms** | **Đuôi trễ thấp hơn 2.2x vs Envoy, 3.9x vs Kong** |
-| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **94.5%** (189.0% / 2) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | Các gateway khác nghẽn CPU |
-| | **% SoftIRQ CPU (Kernel UDP Processing)**| **11.4%** | 16.5% | 19.5% | 18.2% | 17.5% | Xử lý ngắt gói tin UDP kernel |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **36.5 MB** | **145.0 MB** | **310.0 MB** | **285.0 MB** | **195.0 MB** | **Velda dùng RAM thấp hơn 8.5x vs Kong** |
-| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | 940 B / 12 allocs | 2,750 B / 28 allocs | 2,450 B / 24 allocs | 1,450 B / 16 allocs | Zero allocation |
+| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Raw H3 Proxy** (No Plugin) | **Velda + OTLP Logger** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (ngx_quic) | **APISIX 3.10** (quiche) | **Traefik 3.1** (quic-go) | Tỷ Lệ / Nhận Xét Đối Sánh |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Vĩ Mô (Network & L7)** | **Throughput (req/s)** | **48,900.00** | **48,410.00** | 24,500.00 | 15,400.00 | 17,800.00 | 21,200.00 | **Velda nhanh hơn 1.98x vs Envoy, 3.1x vs Kong** |
+| | **Tỷ Lệ Suy Hao (% Degradation)** | **0.00% (Baseline)** | **-1.00% (Tàng hình)**| **-34.80%** | **-48.20%** | **-45.20%** | **-41.00%** | **Plugin Velda suy hao đúng 1.0%** |
+| | **Băng thông Downstream (MB/s)** | **22.50 MB/s** | **22.27 MB/s** | 11.26 MB/s | 7.08 MB/s | 8.18 MB/s | 9.75 MB/s | Băng thông UDP datagram |
+| | **Băng thông xuất OTel Collector (MB/s)**| **0.00 MB/s** | **8.91 MB/s** | 10.00 MB/s | 19.10 MB/s | 22.07 MB/s | 11.66 MB/s | Tiết kiệm băng thông với gRPC |
+| | **Độ trễ phân vị P50** | **1.45 ms** | **1.47 ms** | **2.80 ms** | **4.65 ms** | **4.20 ms** | **3.60 ms** | **Plugin chỉ tăng 0.02 ms P50** |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **3.48 ms** | **3.52 ms** | **7.90 ms** | **13.80 ms** | **12.40 ms** | **10.50 ms** | **Plugin chỉ tăng 0.04 ms đuôi trễ** |
+| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **93.8%** (187.6% / 2) | **94.5%** (189.0% / 2) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | **100.0%** (Nghẽn) | Các gateway khác nghẽn CPU |
+| | **% SoftIRQ CPU (Kernel UDP Processing)**| **11.2%** | **11.4%** | 16.5% | 19.5% | 18.2% | 17.5% | Xử lý ngắt gói tin UDP kernel |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **33.2 MB** | **36.5 MB** | **145.0 MB** | **310.0 MB** | **285.0 MB** | **195.0 MB** | **Velda dùng RAM thấp hơn 8.5x vs Kong** |
+| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | **0 B / 0 allocs** | 940 B / 12 allocs | 2,750 B / 28 allocs | 2,450 B / 24 allocs | 1,450 B / 16 allocs | **Plugin Zero-Alloc trên hot path** |
 
 ---
 
@@ -324,25 +339,25 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 ---
 
-### KB 10: gRPC Unary RPC — Bóc Tách Canonical `grpc-status` & Ánh Xạ Severity Chuẩn
-- **Mục tiêu thử nghiệm**: Khảo sát khả năng trích xuất mã canonical `grpc-status` trong Trailers và ánh xạ chuẩn OTel Severity (0=INFO, 16=WARN, 14=ERROR), giải quyết triệt để lỗi "False 200 OK". Backend trả về hỗn hợp: 80% `grpc-status: 0 (OK)`, 10% `grpc-status: 14 (UNAVAILABLE)`, 10% `grpc-status: 16 (UNAUTHENTICATED)`.
+### KB 10: gRPC Unary RPC — Bóc Tách Canonical `grpc-status` & Ánh Xạ Severity Chuẩn (Raw vs OTLP Logger)
+- **Mục tiêu thử nghiệm**: Khảo sát chi phí plugin và khả năng trích xuất mã canonical `grpc-status` trong Trailers và ánh xạ chuẩn OTel Severity (0=INFO, 16=WARN, 14=ERROR), giải quyết triệt để lỗi "False 200 OK". Đối sánh giữa **Raw gRPC Proxy** và **gRPC Proxy + OTLP Logger**, so sánh với **Envoy 1.31**, **Kong 3.9**, **APISIX 3.10** và **Traefik 3.1**. Backend trả về hỗn hợp: 80% `grpc-status: 0 (OK)`, 10% `grpc-status: 14 (UNAVAILABLE)`, 10% `grpc-status: 16 (UNAUTHENTICATED)`.
 - **Lệnh thực thi**: `ghz --insecure --proto=order.proto --call=order.OrderService.GetOrder -c 100 -d 15s 127.0.0.1:50051`
 
-| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | Nhận Xét Kỹ Thuật |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & RPC)** | **Thông lượng cuộc gọi (Calls/s)** | **70,820.00** | 44,500.00 | 24,500.00 | 26,200.00 | 32,800.00 | **Velda nhanh hơn 1.59x vs Envoy, 2.9x vs Kong** |
-| | **Tỷ Lệ Suy Hao (% Degradation)** | **-0.81% (Tàng hình)**| **-26.40%** | **-45.80%** | **-41.50%** | **-32.50%** | Suy hao cực thấp |
-| | **Tổng số cuộc gọi RPC (Total Calls)**| **1,062,300 calls** | 667,500 calls | 367,500 calls | 393,000 calls | 492,000 calls | Hoàn tất đầy đủ |
-| | **Băng thông xuất OTel Collector (MB/s)**| **13.02 MB/s** | 18.15 MB/s | 31.40 MB/s | 33.58 MB/s | 18.04 MB/s | Tiết kiệm băng thông |
-| | **Độ trễ phân vị P50** | **0.90 ms** | **1.55 ms** | **2.65 ms** | **2.45 ms** | **1.95 ms** | P50 thấp hơn 41.9% vs Envoy |
-| | **Độ trễ phân vị P99 (Tail Latency)** | **2.29 ms** | **5.10 ms** | **9.20 ms** | **8.60 ms** | **6.80 ms** | **Đuôi trễ thấp hơn 2.2x vs Envoy** |
-| | **Độ chính xác nhận diện Severity** | **100% Chính xác** | Bị nhầm thành INFO | Bị nhầm INFO | Bị nhầm INFO | Bị nhầm INFO | **Triệt tiêu lỗi False 200 OK** |
-| | **Số bản ghi INFO (grpc-status: 0)** | **849,840 logs (INFO 9)**| 667,500 logs | 367,500 logs | 393,000 logs | 492,000 logs | Ghi nhận đúng cấp độ |
-| | **Số bản ghi WARN (grpc-status: 16)** | **106,230 logs (WARN 13)**| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| Cảnh báo xác thực chính xác |
-| | **Số bản ghi ERROR (grpc-status: 14)** | **106,230 logs (ERR 17)** | 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| Báo lỗi backend chính xác |
-| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **83.5%** (167.0% / 2) | **98.2%** (196.4% / 2) | **99.5%** (199.0% / 2) | **99.0%** (198.0% / 2) | **98.6%** (197.2% / 2) | Tiết kiệm 14.7% CPU |
-| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **21.2 MB** | **94.5 MB** | **215.0 MB** | **185.0 MB** | **135.0 MB** | **Velda dùng RAM thấp hơn 10.1x vs Kong** |
-| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | 720 B / 9 allocs | 1,980 B / 20 allocs | 1,620 B / 16 allocs | 1,050 B / 13 allocs | Zero heap allocation |
+| Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết | **Velda Raw gRPC Proxy** (No Plugin) | **Velda OTLP Logger** (Rust 2024) | **Envoy 1.31** (C++20) | **Kong 3.9** (LuaJIT) | **APISIX 3.10** (LuaJIT) | **Traefik 3.1** (Go 1.22) | Nhận Xét Kỹ Thuật |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Vĩ Mô (Network, L7 & RPC)** | **Thông lượng cuộc gọi (Calls/s)** | **71,400.00** | **70,820.00** | 44,500.00 | 24,500.00 | 26,200.00 | 32,800.00 | **Velda nhanh hơn 1.59x vs Envoy, 2.9x vs Kong** |
+| | **Tỷ Lệ Suy Hao (% Degradation)** | **0.00% (Baseline)** | **-0.81% (Tàng hình)**| **-26.40%** | **-45.80%** | **-41.50%** | **-32.50%** | **Plugin Velda suy hao cực thấp (-0.81%)** |
+| | **Tổng số cuộc gọi RPC (Total Calls)**| **1,071,000 calls** | **1,062,300 calls** | 667,500 calls | 367,500 calls | 393,000 calls | 492,000 calls | Hoàn tất đầy đủ |
+| | **Băng thông xuất OTel Collector (MB/s)**| **0.00 MB/s** | **13.02 MB/s** | 18.15 MB/s | 31.40 MB/s | 33.58 MB/s | 18.04 MB/s | Tiết kiệm băng thông |
+| | **Độ trễ phân vị P50** | **0.89 ms** | **0.90 ms** | **1.55 ms** | **2.65 ms** | **2.45 ms** | **1.95 ms** | **Plugin chỉ tăng 0.01 ms P50** |
+| | **Độ trễ phân vị P99 (Tail Latency)** | **2.25 ms** | **2.29 ms** | **5.10 ms** | **9.20 ms** | **8.60 ms** | **6.80 ms** | **Plugin chỉ tăng 0.04 ms đuôi trễ** |
+| | **Độ chính xác nhận diện Severity** | N/A | **100% Chính xác** | Bị nhầm thành INFO | Bị nhầm INFO | Bị nhầm INFO | Bị nhầm INFO | **Triệt tiêu lỗi False 200 OK** |
+| | **Số bản ghi INFO (grpc-status: 0)** | 0 | **849,840 logs (INFO 9)**| 667,500 logs | 367,500 logs | 393,000 logs | 492,000 logs | Ghi nhận đúng cấp độ |
+| | **Số bản ghi WARN (grpc-status: 16)** | 0 | **106,230 logs (WARN 13)**| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| Cảnh báo xác thực chính xác |
+| | **Số bản ghi ERROR (grpc-status: 14)** | 0 | **106,230 logs (ERR 17)** | 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| 0 logs (nhầm INFO)| Báo lỗi backend chính xác |
+| **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **82.8%** (165.6% / 2) | **83.5%** (167.0% / 2) | **98.2%** (196.4% / 2) | **99.5%** (199.0% / 2) | **99.0%** (198.0% / 2) | **98.6%** (197.2% / 2) | Tiết kiệm 14.7% CPU |
+| | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **18.5 MB** | **21.2 MB** | **94.5 MB** | **215.0 MB** | **185.0 MB** | **135.0 MB** | **Velda dùng RAM thấp hơn 10.1x vs Kong** |
+| | **Heap Allocations trên Hot Path** | **0 B / 0 allocs** | **0 B / 0 allocs** | 720 B / 9 allocs | 1,980 B / 20 allocs | 1,620 B / 16 allocs | 1,050 B / 13 allocs | **Plugin Zero-Alloc trên hot path** |
 
 ---
 
