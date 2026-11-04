@@ -1,152 +1,159 @@
-# OpenTelemetry Logger Plugin (`opentelemetry_logger`) — Operator & Configuration Runbook
+# OpenTelemetry Logger Plugin (`opentelemetry_logger`) — SRE Operational Runbook
 
-This runbook provides complete operational guidance, configuration reference, production tuning recipes, sizing formulas, and alerting rules for the **`opentelemetry_logger`** post-response plugin in Velda Edge.
+Tài liệu này là cẩm nang vận hành khẩn cấp (**SRE Incident Playbook & On-Call Runbook**) dành riêng cho kỹ sư SRE, DevOps và Operator chịu trách nhiệm trực ca vận hành tính năng ghi log truy cập có cấu trúc (Structured Access Logging) của Velda Edge Gateway.
 
 ---
 
-## 1. Configuration Reference (`plugins.json`)
+## 1. Ma Trận Ứng Cứu Sự Cố Khẩn Cấp (On-Call Triage Matrix)
 
-The `opentelemetry_logger` plugin is declared under the `plugins` array in route configurations:
+| Mức Độ | Triệu Chứng & Cảnh Báo | Nguyên Nhân Khả Dĩ | Hành Động Khắc Phục Nhanh (Mitigation) | SLA Xử Lý |
+| :---: | :--- | :--- | :--- | :---: |
+| **P0** | Gateway tăng độ trễ P99 đột biến trên toàn bộ traffic khi bật logging | Tranh chấp luồng, L1 cache miss hoặc Shadow thread bị kẹt I/O | Kích hoạt cờ Emergency Bypass (tắt plugin runtime qua Control Plane) | **< 5 phút** |
+| **P1** | `VeldaOtelLoggerHighDropRate` kích hoạt (`dropped_total` tăng liên tục) | Cụm OTel Collector phía sau bị quá tải, sập port 4317 hoặc đứt mạng | Tăng `batch_size`, giảm sampling rate status 200 từ Control Plane | **< 15 phút** |
+| **P2** | `VeldaOtelLoggerCollectorUnreachable` (Collector không nhận log) | Sai cấu hình Endpoint, TLS handshake failure, token xác thực hết hạn | Kiểm tra kết nối TCP socket, gia hạn token trong `headers` | **< 30 phút** |
+| **P3** | Thiếu trường dữ liệu trong log (thiếu Route ID hoặc Upstream Addr) | Route chưa gắn header enrichment hoặc response bị reject trước upstream | Kiểm tra thứ tự khai báo plugin trong route | **< 2 giờ** |
 
-```json
-{
-  "plugins": [
-    {
-      "id": "otel_logger_prod",
-      "plugin": "opentelemetry_logger",
-      "config": {
-        "protocol": "grpc",
-        "endpoint": "grpc://otel-collector.monitoring.svc.cluster.local:4317",
-        "service_name": "velda-edge-prod",
-        "batch_size": 256,
-        "flush_interval_ms": 100,
-        "buffer_capacity": 4096,
-        "connect_timeout_ms": 5000,
-        "request_timeout_ms": 10000,
-        "headers": {
-          "x-api-key": "prod-logging-token",
-          "x-environment": "production"
-        },
-        "sampling": {
-          "default": 1.0,
-          "200": 0.05,
-          "201": 0.10,
-          "204": 0.05,
-          "400": 0.50,
-          "401": 1.00,
-          "403": 1.00,
-          "404": 0.50,
-          "429": 1.00,
-          "500": 1.00,
-          "502": 1.00,
-          "503": 1.00,
-          "504": 1.00
-        }
-      }
-    }
-  ]
-}
+---
+
+## 2. Cây Quyết Định Xử Lý Sự Cố (Triage Flowchart)
+
+```mermaid
+flowchart TD
+    Alert["Cảnh Báo Kích Hoạt: velda_plugin_otel_logger_dropped_total > 0"] --> CheckCollector{"OTel Collector Sink\n(Port 4317 / 4318) Còn Sống Không?"}
+    
+    CheckCollector -->|Chết / Timeout| ActionCollector["1. Kiểm tra cụm OTel Collector / Loki / ClickHouse\n2. Gateway tự động Fail-Open (< 1ns)\n3. Khởi động lại cụm Collector"]
+    CheckCollector -->|Vẫn Sống| CheckNetwork{"Mạng Giữa Edge và Collector\nCó Bị Packet Loss / Latency Cao?"}
+    
+    CheckNetwork -->|Có Nghẽn Mạng| ActionBatch["Tăng batch_size (256 -> 512)\nđể giảm số lượng packet đẩy ra mạng"]
+    CheckNetwork -->|Mạng Bình Thường| CheckTraffic{"Lưu Lượng Traffic Tăng Đột Biến\n(Flash Sale / DDoS)?"}
+    
+    CheckTraffic -->|Quá Tải Lưu Lượng| ActionSampling["Hạ tỷ lệ Sampling status 200:\n10% -> 1% hoặc 0.1% qua Control Plane"]
+    CheckTraffic -->|Bình Thường| CheckRingBuffer["Kiểm tra buffer_capacity:\nTăng kích thước Ring Buffer trên RAM"]
 ```
 
-### Parameter Specification
+---
 
-| Field | Type | Required | Constraints | Recommended | Description |
-| :--- | :--- | :---: | :--- | :--- | :--- |
-| `protocol` | `string` | **Yes** | `"grpc"` or `"http"` | `"grpc"` | Exporter transport protocol. `"grpc"` uses HTTP/2 binary Protobuf (port 4317); `"http"` uses HTTP/1.1 JSON (port 4318). |
-| `endpoint` | `string` | **Yes** | Valid URI (`grpc://`, `grpcs://`, `http://`, `https://`) | `grpc://...:4317` | Target OpenTelemetry Collector ingestion endpoint. |
-| `service_name` | `string` | **Yes** | Alphanumeric string (`^[a-zA-Z0-9_\-\.]+$`) | `"velda-edge"` | Service name populated in OpenTelemetry Resource attributes (`service.name`). |
-| `batch_size` | `integer` | **Yes** | `1..=4096` | `256` | Maximum number of records drained per batch before dispatching to the collector. |
-| `flush_interval_ms` | `integer` | **Yes** | `10..=60000` | `100` | Maximum wait duration (in milliseconds) before flushing an incomplete batch. |
-| `buffer_capacity` | `integer` | **Yes** | `128..=262144` | `4096` | Number of 256-byte slots allocated per worker CPU core lane. |
-| `connect_timeout_ms` | `integer` | **Yes** | `100..=60000` | `5000` | TCP and TLS connection establishment timeout in milliseconds. |
-| `request_timeout_ms` | `integer` | **Yes** | `100..=60000` | `10000` | Round-trip timeout for OTLP export requests in milliseconds. |
-| `headers` | `map` | **Yes** | Key-value pairs (`{}` if empty) | Auth tokens | Custom HTTP/gRPC headers sent with every export request (e.g. Ingestion tokens). |
-| `sampling` | `map` | **Yes** | Key: exact status code or `"default"`, Value: `0.0..=1.0` | Production map | Status-aware sampling table. Wildcard patterns (`"2xx"`) are strictly rejected. |
+## 3. Bộ Lệnh Chẩn Đoán Trực Tiếp Tại Hiện Trường (Diagnostic CLI Toolkit)
+
+Khi nhận cảnh báo từ PagerDuty/Prometheus, SSH trực tiếp vào node Velda Edge bị cảnh báo và thực thi tuần tự các lệnh sau:
+
+### 3.1 Kiểm Tra Bộ Đếm Rơi Log & Lưu Lượng Trên Node
+```bash
+# Đọc metric thời gian thực từ endpoint nội bộ của Edge
+curl -s http://127.0.0.1:9090/metrics | grep "velda_plugin_otel_logger"
+
+# Kết quả mẫu cần quan sát:
+# velda_plugin_otel_logger_logged_total 5892100
+# velda_plugin_otel_logger_dropped_total 2410
+```
+*Đánh giá*: Nếu `dropped_total` tăng nhưng CPU của Frontline Worker không đổi $\to$ Gateway đang thực thi cơ chế **Fail-Open an toàn**, traffic khách hàng không bị ảnh hưởng.
+
+### 3.2 Kiểm Tra Trạng Thái Kết Nối Socket Tới Collector
+```bash
+# Kiểm tra trạng thái socket TCP tới Collector (port 4317 gRPC hoặc 4318 HTTP)
+ss -tinh 'dport = :4317 or dport = :4318'
+
+# Kiểm tra độ trễ mạng thực tế tới máy chủ Collector
+ping -c 5 -q <IP_OTEL_COLLECTOR>
+```
+*Đánh giá*: 
+- Nếu thấy nhiều socket ở trạng thái `CLOSE_WAIT` hoặc `SYN_SENT` $\to$ Collector đang từ chối kết nối hoặc sập tiến trình.
+- Kiểm tra `rtt` trong output của `ss`: Nếu RTT mạng nội bộ $> 5\ \text{ms}$ $\to$ Hạ tầng mạng đang nghẽn.
+
+### 3.3 Kiểm Tra Phân Bổ CPU Của Frontline Worker vs Shadow Worker
+```bash
+# Theo dõi % CPU tiêu thụ của từng luồng (Worker vs Shadow)
+pidstat -u -t -p $(pgrep velda-edge) 1 5
+```
+*Đánh giá*:
+- Luồng `velda-worker-{id}` (Frontline): CPU User ổn định, **không được có hiện tượng lock hay syscall bất thường**.
+- Luồng `velda-shadow-{id}` (Shadow): Chạy dưới `SCHED_IDLE`, chịu trách nhiệm mã hóa Protobuf và đẩy socket. Nếu Shadow Worker chạm 100% CPU $\to$ Collector xử lý quá chậm hoặc kích thước batch quá nhỏ.
 
 ---
 
-## 2. Production Deployment Topologies
+## 4. Quy Trình Ứng Cứu & Hạ Tải Khẩn Cấp (Emergency Mitigation)
 
-### Topology A: Local DaemonSet / Sidecar Collector (Recommended)
-Deploying the OpenTelemetry Collector as a Kubernetes DaemonSet or Pod sidecar on the same physical host:
-- **Low Latency**: Network round-trip to localhost (`grpc://127.0.0.1:4317`) is $< 0.1\ \text{ms}$.
-- **Zero TLS Overhead**: Traffic is contained within the Linux network namespace, eliminating TLS handshake CPU costs on the collector link.
-- **Resilience**: The local collector buffers records on local disk or in memory if upstream cloud sinks (Datadog, Loki) experience transient outages.
+### Kịch Bản 1: Cắt Tải Lấy Mẫu Khẩn Cấp Khi Collector Bị Sập
+Khi cụm lưu trữ log (Loki/Elasticsearch/ClickHouse) bị quá tải trong đợt flash sale, giảm tải ngay lập tức mà không cần khởi động lại gateway:
 
-### Topology B: Remote Clustered Collector Pool
-When exporting directly across the internal network to a dedicated Collector pool:
-- Use `protocol: "grpc"` to minimize wire bandwidth.
-- Ensure `endpoint` resolves via internal Layer 4 load balancer (e.g. AWS NLB, Azure Load Balancer).
-- Set `connect_timeout_ms: 3000` and `request_timeout_ms: 5000` to prevent socket accumulation during collector rolling updates.
+1. **Cập nhật Sampling Rate qua Control Plane API**:
+   ```bash
+   curl -X PATCH http://control-plane.internal:8080/api/v1/plugins/opentelemetry_logger \
+     -H "Content-Type: application/json" \
+     -d '{
+       "config": {
+         "sampling": {
+           "default": 1.0,
+           "200": 0.001,
+           "204": 0.001,
+           "500": 1.0
+         }
+       }
+     }'
+   ```
+2. **Hiệu lực**: `velda-sync` biên dịch snapshot mới vào RAM trong **$< 1\ \text{ms}$**. Tỷ lệ lấy mẫu status 200 lập tức giảm xuống 0.1%, giảm **99% áp lực** lên collector trong khi vẫn giữ 100% log lỗi (status 500).
 
----
-
-## 3. Sizing & Memory Capacity Calculator
-
-The RAM footprint of `opentelemetry_logger` is deterministic and allocated upfront during gateway bootstrap:
-
-$$\text{RAM Footprint (Bytes)} = N_{\text{workers}} \times \text{buffer\_capacity} \times 256\ \text{bytes}$$
-
-### Capacity Planning Reference
-
-| CPU Worker Cores | `buffer_capacity` | RAM per Core | Total Gateway RAM Reserved | Max In-Flight Logs |
-| :---: | :---: | :---: | :---: | :---: |
-| 2 Cores | 1,024 slots | 256 KB | **512 KB** | 2,048 logs |
-| 4 Cores | 4,096 slots | 1 MB | **4 MB** | 16,384 logs |
-| 8 Cores | 4,096 slots | 1 MB | **8 MB** | 32,768 logs |
-| 16 Cores | 8,192 slots | 2 MB | **32 MB** | 131,072 logs |
-
-> [!NOTE]
-> Even on a 16-core edge gateway under intense traffic, reserving 8,192 slots per core consumes only **32 MB of RAM**, guaranteeing total immunity against Out-Of-Memory (OOM) events.
+### Kịch Bản 2: Ngắt Kết Nối Plugin Logging Hoàn Toàn (Emergency Kill-Switch)
+Nếu cần gỡ hoàn toàn plugin logging khỏi route bị nghẽn:
+```bash
+curl -X DELETE http://control-plane.internal:8080/api/v1/routes/api-orders/plugins/opentelemetry_logger
+```
+*Hiệu lực*: Route quay về chế độ Raw Proxy thuần túy, overhead trở về $0.00\ \text{ns}$.
 
 ---
 
-## 4. Prometheus Alerting Rules
+## 5. Định Mức Bộ Nhớ Vật Lý & Giới Hạn Phần Cứng (Capacity Sizing)
 
-Deploy the following alerting rules to Prometheus / VictoriaMetrics:
+Công thức xác định dung lượng RAM vật lý phân bổ cứng cho Ring Buffer trên toàn node:
+
+$$\text{RAM}_{\text{logger}} = N_{\text{workers}} \times \text{buffer\_capacity} \times 256\ \text{bytes}$$
+
+| Số CPU Cores ($N_{\text{workers}}$) | buffer_capacity đề xuất | Dung lượng RAM cố định | Thời gian hấp thụ nghẽn tại 75k req/s (10% sample) |
+| :---: | :---: | :---: | :---: |
+| 4 | 2,048 slots | **2.0 MB** | ~1.1 giây mạng gián đoạn |
+| 8 | 4,096 slots | **8.0 MB** | ~4.3 giây mạng gián đoạn |
+| 16 | 4,096 slots | **16.0 MB** | ~8.7 giây mạng gián đoạn |
+| 32 | 8,192 slots | **64.0 MB** | ~17.4 giây mạng gián đoạn |
+
+*Ghi chú*: Toàn bộ vùng nhớ là **Pre-Allocated & Page-Aligned (4KB)** lúc khởi động với cờ `MADV_SEQUENTIAL`, bảo đảm không bao giờ sinh ra lỗi Page Fault trong lúc tải cao.
+
+---
+
+## 6. Quy Tắc Cảnh Báo Prometheus (Alerting Rules)
 
 ```yaml
 groups:
-  - name: velda_opentelemetry_logger_alerts
+  - name: velda-otel-logger-alerts
     rules:
-      - alert: VeldaOtelLoggerRingBufferSaturated
-        expr: rate(opentelemetry_logger_dropped_total[2m]) > 0
-        for: 1m
-        labels:
-          severity: warning
-          subsystem: telemetry
-        annotations:
-          summary: "Velda Edge OTLP logger is dropping log records"
-          description: "Gateway instance {{ $labels.instance }} has dropped {{ $value }} logs/s over the last 2 minutes. The OTel Collector may be overloaded or down."
-
-      - alert: VeldaOtelCollectorDown
-        expr: rate(opentelemetry_logger_flush_errors_total[2m]) > 5
+      - alert: VeldaOtelLoggerHighDropRate
+        expr: rate(velda_plugin_otel_logger_dropped_total[1m]) > 10
         for: 2m
         labels:
-          severity: critical
-          subsystem: telemetry
+          severity: warning
+          tier: edge-telemetry
         annotations:
-          summary: "Velda Edge cannot connect to OpenTelemetry Collector"
-          description: "OTLP flush requests from instance {{ $labels.instance }} to {{ $labels.endpoint }} are continuously failing."
+          summary: "Velda Edge OTel Logger đang làm rơi log"
+          description: "Node {{ $labels.instance }} đang làm rơi {{ $value }} logs/s do hàng đợi SPSC bị bão hòa (Collector nghẽn hoặc sập)."
+          runbook_url: "https://docs.velda.io/runbooks/opentelemetry_logger#triage-1"
+
+      - alert: VeldaOtelLoggerCollectorDown
+        expr: rate(velda_plugin_otel_logger_logged_total[5m]) > 100 and rate(otelcol_receiver_accepted_logs[5m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+          tier: edge-telemetry
+        annotations:
+          summary: "Cụm OTel Collector không nhận được bất kỳ log nào từ Velda Edge"
+          description: "Các worker vẫn ghi nhận log vào RAM nhưng đầu ra mạng sang Collector hoàn toàn không có phản hồi."
+          runbook_url: "https://docs.velda.io/runbooks/opentelemetry_logger#triage-2"
 ```
 
 ---
 
-## 5. Troubleshooting Playbook
+## 7. Checklist Điều Tra Sau Sự Cố (Post-Mortem Checklist)
 
-### Incident 1: `dropped_count` Is Incrementing
-- **Symptoms**: `opentelemetry_logger_dropped_total` is increasing; some log records are missing in Grafana Loki / Jaeger.
-- **Root Cause**: The ring buffer is full because the collector is processing batches slower than traffic arrival, or network bandwidth is saturated.
-- **Diagnostic Steps**:
-  1. Check OTel Collector health: `curl -s http://<collector>:13133/` (Collector health check port).
-  2. Inspect collector CPU and memory usage.
-  3. Verify whether `protocol` is set to `"http"`. If yes, change to `"grpc"` to cut payload size by 76%.
-  4. Increase `buffer_capacity` from `4096` to `8192` or `16384`.
-  5. Refine `sampling` table to lower sample rates for high-volume 200 OK routes.
-
-### Incident 2: Collector Connection Refused / Timeouts
-- **Symptoms**: Error logs in gateway logs: `Failed to flush OTLP logs batch to collector`.
-- **Diagnostic Steps**:
-  1. Verify DNS resolution: `nslookup <collector_hostname>`.
-  2. Verify port reachability: `nc -zv <collector_ip> 4317` (gRPC) or `4318` (HTTP).
-  3. Check if TLS is enabled: If endpoint uses `grpcs://` or `https://`, ensure trusted CA certificates are installed on the gateway host.
+1. [ ] Kiểm tra số lượng log rơi (`velda_plugin_otel_logger_dropped_total`) trong suốt khung giờ xảy ra sự cố.
+2. [ ] Xác minh nhật ký lỗi mạng trên Shadow Worker (`dmesg -T` và systemd journal của `velda-edge`).
+3. [ ] Kiểm tra biểu đồ tài nguyên CPU/RAM/Disk I/O của cụm OTel Collector và Loki/ClickHouse trong thời điểm xảy ra sự cố.
+4. [ ] Đối chiếu tỷ lệ sampling lúc xảy ra sự cố; nếu cần, tinh chỉnh lại bảng sampling vĩnh viễn trong cấu hình Control Plane.
+5. [ ] Đóng ticket sự cố và cập nhật log giải pháp vào kho lưu trữ On-Call.
