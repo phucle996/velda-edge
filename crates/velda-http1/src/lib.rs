@@ -15,11 +15,13 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod server;
+pub mod slot;
 pub mod strategy;
 pub mod wire;
 
 pub use config::Http1Config;
 pub use error::Http1Error;
+pub use slot::Http1HeaderSlot;
 pub use strategy::Http1PipeStrategy;
 pub use velda_core::Body;
 

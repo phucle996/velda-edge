@@ -175,6 +175,9 @@ pub fn encode_request_head(
 
     encode_request_line(method, uri, dst);
     for (name, val) in headers {
+        if name.as_str().starts_with("x-velda-") {
+            continue;
+        }
         dst.put_slice(name.as_str().as_bytes());
         dst.put_slice(b": ");
         dst.put_slice(val.as_bytes());

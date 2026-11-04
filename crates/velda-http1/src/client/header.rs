@@ -24,18 +24,28 @@ pub const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+static KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
+static PROXY_CONNECTION: HeaderName = HeaderName::from_static("proxy-connection");
+static TRAILERS: HeaderName = HeaderName::from_static("trailers");
+
 #[inline(always)]
 fn is_hop_by_hop(name: &HeaderName) -> bool {
-    name == http::header::CONNECTION
-        || name == http::header::TRANSFER_ENCODING
-        || name == http::header::UPGRADE
-        || name == http::header::TE
-        || name == http::header::TRAILER
-        || name == http::header::PROXY_AUTHENTICATE
-        || name == http::header::PROXY_AUTHORIZATION
-        || name.as_str().eq_ignore_ascii_case("keep-alive")
-        || name.as_str().eq_ignore_ascii_case("proxy-connection")
-        || name.as_str().eq_ignore_ascii_case("trailers")
+    // Fast O(1) integer length branch: Hop-by-hop headers only exist at specific byte lengths:
+    // 2 (te), 7 (upgrade, trailer), 8 (trailers), 10 (connection, keep-alive), 16 (proxy-connection),
+    // 17 (transfer-encoding), 18 (proxy-authenticate), 19 (proxy-authorization).
+    // All other lengths (e.g. host: 4, accept: 6, content-type: 12, authorization: 13,
+    // content-length: 14, x-user-id: 9, x-forwarded-for: 15) immediately bail out via a single CPU branch!
+    match name.as_str().len() {
+        2 => name == http::header::TE,
+        7 => name == http::header::UPGRADE || name == http::header::TRAILER,
+        8 => name == TRAILERS,
+        10 => name == http::header::CONNECTION || name == KEEP_ALIVE,
+        16 => name == PROXY_CONNECTION,
+        17 => name == http::header::TRANSFER_ENCODING,
+        18 => name == http::header::PROXY_AUTHENTICATE,
+        19 => name == http::header::PROXY_AUTHORIZATION,
+        _ => false,
+    }
 }
 
 /// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
@@ -54,9 +64,15 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
             if let Ok(conn_str) = conn.to_str() {
                 for part in conn_str.split(',') {
                     let trimmed = part.trim();
-                    if !trimmed.is_empty()
-                        && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
+                    if trimmed.is_empty()
+                        || trimmed.eq_ignore_ascii_case("keep-alive")
+                        || trimmed.eq_ignore_ascii_case("close")
+                        || trimmed.eq_ignore_ascii_case("upgrade")
                     {
+                        // Standard connection tokens: handled by hop-by-hop stripping, skip custom header parsing
+                        continue;
+                    }
+                    if let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes()) {
                         if custom_count < custom_stack.len() {
                             custom_stack[custom_count] = Some(name);
                             custom_count += 1;
@@ -70,7 +86,7 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
     }
 
     // Fast-path: Only inspect headers that are actually present in the map
-    // instead of blindly invoking 10 hash table lookup probes!
+    // using O(1) header name pointer equality instead of string comparisons.
     let mut to_remove_stack: [Option<HeaderName>; 8] = [const { None }; 8];
     let mut to_remove_count = 0;
     for (name, _) in headers.iter() {

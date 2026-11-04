@@ -143,10 +143,15 @@ impl RequestContext {
 ///
 /// Keep this structure explicit and strongly typed. Avoid using
 /// `HashMap<String, Box<dyn Any>>` as a generic plugin state store.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Guaranteed to fit within a single 64-byte L1 Data Cacheline (`size_of <= 64`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RequestState {
     /// Unique identifier for this request.
     pub request_id: RequestId,
+
+    /// Client IP address resolved authoritatively at Ingress.
+    pub client_ip: Option<std::net::IpAddr>,
 
     /// Route selected by the router.
     pub route: Option<RouteId>,
@@ -170,12 +175,19 @@ impl RequestState {
     pub fn new(request_id: RequestId) -> Self {
         Self {
             request_id,
+            client_ip: None,
             route: None,
             upstream: None,
             routed: false,
             upstream_started: false,
             upstream_completed: false,
         }
+    }
+
+    /// Stores the client IP address.
+    #[inline(always)]
+    pub fn set_client_ip(&mut self, ip: std::net::IpAddr) {
+        self.client_ip = Some(ip);
     }
 
     /// Stores the route selected by the router.

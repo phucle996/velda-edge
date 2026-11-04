@@ -9,6 +9,7 @@ use bytes::Bytes;
 use http::{Method, Uri, Version};
 
 use crate::buffer::{HeaderWorkspace, PayloadSlabLease};
+use crate::context::RequestState;
 
 /// HTTP request and response body.
 ///
@@ -180,10 +181,17 @@ pub struct L7Request {
 
     /// Request body.
     pub body: Body,
+
+    /// Ingress timestamp snapshot (Unix epoch seconds) captured once at ingress.
+    /// Used by auth, rate limiting, and quota plugins to eliminate redundant clock reads.
+    pub ingress_time_sec: u64,
+
+    /// Mutable strongly-typed state accumulated throughout the request lifecycle.
+    pub state: RequestState,
 }
 
 impl L7Request {
-    /// Creates a new HTTP request from components.
+    /// Creates a new HTTP request from components, capturing the current coarse time snapshot.
     #[inline]
     pub fn new(
         method: Method,
@@ -198,7 +206,16 @@ impl L7Request {
             version,
             headers: headers.into(),
             body,
+            ingress_time_sec: crate::coarse_now_sec(),
+            state: RequestState::default(),
         }
+    }
+
+    /// Attaches explicit request lifecycle state.
+    #[inline(always)]
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = state;
+        self
     }
 
     /// Returns `true` when the request contains a non-empty body.

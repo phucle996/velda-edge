@@ -20,13 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!("QUIC handshake completed in {:.2?}", start.elapsed());
 
-    let mut req = L7Request {
-        method: http::Method::GET,
-        uri: http::Uri::from_static("/ping"),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Empty,
-    };
+    let mut req = L7Request::new(
+        http::Method::GET,
+        http::Uri::from_static("/ping"),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Empty,
+    );
     req.headers
         .insert("host", http::HeaderValue::from_static("backend.local"));
 

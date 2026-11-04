@@ -34,7 +34,14 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::{context::RequestContext, error::RejectReason, l7::response::L7Response};
+use http::{HeaderValue, StatusCode};
+
+use crate::{
+    buffer::HeaderWorkspace,
+    context::RequestContext,
+    error::RejectReason,
+    l7::{request::Body, response::L7Response},
+};
 
 /// A phase in the Velda request lifecycle.
 ///
@@ -107,6 +114,90 @@ impl Phase {
     }
 }
 
+/// Pre-computed cache metadata and in-memory payload directive returned on Cache HIT.
+///
+/// Designed to eliminate intermediate [`http::HeaderMap`] and [`L7Response`] heap allocations
+/// on the pre-upstream cache lookup path. The downstream pipeline can either directly serialize
+/// these pre-computed HTTP headers onto the wire or instantiate an [`L7Response`] via
+/// [`into_l7_response`](Self::into_l7_response) when post-response hooks (e.g. logging) are registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedResponseDirective {
+    /// Cached HTTP response status code (e.g. 200 OK, 304 Not Modified).
+    pub status: StatusCode,
+    /// In-memory zero-copy cached payload slice.
+    pub payload: bytes::Bytes,
+    /// Cached `Content-Type` header if present.
+    pub content_type: Option<HeaderValue>,
+    /// Content encoding variant (e.g. `gzip`, `br`, `zstd`) if negotiated.
+    pub encoding: Option<HeaderValue>,
+    /// Age of the cache entry in seconds.
+    pub age_secs: u64,
+    /// Whether the cached entry possesses compressed variants (requiring `Vary: Accept-Encoding`).
+    pub has_variants: bool,
+}
+
+impl CachedResponseDirective {
+    /// Constructs a new [`CachedResponseDirective`].
+    #[inline]
+    pub fn new(
+        status: StatusCode,
+        payload: bytes::Bytes,
+        content_type: Option<HeaderValue>,
+        encoding: Option<HeaderValue>,
+        age_secs: u64,
+        has_variants: bool,
+    ) -> Self {
+        Self {
+            status,
+            payload,
+            content_type,
+            encoding,
+            age_secs,
+            has_variants,
+        }
+    }
+
+    /// Converts this cached directive into an [`L7Response`] with standard HTTP cache headers
+    /// populated in a pre-warmed [`HeaderWorkspace`].
+    pub fn into_l7_response(self) -> L7Response {
+        let mut resp_headers = HeaderWorkspace::with_capacity(6);
+        if let Some(ct) = self.content_type {
+            resp_headers.insert(http::header::CONTENT_TYPE, ct);
+        }
+        resp_headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from(self.payload.len()),
+        );
+        resp_headers.insert(
+            http::header::HeaderName::from_static("age"),
+            HeaderValue::from(self.age_secs),
+        );
+        resp_headers.insert(
+            http::header::HeaderName::from_static("x-cache"),
+            HeaderValue::from_static("HIT"),
+        );
+        if let Some(enc) = self.encoding {
+            resp_headers.insert(http::header::CONTENT_ENCODING, enc);
+            resp_headers.insert(
+                http::header::VARY,
+                HeaderValue::from_static("Accept-Encoding"),
+            );
+        } else if self.has_variants {
+            resp_headers.insert(
+                http::header::VARY,
+                HeaderValue::from_static("Accept-Encoding"),
+            );
+        }
+
+        L7Response::new(
+            self.status,
+            http::Version::HTTP_11,
+            resp_headers,
+            Body::Bytes(self.payload),
+        )
+    }
+}
+
 /// Bounded execution authority returned by L7 plugin hooks.
 ///
 /// # Architectural Invariant: Finite Extension Authority
@@ -116,11 +207,13 @@ impl Phase {
 /// 1. `Continue`: Advances the request to the subsequent hook or pipeline phase.
 /// 2. `Respond(L7Response)`: Short-circuits immediately with an explicit, caller-provided
 ///    HTTP response. Used strictly when the plugin supplies explicit body content, custom
-///    non-error status codes (e.g. CORS `204 No Content`), or cached payloads.
+///    non-error status codes (e.g. CORS `204 No Content`).
 /// 3. `Reject(RejectReason)`: Canonical edge rejection for policy/security failures.
 ///    Synthesizes zero-alloc protocol-native error framing downstream and strips Bit 0 headers.
 /// 4. `Delay { duration, and_then }`: Non-blocking asynchronous sleep (used for chaos fault
 ///    injection / artificial latency) before evaluating the boxed `and_then` action.
+/// 5. `ServeCached(CachedResponseDirective)`: Fast-path cache directive returning pre-computed
+///    response metadata and in-memory payload without intermediate `HeaderMap` heap allocations.
 ///
 /// # Memory Layout
 /// `and_then` is boxed inside `Delay` to ensure that `Action` remains small and cacheline-friendly
@@ -146,6 +239,10 @@ pub enum Action {
         duration: Duration,
         and_then: Box<Action>,
     },
+
+    /// Serve pre-computed cached payload directly from in-memory storage,
+    /// bypassing upstream roundtrips and intermediate `HeaderMap` allocations.
+    ServeCached(CachedResponseDirective),
 }
 
 impl Action {
@@ -177,6 +274,12 @@ impl Action {
         Self::Reject(reason)
     }
 
+    /// Constructs a `ServeCached` action with the given cached response directive.
+    #[inline]
+    pub fn serve_cached(directive: CachedResponseDirective) -> Self {
+        Self::ServeCached(directive)
+    }
+
     /// Returns `true` when processing should continue.
     #[inline]
     pub const fn is_continue(&self) -> bool {
@@ -199,6 +302,12 @@ impl Action {
     #[inline]
     pub const fn is_delay(&self) -> bool {
         matches!(self, Self::Delay { .. })
+    }
+
+    /// Returns `true` when the action serves a cached response directive.
+    #[inline]
+    pub const fn is_serve_cached(&self) -> bool {
+        matches!(self, Self::ServeCached(_))
     }
 }
 
@@ -288,5 +397,34 @@ mod tests {
         assert!(!d.is_response());
         assert!(!d.is_rejected());
         assert!(d.is_delay());
+        assert!(!d.is_serve_cached());
+
+        let cached = CachedResponseDirective::new(
+            StatusCode::OK,
+            bytes::Bytes::from_static(b"hello cached"),
+            Some(HeaderValue::from_static("text/plain")),
+            Some(HeaderValue::from_static("gzip")),
+            120,
+            true,
+        );
+        let serve = Action::serve_cached(cached.clone());
+        assert!(!serve.is_continue());
+        assert!(!serve.is_response());
+        assert!(!serve.is_rejected());
+        assert!(!serve.is_delay());
+        assert!(serve.is_serve_cached());
+
+        let l7 = cached.into_l7_response();
+        assert_eq!(l7.status, StatusCode::OK);
+        assert_eq!(l7.headers.get("x-cache").unwrap(), "HIT");
+        assert_eq!(l7.headers.get("age").unwrap(), "120");
+        assert_eq!(
+            l7.headers.get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert_eq!(
+            l7.headers.get(http::header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
     }
 }

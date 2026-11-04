@@ -183,30 +183,30 @@ async fn test_http3_roundtrip_requests() {
     .expect("Client failed to connect to HTTP/3 server");
 
     // 1. Unary GET request
-    let get_req = velda_core::L7Request {
-        method: Method::GET,
-        uri: "/get".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Empty,
-    };
+    let get_req = velda_core::L7Request::new(
+        Method::GET,
+        "/get".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Empty,
+    );
     let get_resp = client.send_request(get_req).await.unwrap();
     assert_eq!(get_resp.status, StatusCode::OK);
     assert_eq!(get_resp.body, Body::Bytes(Bytes::from_static(b"ok")));
 
     // 2. POST request with body (multi-chunk streaming upload roundtrip)
     let payload = vec![0xa5u8; 65_536];
-    let post_req = velda_core::L7Request {
-        method: Method::POST,
-        uri: "/upload".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: {
+    let post_req = velda_core::L7Request::new(
+        Method::POST,
+        "/upload".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        {
             let mut h = http::HeaderMap::new();
             h.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-            h.into()
+            h
         },
-        body: Body::Bytes(Bytes::from(payload.clone())),
-    };
+        Body::Bytes(Bytes::from(payload.clone())),
+    );
     let post_resp = client.send_request(post_req).await.unwrap();
     assert_eq!(post_resp.status, StatusCode::OK);
     if let Body::Bytes(b) = post_resp.body {
@@ -216,25 +216,25 @@ async fn test_http3_roundtrip_requests() {
     }
 
     // 3. Status invariants: HEAD (no body) & 204 No Content
-    let head_req = velda_core::L7Request {
-        method: Method::HEAD,
-        uri: "/head".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Empty,
-    };
+    let head_req = velda_core::L7Request::new(
+        Method::HEAD,
+        "/head".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Empty,
+    );
     let head_resp = client.send_request(head_req).await.unwrap();
     assert_eq!(head_resp.status, StatusCode::OK);
     assert_eq!(head_resp.headers.get("content-length").unwrap(), "1024");
     assert_eq!(head_resp.body, Body::Empty);
 
-    let no_content_req = velda_core::L7Request {
-        method: Method::DELETE,
-        uri: "/no-content".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Empty,
-    };
+    let no_content_req = velda_core::L7Request::new(
+        Method::DELETE,
+        "/no-content".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Empty,
+    );
     let no_content_resp = client.send_request(no_content_req).await.unwrap();
     assert_eq!(no_content_resp.status, StatusCode::NO_CONTENT);
     assert_eq!(no_content_resp.body, Body::Empty);
@@ -244,13 +244,13 @@ async fn test_http3_roundtrip_requests() {
     for i in 0..10 {
         let client_clone = client.clone();
         handles.push(tokio::spawn(async move {
-            let req = velda_core::L7Request {
-                method: Method::POST,
-                uri: format!("/concurrent-{}", i).parse::<Uri>().unwrap(),
-                version: http::Version::HTTP_3,
-                headers: velda_core::HeaderWorkspace::empty(),
-                body: Body::Bytes(Bytes::from(format!("payload-{}", i))),
-            };
+            let req = velda_core::L7Request::new(
+                Method::POST,
+                format!("/concurrent-{}", i).parse::<Uri>().unwrap(),
+                http::Version::HTTP_3,
+                velda_core::HeaderWorkspace::empty(),
+                Body::Bytes(Bytes::from(format!("payload-{}", i))),
+            );
             let resp = client_clone.send_request(req).await.unwrap();
             assert_eq!(resp.status, StatusCode::OK);
             if let Body::Bytes(b) = resp.body {
@@ -289,24 +289,24 @@ async fn test_http3_payload_limit_enforced() {
 
     // 1. Send oversized bomb payload exceeding max_body_size
     let bomb_payload = vec![0x42u8; 128 * 1024];
-    let bomb_req = velda_core::L7Request {
-        method: Method::POST,
-        uri: "/bomb".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Bytes(Bytes::from(bomb_payload)),
-    };
+    let bomb_req = velda_core::L7Request::new(
+        Method::POST,
+        "/bomb".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Bytes(Bytes::from(bomb_payload)),
+    );
     let bomb_res = client.send_request(bomb_req).await;
     assert!(bomb_res.is_err(), "Oversized body must be rejected");
 
     // 2. Subsequent valid request over the same connection succeeds cleanly
-    let valid_req = velda_core::L7Request {
-        method: Method::GET,
-        uri: "/valid".parse::<Uri>().unwrap(),
-        version: http::Version::HTTP_3,
-        headers: velda_core::HeaderWorkspace::empty(),
-        body: Body::Empty,
-    };
+    let valid_req = velda_core::L7Request::new(
+        Method::GET,
+        "/valid".parse::<Uri>().unwrap(),
+        http::Version::HTTP_3,
+        velda_core::HeaderWorkspace::empty(),
+        Body::Empty,
+    );
     let valid_resp = client.send_request(valid_req).await.unwrap();
     assert_eq!(valid_resp.status, StatusCode::OK);
 

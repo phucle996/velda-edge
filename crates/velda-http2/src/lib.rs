@@ -15,6 +15,7 @@ pub mod config;
 pub mod error;
 pub mod headers;
 pub mod server;
+pub mod slot;
 pub mod strategy;
 
 // Top-level public re-exports
@@ -30,4 +31,5 @@ pub use server::{
     Http2ServerRequestHead, Http2ServerResponse, Http2ServerResponseHead, Http2StreamReceiver,
     Http2StreamSender, build_h2_response, decode_request,
 };
+pub use slot::Http2HeaderSlot;
 pub use strategy::Http2PipeStrategy;

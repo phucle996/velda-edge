@@ -22,6 +22,7 @@ pub mod headers;
 pub mod huffman;
 pub mod qpack;
 pub mod server;
+pub mod slot;
 pub mod strategy;
 
 pub use client::{
@@ -44,4 +45,5 @@ pub use server::{
     build_edge_response_frames, enrich_headers, extract_host, is_clean_path, normalize_path,
     send_response,
 };
+pub use slot::Http3HeaderSlot;
 pub use strategy::Http3PipeStrategy;

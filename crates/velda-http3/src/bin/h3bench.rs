@@ -244,16 +244,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let target = &targets[req_idx % targets.len()];
 
-                let mut req = L7Request {
-                    method: http::Method::GET,
-                    uri: match target.path.parse() {
+                let mut req = L7Request::new(
+                    http::Method::GET,
+                    match target.path.parse() {
                         Ok(u) => u,
                         Err(_) => http::Uri::from_static("/"),
                     },
-                    version: http::Version::HTTP_3,
-                    headers: velda_core::HeaderWorkspace::empty(),
-                    body: Body::Empty,
-                };
+                    http::Version::HTTP_3,
+                    velda_core::HeaderWorkspace::empty(),
+                    Body::Empty,
+                );
 
                 if let Ok(hv) = HeaderValue::from_str(&eff_host) {
                     req.headers.insert("host", hv);

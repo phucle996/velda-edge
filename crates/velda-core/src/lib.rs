@@ -19,6 +19,7 @@
 //! `velda-plugin`, and `velda-upstream` build on these contracts.
 
 pub mod buffer;
+pub mod coarse_time;
 pub mod context;
 pub mod endpoint;
 pub mod error;
@@ -39,10 +40,11 @@ pub mod worker;
 // -----------------------------------------------------------------------------
 
 pub use buffer::{
-    AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderWorkspace, HeaderWorkspaceLease,
-    MAX_BYPASS_HEADERS, PayloadSlab, PayloadSlabLease, PayloadSlabPool, ShardedBufferPool,
-    SlabClass, X_REQUEST_ID,
+    AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderSlotTable, HeaderWorkspace,
+    HeaderWorkspaceLease, MAX_BYPASS_HEADERS, MAX_HEADER_SLOTS, PayloadSlab, PayloadSlabLease,
+    PayloadSlabPool, ShardedBufferPool, SlabClass, X_REQUEST_ID,
 };
+pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 pub use hardware::AdaptiveBufferDimensions;
 
 // -----------------------------------------------------------------------------
@@ -83,7 +85,7 @@ pub use error::{Error, ErrorKind, RejectReason, Result};
 // Lifecycle
 // -----------------------------------------------------------------------------
 
-pub use lifecycle::{Action, Hook, HookPhase, Phase};
+pub use lifecycle::{Action, CachedResponseDirective, Hook, HookPhase, Phase};
 
 // -----------------------------------------------------------------------------
 // Shared identifiers & Endpoints

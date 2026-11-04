@@ -26,6 +26,7 @@
 //!    `Bytes` instances or static slices, preventing detached use-after-free corruptions.
 
 pub mod header;
+pub mod slot;
 
 pub mod slab;
 
@@ -33,6 +34,7 @@ pub use header::{
     HeaderPool, HeaderWorkspace, HeaderWorkspaceLease, MAX_BYPASS_HEADERS, X_REQUEST_ID,
 };
 pub use slab::{PayloadSlab, PayloadSlabLease, PayloadSlabPool, SlabClass};
+pub use slot::{HeaderSlotTable, MAX_HEADER_SLOTS};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
