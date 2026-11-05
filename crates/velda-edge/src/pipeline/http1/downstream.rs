@@ -80,7 +80,14 @@ pub async fn handle_http1_stream(
                     "Downstream TLS handshake succeeded for HTTP/1.1"
                 );
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
+                let meta = DownstreamMeta::new(
+                    listener_id,
+                    peer,
+                    local_addr,
+                    true,
+                    alt_svc,
+                    &rt.buffer_pool,
+                );
                 run_http1_loop(tls_stream, meta, streaming, config, runtime).await;
             }
             Err(e) => {
@@ -93,7 +100,14 @@ pub async fn handle_http1_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, alt_svc);
+        let meta = DownstreamMeta::new(
+            listener_id,
+            peer,
+            local_addr,
+            false,
+            alt_svc,
+            &rt.buffer_pool,
+        );
         run_http1_loop(connection, meta, streaming, config, runtime).await;
     }
 }
@@ -274,7 +288,6 @@ pub async fn run_http1_loop<IO>(
 
             if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
                 // Optimization: Zero-clone move of method, uri, and headers into L7Request.
-                // Uses from_pre_injected_headers to bypass redundant x-request-id lookup.
                 let method = std::mem::replace(&mut req_head.method, http::Method::GET);
                 let uri = std::mem::take(&mut req_head.uri);
                 let headers = std::mem::take(&mut req_head.headers);
@@ -282,7 +295,7 @@ pub async fn run_http1_loop<IO>(
                     method,
                     uri,
                     req_head.version,
-                    velda_core::HeaderWorkspace::from_pre_injected_headers(headers),
+                    velda_core::HeaderWorkspace::from_headers(headers),
                     velda_core::Body::Empty,
                 );
                 l7_req.state.request_id = request_id;

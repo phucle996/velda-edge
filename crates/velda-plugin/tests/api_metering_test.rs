@@ -66,6 +66,8 @@ fn test_api_metering_free_tier_rejection_402() {
     let mut r1 = build_test_request(h1);
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
+    assert_eq!(r1.headers.get_u64("x-metering-remaining"), Some(1));
+    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-tier").unwrap(), "free");
     assert_eq!(r1.headers.get("x-metering-remaining").unwrap(), "1");
 
@@ -78,6 +80,8 @@ fn test_api_metering_free_tier_rejection_402() {
     let mut r2 = build_test_request(h2);
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
+    assert_eq!(r2.headers.get_u64("x-metering-remaining"), Some(0));
+    r2.headers.render();
     assert_eq!(r2.headers.get("x-metering-remaining").unwrap(), "0");
 
     // Request 3: Quota exhausted -> Action::Respond(402 Payment Required)
@@ -174,7 +178,8 @@ fn test_api_metering_pro_tier_rejection_429() {
     match act2 {
         Action::Reject(reason) => {
             assert_eq!(reason, RejectReason::TooManyRequests);
-            assert!(r2.headers.has_bypass_headers());
+            r2.headers.render();
+            assert!(r2.headers.bypass_headers().count() >= 2);
             assert_eq!(r2.headers.get("x-metering-tier").unwrap(), "pro");
             assert_eq!(r2.headers.get("x-metering-exhausted").unwrap(), "true");
         }
@@ -220,6 +225,8 @@ fn test_api_metering_enterprise_overage_passthrough() {
     let mut r1 = build_test_request(h1);
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
+    assert_eq!(r1.headers.get_u64("x-metering-balance"), Some(0));
+    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-balance").unwrap(), "0");
 
     // Request 2: Balance 0 < 100_000 cost, but Passthrough policy kicks in!
@@ -269,6 +276,8 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
     let mut r1 = build_test_request(h1);
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
+    assert_eq!(r1.headers.get_u64("x-metering-balance"), Some(500_000));
+    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-balance").unwrap(), "500000");
 
     // Request 2: Consumes 500_000, remaining balance = 0
@@ -280,6 +289,8 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
     let mut r2 = build_test_request(h2);
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
+    assert_eq!(r2.headers.get_u64("x-metering-balance"), Some(0));
+    r2.headers.render();
     assert_eq!(r2.headers.get("x-metering-balance").unwrap(), "0");
 
     // Request 3: Insufficient credits (0 < 500_000) -> 402 Payment Required

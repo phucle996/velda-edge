@@ -30,7 +30,7 @@ Choose the earliest phase that satisfies your plugin's requirements:
 | **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `src/pre_route/` | Authentication, IP firewalls, WAF header checks, DDoS filtering. Fails fast **before** route trie matching and body reading. |
 | **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `src/pre_upstream/` | Request header mutations, backend authentication token injection, local token bucket rate limiting. Runs **after** the target upstream pool/endpoint is chosen. |
 | **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `src/post_response/` | Security response headers (HSTS, CSP), CORS response headers, response header scrubbing. Mutates [`L7Response`](../velda-core/src/l7/response.rs) in place. |
-| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `src/background/` | Long-lived auxiliary services (telemetry exporters, health probes). Runs strictly on dedicated Auxiliary Cores. |
+| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `src/background/` | Long-lived shadow background services (telemetry exporters, health probes). Runs strictly on dedicated Shadow Workers. |
 
 ---
 

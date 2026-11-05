@@ -72,7 +72,8 @@ pub async fn handle_grpc_tcp(
                     "Downstream TLS handshake succeeded for gRPC"
                 );
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, None);
+                let meta =
+                    DownstreamMeta::new(listener_id, peer, local_addr, true, None, &rt.buffer_pool);
                 run_grpc_tcp_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
@@ -85,7 +86,7 @@ pub async fn handle_grpc_tcp(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, None);
+        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, None, &rt.buffer_pool);
         run_grpc_tcp_loop(connection, meta, config, runtime).await;
     }
 }
@@ -140,6 +141,15 @@ async fn dispatch_grpc_tcp_request_stream(
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
+    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
+    if server_stream.parts.headers.len() > velda_core::MAX_WIRE_HEADERS {
+        let _ = server_stream.respond.send_trailers_only(
+            GrpcStatus::ResourceExhausted,
+            Some("too many request headers"),
+        );
+        return;
+    }
+
     // [INGRESS W3C REQUEST ID GENERATION]
     // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
     // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.

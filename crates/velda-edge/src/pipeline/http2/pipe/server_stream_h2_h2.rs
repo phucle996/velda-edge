@@ -40,10 +40,8 @@ async fn forward_server_stream(
 
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
-    if let Body::Bytes(b) = body
-        && !b.is_empty()
-    {
-        send_stream.send_data(b.clone(), true)?;
+    if has_body {
+        send_stream.send_data(body.to_bytes(), true)?;
     }
 
     let response = response_fut.await?;

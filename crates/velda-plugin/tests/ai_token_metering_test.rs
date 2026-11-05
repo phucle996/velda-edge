@@ -123,7 +123,7 @@ fn test_plugin_on_response_success_metering() {
     }"#;
 
     let mut resp = L7Response::from_bytes(StatusCode::OK, &response_json[..]);
-    let mut req_ws = HeaderWorkspace::empty();
+    let mut req_ws = HeaderWorkspace::default();
     req_ws.insert(
         HeaderName::from_static("x-consumer-id"),
         HeaderValue::from_static("tenant-corp-alpha"),
@@ -174,7 +174,7 @@ fn test_plugin_unpriced_model_strict_no_fallback() {
     }"#;
 
     let mut resp = L7Response::from_bytes(StatusCode::OK, &response_json[..]);
-    let mut req_ws = HeaderWorkspace::empty();
+    let mut req_ws = HeaderWorkspace::default();
     req_ws.insert(
         HeaderName::from_static("x-consumer-id"),
         HeaderValue::from_static("tenant-corp-beta"),
@@ -228,7 +228,7 @@ fn test_plugin_no_usage_in_body() {
 
     let response_json = br#"{"error": {"message": "Rate limit reached", "type": "tokens"}}"#;
     let mut resp = L7Response::from_bytes(StatusCode::TOO_MANY_REQUESTS, &response_json[..]);
-    let req_ws = HeaderWorkspace::empty();
+    let req_ws = HeaderWorkspace::default();
 
     run_post_response_plugins(&chain, &req_ws, &mut resp);
 

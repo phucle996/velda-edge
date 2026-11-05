@@ -163,15 +163,13 @@ impl PostResponsePlugin for StdHttpAccessLogPlugin {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        // Content length
+        // Content length (O(1) read from HeaderWorkspace arithmetic register / numeric_entries)
         let cl_raw = resp
             .headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
+            .get_u64(http::header::CONTENT_LENGTH)
             .or_else(|| {
-                if let velda_core::Body::Bytes(ref b) = resp.body {
-                    Some(b.len() as u64)
+                if !resp.body.is_empty() {
+                    Some(resp.body.len() as u64)
                 } else {
                     None
                 }
@@ -288,7 +286,7 @@ mod tests {
             Body::Bytes(bytes::Bytes::from_static(b"response-body")),
         );
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert("x-request-id", HeaderValue::from_static("req-12345"));
         req_headers.insert(
             "user-agent",
@@ -330,7 +328,7 @@ mod tests {
         let plugin = StdHttpAccessLogPlugin::new_for_test("std_http_access_log", config);
 
         let mut resp = L7Response::empty(StatusCode::OK); // 200 is unconfigured
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -352,7 +350,7 @@ mod tests {
         let plugin = StdHttpAccessLogPlugin::new_for_test("std_http_access_log", config);
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         // Fill buffer to capacity (each shard has 64 capacity)
         for _ in 0..128 {

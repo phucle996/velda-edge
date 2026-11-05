@@ -5,7 +5,7 @@
 //! JSON payloads to an OTLP/HTTP collector endpoint (`POST /v1/metrics`).
 //!
 //! # Strict Monorepo Invariants
-//! - **Auxiliary Execution**: Runs strictly on Shadow Worker supervisory threads with idle priority.
+//! - **Shadow Execution**: Runs strictly on Shadow Worker supervisory threads with idle priority.
 //! - **Zero Hot-Path Contention**: Telemetry is extracted via lock-free atomic snapshots.
 //! - **Connection Reuse**: Uses a self-contained persistent HTTP/1.1 Keep-Alive socket.
 

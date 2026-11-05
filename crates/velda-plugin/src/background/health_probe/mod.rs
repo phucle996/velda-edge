@@ -1,4 +1,4 @@
-//! Auxiliary Health & Readiness Probe Background Plugin Submodule (`health_probe`).
+//! Health & Readiness Probe Background Plugin Submodule (`health_probe`).
 
 pub mod plugin;
 

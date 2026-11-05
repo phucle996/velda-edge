@@ -153,25 +153,15 @@ impl KeyStrategy {
     }
 }
 
-/// Resolves client IP address from standard forwarding headers.
+/// Resolves client IP address from `HeaderWorkspace` integer key lookup or request state.
 #[inline]
 pub fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
     if let Some(ip) = req.state.client_ip {
         return Some(ip);
     }
-    if let Some(val) = req.headers.get("x-forwarded-for")
-        && let Ok(raw) = val.to_str()
-    {
-        let first = raw.split(',').next().unwrap_or("").trim();
-        if let Ok(ip) = first.parse::<IpAddr>() {
-            return Some(ip);
-        }
-    }
-
     req.headers
-        .get("x-real-ip")
-        .and_then(|val| val.to_str().ok())
-        .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
+        .get_ip("x-forwarded-for")
+        .or_else(|| req.headers.get_ip("x-real-ip"))
 }
 
 /// Hashes the key string into a 64-bit integer for zero-alloc sharded table lookup.

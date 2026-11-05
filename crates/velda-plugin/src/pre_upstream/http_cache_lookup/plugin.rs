@@ -249,8 +249,7 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
         if let Ok(val) = HeaderValue::from_str(&key_str) {
             req.headers.insert(X_VELDA_CACHE_KEY, val);
         }
-        let hash_val = HeaderValue::from(key_hash);
-        req.headers.insert(X_VELDA_CACHE_HASH, hash_val);
+        req.headers.set_u64(X_VELDA_CACHE_HASH, key_hash);
 
         Action::Continue
     }

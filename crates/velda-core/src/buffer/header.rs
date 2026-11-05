@@ -1,85 +1,294 @@
-//! Pre-warmed User-Space Header Workspace and Object Pool.
+//! Domain-Blind Dual-Representation Header Workspace and Adaptive Object Pool.
 //!
-//! # Architecture and Invariants
-//! 1. **Zero-Heap Allocation on Normal Hot Path**:
-//!    - Holds pre-allocated [`HeaderMap`] instances with pre-sized bucket arrays.
-//!    - When recycled, [`HeaderMap::clear`] resets length to 0 while preserving the
-//!      allocated capacity table in RAM.
-//! 2. **Eager Physical Page Commit (Anti-Page-Fault Baseline)**:
-//!    - At cold-start bootstrap, all baseline slots are allocated and touched to commit
-//!      physical memory pages into the MMU, eliminating Minor Page Faults during normal traffic.
-//! 3. **Two-Tier Adaptive Memory Management**:
-//!    - **Tier 1 (Baseline Floor)**: Pre-warmed permanent workspaces, never evicted.
-//!    - **Tier 2 (Burst Standby Queue)**: Spills over dynamically during spikes up to `max_burst_cap`.
-//!      Standby workspaces retain a 15-second TTL in user space to absorb multi-wave micro-bursts
-//!      without memory allocator churn (`malloc`/`free` thrashing).
-//! 4. **Non-Blocking Auxiliary Sweeper (`try_lock`)**:
-//!    - Eviction of expired burst workspaces is driven by the Auxiliary Core using non-blocking
-//!      `try_lock()`. If a Traffic Core is actively processing headers, the sweeper immediately
-//!      skips that cycle without introducing any pipeline jitter or lock contention.
-//! 5. **Linux RSS Retention Mechanism**:
-//!    - When burst workspaces are evicted after the 15s TTL, they are returned to the user-space
-//!      allocator (`jemalloc`). The Linux kernel retains physical page frames in RSS throughout
-//!      the allocator's dirty decay window, accelerating any subsequent memory re-expansion.
+//! - **Values `<= 16` bytes (Hardware Register `raw: u128`)**: Integers (`U64`), IP addresses
+//!   (`Ipv4`, `Ipv6`), 128-bit identifiers (`Hex128`), and short ASCII tokens (`InlineAscii(len)`)
+//!   are stored in a 16-entry L1-resident `NumericHeaderEntry` table indexed by a 64-bit integer
+//!   key (`key: u64 = header_key(name)`).
+//! - **Values `> 16` bytes (Zero-Copy Pointer)**: Long strings (e.g. JWTs, Cookies, User-Agent)
+//!   remain as zero-copy `Bytes` pointers inside the underlying [`HeaderMap`].
+//! - **Single-Pass Batch Rendering (`render()`)**: Right before wire transmission, all pending
+//!   16-byte register entries are materialized into the [`HeaderMap`] in a single pass.
 
-use std::collections::VecDeque;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::cell::RefCell;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ops::Deref;
 
 use http::HeaderMap;
-use http::header::{HeaderName, HeaderValue, IntoHeaderName};
+use http::header::{AsHeaderName, HeaderName, HeaderValue, IntoHeaderName};
 
-use super::slot::HeaderSlotTable;
+pub use super::{HeaderPool, HeaderWorkspaceLease};
 
 /// Canonical header name for the W3C TraceContext Request Identifier.
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
-/// Maximum number of Bit-1 (Bypass on Reject) headers tracked on the stack without heap allocation.
+/// Compile-time 64-bit integer key for `x-request-id`.
+pub const KEY_X_REQUEST_ID: u64 = header_key(b"x-request-id");
+
+/// Maximum number of Bit-1 (Bypass on Reject) headers tracked on the stack.
 pub const MAX_BYPASS_HEADERS: usize = 8;
 
-/// Reusable workspace holding a pre-allocated, clearable [`HeaderMap`] with stack-sidecar bypass tagging.
-///
-/// # Virtual 3-Column Header Model
-/// - Column 1 & 2: `(HeaderName, HeaderValue)` stored inside standard [`HeaderMap`].
-/// - Column 3: Visibility Bit (Bit 0 = Normal / Upstream-only; Bit 1 = Bypass on Reject / Client-facing).
-///
-/// On normal upstream dispatch, all headers (Bit 0 and Bit 1) are forwarded with zero overhead ($0$ ns).
-/// On rejection, only Bit 1 headers (e.g. `Retry-After`, `x-request-id`) are extracted, preventing
-/// information leakage of client credentials or internal upstream headers.
+/// Maximum number of deferred 16-byte register header mutations buffered before batch rendering.
+pub const MAX_NUMERIC_HEADERS: usize = 16;
+
+/// Computes a case-insensitive 64-bit FNV-1a integer key for an HTTP header name at compile time or runtime.
+#[inline(always)]
+pub const fn header_key(name: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut i = 0;
+    while i < name.len() {
+        let b = name[i];
+        let lower = if b >= b'A' && b <= b'Z' { b + 32 } else { b };
+        hash ^= lower as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
+const DIGITS_1: [u8; 10] = *b"0123456789";
+
+const DIGITS_2: [u8; 180] = {
+    let mut buf = [0u8; 180];
+    let mut n = 10usize;
+    while n < 100 {
+        let idx = (n - 10) * 2;
+        buf[idx] = b'0' + ((n / 10) as u8);
+        buf[idx + 1] = b'0' + ((n % 10) as u8);
+        n += 1;
+    }
+    buf
+};
+
+const DIGITS_3: [u8; 2700] = {
+    let mut buf = [0u8; 2700];
+    let mut n = 100usize;
+    while n < 1000 {
+        let idx = (n - 100) * 3;
+        buf[idx] = b'0' + ((n / 100) as u8);
+        buf[idx + 1] = b'0' + (((n / 10) % 10) as u8);
+        buf[idx + 2] = b'0' + ((n % 10) as u8);
+        n += 1;
+    }
+    buf
+};
+
+thread_local! {
+    static U64_HEADER_CACHE: RefCell<(u64, HeaderValue)> = const {
+        RefCell::new((0, HeaderValue::from_static("0")))
+    };
+}
+
+/// Resolves any unsigned 64-bit integer into an HTTP [`HeaderValue`].
+/// Values `0..1000` (including HTTP status codes `100..599` and rate-limit counters) resolve in ~0.3 ns from `.rodata`.
+#[inline(always)]
+pub fn resolve_u64_header_value(val: u64) -> HeaderValue {
+    if val < 10 {
+        let idx = val as usize;
+        return HeaderValue::from_static(unsafe {
+            std::str::from_utf8_unchecked(&DIGITS_1[idx..idx + 1])
+        });
+    }
+    if val < 100 {
+        let idx = ((val as usize) - 10) * 2;
+        return HeaderValue::from_static(unsafe {
+            std::str::from_utf8_unchecked(&DIGITS_2[idx..idx + 2])
+        });
+    }
+    if val < 1000 {
+        let idx = ((val as usize) - 100) * 3;
+        return HeaderValue::from_static(unsafe {
+            std::str::from_utf8_unchecked(&DIGITS_3[idx..idx + 3])
+        });
+    }
+
+    U64_HEADER_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.0 == val {
+            return cache.1.clone();
+        }
+        let mut buf = [0u8; 20];
+        let mut n = val;
+        let mut pos = 20usize;
+        while n >= 100 {
+            let rem = (n % 100) as usize;
+            n /= 100;
+            pos -= 2;
+            if rem < 10 {
+                buf[pos] = b'0';
+                buf[pos + 1] = DIGITS_1[rem];
+            } else {
+                let d_idx = (rem - 10) * 2;
+                buf[pos] = DIGITS_2[d_idx];
+                buf[pos + 1] = DIGITS_2[d_idx + 1];
+            }
+        }
+        if n < 10 {
+            pos -= 1;
+            buf[pos] = DIGITS_1[n as usize];
+        } else {
+            let d_idx = ((n as usize) - 10) * 2;
+            pos -= 2;
+            buf[pos] = DIGITS_2[d_idx];
+            buf[pos + 1] = DIGITS_2[d_idx + 1];
+        }
+        let hv = HeaderValue::from_bytes(&buf[pos..20])
+            .unwrap_or_else(|_| HeaderValue::from_static("0"));
+        *cache = (val, hv.clone());
+        hv
+    })
+}
+
+/// Fast 32-character hex parser (`&[u8] -> Option<u128>`).
+#[inline]
+fn parse_hex_128(bytes: &[u8]) -> Option<u128> {
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut acc = 0u128;
+    for &b in bytes {
+        let nibble = match b {
+            b'0'..=b'9' => (b - b'0') as u128,
+            b'a'..=b'f' => (b - b'a' + 10) as u128,
+            b'A'..=b'F' => (b - b'A' + 10) as u128,
+            _ => return None,
+        };
+        acc = (acc << 4) | nibble;
+    }
+    Some(acc)
+}
+
+/// Wire rendering format for a 16-byte [`NumericHeaderEntry::raw`] register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericFmt {
+    /// 64-bit unsigned decimal integer (`raw as u64`, including HTTP status codes `100..=599`).
+    U64,
+    /// 128-bit W3C identifier rendered as 32 lowercase hexadecimal characters.
+    Hex128,
+    /// 32-bit IPv4 address (`raw as u32`).
+    Ipv4,
+    /// 128-bit IPv6 address (`raw`).
+    Ipv6,
+    /// Short ASCII string `<= 16` bytes packed little-endian into `raw: u128`, with byte length `0..=16`.
+    InlineAscii(u8),
+}
+
+/// Mutation semantics for a deferred 16-byte register header entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericOp {
+    Set,
+    Append,
+    SetBypass,
+}
+
+/// Single 16-byte register header entry held in [`HeaderWorkspace`], indexed by `key: u64`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericHeaderEntry {
+    pub key: u64,
+    pub name: HeaderName,
+    pub raw: u128,
+    pub fmt: NumericFmt,
+    pub op: NumericOp,
+}
+
+impl NumericHeaderEntry {
+    /// Materializes the 16-byte `raw` integer register into an HTTP [`HeaderValue`].
+    #[inline(always)]
+    pub fn into_header_value(&self) -> HeaderValue {
+        match self.fmt {
+            NumericFmt::U64 => resolve_u64_header_value(self.raw as u64),
+            NumericFmt::Hex128 => {
+                let mut hex = [0u8; 32];
+                let hi = (self.raw >> 64) as u64;
+                let lo = self.raw as u64;
+                let (hi_out, lo_out) = hex.split_at_mut(16);
+                crate::request_id::format_hex_16(hi, hi_out.try_into().unwrap());
+                crate::request_id::format_hex_16(lo, lo_out.try_into().unwrap());
+                HeaderValue::from_bytes(&hex).unwrap_or_else(|_| {
+                    HeaderValue::from_static("00000000000000000000000000000000")
+                })
+            }
+            NumericFmt::Ipv4 => {
+                let octets = Ipv4Addr::from(self.raw as u32).octets();
+                let mut buf = [0u8; 15];
+                let mut pos = 0usize;
+                for (i, &oct) in octets.iter().enumerate() {
+                    if i > 0 {
+                        buf[pos] = b'.';
+                        pos += 1;
+                    }
+                    let n = oct as usize;
+                    if n < 10 {
+                        buf[pos] = DIGITS_1[n];
+                        pos += 1;
+                    } else if n < 100 {
+                        let idx = (n - 10) * 2;
+                        buf[pos] = DIGITS_2[idx];
+                        buf[pos + 1] = DIGITS_2[idx + 1];
+                        pos += 2;
+                    } else {
+                        let idx = (n - 100) * 3;
+                        buf[pos] = DIGITS_3[idx];
+                        buf[pos + 1] = DIGITS_3[idx + 1];
+                        buf[pos + 2] = DIGITS_3[idx + 2];
+                        pos += 3;
+                    }
+                }
+                HeaderValue::from_bytes(&buf[..pos])
+                    .unwrap_or_else(|_| HeaderValue::from_static("0.0.0.0"))
+            }
+            NumericFmt::Ipv6 => {
+                use std::io::Write;
+                let v6 = Ipv6Addr::from(self.raw);
+                let mut buf = [0u8; 46];
+                let mut cursor = std::io::Cursor::new(&mut buf[..]);
+                let _ = write!(cursor, "{v6}");
+                let len = cursor.position() as usize;
+                HeaderValue::from_bytes(&buf[..len])
+                    .unwrap_or_else(|_| HeaderValue::from_static("::"))
+            }
+            NumericFmt::InlineAscii(len) => {
+                let bytes = self.raw.to_le_bytes();
+                let n = (len as usize).min(16);
+                HeaderValue::from_bytes(&bytes[..n])
+                    .unwrap_or_else(|_| HeaderValue::from_static(""))
+            }
+        }
+    }
+}
+
+/// Domain-blind dual-representation workspace holding:
+/// - `headers`: Pre-allocated [`HeaderMap`] holding zero-copy pointers for `> 16` byte strings and wire headers.
+/// - `numeric_entries`: L1-resident 16-byte integer registers (`raw: u128`) indexed by `key: u64` for all values `<= 16` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderWorkspace {
     headers: HeaderMap,
-    pub slots: HeaderSlotTable,
+    pub request_id_raw: u128,
+    pub ingress_time_sec: u64,
+    numeric_entries: [Option<NumericHeaderEntry>; MAX_NUMERIC_HEADERS],
+    pub numeric_len: u8,
     bypass_keys: [Option<HeaderName>; MAX_BYPASS_HEADERS],
     bypass_len: u8,
     initial_capacity: usize,
 }
 
 impl HeaderWorkspace {
-    /// Canonical Request ID header name (`x-request-id`).
     pub const X_REQUEST_ID: HeaderName = X_REQUEST_ID;
-
-    /// Default baseline capacity commit (32 header entries).
     pub const DEFAULT_CAPACITY: usize = 32;
 
     /// Creates and pre-warms a header workspace with specified initial bucket capacity.
-    ///
-    /// # Ingress Invariant
-    /// Pre-loads an authoritative Request ID into `x-request-id` with Bit 1 Bypass priority.
     pub fn new(capacity: usize) -> Self {
-        let mut map = HeaderMap::with_capacity(capacity);
-        // Eagerly warmup internal bucket table by reserving capacity upfront
-        // to force the allocator to commit the initial hash bucket array into physical RAM.
-        map.reserve(capacity);
-        let (_id, req_id) = crate::next_request_id();
-        map.insert(X_REQUEST_ID, req_id);
+        let mut headers = HeaderMap::with_capacity(capacity);
+        headers.reserve(capacity);
+        let (id, req_id) = crate::next_request_id();
+        headers.insert(X_REQUEST_ID, req_id);
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
-            headers: map,
-            slots: HeaderSlotTable::new(),
+            headers,
+            request_id_raw: id.0,
+            ingress_time_sec: crate::coarse_now_sec(),
+            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
+            numeric_len: 0,
             bypass_keys,
             bypass_len: 1,
             initial_capacity: capacity,
@@ -89,124 +298,318 @@ impl HeaderWorkspace {
     /// Creates and pre-warms a header workspace with an explicit Request ID and initial capacity.
     #[inline]
     pub fn with_request_id(req_id: HeaderValue, capacity: usize) -> Self {
-        let mut map = HeaderMap::with_capacity(capacity);
-        map.reserve(capacity);
-        map.insert(X_REQUEST_ID, req_id);
+        let raw = parse_hex_128(req_id.as_bytes()).unwrap_or(0);
+        let mut headers = HeaderMap::with_capacity(capacity);
+        headers.reserve(capacity);
+        headers.insert(X_REQUEST_ID, req_id);
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
-            headers: map,
-            slots: HeaderSlotTable::new(),
+            headers,
+            request_id_raw: raw,
+            ingress_time_sec: crate::coarse_now_sec(),
+            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
+            numeric_len: 0,
             bypass_keys,
             bypass_len: 1,
             initial_capacity: capacity,
         }
     }
 
-    /// Creates an empty pre-warmed workspace with default baseline capacity (32 headers).
-    #[inline(always)]
-    pub fn empty() -> Self {
-        Self::new(Self::DEFAULT_CAPACITY)
-    }
-
-    /// Creates and pre-warms a header workspace with specified initial capacity.
-    #[inline(always)]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::new(capacity)
-    }
-
     /// Wraps an existing [`HeaderMap`] into a [`HeaderWorkspace`].
-    ///
-    /// # Zero-Trust Slot 0 Invariant
-    /// If `headers` does not contain `x-request-id`, an authoritative Request ID is generated
-    /// and inserted. If `headers` already contains `x-request-id` (e.g. assigned authoritatively
-    /// at Ingress boundary via in-place replacement), it is preserved in-place without redundant
-    /// cloning or re-insertion.
-    ///
-    /// In all cases, Slot 0 is pinned with `x-request-id` as a Bit 1 Bypass header (`bypass_len = 1`).
     #[inline]
     pub fn from_headers(mut headers: HeaderMap) -> Self {
         let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
-        if !headers.contains_key(&X_REQUEST_ID) {
-            let (_id, req_id) = crate::next_request_id();
+        let raw = if let Some(existing) = headers.get(&X_REQUEST_ID) {
+            parse_hex_128(existing.as_bytes()).unwrap_or(0)
+        } else {
+            let (id, req_id) = crate::next_request_id();
             headers.insert(X_REQUEST_ID, req_id);
-        }
+            id.0
+        };
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
             headers,
-            slots: HeaderSlotTable::new(),
+            request_id_raw: raw,
+            ingress_time_sec: crate::coarse_now_sec(),
+            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
+            numeric_len: 0,
             bypass_keys,
             bypass_len: 1,
             initial_capacity: cap,
         }
     }
 
-    /// Zero-trust ingress constructor: Ingress has already authoritatively overwritten
-    /// `x-request-id` into the headers map. Skips redundant lookup probes and immediately
-    /// binds Slot 0 as a Bit 1 Bypass header.
+    /// Looks up a 16-byte register entry by its 64-bit integer key (`header_key(name)`).
     #[inline(always)]
-    pub fn from_pre_injected_headers(headers: HeaderMap) -> Self {
-        let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
-        let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        bypass_keys[0] = Some(X_REQUEST_ID);
-        Self {
-            headers,
-            slots: HeaderSlotTable::new(),
-            bypass_keys,
-            bypass_len: 1,
-            initial_capacity: cap,
+    pub fn get_raw_by_key(&self, key: u64) -> Option<(u128, NumericFmt)> {
+        let len = self.numeric_len as usize;
+        for i in (0..len).rev() {
+            if let Some(ref entry) = self.numeric_entries[i]
+                && entry.key == key
+            {
+                return Some((entry.raw, entry.fmt));
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    pub fn contains_key<K: AsHeaderName>(&self, name: K) -> bool {
+        let key = header_key(name.as_str().as_bytes());
+        if self.get_raw_by_key(key).is_some() {
+            return true;
+        }
+        self.headers.contains_key(name)
+    }
+
+    #[inline(always)]
+    fn push_numeric(&mut self, name: HeaderName, raw: u128, fmt: NumericFmt, op: NumericOp) {
+        let key = header_key(name.as_str().as_bytes());
+        if !matches!(op, NumericOp::Append) {
+            if key == KEY_X_REQUEST_ID && matches!(fmt, NumericFmt::Hex128) {
+                self.request_id_raw = raw;
+            }
+            let len = self.numeric_len as usize;
+            for i in 0..len {
+                if let Some(ref mut entry) = self.numeric_entries[i]
+                    && entry.key == key
+                {
+                    entry.raw = raw;
+                    entry.fmt = fmt;
+                    entry.op = op;
+                    return;
+                }
+            }
+        }
+        let len = self.numeric_len as usize;
+        if len < MAX_NUMERIC_HEADERS {
+            self.numeric_entries[len] = Some(NumericHeaderEntry {
+                key,
+                name,
+                raw,
+                fmt,
+                op,
+            });
+            self.numeric_len += 1;
+        } else {
+            self.render();
+            self.numeric_entries[0] = Some(NumericHeaderEntry {
+                key,
+                name,
+                raw,
+                fmt,
+                op,
+            });
+            self.numeric_len = 1;
         }
     }
 
-    /// Zero-trust ingress constructor: Ingress passes headers and an authoritative
-    /// request ID. Unconditionally overwrites any client-supplied `x-request-id`
-    /// in-place, eliminating separate insertion passes and skipping lookup probes.
     #[inline(always)]
-    pub fn from_headers_with_id(mut headers: HeaderMap, req_id: http::HeaderValue) -> Self {
-        headers.insert(X_REQUEST_ID, req_id);
-        let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
-        let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        bypass_keys[0] = Some(X_REQUEST_ID);
-        Self {
-            headers,
-            slots: HeaderSlotTable::new(),
-            bypass_keys,
-            bypass_len: 1,
-            initial_capacity: cap,
+    fn remove_numeric_by_key(&mut self, key: u64) {
+        let mut len = self.numeric_len as usize;
+        let mut i = 0;
+        while i < len {
+            if self.numeric_entries[i]
+                .as_ref()
+                .is_some_and(|e| e.key == key)
+            {
+                for j in i..len - 1 {
+                    self.numeric_entries[j] = self.numeric_entries[j + 1].take();
+                }
+                self.numeric_entries[len - 1] = None;
+                len -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        self.numeric_len = len as u8;
+    }
+
+    #[inline(always)]
+    pub fn set_u64(&mut self, name: HeaderName, val: u64) {
+        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::Set);
+    }
+
+    #[inline(always)]
+    pub fn append_u64(&mut self, name: HeaderName, val: u64) {
+        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::Append);
+    }
+
+    #[inline]
+    pub fn insert_bypass_u64(&mut self, name: HeaderName, val: u64) -> bool {
+        let b_len = self.bypass_len as usize;
+        let exists = (0..b_len).any(|i| self.bypass_keys[i].as_ref() == Some(&name));
+        let ok = if !exists {
+            if b_len < MAX_BYPASS_HEADERS {
+                self.bypass_keys[b_len] = Some(name.clone());
+                self.bypass_len += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::SetBypass);
+        ok
+    }
+
+    #[inline(always)]
+    pub fn set_hex128(&mut self, name: HeaderName, id: u128) {
+        self.push_numeric(name, id, NumericFmt::Hex128, NumericOp::Set);
+    }
+
+    #[inline(always)]
+    pub fn append_hex128(&mut self, name: HeaderName, id: u128) {
+        self.push_numeric(name, id, NumericFmt::Hex128, NumericOp::Append);
+    }
+
+    #[inline(always)]
+    pub fn set_ip(&mut self, name: HeaderName, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => self.push_numeric(
+                name,
+                u32::from(v4) as u128,
+                NumericFmt::Ipv4,
+                NumericOp::Set,
+            ),
+            IpAddr::V6(v6) => {
+                self.push_numeric(name, u128::from(v6), NumericFmt::Ipv6, NumericOp::Set)
+            }
         }
     }
 
-    /// Unwraps and returns the inner [`HeaderMap`].
     #[inline(always)]
-    pub fn into_inner(self) -> HeaderMap {
+    pub fn append_ip(&mut self, name: HeaderName, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => self.push_numeric(
+                name,
+                u32::from(v4) as u128,
+                NumericFmt::Ipv4,
+                NumericOp::Append,
+            ),
+            IpAddr::V6(v6) => {
+                self.push_numeric(name, u128::from(v6), NumericFmt::Ipv6, NumericOp::Append)
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_inline_ascii(&mut self, name: HeaderName, bytes: &[u8]) {
+        debug_assert!(bytes.len() <= 16);
+        let len = bytes.len().min(16);
+        let mut buf = [0u8; 16];
+        buf[..len].copy_from_slice(&bytes[..len]);
+        self.push_numeric(
+            name,
+            u128::from_le_bytes(buf),
+            NumericFmt::InlineAscii(len as u8),
+            NumericOp::Set,
+        );
+    }
+
+    #[inline(always)]
+    pub fn append_inline_ascii(&mut self, name: HeaderName, bytes: &[u8]) {
+        debug_assert!(bytes.len() <= 16);
+        let len = bytes.len().min(16);
+        let mut buf = [0u8; 16];
+        buf[..len].copy_from_slice(&bytes[..len]);
+        self.push_numeric(
+            name,
+            u128::from_le_bytes(buf),
+            NumericFmt::InlineAscii(len as u8),
+            NumericOp::Append,
+        );
+    }
+
+    /// Reads a header as a `u64` integer via 64-bit integer key lookup or branchless wire byte parsing.
+    #[inline]
+    pub fn get_u64<K: AsHeaderName>(&self, name: K) -> Option<u64> {
+        let key = header_key(name.as_str().as_bytes());
+        if let Some((raw, NumericFmt::U64)) = self.get_raw_by_key(key) {
+            return Some(raw as u64);
+        }
+        let bytes = self.headers.get(name)?.as_bytes();
+        if bytes.is_empty() || bytes.len() > 20 {
+            return None;
+        }
+        let mut acc = 0u64;
+        for &b in bytes {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_add(d as u64)?;
+        }
+        Some(acc)
+    }
+
+    /// Reads a header as a 128-bit hexadecimal integer via 64-bit integer key lookup or wire bytes.
+    #[inline]
+    pub fn get_hex128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
+        let key = header_key(name.as_str().as_bytes());
+        if let Some((raw, NumericFmt::Hex128)) = self.get_raw_by_key(key) {
+            return Some(raw);
+        }
+        if key == KEY_X_REQUEST_ID && self.request_id_raw != 0 {
+            return Some(self.request_id_raw);
+        }
+        parse_hex_128(self.headers.get(name)?.as_bytes())
+    }
+
+    /// Reads a header as a binary [`IpAddr`] via 64-bit integer key lookup or wire bytes.
+    #[inline]
+    pub fn get_ip<K: AsHeaderName>(&self, name: K) -> Option<IpAddr> {
+        let key = header_key(name.as_str().as_bytes());
+        if let Some((raw, fmt)) = self.get_raw_by_key(key) {
+            return match fmt {
+                NumericFmt::Ipv4 => Some(IpAddr::V4(Ipv4Addr::from(raw as u32))),
+                NumericFmt::Ipv6 => Some(IpAddr::V6(Ipv6Addr::from(raw))),
+                _ => None,
+            };
+        }
+        let bytes = self.headers.get(name)?.as_bytes();
+        let first = match bytes.iter().position(|&b| b == b',') {
+            Some(idx) => &bytes[..idx],
+            None => bytes,
+        };
+        std::str::from_utf8(first.trim_ascii())
+            .ok()?
+            .parse::<IpAddr>()
+            .ok()
+    }
+
+    /// Batch-renders all pending 16-byte register mutations into the underlying [`HeaderMap`].
+    #[inline]
+    pub fn render(&mut self) {
+        let len = self.numeric_len as usize;
+        if len == 0 {
+            return;
+        }
+        for i in 0..len {
+            if let Some(entry) = self.numeric_entries[i].take() {
+                let hv = entry.into_header_value();
+                match entry.op {
+                    NumericOp::Set | NumericOp::SetBypass => {
+                        self.headers.insert(entry.name, hv);
+                    }
+                    NumericOp::Append => {
+                        self.headers.append(entry.name, hv);
+                    }
+                }
+            }
+        }
+        self.numeric_len = 0;
+    }
+
+    #[inline(always)]
+    pub fn into_inner(mut self) -> HeaderMap {
+        self.render();
         self.headers
     }
 
-    /// Returns the initial baseline capacity of this workspace.
-    #[inline(always)]
-    pub fn initial_capacity(&self) -> usize {
-        self.initial_capacity
-    }
-
-    /// Borrows the internal header map immutably.
-    #[inline(always)]
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    /// Inserts a header with Bit 0 (Normal / Upstream-only visibility).
-    ///
-    /// # Performance Mechanism: Zero-Sniffing Hot Path ($0$ ns Overhead)
-    /// Normal headers inserted by routing, plugins, or upstream mutation run at native
-    /// [`HeaderMap`] speed. Because Slot 0 is already permanently initialized with an
-    /// authoritative Request ID during workspace construction, `insert()` avoids all
-    /// dynamic string comparisons, `contains_key()` checks, or sidecar inspections.
-    ///
-    /// # Security Invariant
-    /// Normal headers (Bit 0) are forwarded to upstream backends on successful pass-through (99% path),
-    /// but are strictly purged and dropped if the request is short-circuited via [`crate::Action::Reject`],
-    /// defending against credential leaks and header reflection attacks.
     #[inline]
     pub fn insert<K: IntoHeaderName>(
         &mut self,
@@ -216,39 +619,29 @@ impl HeaderWorkspace {
         self.headers.insert(name, value)
     }
 
-    /// Appends a header value to the workspace.
-    ///
-    /// If the key already exists, the value is appended to the list of values for that key.
-    /// If the key does not exist, it is inserted.
     #[inline]
     pub fn append<K: IntoHeaderName>(&mut self, name: K, value: HeaderValue) -> bool {
         self.headers.append(name, value)
     }
 
-    /// Reserves capacity for at least `additional` more headers.
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.headers.reserve(additional);
     }
 
-    /// Removes a header from the workspace.
-    ///
-    /// # Slot 0 Invariant Defense
-    /// The authoritative `x-request-id` header in Slot 0 cannot be removed.
+    /// Removes a header from the workspace (protecting Slot 0 `x-request-id`).
     #[inline]
-    pub fn remove<K: http::header::AsHeaderName>(&mut self, name: K) -> Option<HeaderValue> {
-        let name_str = name.as_str();
-        if name_str.eq_ignore_ascii_case("x-request-id") {
+    pub fn remove<K: AsHeaderName>(&mut self, name: K) -> Option<HeaderValue> {
+        let key = header_key(name.as_str().as_bytes());
+        if key == KEY_X_REQUEST_ID {
             return None;
+        }
+        if self.numeric_len > 0 {
+            self.remove_numeric_by_key(key);
         }
         self.headers.remove(name)
     }
 
-    /// Returns the authoritative W3C Request ID pinned in Slot 0.
-    ///
-    /// # Zero-Cost Invariant
-    /// Because every constructor and pool reset guarantees Slot 0 commits `x-request-id`,
-    /// this getter executes in $O(1)$ without allocations or fallibility.
     #[inline(always)]
     pub fn request_id(&self) -> &HeaderValue {
         if let Some(val) = self.headers.get(&X_REQUEST_ID) {
@@ -260,14 +653,11 @@ impl HeaderWorkspace {
         }
     }
 
-    /// Updates the authoritative Request ID, preserving its permanent Bit 1 visibility in Slot 0.
-    ///
-    /// # Tracing Invariant
-    /// In accordance with the Edge distributed tracing contract, the Request ID must remain in
-    /// Slot 0 of the bypass sidecar. When downstream pipelines assign an edge-authoritative ID,
-    /// this function atomically updates the underlying [`HeaderMap`] and pins Slot 0.
     #[inline]
     pub fn set_request_id(&mut self, req_id: HeaderValue) {
+        if let Some(raw) = parse_hex_128(req_id.as_bytes()) {
+            self.request_id_raw = raw;
+        }
         self.headers.insert(X_REQUEST_ID, req_id);
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         if self.bypass_len == 0 {
@@ -275,38 +665,11 @@ impl HeaderWorkspace {
         }
     }
 
-    /// Inserts a header with Bit 1 (Bypass on Reject visibility).
-    ///
-    /// # Mechanism: Cacheline-Aligned Stack Sidecar
-    /// Appends the header name into the stack sidecar `[Option<HeaderName>; 8]` while storing
-    /// the value inside the native [`HeaderMap`]. Linear deduplication across at most 8 items
-    /// in L1 cache executes in $< 1\text{ ns}$ without dynamic heap allocations.
-    ///
-    /// # Security & Protocol Invariant
-    /// Headers tagged as Bit 1 are retained and returned to the downstream client even when
-    /// the request is rejected early by edge policy or security plugins (e.g. `Retry-After`,
-    /// `x-ratelimit-*`, `WWW-Authenticate`).
-    ///
-    /// All normal headers (Bit 0) are discarded on rejection to avoid information disclosure.
-    ///
-    /// Returns `true` if successfully tracked in the stack sidecar, or `false` if `MAX_BYPASS_HEADERS` (8) is reached.
     #[inline]
     pub fn insert_bypass(&mut self, name: HeaderName, value: HeaderValue) -> bool {
         let len = self.bypass_len as usize;
-        let mut exists = false;
-        for i in 0..len {
-            if let Some(ref k) = self.bypass_keys[i]
-                && *k == name
-            {
-                exists = true;
-                break;
-            }
-        }
-        let inserted_to_sidecar = if !exists {
-            debug_assert!(
-                len < MAX_BYPASS_HEADERS,
-                "HeaderWorkspace bypass capacity exceeded MAX_BYPASS_HEADERS = 8"
-            );
+        let exists = (0..len).any(|i| self.bypass_keys[i].as_ref() == Some(&name));
+        let ok = if !exists {
             if len < MAX_BYPASS_HEADERS {
                 self.bypass_keys[len] = Some(name.clone());
                 self.bypass_len += 1;
@@ -317,21 +680,13 @@ impl HeaderWorkspace {
         } else {
             true
         };
+        if self.numeric_len > 0 {
+            self.remove_numeric_by_key(header_key(name.as_str().as_bytes()));
+        }
         self.headers.insert(name, value);
-        inserted_to_sidecar
+        ok
     }
 
-    /// Returns `true` if this workspace has any Bit-1 bypass headers marked.
-    #[inline(always)]
-    pub fn has_bypass_headers(&self) -> bool {
-        self.bypass_len > 0
-    }
-
-    /// Returns an iterator over all Bit-1 (Bypass on Reject) headers.
-    ///
-    /// # Zero-Allocation Invariant
-    /// Traverses the stack sidecar array up to `bypass_len` and resolves values directly from
-    /// the pre-warmed [`HeaderMap`]. Allocates zero memory on the error rejection path.
     pub fn bypass_headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
         let len = self.bypass_len as usize;
         (0..len).filter_map(move |i| {
@@ -341,12 +696,13 @@ impl HeaderWorkspace {
         })
     }
 
-    /// Takes the inner [`HeaderMap`], replacing it with an empty map of the initial capacity pre-loaded with a fresh Request ID.
     #[inline(always)]
     pub fn take(&mut self) -> HeaderMap {
-        self.slots.clear();
+        self.render();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        let (_id, req_id) = crate::next_request_id();
+        let (id, req_id) = crate::next_request_id();
+        self.request_id_raw = id.0;
+        self.ingress_time_sec = crate::coarse_now_sec();
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
         let mut new_map = HeaderMap::with_capacity(self.initial_capacity);
@@ -354,24 +710,18 @@ impl HeaderWorkspace {
         std::mem::replace(&mut self.headers, new_map)
     }
 
-    /// Clears all headers and slots while preserving the pre-allocated bucket array in RAM, re-initializing Slot 0.
-    ///
-    /// # Memory Mechanism: Anti-Minor-Page-Fault Retention
-    /// `self.headers.clear()` retains the physical hash table buckets previously allocated and committed
-    /// in process RSS by `jemalloc`. Resetting Slot 0 commits a fresh Request ID with Bit 1 visibility.
-    ///
-    /// # Anti-Bloat Defense
-    /// If an adversarial client sent an oversized header table exceeding $4\times$ the initial baseline,
-    /// the workspace drops the bloated table and re-allocates back to `initial_capacity` to prevent
-    /// long-term memory leakage.
     #[inline(always)]
     pub fn reset(&mut self) {
-        self.slots.clear();
-        let (_id, req_id) = crate::next_request_id();
+        for i in 0..(self.numeric_len as usize) {
+            self.numeric_entries[i] = None;
+        }
+        self.numeric_len = 0;
+        let (id, req_id) = crate::next_request_id();
+        self.request_id_raw = id.0;
+        self.ingress_time_sec = crate::coarse_now_sec();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
-        // Shrink back to baseline if bloated by oversized request headers
         if self.headers.capacity() > self.initial_capacity * 4 {
             self.headers = HeaderMap::with_capacity(self.initial_capacity);
         } else {
@@ -379,40 +729,16 @@ impl HeaderWorkspace {
         }
         self.headers.insert(X_REQUEST_ID, req_id);
     }
-
-    /// Checks if a fast-path slot is populated in the anonymous slot table in ~0.3ns.
-    #[inline(always)]
-    pub fn has_slot(&self, slot: u8) -> bool {
-        self.slots.has(slot)
-    }
-
-    /// Retrieves a header value from the anonymous slot table by integer index.
-    #[inline(always)]
-    pub fn get_slot(&self, slot: u8) -> Option<&HeaderValue> {
-        self.slots.get(slot)
-    }
-
-    /// Sets a header value into the anonymous slot table by integer index.
-    #[inline(always)]
-    pub fn set_slot(&mut self, slot: u8, val: HeaderValue) {
-        self.slots.set(slot, val);
-    }
-
-    /// Removes a header value from the anonymous slot table by integer index.
-    #[inline(always)]
-    pub fn remove_slot(&mut self, slot: u8) -> Option<HeaderValue> {
-        self.slots.remove(slot)
-    }
 }
 
 impl Default for HeaderWorkspace {
     #[inline(always)]
     fn default() -> Self {
-        Self::empty()
+        Self::new(Self::DEFAULT_CAPACITY)
     }
 }
 
-impl std::ops::Deref for HeaderWorkspace {
+impl Deref for HeaderWorkspace {
     type Target = HeaderMap;
 
     #[inline(always)]
@@ -442,18 +768,15 @@ impl From<HeaderWorkspace> for HeaderMap {
     }
 }
 
-impl FromIterator<(http::header::HeaderName, http::header::HeaderValue)> for HeaderWorkspace {
-    fn from_iter<T: IntoIterator<Item = (http::header::HeaderName, http::header::HeaderValue)>>(
-        iter: T,
-    ) -> Self {
-        let headers = HeaderMap::from_iter(iter);
-        Self::from_headers(headers)
+impl FromIterator<(HeaderName, HeaderValue)> for HeaderWorkspace {
+    fn from_iter<T: IntoIterator<Item = (HeaderName, HeaderValue)>>(iter: T) -> Self {
+        Self::from_headers(HeaderMap::from_iter(iter))
     }
 }
 
 impl<'a> IntoIterator for &'a HeaderWorkspace {
-    type Item = (&'a http::header::HeaderName, &'a http::header::HeaderValue);
-    type IntoIter = http::header::Iter<'a, http::header::HeaderValue>;
+    type Item = (&'a HeaderName, &'a HeaderValue);
+    type IntoIter = http::header::Iter<'a, HeaderValue>;
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
@@ -461,417 +784,99 @@ impl<'a> IntoIterator for &'a HeaderWorkspace {
     }
 }
 
-/// Internal bucket segregating permanent baseline workspaces from transient burst workspaces.
-struct HeaderBucket {
-    /// Baseline pre-warmed physical workspaces. Permanent, never evicted.
-    baseline: Vec<HeaderWorkspace>,
-    /// Burst standby workspaces paired with their return timestamp.
-    /// Ordered chronologically: oldest at front, newest at back.
-    burst: VecDeque<(Instant, HeaderWorkspace)>,
-    /// Maximum number of permanent baseline workspaces.
-    baseline_limit: usize,
-    /// Absolute ceiling of active + pooled workspaces (anti-OOM protection).
-    max_burst_limit: usize,
-}
-
-/// Pre-warmed two-tier adaptive object pool of [`HeaderWorkspace`] instances.
-pub struct HeaderPool {
-    bucket: Mutex<HeaderBucket>,
-    active_leases: AtomicUsize,
-    initial_header_capacity: usize,
-    idle_ttl: Duration,
-}
-
-impl std::fmt::Debug for HeaderPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HeaderPool")
-            .field("active_leases", &self.active_leases.load(Ordering::Relaxed))
-            .field("initial_header_capacity", &self.initial_header_capacity)
-            .finish()
-    }
-}
-
-impl HeaderPool {
-    /// Creates and eagerly warms up a pool with a pre-allocated number of baseline slots
-    /// and a default 3x max burst ceiling with 15-second TTL.
-    pub fn new(baseline_slots: usize, initial_header_capacity: usize) -> Arc<Self> {
-        let max_burst_cap = baseline_slots.saturating_mul(3).max(baseline_slots + 32);
-        Self::with_adaptive_limits(
-            baseline_slots,
-            initial_header_capacity,
-            max_burst_cap,
-            Duration::from_secs(15),
-        )
-    }
-
-    /// Creates an adaptive header pool with explicit baseline, max burst ceiling, and idle TTL.
-    pub fn with_adaptive_limits(
-        baseline_slots: usize,
-        initial_header_capacity: usize,
-        max_burst_cap: usize,
-        idle_ttl: Duration,
-    ) -> Arc<Self> {
-        let mut baseline = Vec::with_capacity(baseline_slots);
-        for _ in 0..baseline_slots {
-            baseline.push(HeaderWorkspace::new(initial_header_capacity));
-        }
-
-        Arc::new(Self {
-            bucket: Mutex::new(HeaderBucket {
-                baseline,
-                burst: VecDeque::new(),
-                baseline_limit: baseline_slots,
-                max_burst_limit: max_burst_cap.max(baseline_slots),
-            }),
-            active_leases: AtomicUsize::new(0),
-            initial_header_capacity,
-            idle_ttl,
-        })
-    }
-
-    /// Borrows a [`HeaderWorkspace`] wrapped in an RAII lease.
-    ///
-    /// Resolution Order:
-    /// 1. **Tier 1 (Hot Baseline)**: Pops from pre-warmed physical workspaces (0 alloc, 0 page fault).
-    /// 2. **Tier 2 (Burst Standby Queue)**: Pops from warm user-space burst queue (0 alloc).
-    /// 3. **Spillover Heap Allocation**: Dynamically allocates if below `max_burst_cap`.
-    /// 4. **Anti-OOM Saturation**: Returns `None` if `max_burst_cap` has been reached.
-    pub fn acquire(self: &Arc<Self>) -> Option<HeaderWorkspaceLease> {
-        let mut guard = self.lock_bucket();
-
-        // 1. Try baseline (fastest path, hot pre-warmed)
-        let ws = if let Some(ws) = guard.baseline.pop() {
-            ws
-        } else if let Some((_, ws)) = guard.burst.pop_front() {
-            // 2. Try burst standby (warm in user space within TTL)
-            ws
-        } else {
-            // 3. Both pools empty: check anti-OOM ceiling before allocating on heap
-            let current_active = self.active_leases.load(Ordering::Relaxed);
-            if current_active >= guard.max_burst_limit {
-                return None;
-            }
-            HeaderWorkspace::new(self.initial_header_capacity)
-        };
-
-        self.active_leases.fetch_add(1, Ordering::Relaxed);
-
-        Some(HeaderWorkspaceLease {
-            workspace: Some(ws),
-            pool: Arc::clone(self),
-        })
-    }
-
-    /// Returns the number of currently checked-out active leases.
-    #[inline(always)]
-    pub fn active_leases(&self) -> usize {
-        self.active_leases.load(Ordering::Relaxed)
-    }
-
-    /// Returns the permanent baseline capacity of this pool.
-    #[inline(always)]
-    pub fn baseline_slots(&self) -> usize {
-        self.lock_bucket().baseline_limit
-    }
-
-    /// Returns the absolute max burst ceiling of this pool.
-    #[inline(always)]
-    pub fn max_burst_cap(&self) -> usize {
-        self.lock_bucket().max_burst_limit
-    }
-
-    /// Returns the count of burst workspaces currently held in standby.
-    #[inline(always)]
-    pub fn burst_standby_count(&self) -> usize {
-        self.lock_bucket().burst.len()
-    }
-
-    /// Returns the total number of workspaces currently sitting in the pool (baseline + burst).
-    #[inline(always)]
-    pub fn total_pooled(&self) -> usize {
-        let guard = self.lock_bucket();
-        guard.baseline.len() + guard.burst.len()
-    }
-
-    /// Evicts burst workspaces that have been idle longer than `idle_ttl`.
-    ///
-    /// # Auxiliary Core Invariant
-    /// Uses non-blocking `try_lock()` to ensure that the sweeper running on the Auxiliary Core
-    /// NEVER blocks or delays a Traffic Worker core servicing requests.
-    pub fn sweep_expired(&self, now: Instant) -> usize {
-        let mut evicted = 0;
-        // A poisoned bucket is still structurally valid (see `lock_bucket`), so the sweeper
-        // keeps reclaiming memory instead of silently giving up forever.
-        let guard = match self.bucket.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        };
-        if let Some(mut guard) = guard {
-            // Workspaces were pushed chronologically; front is oldest, so the first
-            // non-expired entry ends the scan.
-            while guard.burst.front().is_some_and(|(returned_at, _)| {
-                now.saturating_duration_since(*returned_at) >= self.idle_ttl
-            }) {
-                // Evicted back to allocator arena.
-                drop(guard.burst.pop_front());
-                evicted += 1;
-            }
-        }
-        evicted
-    }
-
-    /// Locks the bucket, recovering from mutex poisoning.
-    ///
-    /// # Why poison is ignored
-    /// Every critical section on the bucket is a handful of `Vec`/`VecDeque` push/pop calls with
-    /// no invariant spanning multiple statements, so a panicking holder cannot leave the
-    /// container half-updated. Propagating the poison would instead make every later `acquire()`
-    /// and, worse, every lease `Drop` (`recycle`) panic — a panic inside `Drop` while unwinding
-    /// aborts the whole process.
-    #[inline(always)]
-    fn lock_bucket(&self) -> std::sync::MutexGuard<'_, HeaderBucket> {
-        self.bucket
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Recycles a returned workspace back into the pool.
-    fn recycle(&self, mut ws: HeaderWorkspace) {
-        ws.reset();
-        self.active_leases.fetch_sub(1, Ordering::Relaxed);
-
-        let mut guard = self.lock_bucket();
-        // Priority 1: Refill permanent baseline floor (Zero clock overhead)
-        if guard.baseline.len() < guard.baseline_limit {
-            guard.baseline.push(ws);
-        } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
-            // Priority 2: Retain in burst standby queue with timestamp for 15s cooldown
-            guard.burst.push_back((Instant::now(), ws));
-        }
-        // Priority 3: Above max_burst_limit -> workspace drops and frees back to allocator
-    }
-}
-
-/// RAII Lease for a [`HeaderWorkspace`]. Automatically cleans and returns to the pool on drop.
-///
-/// # DEFENSIVE MEMORY INVARIANT: Anti-Use-After-Free & Anti-Double-Free Defense
-/// 1. **Zero Use-After-Free via Compiler Borrow Checker**:
-///    Deref to [`HeaderWorkspace`] produces references `&'a HeaderWorkspace` strictly bounded
-///    to the lifetime of this lease struct. The moment this lease is dropped (or returns to the pool),
-///    the Rust compiler statically invalidates any outstanding references at compile time.
-/// 2. **Zero Double-Free via `Option::take()`**:
-///    During `drop()`, `self.workspace.take()` extracts the workspace out of `self`. Even if
-///    the drop handler were invoked multiple times (e.g. panic stack unwinding), the inner
-///    workspace can only ever be returned to the pool exactly once.
-/// 3. **Async Cancellation Immunity**:
-///    When a client aborts an in-flight connection or Tokio drops an async request future mid-await,
-///    stack unwinding automatically invokes this `Drop` implementation, safely returning the
-///    workspace to the pool without memory leaks or dangling state.
-pub struct HeaderWorkspaceLease {
-    workspace: Option<HeaderWorkspace>,
-    pool: Arc<HeaderPool>,
-}
-
-impl Deref for HeaderWorkspaceLease {
-    type Target = HeaderWorkspace;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        self.workspace
-            .as_ref()
-            .expect("HeaderWorkspaceLease held invalid state")
-    }
-}
-
-impl DerefMut for HeaderWorkspaceLease {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.workspace
-            .as_mut()
-            .expect("HeaderWorkspaceLease held invalid state")
-    }
-}
-
-impl Drop for HeaderWorkspaceLease {
-    fn drop(&mut self) {
-        if let Some(ws) = self.workspace.take() {
-            self.pool.recycle(ws);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+    use http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 
     #[test]
     fn test_header_workspace_recycle_preserves_capacity() {
         let mut ws = HeaderWorkspace::new(32);
-        assert!(ws.headers().capacity() >= 32);
+        assert!(ws.capacity() >= 32);
+        assert_ne!(ws.request_id_raw, 0);
+        assert!(ws.ingress_time_sec > 1_700_000_000);
 
         ws.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         ws.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token123"));
-        assert_eq!(ws.headers().len(), 3); // Pre-loaded Slot 0 x-request-id + 2 custom headers
-
-        // Guard against removing Slot 0 x-request-id
+        assert_eq!(ws.len(), 3);
         assert!(ws.remove(&HeaderWorkspace::X_REQUEST_ID).is_none());
-        assert_eq!(ws.headers().len(), 3);
 
         ws.reset();
-        assert_eq!(ws.headers().len(), 1); // Pre-loaded Slot 0 with Request ID!
-        assert!(ws.headers().capacity() >= 32); // Bucket capacity preserved!
+        assert_eq!(ws.len(), 1);
+        assert!(ws.capacity() >= 32);
+    }
+
+    #[test]
+    fn test_header_workspace_arithmetic_defer_and_batch_render() {
+        let mut ws = HeaderWorkspace::new(32);
+        let req_id_u128 = ws.request_id_raw;
+        let ts = ws.ingress_time_sec;
+
+        let h_limit = HeaderName::from_static("x-ratelimit-limit");
+        let h_rem = HeaderName::from_static("x-ratelimit-remaining");
+        let h_status = HeaderName::from_static("x-upstream-status");
+        let h_trace = HeaderName::from_static("x-trace-id");
+        let h_ip = HeaderName::from_static("x-real-ip");
+        let h_ts = HeaderName::from_static("x-edge-ts");
+
+        ws.set_u64(h_limit.clone(), 100);
+        ws.set_u64(h_rem.clone(), 99);
+        ws.set_u64(h_status.clone(), 200);
+        ws.set_hex128(h_trace.clone(), req_id_u128);
+        ws.set_ip(h_ip.clone(), IpAddr::V4(Ipv4Addr::new(10, 24, 0, 5)));
+        ws.set_u64(h_ts.clone(), ts);
+
+        assert_eq!(ws.numeric_len, 6);
+        assert_eq!(ws.get_u64(&h_limit), Some(100));
+        assert_eq!(ws.get_u64(&h_rem), Some(99));
+        assert_eq!(ws.get_u64(&h_status), Some(200));
+        assert_eq!(ws.get_hex128(&h_trace), Some(req_id_u128));
+        assert_eq!(
+            ws.get_ip(&h_ip),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 24, 0, 5)))
+        );
+        assert_eq!(ws.get_u64(&h_ts), Some(ts));
+        assert!(ws.contains_key(&h_limit));
+
+        ws.render();
+        assert_eq!(ws.numeric_len, 0);
+        assert_eq!(ws.get(&h_limit).unwrap(), "100");
+        assert_eq!(ws.get(&h_rem).unwrap(), "99");
+        assert_eq!(ws.get(&h_status).unwrap(), "200");
+        assert_eq!(ws.get(&h_trace).unwrap(), ws.request_id());
+        assert_eq!(ws.get(&h_ip).unwrap(), "10.24.0.5");
+        assert_eq!(ws.get(&h_ts).unwrap(), &ts.to_string());
+
+        ws.set_ip(h_ip.clone(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        ws.render();
+        assert_eq!(ws.get(&h_ip).unwrap(), "::1");
+
+        const KEY_PROTO: u64 = header_key(b"x-forwarded-proto");
+        let h_proto = HeaderName::from_static("x-forwarded-proto");
+        ws.set_inline_ascii(h_proto.clone(), b"https");
+        assert!(matches!(
+            ws.get_raw_by_key(KEY_PROTO),
+            Some((_, NumericFmt::InlineAscii(5)))
+        ));
+        ws.render();
+        assert_eq!(ws.get(&h_proto).unwrap(), "https");
     }
 
     #[test]
     fn test_header_workspace_bypass_tagging() {
-        use http::header::{HeaderName, HeaderValue, RETRY_AFTER};
-        let mut ws = HeaderWorkspace::empty();
-        // Slot 0 is ALWAYS pre-loaded with x-request-id as Bit 1 Bypass!
-        assert!(ws.has_bypass_headers());
+        let mut ws = HeaderWorkspace::default();
         assert_eq!(ws.bypass_headers().count(), 1);
-        let (first_k, first_v) = ws.bypass_headers().next().unwrap();
-        assert_eq!(first_k, &HeaderWorkspace::X_REQUEST_ID);
-        assert!(!first_v.is_empty());
-
-        // Normal header (Bit 0) does not increase bypass count
         ws.insert(
             HeaderName::from_static("x-internal-secret"),
             HeaderValue::from_static("secret123"),
         );
-        assert_eq!(ws.bypass_headers().count(), 1);
-
-        // Bypass header (Bit 1) added by plugin takes Slot 1
-        ws.insert_bypass(RETRY_AFTER, HeaderValue::from_static("60"));
+        ws.insert_bypass_u64(RETRY_AFTER, 60);
+        assert_eq!(ws.get_u64(RETRY_AFTER), Some(60));
+        ws.render();
         assert_eq!(ws.bypass_headers().count(), 2);
 
-        // Extract bypass headers: Slot 0 = x-request-id, Slot 1 = Retry-After
-        let bypass: Vec<_> = ws.bypass_headers().collect();
-        assert_eq!(bypass.len(), 2);
-        assert_eq!(bypass[0].0, &HeaderWorkspace::X_REQUEST_ID);
-        assert_eq!(bypass[1].0, &RETRY_AFTER);
-        assert_eq!(bypass[1].1, &HeaderValue::from_static("60"));
-
-        // All headers still accessible for upstream
-        assert_eq!(ws.headers().len(), 3); // x-request-id + x-internal-secret + RETRY_AFTER
-
-        // Reset clears custom headers and re-preloads fresh x-request-id into Slot 0
         ws.reset();
-        assert!(ws.has_bypass_headers());
-        assert_eq!(ws.headers().len(), 1);
+        assert_eq!(ws.len(), 1);
         assert_eq!(ws.bypass_headers().count(), 1);
-
-        // from_headers with x-request-id preserves it at Slot 0
-        let mut map = HeaderMap::new();
-        map.insert(
-            HeaderWorkspace::X_REQUEST_ID,
-            HeaderValue::from_static("trace-incoming-999"),
-        );
-        map.insert(
-            HeaderName::from_static("host"),
-            HeaderValue::from_static("api.example.com"),
-        );
-        let ws2 = HeaderWorkspace::from_headers(map);
-        assert!(ws2.has_bypass_headers());
-        let bypass2: Vec<_> = ws2.bypass_headers().collect();
-        assert_eq!(bypass2.len(), 1);
-        assert_eq!(bypass2[0].0, &HeaderWorkspace::X_REQUEST_ID);
-        assert_eq!(
-            bypass2[0].1,
-            &HeaderValue::from_static("trace-incoming-999")
-        );
-        assert_eq!(
-            ws2.request_id(),
-            &HeaderValue::from_static("trace-incoming-999")
-        );
-
-        // from_headers without x-request-id automatically pre-loads an authoritative ID into Slot 0
-        let mut clean_map = HeaderMap::new();
-        clean_map.insert(
-            HeaderName::from_static("host"),
-            HeaderValue::from_static("api.example.com"),
-        );
-        let ws3 = HeaderWorkspace::from_headers(clean_map);
-        assert!(ws3.has_bypass_headers());
-        assert_eq!(ws3.headers().len(), 2);
-        assert!(!ws3.request_id().is_empty());
-    }
-
-    #[test]
-    fn test_header_pool_eager_warmup_and_lease() {
-        let pool = HeaderPool::new(4, 32);
-        assert_eq!(pool.baseline_slots(), 4);
-        assert_eq!(pool.active_leases(), 0);
-
-        {
-            let mut lease1 = pool.acquire().expect("acquire lease 1");
-            assert_eq!(pool.active_leases(), 1);
-            lease1.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-            assert_eq!(lease1.headers().len(), 2); // Pre-loaded X_REQUEST_ID + CONTENT_TYPE
-
-            let mut lease2 = pool.acquire().expect("acquire lease 2");
-            assert_eq!(pool.active_leases(), 2);
-            lease2.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
-        }
-
-        // Both leases dropped: returned to pool, active leases reset to 0
-        assert_eq!(pool.active_leases(), 0);
-
-        // Next acquire gets pre-cleaned workspace with Request ID
-        let lease3 = pool.acquire().expect("acquire lease 3");
-        assert_eq!(lease3.headers().len(), 1);
-        assert!(
-            lease3
-                .headers()
-                .contains_key(&HeaderWorkspace::X_REQUEST_ID)
-        );
-        assert!(lease3.headers().capacity() >= 32);
-    }
-
-    #[test]
-    fn test_header_pool_adaptive_burst_and_decay() {
-        // Pool with baseline=2, max_burst_cap=4, idle_ttl=50ms
-        let pool = HeaderPool::with_adaptive_limits(2, 32, 4, Duration::from_millis(50));
-        assert_eq!(pool.baseline_slots(), 2);
-        assert_eq!(pool.max_burst_cap(), 4);
-
-        // 1. Acquire baseline (2 slots)
-        let l1 = pool.acquire().expect("lease 1 (baseline)");
-        let l2 = pool.acquire().expect("lease 2 (baseline)");
-        assert_eq!(pool.active_leases(), 2);
-
-        // 2. Acquire burst (2 slots spillover)
-        let l3 = pool.acquire().expect("lease 3 (burst)");
-        let l4 = pool.acquire().expect("lease 4 (burst)");
-        assert_eq!(pool.active_leases(), 4);
-
-        // 3. Attempt 5th acquire -> Anti-OOM cap reached -> returns None!
-        assert!(pool.acquire().is_none());
-
-        // 4. Drop all leases
-        drop(l1);
-        drop(l2);
-        drop(l3);
-        drop(l4);
-        assert_eq!(pool.active_leases(), 0);
-
-        // 2 refilled baseline, 2 in burst standby queue
-        assert_eq!(pool.total_pooled(), 4);
-        assert_eq!(pool.burst_standby_count(), 2);
-
-        // Immediate sweep should evict 0 because 50ms TTL hasn't elapsed
-        let evicted = pool.sweep_expired(Instant::now());
-        assert_eq!(evicted, 0);
-        assert_eq!(pool.total_pooled(), 4);
-
-        // Simulate time passage (> 50ms)
-        let future_time = Instant::now() + Duration::from_millis(100);
-        let evicted = pool.sweep_expired(future_time);
-        assert_eq!(evicted, 2);
-
-        // Pool cleanly decayed back to baseline floor (2)
-        assert_eq!(pool.total_pooled(), 2);
-        assert_eq!(pool.burst_standby_count(), 0);
     }
 }

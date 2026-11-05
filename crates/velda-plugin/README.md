@@ -60,7 +60,7 @@ Plugins execute across four strictly isolated lifecycle phases:
 [ Egress Protocol Encoder ]
 
 ┌─────────────────────────┐
-│ Phase 4: Background     │ ── Runs exclusively on auxiliary supervisor cores.
+│ Phase 4: Background     │ ── Runs exclusively on Shadow Workers under SCHED_IDLE.
 │ (BackgroundPlugin)      │    Prometheus exporter, health check probes. Zero traffic worker impact.
 └─────────────────────────┘
 ```
@@ -72,7 +72,7 @@ Plugins execute across four strictly isolated lifecycle phases:
 | **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `on_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
 | **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `on_upstream_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
 | **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `on_response(&self, resp: &mut L7Response)` | In-place header & status mutation |
-| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `run(self, shutdown) -> Future<Output = Result<(), PluginError>>` | Auxiliary supervisory execution loop |
+| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `run(self, shutdown) -> Future<Output = Result<(), PluginError>>` | Shadow background execution loop |
 
 ### Canonical Rejections & Virtual 3-Column Header Model
 To achieve protocol-agnostic short-circuiting and eliminate header leakage:
@@ -145,7 +145,7 @@ To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factor
 | [`std_http_access_log`](src/post_response/std_http_access_log/) | `post_response` | All HTTP | Lock-free, hardware-harmonized standard stream HTTP access logging with status-aware sampling. |
 | [`std_grpc_access_log`](src/post_response/std_grpc_access_log/) | `post_response` | gRPC | Lock-free, hardware-harmonized standard stream gRPC access logging with canonical status sampling. |
 | [`cors`](src/post_response/cors.rs) | `post_response` | All L7 | Injects CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`). |
-| [`prometheus_exporter`](src/background/prometheus/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Auxiliary Core. |
+| [`prometheus_exporter`](src/background/prometheus/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Shadow Worker. |
 | [`health_probe`](src/background/health_probe.rs) | `background` | Management (:8081) | Kubernetes liveness and readiness probe HTTP endpoint. |
 
 ---

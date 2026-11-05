@@ -24,10 +24,8 @@ async fn pipe_server_stream_udp(
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
-        if let Body::Bytes(ref b) = req.body
-            && !b.is_empty()
-            && b.len() >= 5
-        {
+        let b = req.body.as_slice();
+        if !b.is_empty() && b.len() >= 5 {
             let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
             if declared_len > config.max_message_size {
                 return Err(GrpcError::PayloadTooLarge(declared_len));

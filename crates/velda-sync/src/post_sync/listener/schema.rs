@@ -58,8 +58,6 @@ pub struct Http1ListenerConfig {
     #[serde(default)]
     pub max_header_size: Option<usize>,
     #[serde(default)]
-    pub max_headers: Option<usize>,
-    #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
     #[serde(default)]
     pub max_keepalive_requests: Option<u32>,
@@ -140,8 +138,6 @@ pub struct Http2ListenerConfig {
     #[serde(default)]
     pub max_header_size: Option<usize>,
     #[serde(default)]
-    pub max_headers: Option<usize>,
-    #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
     #[serde(default)]
     pub max_concurrent_streams: Option<u32>,
@@ -186,8 +182,6 @@ pub struct GrpcListenerConfig {
     #[serde(default)]
     pub max_header_size: Option<usize>,
     #[serde(default)]
-    pub max_headers: Option<usize>,
-    #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
     #[serde(default)]
     pub max_concurrent_streams: Option<u32>,
@@ -207,8 +201,6 @@ pub struct Http3ListenerConfig {
     pub max_body_size: Option<usize>,
     #[serde(default)]
     pub max_header_size: Option<usize>,
-    #[serde(default)]
-    pub max_headers: Option<usize>,
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
     #[serde(default)]

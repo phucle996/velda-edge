@@ -1,6 +1,6 @@
 //! Health Probe Configuration Schema & Semantic Validation (`phase: "background"`).
 //!
-//! Enforces a strict declarative contract for background auxiliary health probes.
+//! Enforces a strict declarative contract for background health probes.
 //!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Valid SocketAddr**: `listen` must be a valid IP:PORT socket address.
@@ -14,7 +14,7 @@ use crate::SyncError;
 /// Declarative configuration for the Health Probe plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthProbeConfig {
-    /// Socket address to bind and serve auxiliary health endpoints (e.g. "0.0.0.0:8081").
+    /// Socket address to bind and serve health endpoints (e.g. "0.0.0.0:8081").
     pub listen: String,
     /// HTTP URI path for container liveness probe (e.g. "/livez").
     pub liveness_path: String,

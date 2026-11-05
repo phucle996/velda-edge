@@ -14,8 +14,6 @@ pub struct Http2Config {
     pub max_body_size: usize,
     /// Maximum header size in bytes.
     pub max_header_size: usize,
-    /// Maximum number of headers accepted.
-    pub max_headers: usize,
     /// Connection idle timeout in milliseconds.
     pub idle_timeout_ms: u64,
     /// Maximum number of concurrent streams allowed per connection.
@@ -101,9 +99,6 @@ impl Http2Config {
         // 6. Max header size: (ram_bytes / 131072).clamp(16 KB, 64 KB)
         let max_header_size = clamp_usize(ram_bytes / 131_072, 16 * KB, 64 * KB);
 
-        // 7. Max headers count: clamped to [32, 96]
-        let max_headers = clamp_usize(cores * 16, 32, 96);
-
         // 8. Idle timeout, frame payload ceiling [64 KB, 256 KB], and safety limits
         let idle_timeout_ms = 30_000;
         let max_frame_size = clamp_usize(ram_bytes / 131_072, 64 * KB, 256 * KB) as u32;
@@ -116,7 +111,6 @@ impl Http2Config {
         Self {
             max_body_size,
             max_header_size,
-            max_headers,
             idle_timeout_ms,
             max_concurrent_streams,
             initial_connection_window_size,
@@ -151,13 +145,6 @@ impl Http2Config {
     pub const fn with_max_header_size(mut self, size: usize) -> Self {
         self.max_header_size = size;
         self.max_header_list_size = size as u32;
-        self
-    }
-
-    /// Sets the maximum number of headers.
-    #[inline]
-    pub const fn with_max_headers(mut self, max: usize) -> Self {
-        self.max_headers = max;
         self
     }
 

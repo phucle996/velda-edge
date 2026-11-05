@@ -110,7 +110,7 @@ fn test_grpc_post_response_pipeline_execution() {
         velda_core::Body::Bytes(bytes::Bytes::from_static(b"response-data")),
     );
 
-    let mut req_headers = HeaderWorkspace::empty();
+    let mut req_headers = HeaderWorkspace::default();
     req_headers.insert("x-request-id", HeaderValue::from_static("trace-grpc-01"));
     req_headers.insert(
         "x-forwarded-path",
@@ -163,7 +163,7 @@ fn test_grpc_unsampled_status_invisible_on_hot_path() {
     let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin.clone()];
 
     let mut resp = L7Response::empty(StatusCode::OK); // 0 (OK) is unconfigured
-    let req_headers = HeaderWorkspace::empty();
+    let req_headers = HeaderWorkspace::default();
 
     run_post_response_plugins(&chain, &req_headers, &mut resp);
 
@@ -187,7 +187,7 @@ fn test_grpc_ring_buffer_saturation_drops_fail_open() {
 
     let plugin = StdGrpcAccessLogPlugin::new_for_test("std_grpc_access_log", config);
     let mut resp = L7Response::empty(StatusCode::OK);
-    let req_headers = HeaderWorkspace::empty();
+    let req_headers = HeaderWorkspace::default();
 
     for _ in 0..200 {
         plugin.on_response(&req_headers, &mut resp);

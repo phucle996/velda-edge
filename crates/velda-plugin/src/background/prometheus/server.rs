@@ -1,10 +1,10 @@
-//! Auxiliary Prometheus Exporter HTTP/1.1 & HTTPS Server.
+//! Prometheus Exporter HTTP/1.1 & HTTPS Server.
 //!
 //! Exposes OpenMetrics / Prometheus scrape endpoints (`GET /metrics`) and liveness probes (`GET /healthz`)
-//! on an auxiliary network interface strictly separated from Data Plane traffic workers.
+//! on a management network interface strictly separated from Data Plane traffic workers.
 //!
-//! # Hard Architectural Boundary: Auxiliary vs Traffic Workers
-//! - **Auxiliary Domain**: This server runs exclusively on the Supervisor / Auxiliary core runtime.
+//! # Hard Architectural Boundary: Shadow Worker vs Traffic Workers
+//! - **Shadow Domain**: This server runs exclusively on the Shadow Worker runtime.
 //! - **Zero Interference**: It never touches traffic event loops, worker pinning, or hot-path pipelines.
 //! - **Non-blocking Telemetry**: Metrics are extracted via lock-free point-in-time snapshots
 //!   ([`MetricsStore::snapshot`]), ensuring zero write stalls or cacheline contention for worker threads.
@@ -92,7 +92,7 @@ impl AsyncWrite for ExporterStream {
 // Prometheus Exporter Server
 // ============================================================================
 
-/// Standalone Auxiliary Prometheus Exporter service.
+/// Standalone Prometheus Exporter service.
 pub struct PrometheusExporter {
     config: PrometheusExporterConfig,
     metrics: Arc<MetricsStore>,
@@ -223,7 +223,7 @@ impl PrometheusExporter {
             protocol = %self.config.protocol,
             auth_mode = %self.config.auth.mode,
             tls_mode = %self.config.tls.mode,
-            "Prometheus exporter started on auxiliary subsystem"
+            "Prometheus exporter started on shadow subsystem"
         );
 
         loop {

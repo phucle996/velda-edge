@@ -46,15 +46,20 @@ pub trait PreRoutePlugin: Send + Sync {
 
 /// Executes a linear chain of pre-route plugins.
 ///
-/// Short-circuits immediately on the first non-[`Action::Continue`] result.
+/// Short-circuits immediately on the first non-[`Action::Continue`] result and batch-renders
+/// any pending arithmetic header mutations into `req.headers`.
 #[inline]
 pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Request) -> Action {
     for plugin in chain {
         match plugin.on_request(req) {
             Action::Continue => continue,
-            action => return action,
+            action => {
+                req.headers.render();
+                return action;
+            }
         }
     }
+    req.headers.render();
     Action::Continue
 }
 

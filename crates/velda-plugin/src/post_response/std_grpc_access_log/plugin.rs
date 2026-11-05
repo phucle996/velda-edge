@@ -240,8 +240,8 @@ impl PostResponsePlugin for StdGrpcAccessLogPlugin {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .or_else(|| {
-                if let velda_core::Body::Bytes(ref b) = resp.body {
-                    Some(b.len() as u64)
+                if !resp.body.is_empty() {
+                    Some(resp.body.len() as u64)
                 } else {
                     None
                 }
@@ -349,7 +349,7 @@ mod tests {
             Body::Bytes(bytes::Bytes::from_static(b"rpc-payload")),
         );
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert("x-request-id", HeaderValue::from_static("req-grpc-123"));
         req_headers.insert(
             "x-forwarded-path",
@@ -398,7 +398,7 @@ mod tests {
         let mut resp = L7Response::empty(StatusCode::OK);
         resp.headers = headers.into();
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(
             "x-forwarded-path",
             HeaderValue::from_static("/payment.Payment/Pay"),

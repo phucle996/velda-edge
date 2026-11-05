@@ -1,10 +1,10 @@
-//! Auxiliary Health & Readiness Probe Background Plugin (`health_probe`).
+//! Health & Readiness Probe Background Plugin (`health_probe`).
 //!
 //! Exposes cold-path Kubernetes / Load Balancer liveness (`/healthz`) and readiness (`/readyz`)
-//! endpoints on a dedicated auxiliary port, completely isolated from Data Plane traffic worker loops.
+//! endpoints on a dedicated management port, completely isolated from Data Plane traffic worker loops.
 //!
 //! # Strict Architectural Invariants
-//! - **Auxiliary Port Isolation**: Runs on an auxiliary port strictly separated from Data Plane listeners.
+//! - **Port Isolation**: Runs on a dedicated management port strictly separated from Data Plane listeners.
 //! - **Zero Payload**: Returns empty bodies (`Content-Length: 0`) using immutable static byte
 //!   constants (`&'static [u8]`) embedded directly in `.rodata`. Zero allocations, zero heap format strings.
 //! - **Lock-Free State Query**: Health queries inspect lock-free atomic states (`AtomicBool`), never
@@ -106,7 +106,7 @@ impl HealthState {
 /// Configuration settings for the health probe background plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthProbeConfig {
-    /// Auxiliary TCP socket address to bind and listen on (must NOT collide with traffic listeners).
+    /// Dedicated TCP socket address to bind and listen on (must NOT collide with traffic listeners).
     pub listen_addr: SocketAddr,
     /// Path for the Kubernetes / Orchestrator liveness probe.
     pub liveness_path: String,
@@ -130,7 +130,7 @@ impl Default for HealthProbeConfig {
     }
 }
 
-/// Auxiliary Health and Readiness Probe Background Service.
+/// Health and Readiness Probe Background Service.
 #[derive(Debug, Clone)]
 pub struct HealthProbePlugin {
     pub id: String,
@@ -270,7 +270,7 @@ impl BackgroundPlugin for HealthProbePlugin {
                 addr = %self.config.listen_addr,
                 liveness = %self.config.liveness_path,
                 readiness = %self.config.readiness_path,
-                "Auxiliary health & readiness probe service listening"
+                "Health & readiness probe service listening"
             );
 
             let config = Arc::new(self.config.clone());

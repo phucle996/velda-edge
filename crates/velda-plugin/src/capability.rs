@@ -116,7 +116,7 @@ pub enum Direction {
     Request,
     /// Operates on the returning response path from upstream towards client.
     Response,
-    /// Operates as an independent background service on auxiliary supervisory cores.
+    /// Operates as an independent background service on Shadow Workers.
     Background,
 }
 

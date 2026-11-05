@@ -143,8 +143,8 @@ impl Http1ClientRequest {
             Some(self.body.len()),
             dst,
         );
-        if let Body::Bytes(bytes) = &self.body {
-            dst.extend_from_slice(bytes);
+        if !self.body.is_empty() {
+            dst.extend_from_slice(self.body.as_slice());
         }
     }
 }

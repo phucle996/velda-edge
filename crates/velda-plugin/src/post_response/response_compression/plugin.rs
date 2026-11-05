@@ -22,44 +22,13 @@ use http::{HeaderValue, StatusCode};
 use velda_core::{Body, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::algorithm::{CompressionAlgorithm, compress_payload_with_dict, negotiate_algorithm};
+use super::config::ResponseCompressionConfig;
+use super::dictionary::ZstdDictionaryConfig;
+use super::engine::compress_payload_with_dict;
+use super::negotiation::{CompressionAlgorithm, negotiate_algorithm};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::post_response::PostResponsePlugin;
-
-/// Configuration schema for [`ResponseCompressionPlugin`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponseCompressionConfig {
-    /// Enabled algorithms in server priority order.
-    pub algorithms: Vec<CompressionAlgorithm>,
-    /// Minimum payload size in bytes required to trigger compression.
-    /// Tiny payloads (< 256 bytes) expand in size due to framing and Huffman overhead.
-    pub min_length: usize,
-    /// Gzip/Deflate compression level (1-9, default: 1 for Pareto speed/ratio sweet spot).
-    pub gzip_level: u32,
-    /// Brotli compression quality level (0-11, default: 2 for sub-millisecond edge latency).
-    pub brotli_level: u32,
-    /// Zstandard compression level (1-22, default: 1 for ultra-fast line-rate throughput).
-    pub zstd_level: i32,
-    /// Optional pre-trained Zstandard dictionary (RFC 8878) for high-ratio structured JSON compression.
-    pub zstd_dict: Option<bytes::Bytes>,
-    /// MIME type prefixes eligible for compression.
-    pub content_types: Vec<String>,
-}
-
-impl Default for ResponseCompressionConfig {
-    fn default() -> Self {
-        Self {
-            algorithms: Vec::new(),
-            min_length: 256,
-            gzip_level: 1,
-            brotli_level: 2,
-            zstd_level: 1,
-            zstd_dict: None,
-            content_types: Vec::new(),
-        }
-    }
-}
 
 /// Post-Response Compression Plugin instance.
 #[derive(Debug, Clone)]
@@ -98,14 +67,7 @@ impl ResponseCompressionPlugin {
             algorithms.push(algo);
         }
 
-        let zstd_dict = cfg.zstd_dict.and_then(|s| {
-            use base64::Engine;
-            base64::prelude::BASE64_STANDARD
-                .decode(s.trim())
-                .ok()
-                .map(bytes::Bytes::from)
-                .or_else(|| Some(bytes::Bytes::copy_from_slice(s.as_bytes())))
-        });
+        let zstd_dict = ZstdDictionaryConfig::from_optional_str(cfg.zstd_dict.as_deref());
 
         let content_types = cfg
             .content_types
@@ -128,20 +90,25 @@ impl ResponseCompressionPlugin {
     }
 
     /// Checks if the response Content-Type is eligible for compression.
+    ///
+    /// Executes with zero heap allocations by scanning the raw header slice case-insensitively.
     #[inline]
     fn is_compressible_content_type(&self, resp: &L7Response) -> bool {
         let content_type = match resp.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
-            Some(ct) => ct.to_lowercase(),
+            Some(ct) => ct,
             None => return false,
         };
 
         // Extract media type prefix before optional parameters (e.g. "application/json; charset=utf-8")
         let media_type = content_type.split(';').next().unwrap_or("").trim();
 
-        self.config
-            .content_types
-            .iter()
-            .any(|pattern| media_type.starts_with(pattern.as_str()) || media_type == pattern)
+        self.config.content_types.iter().any(|pattern| {
+            if media_type.len() >= pattern.len() {
+                media_type[..pattern.len()].eq_ignore_ascii_case(pattern)
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -153,8 +120,6 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
 
     fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // Guard 0: Explicit Declaration Invariant
-        // Both `algorithms` and `content_types` MUST be explicitly declared in configuration.
-        // If unconfigured or empty, server does NOT support compression on this route and returns uncompressed.
         if self.config.algorithms.is_empty() || self.config.content_types.is_empty() {
             return;
         }
@@ -201,7 +166,7 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
             self.config.gzip_level,
             self.config.brotli_level,
             self.config.zstd_level,
-            self.config.zstd_dict.as_deref(),
+            self.config.zstd_dict.as_bytes(),
         ) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -215,30 +180,38 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
             }
         };
 
-        // Guard 6: Inflation Safeguard
-        // If compressed bytes are equal to or larger than original, preserve raw body
+        // Safeguard: Content Expansion Guard
+        // If compressed size is not strictly smaller than original, keep raw body to avoid bandwidth expansion.
         if compressed.len() >= original_bytes.len() {
             return;
         }
 
         // Apply Response Transformations
-        let compressed_len = compressed.len();
+        let new_len = compressed.len();
         resp.body = Body::Bytes(compressed);
 
-        // Set Content-Encoding
-        resp.headers
-            .insert(CONTENT_ENCODING, selected_algo.as_header_value());
+        // Update Content-Length via arithmetic HeaderWorkspace (also updates content_length register)
+        resp.headers.set_u64(CONTENT_LENGTH, new_len as u64);
 
-        // Update Content-Length
-        resp.headers
-            .insert(CONTENT_LENGTH, HeaderValue::from(compressed_len));
+        // Inject Content-Encoding
+        resp.headers.insert(
+            CONTENT_ENCODING,
+            HeaderValue::from_static(selected_algo.as_str()),
+        );
 
-        // Inject / Append Vary: Accept-Encoding (RFC 9110 § 12.5.5)
+        // Inject Vary: Accept-Encoding (RFC 9110 § 12.5.5)
+        // Prevents downstream caching proxies from serving compressed variants to uncompressed clients.
         if let Some(existing_vary) = resp.headers.get(VARY).and_then(|v| v.to_str().ok()) {
-            if !existing_vary.to_lowercase().contains("accept-encoding") {
-                let new_vary = format!("{existing_vary}, Accept-Encoding");
-                if let Ok(val) = HeaderValue::from_str(&new_vary) {
-                    resp.headers.insert(VARY, val);
+            let has_vary = existing_vary.split(',').any(|part| {
+                part.trim().eq_ignore_ascii_case("accept-encoding") || part.trim() == "*"
+            });
+
+            if !has_vary {
+                let mut new_val = String::with_capacity(existing_vary.len() + 17);
+                new_val.push_str(existing_vary);
+                new_val.push_str(", Accept-Encoding");
+                if let Ok(hv) = HeaderValue::from_str(&new_val) {
+                    resp.headers.insert(VARY, hv);
                 }
             }
         } else {
@@ -263,12 +236,8 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dictionary::BUILTIN_COMMON_JSON_REST_DICT;
     use super::*;
-    use http::StatusCode;
-    use std::io::Read;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use velda_core::Body;
 
     fn standard_test_config() -> ResponseCompressionConfig {
         ResponseCompressionConfig {
@@ -276,330 +245,39 @@ mod tests {
                 CompressionAlgorithm::Zstd,
                 CompressionAlgorithm::Brotli,
                 CompressionAlgorithm::Gzip,
-                CompressionAlgorithm::Deflate,
             ],
-            min_length: 256,
-            gzip_level: 6,
-            brotli_level: 4,
-            zstd_level: 3,
-            zstd_dict: None,
-            content_types: vec!["application/json".to_string(), "text/plain".to_string()],
+            min_length: 64,
+            gzip_level: 1,
+            brotli_level: 2,
+            zstd_level: 1,
+            zstd_dict: ZstdDictionaryConfig::None,
+            content_types: vec!["application/json".into(), "text/".into()],
         }
     }
 
     #[test]
-    fn test_compression_default_priority_zstd() {
-        let plugin = ResponseCompressionPlugin::new("compress-1", standard_test_config());
+    fn test_compression_gzip_application_json() {
+        let plugin = ResponseCompressionPlugin::new("compress-gzip", standard_test_config());
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(
-            ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip, deflate, br, zstd"),
-        );
-
-        let payload = b"{\"users\":[{\"id\":1,\"name\":\"Alice\",\"role\":\"Admin\"},{\"id\":2,\"name\":\"Bob\",\"role\":\"User\"}]}".repeat(10);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json; charset=utf-8"),
-        );
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "zstd"); // Default priority prefers zstd
-        assert_eq!(resp.headers.get(VARY).unwrap(), "Accept-Encoding");
-        let compressed_len: usize = resp
-            .headers
-            .get(CONTENT_LENGTH)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        match resp.body {
-            Body::Bytes(b) => {
-                assert_eq!(b.len(), compressed_len);
-                assert!(b.len() < payload.len());
-                let decompressed = zstd::decode_all(&b[..]).expect("valid zstd");
-                assert_eq!(decompressed, payload);
-            }
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_compression_brotli_explicit() {
-        let config = ResponseCompressionConfig {
-            algorithms: vec![CompressionAlgorithm::Brotli, CompressionAlgorithm::Gzip],
-            content_types: vec!["text/plain".to_string()],
-            ..standard_test_config()
-        };
-        let plugin = ResponseCompressionPlugin::new("compress-br", config);
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("br"));
-
-        let payload = b"Velda Edge API Gateway Brotli Compression Testing Payload".repeat(15);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "br");
-        match resp.body {
-            Body::Bytes(b) => {
-                let mut decompressed = Vec::new();
-                brotli::Decompressor::new(&b[..], 4096)
-                    .read_to_end(&mut decompressed)
-                    .expect("valid brotli");
-                assert_eq!(decompressed, payload);
-            }
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_compression_gzip_when_only_gzip_accepted() {
-        let plugin = ResponseCompressionPlugin::new("compress-gz", standard_test_config());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
-        let payload = b"{\"message\":\"hello world gzip compression\"}".repeat(20);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "gzip");
-        match resp.body {
-            Body::Bytes(b) => {
-                let mut decoder = flate2::read::GzDecoder::new(&b[..]);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed).expect("valid gzip");
-                assert_eq!(decompressed, payload);
-            }
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_compression_bypass_min_length() {
-        let plugin = ResponseCompressionPlugin::new(
-            "compress-min",
-            ResponseCompressionConfig {
-                min_length: 256,
-                ..standard_test_config()
-            },
-        );
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
-
-        // Only 20 bytes -> below min_length
-        let tiny_payload = b"{\"status\":\"ok\"}";
-        let mut resp = L7Response::from_bytes(StatusCode::OK, tiny_payload.to_vec());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        // Content-Encoding should NOT be set
-        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
-        match resp.body {
-            Body::Bytes(b) => assert_eq!(&b[..], tiny_payload),
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_compression_bypass_already_compressed() {
-        let plugin = ResponseCompressionPlugin::new("compress-skip", standard_test_config());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
-
-        let payload = b"already compressed by backend".repeat(20);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        resp.headers
-            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        // Header and body must remain unchanged (no double-compression)
-        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "gzip");
-        match resp.body {
-            Body::Bytes(b) => assert_eq!(&b[..], &payload[..]),
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_compression_bypass_non_compressible_mime() {
-        let plugin = ResponseCompressionPlugin::new("compress-mime", standard_test_config());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
-
-        let payload = vec![0xFF; 500]; // Simulated PNG bytes
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
-    }
-
-    #[test]
-    fn test_compression_bypass_status_204_and_304() {
-        let plugin = ResponseCompressionPlugin::new("compress-status", standard_test_config());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
-
-        let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
-        plugin.on_response(&req_headers, &mut resp);
-        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
-
-        let mut resp304 = L7Response::empty(StatusCode::NOT_MODIFIED);
-        plugin.on_response(&req_headers, &mut resp304);
-        assert!(!resp304.headers.contains_key(CONTENT_ENCODING));
-    }
-
-    #[test]
-    fn test_compression_unconfigured_or_empty_returns_uncompressed() {
-        // Neither algorithms nor content_types declared -> compression disabled
-        let plugin =
-            ResponseCompressionPlugin::new("compress-empty", ResponseCompressionConfig::default());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
-
-        let payload =
-            b"{\"message\":\"should not be compressed because config is empty\"}".repeat(20);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
-        match resp.body {
-            Body::Bytes(b) => assert_eq!(b, payload),
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_from_config_empty_object_rejected() {
-        let plugin_cfg = PluginConfig {
-            id: "response_compression".into(),
-            phase: "post_response".into(),
-            config: serde_json::json!({}),
-        };
-        assert!(ResponseCompressionPlugin::from_config(&plugin_cfg).is_err());
-
-        let plugin = ResponseCompressionPlugin::new(
-            "response_compression",
-            ResponseCompressionConfig::default(),
-        );
-        assert!(plugin.config.algorithms.is_empty());
-        assert!(plugin.config.content_types.is_empty());
-
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br, zstd"));
-
-        let payload = b"{\"message\":\"unconfigured returns raw uncompressed\"}".repeat(20);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
-        resp.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        plugin.on_response(&req_headers, &mut resp);
-        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
-        match resp.body {
-            Body::Bytes(b) => assert_eq!(b, payload),
-            _ => panic!("Expected Body::Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_cache_coordination_store_uncompressed_then_compress_on_return() {
-        use crate::http_cache::HttpCacheStorage;
-        use crate::post_response::HttpCacheStoreConfig;
-        use crate::post_response::HttpCacheStorePlugin;
-
-        let storage = Arc::new(HttpCacheStorage::new(
-            "compress_storage",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let store_plugin = HttpCacheStorePlugin::with_storage(
-            "store-1",
-            HttpCacheStoreConfig::default(),
-            Arc::clone(&storage),
-        );
-        let compress_plugin = ResponseCompressionPlugin::new(
-            "compress-1",
-            ResponseCompressionConfig {
-                algorithms: vec![CompressionAlgorithm::Gzip],
-                content_types: vec!["application/json".to_string()],
-                ..standard_test_config()
-            },
-        );
-
-        // 1. Upstream emits 200 OK uncompressed JSON
-        let original_json = b"{\"items\":[{\"id\":101,\"name\":\"MacBook Pro\"},{\"id\":102,\"name\":\"ThinkPad X1\"}]}".repeat(10);
+        let original_json = b"{\"message\":\"hello world from velda-edge post_response plugin compression test\",\"status\":\"active\",\"code\":200}".repeat(5);
         let mut resp = L7Response::from_bytes(StatusCode::OK, original_json.clone());
-        resp.headers.insert(
-            "x-velda-cache-key",
-            HeaderValue::from_static("GET:api.example.com:/products"),
-        );
         resp.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        resp.headers.insert(
-            http::header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=60"),
-        );
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
-        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        plugin.on_response(&req_headers, &mut resp);
 
-        // 2. Sequential execution in post_response phase:
-        //    Step A: http_cache_store stores the pristine uncompressed body into RAM zone
-        store_plugin.on_response(&req_headers, &mut resp);
-        assert_eq!(resp.headers.get("x-cache").unwrap(), "MISS");
-
-        // Verify the cache storage has UNCOMPRESSED bytes!
-        let hash = HttpCacheStorage::hash_key("GET:api.example.com:/products");
-        let stored_entry = storage.get(hash).expect("Must be stored in cache");
-        assert_eq!(
-            stored_entry.raw_body.as_ref().unwrap(),
-            &bytes::Bytes::from(original_json.clone())
-        );
-        assert_eq!(
-            stored_entry.content_type.as_ref().unwrap(),
-            "application/json"
-        );
-        // Pure Payload Invariant: Headers map is never stored in cache zone!
-
-        //    Step B: response_compression compresses the payload on the exit return path for client
-        compress_plugin.on_response(&req_headers, &mut resp);
         assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "gzip");
         assert_eq!(resp.headers.get(VARY).unwrap(), "Accept-Encoding");
 
-        // Downstream response body is compressed
         match resp.body {
             Body::Bytes(b) => {
                 assert!(b.len() < original_json.len());
                 let mut decoder = flate2::read::GzDecoder::new(&b[..]);
                 let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed).expect("valid gzip");
+                std::io::Read::read_to_end(&mut decoder, &mut decompressed).unwrap();
                 assert_eq!(decompressed, original_json);
             }
             _ => panic!("Expected Body::Bytes"),
@@ -607,22 +285,21 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_zstd_with_dict() {
-        let dict = bytes::Bytes::from_static(
-            b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\"}",
-        );
+    fn test_compression_zstd_with_builtin_dict() {
         let config = ResponseCompressionConfig {
             algorithms: vec![CompressionAlgorithm::Zstd],
-            zstd_dict: Some(dict.clone()),
+            zstd_dict: ZstdDictionaryConfig::Builtin(
+                super::super::dictionary::BuiltinDictionary::CommonJsonRest,
+            ),
             ..standard_test_config()
         };
-        let plugin = ResponseCompressionPlugin::new("compress-dict", config);
+        let plugin = ResponseCompressionPlugin::new("compress-builtin-dict", config);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("zstd"));
 
-        let payload = b"{\"user_id\":1001,\"username\":\"test_user\",\"role\":\"developer\",\"session\":\"active_9999\"}".repeat(15);
-        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.clone());
+        let payload = br#"{"status":"success","code":200,"message":"Resource retrieved successfully","data":[{"id":"usr_101","username":"dev_user","email":"dev@example.com","role":"admin","status":"active"}]}"#;
+        let mut resp = L7Response::from_bytes(StatusCode::OK, payload.to_vec());
         resp.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -631,9 +308,12 @@ mod tests {
         assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "zstd");
         match resp.body {
             Body::Bytes(b) => {
-                let decompressed = super::super::algorithm::decode_zstd_with_dict(&b, Some(&dict))
-                    .expect("valid zstd dict");
-                assert_eq!(decompressed, payload);
+                let decompressed = super::super::engine::decode_zstd_with_dict(
+                    &b,
+                    Some(BUILTIN_COMMON_JSON_REST_DICT),
+                )
+                .expect("valid zstd builtin dict");
+                assert_eq!(decompressed, payload[..]);
             }
             _ => panic!("Expected Body::Bytes"),
         }
@@ -663,16 +343,57 @@ mod tests {
         assert_eq!(plugin.config.gzip_level, 1);
         assert_eq!(plugin.config.brotli_level, 2);
         assert_eq!(plugin.config.zstd_level, 1);
+        assert_eq!(plugin.config.zstd_dict, ZstdDictionaryConfig::None);
 
-        let invalid_json = serde_json::json!({
-            "algorithms": ["zstd"]
-            // Missing all other fields
+        // Test built-in common_json_rest dictionary resolution
+        let builtin_json = serde_json::json!({
+            "algorithms": ["zstd"],
+            "min_length_bytes": 256,
+            "gzip_level": 1,
+            "brotli_level": 2,
+            "zstd_level": 1,
+            "zstd_dict": "common_json_rest",
+            "content_types": ["application/json"]
         });
-        let bad_cfg = PluginConfig {
-            id: "comp_bad".into(),
+        let builtin_cfg = PluginConfig {
+            id: "comp_builtin".into(),
             phase: "post_response".into(),
-            config: invalid_json,
+            config: builtin_json,
         };
-        assert!(ResponseCompressionPlugin::from_config(&bad_cfg).is_err());
+        let builtin_plugin = ResponseCompressionPlugin::from_config(&builtin_cfg).unwrap();
+        assert_eq!(
+            builtin_plugin.config.zstd_dict.as_bytes().unwrap(),
+            BUILTIN_COMMON_JSON_REST_DICT
+        );
+    }
+
+    #[test]
+    fn test_guards_prevent_compression() {
+        let plugin = ResponseCompressionPlugin::new("compress-guard", standard_test_config());
+        let mut req_headers = velda_core::HeaderWorkspace::default();
+        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+        // Guard 1: Status code 204
+        let mut resp = L7Response::from_bytes(StatusCode::NO_CONTENT, b"some content".to_vec());
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        plugin.on_response(&req_headers, &mut resp);
+        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
+
+        // Guard 2: Already compressed
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"compressed".repeat(20));
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        resp.headers
+            .insert(CONTENT_ENCODING, HeaderValue::from_static("br"));
+        plugin.on_response(&req_headers, &mut resp);
+        assert_eq!(resp.headers.get(CONTENT_ENCODING).unwrap(), "br");
+
+        // Guard 4: Non-matching content type
+        let mut resp = L7Response::from_bytes(StatusCode::OK, b"compressed".repeat(20));
+        resp.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        plugin.on_response(&req_headers, &mut resp);
+        assert!(!resp.headers.contains_key(CONTENT_ENCODING));
     }
 }

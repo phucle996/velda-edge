@@ -172,16 +172,12 @@ impl PostResponsePlugin for OpentelemetryLoggerPlugin {
             record.set_path(b"/");
         }
 
-        // Client IP
-        if let Some(ip_str) = req_headers
-            .get("x-forwarded-for")
-            .or_else(|| req_headers.get("x-real-ip"))
-            .and_then(|v| v.to_str().ok())
+        // Client IP (O(1) integer key lookup from HeaderWorkspace)
+        if let Some(ip) = req_headers
+            .get_ip("x-forwarded-for")
+            .or_else(|| req_headers.get_ip("x-real-ip"))
         {
-            let first_ip = ip_str.split(',').next().unwrap_or("").trim();
-            if let Ok(ip) = first_ip.parse::<std::net::IpAddr>() {
-                record.set_client_ip(ip);
-            }
+            record.set_client_ip(ip);
         }
 
         // Matched Route ID
@@ -208,8 +204,12 @@ impl PostResponsePlugin for OpentelemetryLoggerPlugin {
             record.duration_us = (ms * 1000.0).clamp(0.0, u32::MAX as f64) as u32;
         }
 
-        // W3C Trace ID & Span ID
-        if let Some(trace_id_val) = req_headers
+        // W3C Trace ID & Span ID (O(1) 128-bit integer read or zero-copy hex decode)
+        if let Some(raw_trace) = req_headers.get_hex128(&X_TRACE_ID) {
+            record.set_trace_id(&raw_trace.to_be_bytes());
+        } else if req_headers.request_id_raw != 0 && !req_headers.contains_key(&X_TRACE_ID) {
+            record.set_trace_id(&req_headers.request_id_raw.to_be_bytes());
+        } else if let Some(trace_id_val) = req_headers
             .get(&X_TRACE_ID)
             .or_else(|| req_headers.get(&X_REQUEST_ID))
         {
@@ -284,7 +284,7 @@ mod tests {
 
         let plugin = OpentelemetryLoggerPlugin::new("otel_log", config);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert("x-forwarded-method", HeaderValue::from_static("POST"));
         req_headers.insert("x-forwarded-uri", HeaderValue::from_static("/api/orders"));
         req_headers.insert(

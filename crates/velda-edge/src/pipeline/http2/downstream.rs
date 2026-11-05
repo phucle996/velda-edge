@@ -80,7 +80,14 @@ pub async fn handle_http2_stream(
                     "Downstream TLS handshake succeeded for HTTP/2"
                 );
 
-                let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, alt_svc);
+                let meta = DownstreamMeta::new(
+                    listener_id,
+                    peer,
+                    local_addr,
+                    true,
+                    alt_svc,
+                    &rt.buffer_pool,
+                );
                 run_http2_loop(tls_stream, meta, config, runtime).await;
             }
             Err(e) => {
@@ -93,7 +100,14 @@ pub async fn handle_http2_stream(
             }
         }
     } else {
-        let meta = DownstreamMeta::new(listener_id, peer, local_addr, false, alt_svc);
+        let meta = DownstreamMeta::new(
+            listener_id,
+            peer,
+            local_addr,
+            false,
+            alt_svc,
+            &rt.buffer_pool,
+        );
         run_http2_loop(connection, meta, config, runtime).await;
     }
 }
@@ -156,6 +170,19 @@ pub async fn run_http2_loop<IO>(
                     responder = responder
                         .with_request_id(Some(req_id_header.clone()))
                         .with_alt_svc(meta.alt_svc_header.clone());
+
+                    if req_head.headers.len() > velda_core::MAX_WIRE_HEADERS {
+                        tracing::warn!(
+                            listener = %meta.listener_id,
+                            peer = %meta.peer,
+                            headers = req_head.headers.len(),
+                            max = velda_core::MAX_WIRE_HEADERS,
+                            "Rejecting HTTP/2 request exceeding MAX_WIRE_HEADERS"
+                        );
+                        let _ =
+                            responder.send_early_error(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+                        continue;
+                    }
 
                     if let Err(e) = velda_http2::server::path::normalize_path(&mut req_head.uri) {
                         tracing::warn!(
@@ -388,7 +415,6 @@ async fn serve_http2_stream(
 
         if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
             // Optimization: Zero-clone move of method, uri, and headers into L7Request.
-            // Uses from_pre_injected_headers to bypass redundant x-request-id lookup.
             let method = std::mem::replace(&mut req_head.method, http::Method::GET);
             let uri = std::mem::take(&mut req_head.uri);
             let headers = std::mem::take(&mut req_head.headers);
@@ -396,7 +422,7 @@ async fn serve_http2_stream(
                 method,
                 uri,
                 http::Version::HTTP_2,
-                velda_core::HeaderWorkspace::from_pre_injected_headers(headers),
+                velda_core::HeaderWorkspace::from_headers(headers),
                 velda_core::Body::Empty,
             );
             l7_req.state.request_id = request_id;

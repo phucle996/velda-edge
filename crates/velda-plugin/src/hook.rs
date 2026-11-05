@@ -1,4 +1,4 @@
-//! Generic Asynchronous Task Hook for Auxiliary Shadow Workers (`velda-plugin::hook`).
+//! Generic Asynchronous Task Hook for Shadow Logistics Workers (`velda-plugin::hook`).
 //!
 //! Provides core-local and global dispatch hooks enabling plugins to offload asynchronous,
 //! non-critical, or background operations to dedicated low-priority (`SCHED_IDLE`) Shadow Workers

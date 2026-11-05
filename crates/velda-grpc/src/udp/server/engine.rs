@@ -332,6 +332,20 @@ impl GrpcUdpEngine {
                 Ok(Some(frame)) => match frame {
                     UdpFrame::Headers(payload) => match decode_qpack_headers(&payload) {
                         Ok(mut decoded) => {
+                            if decoded.headers.len() > velda_core::MAX_WIRE_HEADERS {
+                                tracing::warn!(
+                                    stream_id = id.index(),
+                                    header_count = decoded.headers.len(),
+                                    max = velda_core::MAX_WIRE_HEADERS,
+                                    "Rejecting gRPC UDP request exceeding MAX_WIRE_HEADERS"
+                                );
+                                let _ = conn
+                                    .recv_stream(id)
+                                    .stop(quinn_proto::VarInt::from_u32(0x0107)); // H3_EXCESSIVE_LOAD
+                                streams.remove(&(handle, id));
+                                return;
+                            }
+
                             // [INGRESS W3C REQUEST ID GENERATION]
                             // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
                             // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers
@@ -442,10 +456,11 @@ impl GrpcUdpEngine {
         encode_udp_frame(&UdpFrame::Headers(header_payload.freeze()), &mut write_buf);
 
         // 2. Encode DATA frame if body present
-        if let Body::Bytes(ref b) = response.body
-            && !b.is_empty()
-        {
-            encode_udp_frame(&UdpFrame::Data(b.clone()), &mut write_buf);
+        let b = response.body.as_slice();
+        if !b.is_empty() {
+            crate::udp::wire::encode_varint(0x00, &mut write_buf);
+            crate::udp::wire::encode_varint(b.len() as u64, &mut write_buf);
+            write_buf.extend_from_slice(b);
         }
 
         // 3. Write frames to send stream

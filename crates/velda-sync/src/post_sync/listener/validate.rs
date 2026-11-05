@@ -27,12 +27,6 @@ pub(crate) fn validate_http1(id: &str, h1: &Http1ListenerConfig) -> Result<(), S
             reason: format!("Listener '{id}' has invalid max_header_size 0; must be > 0"),
         });
     }
-    if let Some(0) = h1.max_headers {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!("Listener '{id}' has invalid max_headers 0; must be > 0"),
-        });
-    }
     if let Some(0) = h1.idle_timeout_ms {
         return Err(SyncError::Validation {
             domain: "listeners".into(),
@@ -75,12 +69,6 @@ pub(crate) fn validate_http2(id: &str, h2: &Http2ListenerConfig) -> Result<(), S
         return Err(SyncError::Validation {
             domain: "listeners".into(),
             reason: format!("Listener '{id}' has invalid max_header_size 0; must be > 0"),
-        });
-    }
-    if let Some(0) = h2.max_headers {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!("Listener '{id}' has invalid max_headers 0; must be > 0"),
         });
     }
     if let Some(0) = h2.idle_timeout_ms {
@@ -167,12 +155,6 @@ pub(crate) fn validate_grpc(id: &str, grpc: &GrpcListenerConfig) -> Result<(), S
             reason: format!("Listener '{id}' has invalid max_header_size 0; must be > 0"),
         });
     }
-    if let Some(0) = grpc.max_headers {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!("Listener '{id}' has invalid max_headers 0; must be > 0"),
-        });
-    }
     if let Some(0) = grpc.idle_timeout_ms {
         return Err(SyncError::Validation {
             domain: "listeners".into(),
@@ -215,12 +197,6 @@ pub(crate) fn validate_http3(id: &str, h3: &Http3ListenerConfig) -> Result<(), S
         return Err(SyncError::Validation {
             domain: "listeners".into(),
             reason: format!("Listener '{id}' has invalid max_header_size 0; must be > 0"),
-        });
-    }
-    if let Some(0) = h3.max_headers {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!("Listener '{id}' has invalid max_headers 0; must be > 0"),
         });
     }
     if let Some(0) = h3.idle_timeout_ms {

@@ -42,7 +42,7 @@ The `plugins.json` file configures the edge extensibility catalog. Plugins in Ve
         │
 [Downstream Client]
 
-[Auxiliary Background Daemon] (Declared in plugins.json)
+[Shadow Background Daemon] (Declared in plugins.json)
    └── prometheus_exporter (Scrapes lock-free metric atomics on dedicated port)
 ```
 
@@ -327,7 +327,7 @@ Controls structured telemetry and access log emissions.
 ---
 
 ### 4.8 `prometheus_exporter` (Phase: `background`)
-Auxiliary background daemon that serves OpenMetrics / Prometheus metrics on a dedicated scrape port.
+Shadow background daemon that serves OpenMetrics / Prometheus metrics on a dedicated scrape port.
 
 ```json
 {

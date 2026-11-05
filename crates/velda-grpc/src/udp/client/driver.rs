@@ -109,8 +109,11 @@ pub(crate) async fn run_client_driver(
                         encode_udp_frame(&UdpFrame::Headers(header_buf.freeze()), &mut send_buf);
 
                         // 2. Wrap body frame if present
-                        if let Body::Bytes(ref b) = request.body && !b.is_empty() {
-                            encode_udp_frame(&UdpFrame::Data(b.clone()), &mut send_buf);
+                        let b = request.body.as_slice();
+                        if !b.is_empty() {
+                            crate::udp::wire::encode_varint(0x00, &mut send_buf);
+                            crate::udp::wire::encode_varint(b.len() as u64, &mut send_buf);
+                            send_buf.extend_from_slice(b);
                         }
 
                         // 3. Write all encoded frames to the send stream

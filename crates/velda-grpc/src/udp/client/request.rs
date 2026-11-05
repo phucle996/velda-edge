@@ -121,11 +121,11 @@ impl GrpcUdpClientRequest {
         let mut send_buf = BytesMut::new();
         encode_udp_frame(&header_frame, &mut send_buf);
 
-        if let Body::Bytes(ref b) = self.body
-            && !b.is_empty()
-        {
-            let data_frame = UdpFrame::Data(b.clone());
-            encode_udp_frame(&data_frame, &mut send_buf);
+        let b = self.body.as_slice();
+        if !b.is_empty() {
+            crate::udp::wire::encode_varint(0x00, &mut send_buf);
+            crate::udp::wire::encode_varint(b.len() as u64, &mut send_buf);
+            send_buf.extend_from_slice(b);
         }
 
         send_buf

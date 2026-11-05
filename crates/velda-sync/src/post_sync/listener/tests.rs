@@ -35,7 +35,6 @@ fn test_parse_valid_listeners() {
             "http1": {
                 "max_body_size": 10485760,
                 "max_header_size": 65536,
-                "max_headers": 64,
                 "idle_timeout_ms": 30000
             }
         }]

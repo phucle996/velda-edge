@@ -44,7 +44,10 @@ where
     }
 
     // 3. Read entire downstream body into RAM (protect upstream pool from slow uploads)
-    let body = match conn.read_body_into_slab(framing, None).await {
+    let body = match conn
+        .read_body_into_slab(framing, Some(&meta.slab_pool))
+        .await
+    {
         Ok(b) => b,
         Err(Http1Error::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(

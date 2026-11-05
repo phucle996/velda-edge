@@ -5,11 +5,11 @@
 //!
 //! # Core Invariants:
 //! - **Per-Core Symmetrical Pairing**: Exactly 1 Primary Traffic Worker (`SCHED_OTHER`)
-//!   and 1 Auxiliary Shadow Worker (`SCHED_IDLE`) pinned 1:1 to each CPU core.
+//!   and 1 Shadow Logistics Worker (`SCHED_IDLE`) pinned 1:1 to each CPU core.
 //! - **0% CPU Contention on Hot Path**: CFS preempts Shadow Workers instantly when
 //!   traffic arrives on the Primary Traffic Worker.
 //! - **Hook-Driven Architecture**: Shadow Workers provide a single core-local Hook
-//!   channel. Plugins and auxiliary services register tasks directly into this Hook
+//!   channel. Plugins and background services register tasks directly into this Hook
 //!   without arbitrary detached background task spawning.
 
 use std::collections::HashMap;
@@ -219,7 +219,7 @@ impl std::future::Future for WithTrafficHandle {
     }
 }
 
-/// Spawns a dedicated Shadow Auxiliary Worker thread pinned to `core_id`.
+/// Spawns a dedicated Shadow Logistics Worker thread pinned to `core_id`.
 ///
 /// Drives the core-local Shadow Hook receiver and, for Worker 0, hosts process-wide
 /// background plugins and system maintenance routines inside a single unified event loop.
@@ -279,26 +279,13 @@ pub fn spawn_shadow_worker(
                             }
                         }
                     });
-
-                    // 3. Register Buffer Pool Sweeper
-                    let sweeper_pool = shared_runtime.load().buffer_pool.clone();
-                    let mut sweeper_shutdown = shutdown.clone();
-                    bg_tasks.spawn(async move {
-                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-                        loop {
-                            tokio::select! {
-                                _ = interval.tick() => {
-                                    let _ = sweeper_pool.sweep_all_cores(std::time::Instant::now());
-                                }
-                                _ = sweeper_shutdown.changed() => break,
-                            }
-                        }
-                    });
                 }
 
-                // Initial upstream connection pre-warming on bootstrap
+                // Initial upstream connection pre-warming and core-local buffer pool maintenance on bootstrap
                 {
-                    let upstreams = shared_runtime.load().upstreams.clone();
+                    let rt = shared_runtime.load();
+                    rt.buffer_pool.maintain_lane(worker_id);
+                    let upstreams = rt.upstreams.clone();
                     if let Some(ref th) = traffic_handle {
                         let _guard = th.enter();
                         upstreams.prewarm_lane(worker_id).await;
@@ -313,9 +300,18 @@ pub fn spawn_shadow_worker(
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
-                        // Autonomous background upstream pre-warming on SCHED_IDLE
+                        // Autonomous background upstream pre-warming & core-local buffer maintenance on SCHED_IDLE
                         _ = prewarm_interval.tick() => {
-                            let upstreams = shared_runtime.load().upstreams.clone();
+                            let rt = shared_runtime.load();
+                            // Strict Core-Jailing Invariant:
+                            // velda-shadow-{worker_id} exclusively maintains its own core's buffer pool inline:
+                            // - Proactively commits physical memory (touches 4KB pages) into burst queue when available <= 25%
+                            // - Evicts burst slabs idle > 15s back to jemalloc RSS (retaining dirty pages for next burst)
+                            // Zero cross-core contention, zero task spawning (NO SPAWN).
+                            // Automatically counts time using lock-free coarse clock (~0.5ns relaxed AtomicU64 load).
+                            rt.buffer_pool.maintain_lane(worker_id);
+
+                            let upstreams = rt.upstreams.clone();
                             if let Some(ref th) = traffic_handle {
                                 let _guard = th.enter();
                                 upstreams.prewarm_lane(worker_id).await;
@@ -363,6 +359,7 @@ pub fn spawn_shadow_worker(
                                     last_revision = current_rt.revision;
                                 }
 
+                                current_rt.buffer_pool.maintain_lane(worker_id);
                                 let upstreams = current_rt.upstreams.clone();
                                 if let Some(ref th) = traffic_handle {
                                     let _guard = th.enter();
@@ -386,7 +383,7 @@ pub fn spawn_shadow_worker(
         .expect("Failed to spawn shadow worker thread")
 }
 
-/// Helper registering declared background auxiliary plugins into a task [`JoinSet`].
+/// Helper registering declared background plugins into a task [`JoinSet`].
 fn register_background_plugins(
     tasks: &mut JoinSet<()>,
     plugins: &[Arc<dyn velda_plugin::BackgroundPlugin>],
@@ -397,11 +394,11 @@ fn register_background_plugins(
         let s = shutdown.clone();
         tasks.spawn(async move {
             let id = p.id().to_string();
-            tracing::info!(plugin_id = %id, "Background auxiliary plugin starting on Shadow Worker");
+            tracing::info!(plugin_id = %id, "Background plugin starting on Shadow Worker");
             if let Err(e) = p.run(s).await {
-                tracing::error!(plugin_id = %id, error = %e, "Background auxiliary plugin exited with error");
+                tracing::error!(plugin_id = %id, error = %e, "Background plugin exited with error");
             } else {
-                tracing::info!(plugin_id = %id, "Background auxiliary plugin stopped cleanly");
+                tracing::info!(plugin_id = %id, "Background plugin stopped cleanly");
             }
         });
     }

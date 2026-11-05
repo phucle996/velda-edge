@@ -101,11 +101,11 @@ impl Http3ClientRequest {
         let mut send_buf = BytesMut::new();
         encode_frame(&header_frame, &mut send_buf);
 
-        if let Body::Bytes(ref b) = self.body
-            && !b.is_empty()
-        {
-            let data_frame = Http3Frame::Data(b.clone());
-            encode_frame(&data_frame, &mut send_buf);
+        let b = self.body.as_slice();
+        if !b.is_empty() {
+            crate::frame::encode_varint(crate::frame::frame_id::DATA, &mut send_buf);
+            crate::frame::encode_varint(b.len() as u64, &mut send_buf);
+            send_buf.extend_from_slice(b);
         }
 
         send_buf

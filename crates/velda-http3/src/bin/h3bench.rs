@@ -251,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(_) => http::Uri::from_static("/"),
                     },
                     http::Version::HTTP_3,
-                    velda_core::HeaderWorkspace::empty(),
+                    velda_core::HeaderWorkspace::default(),
                     Body::Empty,
                 );
 

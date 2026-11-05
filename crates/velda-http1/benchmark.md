@@ -28,7 +28,7 @@ Tests were executed using the custom counting allocator and timing suite in:
 | **Multicore Encoding Scaling** | 24 Workers (Parallel serialize) | **183.77 M ops/s** (21.91 GB/s) | **Exceeded** (Lock-free scaling >180M) |
 | **Keep-Alive Connection Storm** | 16 Tasks, 80,000 duplex ops | **7.92 M ops/s**, **0 deadlocks** | **Passed** (10.10 ms total duration) |
 | **Smuggling Rejection (TE/CL)** | Malformed / negative / overflow | **100% Deterministic Rejection** | **Passed** (Zero ambiguity, < 290 ns) |
-| **Header Bomb Resistance** | >64 headers / 4KB values | **Bounded & Rejected** | **Passed** (`Http1Config::max_headers` bound) |
+| **Header Bomb Resistance** | >1024 headers / 4KB values | **Bounded & Rejected** | **Passed** (`Http1Config::max_headers` bound) |
 | **Slowloris Drip Resistance** | Incomplete fragment feeding | **98.74 ns**, `Ok(None)` | **Passed** (Zero buffer advance) |
 | **Hostile Token Injection** | 1,000,000 SQLi/null/mutations | **4.81 M ops/s**, **0 panics** | **Passed** (Deterministic error return) |
 | **Pipeline Boundary Fuzzing** | 500,000 partial & back-to-back | **1.12 M cycles/s**, **0 corrupt**| **Passed** (Strict frame boundary) |
@@ -142,7 +142,7 @@ Evaluates RFC 9112 conformance, parser resilience against smuggling vectors, hea
 
 | Stress Vector | Payload Description | Outcome | Latency / op | Invariant Enforced |
 | :--- | :--- | :--- | :--- | :--- |
-| **Header Bomb (>64 Headers)** | 1,785 bytes (65 distinct headers) | Rejected / Bounded | **885.41 ns** | Bounded by `Http1Config::max_headers` |
+| **Header Bomb (>1024 Headers)** | Bounded header flood exceeding MAX_WIRE_HEADERS | Rejected / Bounded | **885.41 ns** | Bounded by `Http1Config::max_headers` |
 | **4KB Giant Header Value** | 4,141 bytes oversized header value | Parsed / Bounded | **1270.57 ns** | Bounded header capacity |
 | **Slowloris Incomplete Drip** | 45 bytes truncated mid-header | Pending (`Ok(None)`) | **98.74 ns** | Zero buffer advance, preserves stream |
 

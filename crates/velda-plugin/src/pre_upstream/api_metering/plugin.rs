@@ -323,8 +323,12 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
             .or_else(|| self.config.tiers.get(&self.config.default_tier))
             .unwrap_or(&default_cfg);
 
-        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
-        let now_sec = req.ingress_time_sec;
+        // Use authoritative pre-sampled ingress timestamp from HeaderWorkspace (0ns)
+        let now_sec = if req.headers.ingress_time_sec != 0 {
+            req.headers.ingress_time_sec
+        } else {
+            req.ingress_time_sec
+        };
         let now_instant = Instant::now();
 
         match self.state.evaluate(
@@ -343,18 +347,19 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                     req.headers.insert(&X_METERING_TIER, val);
                 }
                 req.headers
-                    .insert(&X_METERING_REMAINING, HeaderValue::from(min_remaining));
+                    .set_u64(X_METERING_REMAINING.clone(), min_remaining);
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
                     req.headers.insert(&X_METERING_WINDOW, val);
                 }
-                let balance_val = if balance_micro_credits >= 0 {
-                    HeaderValue::from(balance_micro_credits as u64)
+                if balance_micro_credits >= 0 {
+                    req.headers
+                        .set_u64(X_METERING_BALANCE.clone(), balance_micro_credits as u64);
                 } else {
                     let mut itoa_buf = itoa::Buffer::new();
-                    HeaderValue::from_str(itoa_buf.format(balance_micro_credits))
-                        .unwrap_or_else(|_| HeaderValue::from_static("0"))
-                };
-                req.headers.insert(&X_METERING_BALANCE, balance_val);
+                    let balance_val = HeaderValue::from_str(itoa_buf.format(balance_micro_credits))
+                        .unwrap_or_else(|_| HeaderValue::from_static("0"));
+                    req.headers.insert(&X_METERING_BALANCE, balance_val);
+                }
                 Action::Continue
             }
             MeteringDecision::OverageAllowed { negative_balance } => {
@@ -387,7 +392,7 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                         CONTENT_TYPE,
                         HeaderValue::from_static("application/json; charset=utf-8"),
                     );
-                    resp.headers.insert(CONTENT_LENGTH, HeaderValue::from(len));
+                    resp.headers.set_u64(CONTENT_LENGTH, len as u64);
                     if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
                         resp.headers.insert(&X_METERING_TIER, val);
                     }
@@ -395,16 +400,15 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                         resp.headers.insert(&X_METERING_EXHAUSTED_WINDOW, val);
                     }
                     if reset_seconds > 0 {
-                        resp.headers
-                            .insert(RETRY_AFTER, HeaderValue::from(reset_seconds));
+                        resp.headers.set_u64(RETRY_AFTER, reset_seconds);
                     }
+                    resp.headers.render();
 
                     Action::Respond(resp)
                 }
                 ExhaustedAction::Reject429 => {
                     if reset_seconds > 0 {
-                        req.headers
-                            .insert_bypass(RETRY_AFTER, HeaderValue::from(reset_seconds));
+                        req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
                     }
                     if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
                         req.headers.insert_bypass(X_METERING_TIER.clone(), val);

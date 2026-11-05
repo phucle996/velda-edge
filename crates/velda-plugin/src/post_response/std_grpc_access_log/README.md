@@ -22,7 +22,7 @@ Built strictly around the **Hourglass Architecture**, **AGENTS.md Rule 2.7 (HTTP
    Canonical gRPC status codes (0..=16) directly index into a 17-element array of precomputed threshold integers. Status codes configured with a rate of `0.0` (or omitted from the config) trigger an instant hot-path escape in **under 1.0 nanosecond**.
 
 4. **Frontline vs Shadow Logistics Worker Separation (Rule 2.9)**:
-   Frontline workers never perform standard stream I/O or acquire mutexes. A background Shadow Logistics Worker pinned to an auxiliary core drains SPSC ring buffer shards and serializes batches directly to `stdout` or `stderr` via single `libc::write` syscalls.
+   Frontline workers never perform standard stream I/O or acquire mutexes. A background Shadow Logistics Worker pinned to the same CPU core drains SPSC ring buffer shards and serializes batches directly to `stdout` or `stderr` via single `libc::write` syscalls.
 
 5. **Trailers & Streaming Message Awareness**:
    Unlike generic HTTP loggers, `std_grpc_access_log` natively tracks:

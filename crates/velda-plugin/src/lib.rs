@@ -1,12 +1,12 @@
-//! Velda Plugin Engine and Auxiliary Extensions (`velda-plugin`).
+//! Velda Plugin Engine and Edge Extensions (`velda-plugin`).
 //!
 //! Provides extensible edge capabilities divided strictly across canonical pipeline phases:
 //! - **Traffic Phase Plugins**: Evaluated linearly within the request pipeline:
 //!   - [`pre_route`]: Evaluated immediately after downstream L7 decode, before route lookup.
 //!   - [`pre_upstream`]: Evaluated after route and endpoint selection, before upstream request dispatch.
 //!   - [`post_response`]: Evaluated on upstream responses before downstream frame encoding.
-//! - **Auxiliary Background Plugins**:
-//!   - [`background`]: Executed on auxiliary supervisory runtimes isolated from Data Plane workers
+//! - **Background Plugins**:
+//!   - [`background`]: Executed on Shadow Logistics Worker runtimes isolated from Data Plane workers
 //!     (e.g., Prometheus Exporter, Health Probes).
 
 pub mod background;

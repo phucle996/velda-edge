@@ -151,7 +151,7 @@ mod tests {
 
         let mut bypass_resp = L7Response::from_bytes(StatusCode::OK, b"{\"order\":42}".to_vec())
             .with_headers(bypass_headers);
-        let empty_req_headers = velda_core::HeaderWorkspace::empty();
+        let empty_req_headers = velda_core::HeaderWorkspace::default();
 
         store_plugin.on_response(&empty_req_headers, &mut bypass_resp);
         assert_eq!(bypass_resp.headers.get("x-cache").unwrap(), "BYPASS");

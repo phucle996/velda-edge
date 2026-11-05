@@ -108,6 +108,11 @@ pub async fn process_grpc_udp_request(
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) -> L7Response {
+    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
+    if req.headers.len() > velda_core::MAX_WIRE_HEADERS {
+        return GrpcStatus::ResourceExhausted.to_l7_response(Some("too many request headers"));
+    }
+
     let authority = req
         .headers
         .get(":authority")

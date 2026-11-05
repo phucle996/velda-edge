@@ -211,15 +211,7 @@ impl CacheEntry {
             if let Some(header) = accept_encoding
                 && let Ok(header_str) = header.to_str()
             {
-                let prefs =
-                    crate::post_response::response_compression::algorithm::parse_accept_encoding(
-                        header_str,
-                    );
-                let identity_forbidden = prefs.iter().any(|p| {
-                    (p.algorithm.is_none() || p.algorithm == Some(CompressionAlgorithm::Deflate))
-                        && p.q == 0.0
-                });
-                if !identity_forbidden {
+                if crate::post_response::response_compression::is_identity_acceptable(header_str) {
                     return Some((raw.clone(), None));
                 }
             } else {
@@ -229,27 +221,6 @@ impl CacheEntry {
 
         // 3. No compatible representation available in cache for this client
         None
-    }
-
-    /// Backwards-compatible convenience method delegating to [`Self::negotiate_smart_variant`].
-    #[inline]
-    pub fn negotiate_payload(
-        &self,
-        accept_encoding: Option<&http::HeaderValue>,
-    ) -> (Bytes, Option<http::HeaderValue>) {
-        if let Some(res) = self.negotiate_smart_variant(accept_encoding) {
-            res
-        } else if let Some(raw) = &self.raw_body {
-            (raw.clone(), None)
-        } else if let Some(br) = &self.variants.brotli {
-            (br.clone(), Some(http::HeaderValue::from_static("br")))
-        } else if let Some(zstd) = &self.variants.zstd {
-            (zstd.clone(), Some(http::HeaderValue::from_static("zstd")))
-        } else if let Some(gzip) = &self.variants.gzip {
-            (gzip.clone(), Some(http::HeaderValue::from_static("gzip")))
-        } else {
-            (Bytes::new(), None)
-        }
     }
 }
 
@@ -285,41 +256,6 @@ mod tests {
 
         assert!(entry.is_public);
         assert!(entry.is_fresh());
-    }
-
-    #[test]
-    fn test_negotiate_payload_variants() {
-        let variants = CompressedVariants {
-            gzip: Some(Bytes::from_static(b"gzip payload")),
-            brotli: Some(Bytes::from_static(b"brotli payload")),
-            zstd: Some(Bytes::from_static(b"zstd payload")),
-        };
-
-        let entry = CacheEntry::with_raw(
-            "GET:example.com:/data",
-            StatusCode::OK,
-            None,
-            Bytes::from_static(b"raw data"),
-            Duration::from_secs(60),
-        )
-        .with_variants(variants);
-
-        // Client supports all -> Server preference selects zstd
-        let ae_all = HeaderValue::from_static("gzip, deflate, br, zstd");
-        let (payload, enc) = entry.negotiate_payload(Some(&ae_all));
-        assert_eq!(payload.as_ref(), b"zstd payload");
-        assert_eq!(enc.unwrap().to_str().unwrap(), "zstd");
-
-        // Client supports only gzip
-        let ae_gzip = HeaderValue::from_static("gzip");
-        let (payload, enc) = entry.negotiate_payload(Some(&ae_gzip));
-        assert_eq!(payload.as_ref(), b"gzip payload");
-        assert_eq!(enc.unwrap().to_str().unwrap(), "gzip");
-
-        // Client sends no Accept-Encoding -> Serves raw uncompressed body
-        let (payload, enc) = entry.negotiate_payload(None);
-        assert_eq!(payload.as_ref(), b"raw data");
-        assert!(enc.is_none());
     }
 
     #[test]

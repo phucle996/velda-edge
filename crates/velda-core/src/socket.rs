@@ -1,7 +1,7 @@
 //! Host Socket and Network Listener Management (`socket`).
 //!
 //! Provides the process-wide Single Source of Truth for all listening network sockets
-//! opened across the host (Data Plane Traffic, Auxiliary Services, and Gateway Management).
+//! opened across the host (Data Plane Traffic, Shadow Logistics Services, and Gateway Management).
 
 use std::net::SocketAddr;
 use std::sync::{OnceLock, RwLock};
@@ -11,7 +11,7 @@ use std::sync::{OnceLock, RwLock};
 pub enum SocketRole {
     /// Data Plane Traffic Ingress: Pinned to CPU cores, multi-worker SO_REUSEPORT (HTTP/1, HTTP/2, HTTP/3, gRPC, Raw).
     Traffic,
-    /// Shadow Auxiliary Service: Single-listener TCP running on shadow worker thread (e.g. Prometheus Exporter, Health Probes).
+    /// Shadow Service: Single-listener TCP running on shadow worker thread (e.g. Prometheus Exporter, Health Probes).
     Shadow,
     /// Gateway Control / Management (e.g. UDS IPC Socket).
     Management,
@@ -165,7 +165,7 @@ impl SocketManager {
         self.register_claim(claim)
     }
 
-    /// Atomically validates conflicts, performs OS `bind()`, and records an auxiliary shadow TCP listener.
+    /// Atomically validates conflicts, performs OS `bind()`, and records a shadow TCP listener.
     ///
     /// Returns the standard library [`std::net::TcpListener`] ready for non-blocking wrapping.
     pub fn acquire_shadow_tcp(

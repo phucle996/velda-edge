@@ -24,7 +24,7 @@ use velda_core::{Body, L7Request, L7Response};
 
 use super::response::Http3StreamResponse;
 use crate::error::Http3Error;
-use crate::frame::{Http3Frame, decode_frame, encode_frame, error_code};
+use crate::frame::{Http3Frame, decode_frame, encode_frame, encode_varint, error_code, frame_id};
 use crate::qpack::{decode_qpack, encode_qpack_request};
 
 /// Return type for [`ClientCommand::OpenStream`].
@@ -210,12 +210,11 @@ fn dispatch_open_command(
             let mut send_buf = BytesMut::new();
             encode_frame(&header_frame, &mut send_buf);
 
-            // Move bytes directly into Http3Frame::Data to avoid copying buffer memory
-            if let Body::Bytes(b) = request.body
-                && !b.is_empty()
-            {
-                let data_frame = Http3Frame::Data(b);
-                encode_frame(&data_frame, &mut send_buf);
+            let b = request.body.as_slice();
+            if !b.is_empty() {
+                encode_varint(frame_id::DATA, &mut send_buf);
+                encode_varint(b.len() as u64, &mut send_buf);
+                send_buf.extend_from_slice(b);
             }
 
             let mut slot = ActiveStreamSlot {
@@ -248,12 +247,11 @@ fn dispatch_open_command(
             let mut send_buf = BytesMut::new();
             encode_frame(&header_frame, &mut send_buf);
 
-            // Move bytes directly into Http3Frame::Data to avoid copying buffer memory
-            if let Body::Bytes(b) = request.body
-                && !b.is_empty()
-            {
-                let data_frame = Http3Frame::Data(b);
-                encode_frame(&data_frame, &mut send_buf);
+            let b = request.body.as_slice();
+            if !b.is_empty() {
+                encode_varint(frame_id::DATA, &mut send_buf);
+                encode_varint(b.len() as u64, &mut send_buf);
+                send_buf.extend_from_slice(b);
             }
 
             // Channel capacity of 32 chunks provides sufficient pipeline credit while bounding memory under slow consumers

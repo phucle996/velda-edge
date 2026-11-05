@@ -11,7 +11,7 @@ High-performance, lock-free OpenTelemetry Metrics background exporter for the **
 | **Plugin ID** | `otlp_metrics_exporter` |
 | **Canonical Phase** | `background` (Autonomous Worker) |
 | **Execution Runtime** | Evaluated strictly on Shadow Worker supervisory threads (`velda-shadow-0`) with idle priority (`SCHED_IDLE`) |
-| **Reverse Capability** | `PluginCapability::default()` (Non-request-serving background auxiliary service) |
+| **Reverse Capability** | `PluginCapability::default()` (Non-request-serving background shadow service) |
 | **Supported Protocols** | Protocol-agnostic telemetry ingestion (Reports metrics across HTTP/1.1, HTTP/2, HTTP/3, and gRPC) |
 | **Hot-Path Overhead** | **0 ns serving cost**; zero lock contention, zero allocations, and zero network I/O on traffic worker cores |
 

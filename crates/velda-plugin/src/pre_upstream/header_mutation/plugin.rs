@@ -341,75 +341,6 @@ impl HeaderMutationPlugin {
     }
 }
 
-#[inline]
-fn resolve_dynamic_var_cached(
-    var: DynamicVar,
-    req: &L7Request,
-    cached_client_ip: &mut Option<HeaderValue>,
-    cached_scheme: &mut Option<HeaderValue>,
-) -> Option<HeaderValue> {
-    match var {
-        DynamicVar::ClientIp => {
-            if let Some(ip) = cached_client_ip.as_ref() {
-                return Some(ip.clone());
-            }
-            let ip = if let Some(real_ip) = req.headers.get("x-real-ip") {
-                real_ip.clone()
-            } else if let Some(xff) = req
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-            {
-                let nearest = xff
-                    .rsplit(',')
-                    .next()
-                    .map(|s| s.trim())
-                    .unwrap_or("127.0.0.1");
-                HeaderValue::from_str(nearest)
-                    .unwrap_or_else(|_| HeaderValue::from_static("127.0.0.1"))
-            } else {
-                HeaderValue::from_static("127.0.0.1")
-            };
-            *cached_client_ip = Some(ip.clone());
-            Some(ip)
-        }
-        DynamicVar::Scheme => {
-            if let Some(s) = cached_scheme.as_ref() {
-                return Some(s.clone());
-            }
-            let is_https = req.uri.scheme_str() == Some("https")
-                || req
-                    .headers
-                    .get("x-forwarded-proto")
-                    .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
-            let val = if is_https {
-                HeaderValue::from_static("https")
-            } else {
-                HeaderValue::from_static("http")
-            };
-            *cached_scheme = Some(val.clone());
-            Some(val)
-        }
-        DynamicVar::RequestId => Some(req.headers.request_id().clone()),
-        DynamicVar::Host => req
-            .headers
-            .get(http::header::HOST)
-            .cloned()
-            .or_else(|| req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())),
-        DynamicVar::Method => match req.method {
-            http::Method::GET => Some(HeaderValue::from_static("GET")),
-            http::Method::POST => Some(HeaderValue::from_static("POST")),
-            http::Method::PUT => Some(HeaderValue::from_static("PUT")),
-            http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
-            http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
-            http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
-            http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
-            ref m => HeaderValue::from_str(m.as_str()).ok(),
-        },
-        DynamicVar::Path => HeaderValue::from_str(req.uri.path()).ok(),
-    }
-}
-
 impl PreUpstreamPlugin for HeaderMutationPlugin {
     #[inline(always)]
     fn id(&self) -> &str {
@@ -469,24 +400,125 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
             req.headers.append(name.clone(), val.clone());
         }
 
-        // Step 6: Dynamic mutations with stack-cached context (only if dynamic vars configured)
+        // Step 6: Dynamic mutations using arithmetic HeaderWorkspace registers
         if !self.dynamic_sets.is_empty() || !self.dynamic_appends.is_empty() {
-            let mut cached_client_ip: Option<HeaderValue> = None;
-            let mut cached_scheme: Option<HeaderValue> = None;
-
             for (name, var) in &self.dynamic_sets {
-                if let Some(val) =
-                    resolve_dynamic_var_cached(*var, req, &mut cached_client_ip, &mut cached_scheme)
-                {
-                    req.headers.insert(name.clone(), val);
+                match *var {
+                    DynamicVar::ClientIp => {
+                        let ip = req
+                            .headers
+                            .get_ip("x-real-ip")
+                            .or_else(|| req.headers.get_ip("x-forwarded-for"))
+                            .or(req.state.client_ip)
+                            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                        req.headers.set_ip(name.clone(), ip);
+                    }
+                    DynamicVar::RequestId => {
+                        req.headers
+                            .set_hex128(name.clone(), req.headers.request_id_raw);
+                    }
+                    DynamicVar::Scheme => {
+                        let is_https = req.uri.scheme_str() == Some("https")
+                            || req
+                                .headers
+                                .get("x-forwarded-proto")
+                                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
+                        let scheme = if is_https {
+                            b"https" as &[u8]
+                        } else {
+                            b"http" as &[u8]
+                        };
+                        req.headers.set_inline_ascii(name.clone(), scheme);
+                    }
+                    DynamicVar::Host => {
+                        if let Some(val) =
+                            req.headers.get(http::header::HOST).cloned().or_else(|| {
+                                req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())
+                            })
+                        {
+                            req.headers.insert(name.clone(), val);
+                        }
+                    }
+                    DynamicVar::Method => {
+                        let val = match req.method {
+                            http::Method::GET => Some(HeaderValue::from_static("GET")),
+                            http::Method::POST => Some(HeaderValue::from_static("POST")),
+                            http::Method::PUT => Some(HeaderValue::from_static("PUT")),
+                            http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
+                            http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
+                            http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
+                            http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
+                            ref m => HeaderValue::from_str(m.as_str()).ok(),
+                        };
+                        if let Some(v) = val {
+                            req.headers.insert(name.clone(), v);
+                        }
+                    }
+                    DynamicVar::Path => {
+                        if let Ok(val) = HeaderValue::from_str(req.uri.path()) {
+                            req.headers.insert(name.clone(), val);
+                        }
+                    }
                 }
             }
 
             for (name, var) in &self.dynamic_appends {
-                if let Some(val) =
-                    resolve_dynamic_var_cached(*var, req, &mut cached_client_ip, &mut cached_scheme)
-                {
-                    req.headers.append(name.clone(), val);
+                match *var {
+                    DynamicVar::ClientIp => {
+                        let ip = req
+                            .headers
+                            .get_ip("x-real-ip")
+                            .or_else(|| req.headers.get_ip("x-forwarded-for"))
+                            .or(req.state.client_ip)
+                            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                        req.headers.append_ip(name.clone(), ip);
+                    }
+                    DynamicVar::RequestId => {
+                        req.headers
+                            .append_hex128(name.clone(), req.headers.request_id_raw);
+                    }
+                    DynamicVar::Scheme => {
+                        let is_https = req.uri.scheme_str() == Some("https")
+                            || req
+                                .headers
+                                .get("x-forwarded-proto")
+                                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
+                        let scheme = if is_https {
+                            b"https" as &[u8]
+                        } else {
+                            b"http" as &[u8]
+                        };
+                        req.headers.append_inline_ascii(name.clone(), scheme);
+                    }
+                    DynamicVar::Host => {
+                        if let Some(val) =
+                            req.headers.get(http::header::HOST).cloned().or_else(|| {
+                                req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())
+                            })
+                        {
+                            req.headers.append(name.clone(), val);
+                        }
+                    }
+                    DynamicVar::Method => {
+                        let val = match req.method {
+                            http::Method::GET => Some(HeaderValue::from_static("GET")),
+                            http::Method::POST => Some(HeaderValue::from_static("POST")),
+                            http::Method::PUT => Some(HeaderValue::from_static("PUT")),
+                            http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
+                            http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
+                            http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
+                            http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
+                            ref m => HeaderValue::from_str(m.as_str()).ok(),
+                        };
+                        if let Some(v) = val {
+                            req.headers.append(name.clone(), v);
+                        }
+                    }
+                    DynamicVar::Path => {
+                        if let Ok(val) = HeaderValue::from_str(req.uri.path()) {
+                            req.headers.append(name.clone(), val);
+                        }
+                    }
                 }
             }
         }
@@ -681,6 +713,18 @@ mod tests {
 
         let mut target = Arc::from("billing-backend-cluster");
         plugin.on_upstream_request(&mut req, &mut target);
+
+        // Verify arithmetic workspace state before rendering
+        assert_eq!(
+            req.headers.get_ip("x-client-ip"),
+            Some("198.51.100.25".parse().unwrap())
+        );
+        assert_eq!(
+            req.headers.get_hex128("x-req-id"),
+            Some(req.headers.request_id_raw)
+        );
+
+        req.headers.render();
 
         // Edge x-real-ip takes precedence over untrusted xff prefix
         assert_eq!(req.headers.get("x-client-ip").unwrap(), "198.51.100.25");

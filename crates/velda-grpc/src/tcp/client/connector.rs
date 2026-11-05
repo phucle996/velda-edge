@@ -7,7 +7,7 @@ use bytes::Bytes;
 use h2::SendStream;
 use h2::client::{ResponseFuture, SendRequest};
 use std::net::SocketAddr;
-use velda_core::{Body, L7Request, L7Response};
+use velda_core::{L7Request, L7Response};
 use velda_tls::TlsClientEngine;
 
 use crate::config::GrpcConfig;
@@ -494,9 +494,9 @@ impl GrpcUpstreamConnector {
         let (http_req, end_of_stream) = req.encode_http_request()?;
         let (response_future, mut send_stream) = self.open_stream(http_req, end_of_stream)?;
 
-        if let Body::Bytes(ref data) = req.body {
+        if !req.body.is_empty() {
             send_stream
-                .send_data(data.clone(), true)
+                .send_data(req.body.to_bytes(), true)
                 .map_err(GrpcError::H2)?;
         }
 

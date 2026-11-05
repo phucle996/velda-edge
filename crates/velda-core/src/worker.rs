@@ -20,7 +20,7 @@ impl std::fmt::Display for WorkerId {
 pub enum WorkerRole {
     /// Primary Traffic Worker: Pinned to CPU core, normal priority (`SCHED_OTHER`), serves user traffic hot path.
     Traffic,
-    /// Shadow Worker: Pinned to the same CPU core, lowest priority (`SCHED_IDLE`), executes all auxiliary & plugin tasks.
+    /// Shadow Worker: Pinned to the same CPU core, lowest priority (`SCHED_IDLE`), executes all background logistics & plugin tasks.
     Shadow,
 }
 

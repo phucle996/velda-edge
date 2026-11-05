@@ -20,7 +20,7 @@ use crate::error::EdgeError;
 pub struct PluginTable {
     /// O(1) integer lookup table: RouteId -> RoutePluginPlan.
     pub routes: FxHashMap<RouteId, Arc<RoutePluginPlan>>,
-    /// Active background auxiliary plugins running on supervisory threads.
+    /// Active background plugins running on Shadow Worker.
     pub background_plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>>,
     /// Canonical empty plan singleton used for routes without any declared plugins.
     pub empty_plan: Arc<RoutePluginPlan>,

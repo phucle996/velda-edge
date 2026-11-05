@@ -41,7 +41,7 @@ impl L7Response {
         Self {
             status,
             version: Version::HTTP_11,
-            headers: HeaderWorkspace::empty(),
+            headers: HeaderWorkspace::default(),
             body: Body::Empty,
         }
     }
@@ -52,7 +52,7 @@ impl L7Response {
         Self {
             status,
             version: Version::HTTP_11,
-            headers: HeaderWorkspace::empty(),
+            headers: HeaderWorkspace::default(),
             body: Body::Bytes(bytes.into()),
         }
     }
@@ -67,7 +67,7 @@ impl L7Response {
         Self {
             status,
             version: Version::HTTP_11,
-            headers: HeaderWorkspace::empty(),
+            headers: HeaderWorkspace::default(),
             body: Body::from_slab(lease, len),
         }
     }

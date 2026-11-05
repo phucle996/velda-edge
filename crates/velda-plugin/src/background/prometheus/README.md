@@ -1,6 +1,6 @@
 # Prometheus Metrics Exporter Plugin (`prometheus_exporter`)
 
-Production-grade background service exposing zero-allocation OpenMetrics / Prometheus scrape endpoints on an isolated auxiliary port.
+Production-grade background service exposing zero-allocation OpenMetrics / Prometheus scrape endpoints on an isolated management port.
 
 ---
 
@@ -10,8 +10,8 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 | :--- | :--- |
 | **Plugin ID** | `prometheus_exporter` |
 | **Canonical Phase** | `background` |
-| **Execution Runtime** | Isolated auxiliary thread with cooperative scheduling |
-| **Auxiliary Socket** | `0.0.0.0:9090` (Auxiliary Port) |
+| **Execution Runtime** | Isolated shadow thread with cooperative scheduling |
+| **Management Socket** | `0.0.0.0:9090` (Management Port) |
 | **Hot-Path Overhead** | **Zero**. Runs completely out-of-band; zero overhead on traffic workers |
 | **Format** | Prometheus Text-based format 0.0.4 / OpenMetrics standard |
 | **Security** | Supports Optional TLS/mTLS, Bearer Token / HTTP Basic Authentication, and CORS |
@@ -25,9 +25,9 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `listen` | String | **Yes** | Valid `IP:PORT` socket address (must not collide with ingress listeners) | `"0.0.0.0:9090"` | Dedicated auxiliary IP:Port socket to bind and expose metrics. |
+| `listen` | String | **Yes** | Valid `IP:PORT` socket address (must not collide with ingress listeners) | `"0.0.0.0:9090"` | Dedicated management IP:Port socket to bind and expose metrics. |
 | `path` | String | **Yes** | Must start with `/` | `"/metrics"` | HTTP URI path where scraper fetches metrics. |
-| `protocol` | String | **Yes** | `"http"` or `"https"` | `"http"` | Transport protocol for the auxiliary exporter server. |
+| `protocol` | String | **Yes** | `"http"` or `"https"` | `"http"` | Transport protocol for the management exporter server. |
 | `scrape.timeout_ms` | Integer (u64) | **Yes** | `100 ..= 60000` ms | `5000` | Exporter scraping request timeout threshold in milliseconds. |
 | `scrape.max_concurrency` | Integer (usize) | **Yes** | `1 ..= 1024` | `16` | Maximum concurrent scraper connections allowed simultaneously. |
 | `scrape.max_buffer_size_kb` | Integer (usize) | **Yes** | `16 ..= 16384` KB | `256` | Maximum scratch buffer capacity allocated for OpenMetrics serialization. |
@@ -46,13 +46,13 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 ---
 
-## 3. Auxiliary Port Isolation Invariant
+## 3. Management Port Isolation Invariant
 
 > [!CAUTION]
-> **Auxiliary Port Isolation Invariant**: The Prometheus exporter socket (`listen`) runs as an auxiliary background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
+> **Management Port Isolation Invariant**: The Prometheus exporter socket (`listen`) runs as a shadow background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
 > 
-> The configuration compiler validates that the set of auxiliary ports and traffic listener ports are strictly disjoint:
-> $$\text{ListenerPorts} \cap \text{AuxiliaryPorts} = \emptyset$$
+> The configuration compiler validates that the set of management ports and traffic listener ports are strictly disjoint:
+> $$\text{ListenerPorts} \cap \text{ManagementPorts} = \emptyset$$
 
 ---
 
@@ -98,7 +98,7 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 ```
 
 > [!NOTE]
-> Background plugins are not attached to individual HTTP/gRPC routes. They run as standalone auxiliary daemons managed by the runtime lifecycle engine.
+> Background plugins are not attached to individual HTTP/gRPC routes. They run as standalone shadow daemons managed by the runtime lifecycle engine.
 
 ---
 

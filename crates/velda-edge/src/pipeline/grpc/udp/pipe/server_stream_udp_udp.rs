@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use velda_core::{Body, L7Request, L7Response};
+use velda_core::{L7Request, L7Response};
 use velda_grpc::udp::client::GrpcUdpClient;
 use velda_grpc::{GrpcConfig, GrpcError};
 
@@ -24,10 +24,8 @@ async fn pipe_server_stream_wire(
 
     let workflow = async {
         // Step 1: Validate downstream request message
-        if let Body::Bytes(ref b) = req.body
-            && !b.is_empty()
-            && b.len() >= 5
-        {
+        let b = req.body.as_slice();
+        if !b.is_empty() && b.len() >= 5 {
             let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
             if declared_len > config.max_message_size {
                 return Err(GrpcError::PayloadTooLarge(declared_len));

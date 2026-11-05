@@ -41,10 +41,8 @@ async fn forward_buffered(
 
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
-    if let Body::Bytes(b) = body
-        && !b.is_empty()
-    {
-        send_stream.send_data(b.clone(), true)?;
+    if has_body {
+        send_stream.send_data(body.to_bytes(), true)?;
     }
 
     let response = response_fut.await?;
@@ -176,7 +174,7 @@ pub async fn serve(
     plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
-    let body = match receiver.consume_all().await {
+    let body = match receiver.consume_all_into_slab(Some(&meta.slab_pool)).await {
         Ok(b) => b,
         Err(e) => {
             let mut err_resp = L7Response::from_bytes(

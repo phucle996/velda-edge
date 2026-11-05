@@ -25,7 +25,7 @@ pub async fn serve(
     plan: &velda_plugin::RoutePluginPlan,
 ) {
     // 1. Consume downstream body
-    let body = match receiver.consume_all().await {
+    let body = match receiver.consume_all_into_slab(Some(&meta.slab_pool)).await {
         Ok(b) => b,
         Err(e) => {
             let err_resp = L7Response::from_bytes(

@@ -1,4 +1,4 @@
-//! Comprehensive integration tests for Prometheus Exporter on Auxiliary Subsystem.
+//! Comprehensive integration tests for Prometheus Exporter on Shadow Subsystem.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -198,20 +198,29 @@ pub fn parse_response_head(
     let max_headers = config.max_headers.max(1);
     let mut stack_headers = [httparse::EMPTY_HEADER; 128];
     let mut heap_headers: Vec<httparse::Header>;
-    let header_slice: &mut [httparse::Header] = if max_headers <= 128 {
-        &mut stack_headers[..max_headers]
-    } else {
-        heap_headers = vec![httparse::EMPTY_HEADER; max_headers];
-        heap_headers.as_mut_slice()
-    };
-    let mut resp = httparse::Response::new(header_slice);
 
-    let status = match resp.parse(data) {
-        Ok(s) => s,
-        Err(httparse::Error::TooManyHeaders) => {
-            return Err(Http1Error::TooManyHeaders(config.max_headers));
+    let (resp, status) = {
+        let fast_cap = max_headers.min(128);
+        let mut resp = httparse::Response::new(&mut stack_headers[..fast_cap]);
+        match resp.parse(data) {
+            Ok(s) => (resp, s),
+            Err(httparse::Error::TooManyHeaders) if max_headers > 128 => {
+                heap_headers = vec![httparse::EMPTY_HEADER; max_headers];
+                let mut resp = httparse::Response::new(heap_headers.as_mut_slice());
+                let s = match resp.parse(data) {
+                    Ok(s) => s,
+                    Err(httparse::Error::TooManyHeaders) => {
+                        return Err(Http1Error::TooManyHeaders(config.max_headers));
+                    }
+                    Err(e) => return Err(Http1Error::Parse(e.to_string())),
+                };
+                (resp, s)
+            }
+            Err(httparse::Error::TooManyHeaders) => {
+                return Err(Http1Error::TooManyHeaders(config.max_headers));
+            }
+            Err(e) => return Err(Http1Error::Parse(e.to_string())),
         }
-        Err(e) => return Err(Http1Error::Parse(e.to_string())),
     };
 
     let header_len = match status {

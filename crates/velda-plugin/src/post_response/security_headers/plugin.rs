@@ -252,7 +252,7 @@ mod tests {
     fn test_default_security_headers_injection() {
         let plugin = SecurityHeadersPlugin::new("sec-default");
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -291,7 +291,7 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::with_config("sec-custom", config);
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -327,7 +327,7 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::with_config("sec-none", config);
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -363,7 +363,7 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::from_config(&plugin_config).unwrap();
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
         plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(
@@ -405,7 +405,7 @@ mod tests {
 
         let plugin = SecurityHeadersPlugin::from_config(&plugin_config).unwrap();
         let mut resp = L7Response::from_bytes(StatusCode::OK, "");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
         plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(

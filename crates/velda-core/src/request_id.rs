@@ -51,7 +51,6 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::HeaderValue;
 
@@ -174,13 +173,10 @@ pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
     (FORMAT_HEX_16_FN)(val, out)
 }
 
-/// Helper to get current Unix epoch in seconds.
+/// Helper to get current Unix epoch in seconds via the lock-free coarse clock (~0.5ns).
 #[inline(always)]
 fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    crate::coarse_time::coarse_now_sec()
 }
 
 /// Pre-computed request ID entry held in the pool.

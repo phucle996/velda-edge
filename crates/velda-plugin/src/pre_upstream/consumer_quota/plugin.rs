@@ -291,8 +291,12 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
     fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut Arc<str>) -> Action {
         let key_hash = resolve_quota_key(req, &self.config.key_headers);
 
-        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
-        let now_sec = req.ingress_time_sec;
+        // Use authoritative pre-sampled ingress timestamp from HeaderWorkspace (0ns)
+        let now_sec = if req.headers.ingress_time_sec != 0 {
+            req.headers.ingress_time_sec
+        } else {
+            req.ingress_time_sec
+        };
         let now_instant = Instant::now();
 
         match self
@@ -303,9 +307,9 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
                 min_remaining,
                 window_name,
             } => {
-                // Zero-allocation integer formatting via itoa in HeaderValue
+                // Deferred arithmetic write into HeaderWorkspace (0 string formatting)
                 req.headers
-                    .insert(&X_QUOTA_REMAINING, HeaderValue::from(min_remaining));
+                    .set_u64(X_QUOTA_REMAINING.clone(), min_remaining);
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
                     req.headers.insert(&X_QUOTA_WINDOW, val);
                 }
@@ -315,11 +319,9 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
                 window_name,
                 reset_seconds,
             } => {
-                // Bit-1 Bypass Header Injection on Rejection (RFC 6585) - Zero-alloc
-                req.headers
-                    .insert_bypass(RETRY_AFTER, HeaderValue::from(reset_seconds));
-                req.headers
-                    .insert_bypass(X_QUOTA_REMAINING.clone(), HeaderValue::from_static("0"));
+                // Bit-1 Bypass Arithmetic Header Injection on Rejection (RFC 6585)
+                req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
+                req.headers.insert_bypass_u64(X_QUOTA_REMAINING.clone(), 0);
                 if let Ok(val) = HeaderValue::from_str(&window_name) {
                     req.headers.insert_bypass(X_QUOTA_WINDOW.clone(), val);
                 }

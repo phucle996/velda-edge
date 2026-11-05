@@ -1,7 +1,7 @@
 //! Plugin Domain Compiler & Lifecycle Engine (`velda-sync::post_sync::plugin`).
 //!
 //! Converts raw plugin configurations (`plugins.json`) into optimized, checksummed
-//! binary runtime artifacts (`plugins.bin`) for consumption by the Data Plane and Auxiliary Subsystem.
+//! binary runtime artifacts (`plugins.bin`) for consumption by the Data Plane and Shadow Logistics Workers.
 //!
 //! # Modular Plugin Schema Architecture
 //! Individual plugin configuration schemas and validation rules are organized under

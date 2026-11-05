@@ -558,3 +558,56 @@ fn test_build_h2_response_zero_allocation_filtering() {
     assert!(resp_headers.get("transfer-encoding").is_none());
     assert!(resp_headers.get("upgrade").is_none());
 }
+
+#[tokio::test]
+async fn test_http2_consume_all_into_slab_lifecycle() {
+    use velda_core::{PayloadSlabPool, SlabClass};
+
+    let (client_io, server_io) = duplex(64 * 1024);
+    let slab_pool = PayloadSlabPool::new(2, 2, 2, 2);
+
+    let payload = b"HTTP/2 multi-chunk payload into pre-warmed slab lease verification test.";
+
+    tokio::spawn(async move {
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("https://example.com/slab-upload")
+            .body(())
+            .unwrap();
+
+        let (resp_fut, mut send_stream) = client.send_request(req, false).unwrap();
+        // Send in 2 separate chunks to verify multi-frame coalescing into slab
+        send_stream
+            .send_data(Bytes::copy_from_slice(&payload[..30]), false)
+            .unwrap();
+        send_stream
+            .send_data(Bytes::copy_from_slice(&payload[30..]), true)
+            .unwrap();
+
+        let _ = resp_fut.await;
+    });
+
+    let mut h2_server = h2::server::handshake(server_io).await.unwrap();
+    let (request, _respond) = h2_server.accept().await.unwrap().unwrap();
+    let (_parts, body_stream) = request.into_parts();
+    let mut receiver = velda_http2::server::Http2StreamReceiver::new(body_stream, 64 * 1024);
+
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
+
+    let body = receiver
+        .consume_all_into_slab(Some(&slab_pool))
+        .await
+        .unwrap();
+
+    assert!(matches!(body, Body::Slab { .. }));
+    assert_eq!(body.as_slice(), payload);
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 1);
+
+    drop(body);
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
+}

@@ -40,12 +40,16 @@ pub mod worker;
 // -----------------------------------------------------------------------------
 
 pub use buffer::{
-    AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderSlotTable, HeaderWorkspace,
-    HeaderWorkspaceLease, MAX_BYPASS_HEADERS, MAX_HEADER_SLOTS, PayloadSlab, PayloadSlabLease,
-    PayloadSlabPool, ShardedBufferPool, SlabClass, X_REQUEST_ID,
+    AdaptivePoolConfig, AdaptiveSlabLimits, CoreBufferPool, HeaderPool, HeaderWorkspace,
+    HeaderWorkspaceLease, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, NumericFmt,
+    NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease, PayloadSlabPool,
+    ShardedBufferPool, SlabClass, X_REQUEST_ID, header_key, resolve_u64_header_value,
 };
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 pub use hardware::AdaptiveBufferDimensions;
+
+/// Maximum physical wire headers allowed across all ingress protocols (Anti-OOM DoS ceiling).
+pub const MAX_WIRE_HEADERS: usize = 1024;
 
 // -----------------------------------------------------------------------------
 // Protocol Family

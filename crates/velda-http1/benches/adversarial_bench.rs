@@ -128,10 +128,10 @@ fn bench_pathological_header_floods() {
 
     let iters = 100_000;
 
-    // 1. Header bomb: 70 headers exceeding MAX_HEADERS (64)
+    // 1. Header bomb: 1050 headers exceeding MAX_WIRE_HEADERS (1024)
     let mut header_bomb = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
-    for i in 0..70 {
-        header_bomb.extend_from_slice(format!("X-Header-{i:03}: value_{i:03}\r\n").as_bytes());
+    for i in 0..1050 {
+        header_bomb.extend_from_slice(format!("X-Header-{i:04}: value_{i:04}\r\n").as_bytes());
     }
     header_bomb.extend_from_slice(b"\r\n");
 
@@ -145,7 +145,7 @@ fn bench_pathological_header_floods() {
 
     let scenarios: [(&str, &[u8], &str); 3] = [
         (
-            "Header Bomb (>64 Headers)",
+            "Header Bomb (>1024 Headers)",
             &header_bomb,
             "Rejected / Bounded",
         ),

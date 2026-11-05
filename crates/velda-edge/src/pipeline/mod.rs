@@ -31,6 +31,7 @@ pub struct DownstreamMeta {
     pub client_ip_header: http::HeaderValue,
     pub client_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
+    pub slab_pool: Arc<velda_core::PayloadSlabPool>,
 }
 
 /// Trait abstraction allowing in-place injection of connection-level headers
@@ -54,7 +55,7 @@ impl HeaderContainer for http::HeaderMap {
 impl HeaderContainer for velda_core::HeaderWorkspace {
     #[inline(always)]
     fn contains_key(&self, key: &http::header::HeaderName) -> bool {
-        self.headers().contains_key(key)
+        velda_core::HeaderWorkspace::contains_key(self, key)
     }
     #[inline(always)]
     fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue) {
@@ -70,10 +71,16 @@ impl DownstreamMeta {
         local_addr: SocketAddr,
         is_tls: bool,
         alt_svc_header: Option<http::HeaderValue>,
+        buffer_pool: &velda_core::ShardedBufferPool,
     ) -> Self {
         let client_ip_header = http::HeaderValue::from_str(&peer.ip().to_string())
             .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));
         let client_port_header = http::HeaderValue::from(local_addr.port());
+        let slab_pool = Arc::clone(
+            &buffer_pool
+                .core_pool(velda_connection_pool::current_thread_lane())
+                .slabs,
+        );
         Self {
             listener_id,
             peer,
@@ -82,6 +89,7 @@ impl DownstreamMeta {
             client_ip_header,
             client_port_header,
             alt_svc_header,
+            slab_pool,
         }
     }
 
@@ -359,7 +367,14 @@ async fn handle_http_auto_stream(
                 "Downstream TLS handshake succeeded for HTTP family"
             );
 
-            let meta = DownstreamMeta::new(listener_id, peer, local_addr, true, config.alt_svc);
+            let meta = DownstreamMeta::new(
+                listener_id,
+                peer,
+                local_addr,
+                true,
+                config.alt_svc,
+                &rt.buffer_pool,
+            );
 
             // ALPN demuxing strictly within the HTTP protocol family.
             // When ALPN is omitted by the client, default to HTTP/1.1 as per RFC 7301.

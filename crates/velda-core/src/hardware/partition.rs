@@ -5,7 +5,7 @@
 //! # Architectural Rationale: All-Worker Balanced Sharding & Idle CPU Harvesting
 //!
 //! In legacy proxy architectures, systems often arbitrarily reserve one or more dedicated CPU cores
-//! exclusively for background/auxiliary tasks (e.g. Prometheus metrics exporting, health probes,
+//! exclusively for background logistics tasks (e.g. Prometheus metrics exporting, health probes,
 //! buffer pool sweeping, and IPC administration). In high-performance edge computing, this approach
 //! introduces severe operational drawbacks:
 //!
@@ -20,18 +20,18 @@
 //!    `Cooperative`) with arbitrary core count thresholds (e.g. `< 5` vs `>= 5`). This created
 //!    accidental complexity, inconsistent latency characteristics, and branching overhead.
 //!
-//! 3. **The Velda Unified Model: 100% Cores for Traffic, Auxiliary on Idle Cycles**:
+//! 3. **The Velda Unified Model: 100% Cores for Traffic, Shadow Logistics on Idle Cycles**:
 //!    - **100% Traffic Core Allocation**: Every permitted CPU core is allocated to a dedicated,
 //!      core-pinned Data Plane worker thread running a single-threaded Tokio runtime (`new_current_thread()`).
-//!    - **Floating Auxiliary Tasks**: Auxiliary services (Prometheus Exporter, IPC Server, Buffer Sweeper,
-//!      Overload Monitor, Access Log Flusher) execute cooperatively as floating background tasks.
+//!    - **Shadow Logistics Tasks**: Shadow services (Prometheus Exporter, IPC Server, Buffer Maintenance,
+//!      Overload Monitor, Access Log Flusher) execute cooperatively as companion background tasks.
 //!    - **Zero-Contention Kernel Scheduling (`SCHED_IDLE` / `nice(19)`)**:
-//!      Auxiliary threads operate under the Linux `SCHED_IDLE` scheduling class (or POSIX `nice(19)`).
-//!      The Linux Completely Fair Scheduler (CFS) guarantees that auxiliary tasks ONLY receive CPU slices
+//!      Shadow threads operate under the Linux `SCHED_IDLE` scheduling class (or POSIX `nice(19)`).
+//!      The Linux Completely Fair Scheduler (CFS) guarantees that shadow tasks ONLY receive CPU slices
 //!      when there are NO runnable normal-priority worker threads (e.g. during network I/O wait).
 //!    - **Lock-Free Cacheline Isolation**:
 //!      Shared metrics structures ([`velda_observability::PipelineSlot`]) are explicitly 64-byte aligned
-//!      (`#[repr(align(64))]`), preventing False Sharing and ensuring auxiliary reads never contend
+//!      (`#[repr(align(64))]`), preventing False Sharing and ensuring shadow reads never contend
 //!      with or stall traffic worker cachelines.
 
 /// Core allocation strategy mapping host hardware cores directly to Data Plane traffic workers.
@@ -54,7 +54,7 @@ impl CorePartition {
     /// # Sizing Rules
     /// - **Empty input**: Defaults safely to `[0]` (1 traffic worker on Core 0).
     /// - **N Cores**: Allocates all `N` cores to `traffic_cores` (100% edge capacity).
-    ///   Auxiliary tasks run floating on unpinned supervisor threads utilizing idle CPU cycles.
+    ///   Shadow logistics tasks run on companion threads utilizing idle CPU cycles.
     pub fn plan(allowed: &[usize]) -> Self {
         let cores = if allowed.is_empty() {
             vec![0]

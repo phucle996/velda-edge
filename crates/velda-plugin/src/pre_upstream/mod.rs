@@ -98,7 +98,8 @@ pub trait PreUpstreamPlugin: Send + Sync {
 
 /// Executes a linear chain of pre-upstream plugins.
 ///
-/// Short-circuits immediately on the first non-[`Action::Continue`] result.
+/// Short-circuits immediately on the first non-[`Action::Continue`] result and batch-renders
+/// any pending arithmetic header mutations into `req.headers`.
 #[inline]
 pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
@@ -113,12 +114,17 @@ pub fn run_pre_upstream_plugins(
                     let next = run_pre_upstream_plugins(&chain[idx + 1..], req, target_upstream);
                     return Action::delay(duration, next);
                 } else {
+                    req.headers.render();
                     return Action::Delay { duration, and_then };
                 }
             }
-            action => return action,
+            action => {
+                req.headers.render();
+                return action;
+            }
         }
     }
+    req.headers.render();
     Action::Continue
 }
 
@@ -238,7 +244,7 @@ mod tests {
                 assert_eq!(reason, RejectReason::TooManyRequests);
                 assert_eq!(req2.headers.get("retry-after").unwrap(), "1");
                 assert_eq!(req2.headers.get("x-ratelimit-remaining").unwrap(), "0");
-                assert!(req2.headers.has_bypass_headers());
+                assert!(req2.headers.bypass_headers().count() >= 2);
             }
             _ => panic!("Expected Action::Reject(TooManyRequests)"),
         }

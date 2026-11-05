@@ -13,8 +13,6 @@ pub struct Http3Config {
     pub max_body_size: usize,
     /// Maximum header size in bytes.
     pub max_header_size: usize,
-    /// Maximum number of headers accepted.
-    pub max_headers: usize,
     /// Connection idle timeout in milliseconds.
     pub idle_timeout_ms: u64,
     /// Maximum number of concurrent bidirectional streams.
@@ -92,9 +90,6 @@ impl Http3Config {
         // 7. Max header size: clamped to [16 KB, 64 KB]
         let max_header_size = (ram_bytes / 131_072).clamp(16 * KB, 64 * KB);
 
-        // 8. Max headers count: clamped to [32, 96]
-        let max_headers = (cores * 16).clamp(32, 96);
-
         // 9. QPACK dynamic table capacity: clamped to [4096, 32768]
         let max_qpack_table_capacity = (ram_bytes / MB).clamp(4096, 32768);
 
@@ -108,7 +103,6 @@ impl Http3Config {
         Self {
             max_body_size,
             max_header_size,
-            max_headers,
             idle_timeout_ms: 30_000,
             max_concurrent_streams,
             max_concurrent_uni_streams,
@@ -142,13 +136,6 @@ impl Http3Config {
     #[inline]
     pub const fn with_max_header_size(mut self, size: usize) -> Self {
         self.max_header_size = size;
-        self
-    }
-
-    /// Sets the maximum number of headers.
-    #[inline]
-    pub const fn with_max_headers(mut self, max: usize) -> Self {
-        self.max_headers = max;
         self
     }
 

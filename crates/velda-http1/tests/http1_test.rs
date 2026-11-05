@@ -181,6 +181,39 @@ fn test_too_many_headers_rejection() {
     );
 }
 
+#[test]
+fn test_two_tier_large_headers_spillover_success() {
+    let config = TEST_CONFIG.with_max_headers(velda_core::MAX_WIRE_HEADERS);
+    let mut raw = Vec::from(&b"GET /large HTTP/1.1\r\nHost: localhost\r\n"[..]);
+    for i in 0..150 {
+        raw.extend_from_slice(format!("X-Custom-{i:03}: value-{i}\r\n").as_bytes());
+    }
+    raw.extend_from_slice(b"\r\n");
+    let mut buf = BytesMut::from(&raw[..]);
+
+    let req = decode_request(&mut buf, &config)
+        .expect("150 headers must succeed via Two-Tier spillover path")
+        .expect("full request head parsed");
+    assert_eq!(req.head().headers.len(), 151); // Host + 150 headers
+}
+
+#[test]
+fn test_wire_ceiling_rejection_at_1024() {
+    let config = TEST_CONFIG.with_max_headers(velda_core::MAX_WIRE_HEADERS);
+    let mut raw = Vec::from(&b"GET /bomb HTTP/1.1\r\nHost: localhost\r\n"[..]);
+    for i in 0..1030 {
+        raw.extend_from_slice(format!("X-Bomb-{i:04}: val\r\n").as_bytes());
+    }
+    raw.extend_from_slice(b"\r\n");
+    let mut buf = BytesMut::from(&raw[..]);
+
+    let err = decode_request(&mut buf, &config).unwrap_err();
+    assert!(
+        matches!(err, Http1Error::TooManyHeaders(1024)),
+        "Must reject when header count exceeds 1024"
+    );
+}
+
 #[tokio::test]
 async fn test_http10_close_by_default() {
     let (mut client, server) = duplex(1024);
@@ -639,4 +672,45 @@ async fn test_send_coalesced_chunks_single_wire_block() {
     let wire_output = std::str::from_utf8(&buf[..n]).unwrap();
 
     assert_eq!(wire_output, "D\r\nhello world !\r\n");
+}
+
+#[tokio::test]
+async fn test_http1_read_body_into_slab_pool_lifecycle() {
+    use velda_core::{PayloadSlabPool, SlabClass};
+
+    let (mut client, server) = duplex(4096);
+    let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
+    let slab_pool = PayloadSlabPool::new(2, 2, 2, 2);
+
+    let payload = b"Hello pre-warmed slab allocation! Anti-fragmentation verification.";
+    let payload_len = payload.len();
+
+    tokio::spawn(async move {
+        let req = format!(
+            "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: {payload_len}\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(payload).await.unwrap();
+    });
+
+    let (_head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    assert_eq!(framing, Http1BodyFraming::ContentLength(payload_len));
+
+    // Initially 0 active leases
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
+
+    let body = conn
+        .read_body_into_slab(framing, Some(&slab_pool))
+        .await
+        .unwrap();
+
+    // Verifies body is backed by pre-warmed slab
+    assert!(matches!(body, Body::Slab { .. }));
+    assert_eq!(body.as_slice(), payload);
+    assert_eq!(body.len(), payload_len);
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 1);
+
+    // Dropping the body releases slab back to the pool
+    drop(body);
+    assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
 }

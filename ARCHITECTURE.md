@@ -368,7 +368,7 @@ To eliminate connection establishment and TLS handshake latencies on the request
    - **Behavior**:
      - Queries its designated core lane shard (`lane = k`) for an existing connection or available multiplexed capacity (< 10 ns, pure RAM).
      - **HIT**: Instantly returns the reused stream/connection.
-     - **MISS**: If the pool is empty (e.g., initial startup or traffic burst exceeding logistics rate), falls back to connecting transparently. It **never** dispatches warmup tasks, awaits auxiliary locks, or boxes future closures on the serving hot path.
+     - **MISS**: If the pool is empty (e.g., initial startup or traffic burst exceeding logistics rate), falls back to connecting transparently. It **never** dispatches warmup tasks, awaits background locks, or boxes future closures on the serving hot path.
 
 2. **Shadow Logistics Worker (`velda-shadow-{k}`)**:
    - **Role**: Autonomous Logistics & Background Warmup (Hậu cần).

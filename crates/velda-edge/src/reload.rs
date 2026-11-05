@@ -120,14 +120,15 @@ pub fn load_initial_runtime(
     let pool_config = velda_core::AdaptivePoolConfig {
         header_slots: dims.header_baseline,
         header_max_cap: dims.header_max_cap,
-        headers_per_map: dims.headers_per_map,
         small_slabs: dims.small_baseline,
         small_max_cap: dims.small_max_cap,
         medium_slabs: dims.medium_baseline,
         medium_max_cap: dims.medium_max_cap,
+        standard_slabs: dims.standard_baseline,
+        standard_max_cap: dims.standard_max_cap,
         large_slabs: dims.large_baseline,
         large_max_cap: dims.large_max_cap,
-        idle_ttl: std::time::Duration::from_secs(15),
+        idle_ttl_secs: 15,
     };
     let buffer_pool = Arc::new(velda_core::ShardedBufferPool::with_adaptive_limits(
         topo.available_cores,

@@ -185,7 +185,7 @@ impl GrpcFaultInjectionPlugin {
                 let threshold = calculate_threshold_32(a.percentage);
 
                 // Build pre-compiled Trailers-Only response pre-sized to exactly 3 slots
-                let mut ws = HeaderWorkspace::with_capacity(3);
+                let mut ws = HeaderWorkspace::new(3);
                 ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
                 ws.insert(
                     GrpcWire::STATUS_NAME,

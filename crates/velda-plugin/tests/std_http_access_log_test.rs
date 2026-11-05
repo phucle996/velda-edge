@@ -134,7 +134,7 @@ fn test_post_response_pipeline_execution() {
         velda_core::Body::Bytes(bytes::Bytes::from_static(b"OK")),
     );
 
-    let mut req_headers = HeaderWorkspace::empty();
+    let mut req_headers = HeaderWorkspace::default();
     req_headers.insert("x-request-id", HeaderValue::from_static("trace-001"));
     req_headers.insert("user-agent", HeaderValue::from_static("curl/8.6.0"));
     req_headers.insert("x-forwarded-method", HeaderValue::from_static("GET"));
@@ -176,7 +176,7 @@ fn test_unsampled_status_invisible_on_hot_path() {
     let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin.clone()];
 
     let mut resp = L7Response::empty(StatusCode::OK); // 200 is unconfigured
-    let req_headers = HeaderWorkspace::empty();
+    let req_headers = HeaderWorkspace::default();
 
     run_post_response_plugins(&chain, &req_headers, &mut resp);
 
@@ -201,7 +201,7 @@ fn test_ring_buffer_saturation_drops_fail_open() {
 
     let plugin = StdHttpAccessLogPlugin::new_for_test("std_http_access_log", config);
     let mut resp = L7Response::empty(StatusCode::OK);
-    let req_headers = HeaderWorkspace::empty();
+    let req_headers = HeaderWorkspace::default();
 
     // Push 200 records to saturate the 64-capacity per-shard ring buffer
     for _ in 0..200 {

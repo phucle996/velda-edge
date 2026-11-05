@@ -1,11 +1,11 @@
-//! Redis Connection Pool and Auxiliary Synchronization Engine.
+//! Redis Connection Pool and Shadow Synchronization Engine.
 //!
 //! Owns the asynchronous connection lifecycle, TLS/mTLS credentials, batch pipelining,
 //! and exponential backoff reconnection logic for cluster rate limiting.
 //!
 //! # Subsystem Boundary & Execution Invariant
-//! - **Auxiliary Execution**: Runs strictly on background auxiliary workers or pinned
-//!   auxiliary cores (`velda_core::hardware::partition`).
+//! - **Shadow Execution**: Runs strictly on background shadow workers or companion threads
+//!   (`velda_core::hardware::partition`).
 //! - **Non-blocking Hot Path**: The request serving hot path never awaits network I/O;
 //!   it records hits into a lock-striped batch accumulator drained periodically by this pool.
 
@@ -158,8 +158,8 @@ impl RedisConnectionPool {
         total_drained
     }
 
-    /// Spawns the auxiliary background synchronization loop on the supervisory Tokio runtime.
-    pub fn start_auxiliary_worker(&self) {
+    /// Spawns the shadow background synchronization loop on the supervisory Tokio runtime.
+    pub fn start_shadow_worker(&self) {
         if self.config.url.is_none() {
             return;
         }
@@ -212,7 +212,7 @@ impl RedisConnectionPool {
                         is_connected.store(true, Ordering::Relaxed);
                         tracing::info!(
                             target: "velda::plugin::rate_limit::redis",
-                            "Redis auxiliary worker reconnected to cluster"
+                            "Redis shadow worker reconnected to cluster"
                         );
                     }
                 }

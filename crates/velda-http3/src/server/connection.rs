@@ -436,6 +436,18 @@ impl Http3Engine {
                 Ok(Some(frame)) => match frame {
                     Http3Frame::Headers(payload) => match decode_qpack(&payload) {
                         Ok(mut decoded) => {
+                            if decoded.headers.len() > velda_core::MAX_WIRE_HEADERS {
+                                tracing::warn!(
+                                    headers = decoded.headers.len(),
+                                    max = velda_core::MAX_WIRE_HEADERS,
+                                    "Rejecting HTTP/3 request exceeding MAX_WIRE_HEADERS"
+                                );
+                                let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
+                                    error_code::H3_EXCESSIVE_LOAD as u32,
+                                ));
+                                streams.remove(&(handle, id));
+                                return;
+                            }
                             // [INGRESS W3C REQUEST ID GENERATION]
                             // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
                             // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers

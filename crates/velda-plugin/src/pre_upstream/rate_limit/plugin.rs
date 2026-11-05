@@ -7,8 +7,8 @@
 //! Full schema specification, allowed values, and configuration examples:
 //! See [`README.md`](./README.md).
 
+use http::HeaderName;
 use http::header::RETRY_AFTER;
-use http::{HeaderName, HeaderValue};
 use std::sync::Arc;
 use velda_core::{Action, L7Request, RejectReason};
 
@@ -25,7 +25,7 @@ pub enum RateLimitBackend {
     /// Local in-memory lock-striped concurrent state (Zero Network I/O, microsecond latency).
     #[default]
     Memory,
-    /// Distributed Redis synchronization with background auxiliary batching.
+    /// Distributed Redis synchronization with background shadow batching.
     Redis,
 }
 
@@ -96,7 +96,6 @@ pub struct RateLimitPlugin {
     pub config: RateLimitConfig,
     state: ShardedState,
     pub redis_pool: RedisConnectionPool,
-    limit_val: HeaderValue,
 }
 
 impl std::fmt::Debug for RateLimitPlugin {
@@ -124,22 +123,16 @@ impl RateLimitPlugin {
     pub fn with_config(id: impl Into<String>, config: RateLimitConfig) -> Self {
         let redis_pool = RedisConnectionPool::new(config.redis.clone());
 
-        // Spawn auxiliary synchronization worker if configured for Redis backend
+        // Spawn shadow synchronization worker if configured for Redis backend
         if config.backend == RateLimitBackend::Redis {
-            redis_pool.start_auxiliary_worker();
+            redis_pool.start_shadow_worker();
         }
-
-        let mut itoa_buf = itoa::Buffer::new();
-        let limit_str = itoa_buf.format(config.rate_per_second);
-        let limit_val =
-            HeaderValue::from_str(limit_str).unwrap_or_else(|_| HeaderValue::from_static("0"));
 
         Self {
             id: id.into(),
             config,
             state: ShardedState::new(),
             redis_pool,
-            limit_val,
         }
     }
 
@@ -337,7 +330,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
                         FallbackBehavior::Deny => (false, 1),
                     }
                 } else {
-                    // Record request in Redis batch accumulator for auxiliary synchronization
+                    // Record request in Redis batch accumulator for shadow synchronization
                     self.redis_pool.record_hit(key_hash);
 
                     // Local high-speed enforcement against cluster quota
@@ -354,22 +347,15 @@ impl PreUpstreamPlugin for RateLimitPlugin {
         if allowed {
             Action::Continue
         } else {
-            let mut itoa_buf = itoa::Buffer::new();
-            let retry_str = itoa_buf.format(retry_after);
-            let retry_val =
-                HeaderValue::from_str(retry_str).unwrap_or_else(|_| HeaderValue::from_static("1"));
-
-            req.headers.insert_bypass(RETRY_AFTER, retry_val.clone());
+            req.headers.insert_bypass_u64(RETRY_AFTER, retry_after);
             req.headers
-                .insert_bypass(HeaderName::from_static("x-ratelimit-reset"), retry_val);
-            req.headers.insert_bypass(
+                .insert_bypass_u64(HeaderName::from_static("x-ratelimit-reset"), retry_after);
+            req.headers.insert_bypass_u64(
                 HeaderName::from_static("x-ratelimit-limit"),
-                self.limit_val.clone(),
+                self.config.rate_per_second,
             );
-            req.headers.insert_bypass(
-                HeaderName::from_static("x-ratelimit-remaining"),
-                HeaderValue::from_static("0"),
-            );
+            req.headers
+                .insert_bypass_u64(HeaderName::from_static("x-ratelimit-remaining"), 0);
 
             Action::Reject(RejectReason::TooManyRequests)
         }
@@ -389,7 +375,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{HeaderMap, HeaderValue, Method, Uri, Version};
     use velda_core::Body;
 
     fn make_test_request(headers: HeaderMap) -> L7Request {
@@ -425,10 +411,13 @@ mod tests {
         match plugin.on_upstream_request(&mut req, &mut target) {
             Action::Reject(reason) => {
                 assert_eq!(reason, RejectReason::TooManyRequests);
+                assert_eq!(req.headers.get_u64("x-ratelimit-remaining"), Some(0));
+                assert_eq!(req.headers.get_u64("x-ratelimit-limit"), Some(2));
+                assert!(req.headers.contains_key("retry-after"));
+                req.headers.render();
                 assert_eq!(req.headers.get("x-ratelimit-remaining").unwrap(), "0");
                 assert_eq!(req.headers.get("x-ratelimit-limit").unwrap(), "2");
-                assert!(req.headers.contains_key("retry-after"));
-                assert!(req.headers.has_bypass_headers());
+                assert!(req.headers.bypass_headers().count() >= 2);
             }
             _ => panic!("Expected Action::Reject(TooManyRequests)"),
         }

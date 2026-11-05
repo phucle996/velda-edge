@@ -84,7 +84,7 @@ pub fn precompiled_early_response(
 
     let mut ws = match request_id {
         Some(req_id) => HeaderWorkspace::with_request_id(req_id.clone(), 5),
-        None => HeaderWorkspace::with_capacity(5),
+        None => HeaderWorkspace::new(5),
     };
     ws.insert(
         CONTENT_TYPE,

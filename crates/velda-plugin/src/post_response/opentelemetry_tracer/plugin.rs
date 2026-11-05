@@ -185,16 +185,12 @@ impl PostResponsePlugin for OpentelemetryTracerPlugin {
             span.set_path(b"/");
         }
 
-        // Client IP
-        if let Some(ip_str) = req_headers
-            .get("x-forwarded-for")
-            .or_else(|| req_headers.get("x-real-ip"))
-            .and_then(|v| v.to_str().ok())
+        // Client IP (O(1) integer key lookup from HeaderWorkspace)
+        if let Some(ip) = req_headers
+            .get_ip("x-forwarded-for")
+            .or_else(|| req_headers.get_ip("x-real-ip"))
         {
-            let first_ip = ip_str.split(',').next().unwrap_or("").trim();
-            if let Ok(ip) = first_ip.parse::<std::net::IpAddr>() {
-                span.set_client_ip(ip);
-            }
+            span.set_client_ip(ip);
         }
 
         // Matched Route ID
@@ -211,8 +207,12 @@ impl PostResponsePlugin for OpentelemetryTracerPlugin {
             span.set_upstream(up.as_bytes());
         }
 
-        // 3. W3C Trace ID & Span ID Resolution (Zero-copy hex decode from HeaderWorkspace)
-        if let Some(t_val) = req_headers
+        // 3. W3C Trace ID & Span ID Resolution (O(1) 128-bit integer read or zero-copy hex decode)
+        if let Some(raw_trace) = req_headers.get_hex128(&X_TRACE_ID) {
+            span.set_trace_id(&raw_trace.to_be_bytes());
+        } else if req_headers.request_id_raw != 0 && !req_headers.contains_key(&X_TRACE_ID) {
+            span.set_trace_id(&req_headers.request_id_raw.to_be_bytes());
+        } else if let Some(t_val) = req_headers
             .get(&X_TRACE_ID)
             .or_else(|| req_headers.get(&X_REQUEST_ID))
         {
@@ -320,7 +320,7 @@ mod tests {
 
         let plugin = OpentelemetryTracerPlugin::new("otel_tracer", config);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert("x-original-method", HeaderValue::from_static("GET"));
         req_headers.insert("x-original-path", HeaderValue::from_static("/api/users"));
         req_headers.insert(

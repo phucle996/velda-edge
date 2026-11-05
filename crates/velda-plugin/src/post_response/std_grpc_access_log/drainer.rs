@@ -1,7 +1,7 @@
 //! Background Shadow Logistics Drainer for gRPC (`std_grpc_access_log::drainer`).
 //!
 //! Autonomous background task running on companion Shadow Logistics Workers pinned to
-//! auxiliary cores under `SCHED_IDLE`. Drains per-lane SPSC ring buffers and serializes
+//! the same CPU cores under `SCHED_IDLE`. Drains per-lane SPSC ring buffers and serializes
 //! gRPC audit logs directly to standard streams (`stdout` or `stderr`) via single-syscall batching.
 //!
 //! # Micro-Architectural Guarantees

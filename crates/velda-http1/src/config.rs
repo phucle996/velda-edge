@@ -61,7 +61,7 @@ impl Http1Config {
                 100 * 1024 * 1024,
             ),
             max_header_size: sizing.http1_max_header_size,
-            max_headers: sizing.http1_max_headers_count,
+            max_headers: velda_core::MAX_WIRE_HEADERS,
             idle_timeout_ms: 30_000,
             max_keepalive_requests: 10_000_000,
             header_read_timeout_ms: 10_000,

@@ -1,6 +1,6 @@
 # Response Compression Plugin (`response_compression`)
 
-High-performance, content-negotiated HTTP response body compression plugin evaluated during the `post_response` phase. Automatically compresses response payloads (Zstandard, Brotli, Gzip, Deflate) based on downstream client capabilities (`Accept-Encoding`), while coordinating seamlessly with in-memory cache zones.
+High-performance, content-negotiated HTTP response body compression plugin evaluated during the `post_response` phase. Automatically compresses response payloads (Zstandard, Brotli, Gzip, Deflate) based on downstream client capabilities (`Accept-Encoding`), while coordinating seamlessly with in-memory cache zones and hardware SIMD non-temporal memory streaming.
 
 > [!IMPORTANT]
 > **100% Explicit Configuration Invariant**: Every configuration parameter must be declared explicitly in `plugins.json`. No silent fallbacks, implicit defaults, or hidden behaviors are permitted.
@@ -11,7 +11,21 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 
 ---
 
-## 1. Specifications
+## 1. Documentation Index
+
+The `response_compression` subsystem maintains a complete suite of specialized technical documentation:
+
+| Document | Description |
+| :--- | :--- |
+| **[`ARCHITECTURE.md`](ARCHITECTURE.md)** | Deep architectural invariants, SIMD Non-Temporal Streaming Store (`_mm256_stream_si256`), dynamic function pointer CPU dispatch, and zero-allocation stack negotiation. |
+| **[`BENCHMARK.md`](BENCHMARK.md)** | Real Azure cloud benchmarks on fixed 32,759-byte payloads: Raw vs Zstd (16,979 RPS, -99% bandwidth) vs Gzip vs Brotli, CPU profiling, and latency distribution. |
+| **[`DICTIONARY.md`](DICTIONARY.md)** | Dedicated RFC 8878 Zstandard Dictionary guide: training custom dictionaries with `zstd --train`, built-in `common_json_rest.dict`, and client decompression code (Go, Rust, Python, Android, iOS, Node.js). |
+| **[`RUNBOOK.md`](RUNBOOK.md)** | SRE operational runbook, P0–P3 triage matrix, triage flowcharts, emergency mitigation commands, and diagnostic CLI toolkit. |
+| **[`TEST.md`](TEST.md)** | Test architecture, automated test suite matrix across modules, live Azure test recipe, and verification procedures. |
+
+---
+
+## 2. Specifications
 
 | Property | Value |
 | :--- | :--- |
@@ -20,11 +34,13 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability { header: AccessLevel::Write, payload: AccessLevel::Write }` |
 | **Compression Codecs** | `zstd` (RFC 8878), `br` (RFC 7932), `gzip` (RFC 1952), `deflate` (RFC 1951) |
+| **Built-in Dictionary** | `common_json_rest.dict` (16 KB embedded statically in binary) |
+| **Memory Architecture** | Non-Temporal Store via Write-Combining buffer bypassing L1/L2/L3 CPU cache |
 | **Standards Compliance** | RFC 9110 § 12.5.3 (Negotiation), § 8.4.1 (Content-Encoding), § 12.5.5 (Vary) |
 
 ---
 
-## 2. Configuration Parameters
+## 3. Configuration Parameters
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -33,12 +49,12 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 | `gzip_level` | `integer` | **Yes** | `1..=9` | `1` | Gzip/Deflate compression level (Level 1 Pareto sweet-spot with SIMD acceleration). |
 | `brotli_level` | `integer` | **Yes** | `0..=11` | `2` | Brotli compression quality (Level 2 sub-millisecond edge latency). |
 | `zstd_level` | `integer` | **Yes** | `1..=22` | `1` | Zstandard compression level (Level 1 ~800MB/s per core). |
-| `zstd_dict` | `string \| null` | **Yes** | Base64-encoded dictionary bytes or `null` | `null` | Optional pre-trained Zstandard dictionary (RFC 8878) for high-ratio structured JSON compression. |
+| `zstd_dict` | `string \| null` | **Yes** | `"common_json_rest"`, `"default"`, Base64 string, or `null` | `null` (or `"common_json_rest"`) | Pre-trained Zstandard dictionary (RFC 8878) for high-ratio structured JSON compression. |
 | `content_types` | `array[string]` | **Yes** | Non-empty array of MIME type prefixes | `["text/", "application/json", "application/javascript", "image/svg+xml"]` | MIME content-type prefixes eligible for compression. |
 
 ---
 
-## 3. Configuration Manifest (`plugins.json`)
+## 4. Configuration Manifest (`plugins.json`)
 
 ```json
 {
@@ -56,7 +72,7 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
         "gzip_level": 1,
         "brotli_level": 2,
         "zstd_level": 1,
-        "zstd_dict": null,
+        "zstd_dict": "common_json_rest",
         "content_types": [
           "text/",
           "application/json",
@@ -71,7 +87,7 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 
 ---
 
-## 4. Route Attachment (`routes.json`)
+## 5. Route Attachment (`routes.json`)
 
 Attach the plugin to an HTTP route via its unique identifier in the `plugins` array:
 
@@ -97,7 +113,7 @@ Attach the plugin to an HTTP route via its unique identifier in the `plugins` ar
 
 ---
 
-## 5. Smart Variant Matching (RFC 9110 § 12.5.3)
+## 6. Smart Variant Matching (RFC 9110 § 12.5.3)
 
 When coordinated with `http_cache_lookup`, the edge gateway implements **Smart Variant Matching** across client preferences and in-memory cache variants:
 
@@ -126,7 +142,7 @@ When coordinated with `http_cache_lookup`, the edge gateway implements **Smart V
 
 ---
 
-## 6. Invariants & Safeguards
+## 7. Invariants & Safeguards
 
 1. **Zero Double-Compression**: If upstream or cache already emitted a `Content-Encoding` header, compression is bypassed unconditionally.
 2. **Status Code Safeguard**: Responses with status `204 No Content`, `304 Not Modified`, or `1xx Informational` are never compressed.

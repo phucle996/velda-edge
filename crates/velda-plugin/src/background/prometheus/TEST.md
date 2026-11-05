@@ -6,7 +6,7 @@ This document defines the test suite coverage, invariants verification, and edge
 
 ## 1. Test Coverage Overview
 
-The test harness exercises both the serialization formatter (`formatter.rs`) and the auxiliary network server (`server.rs`).
+The test harness exercises both the serialization formatter (`formatter.rs`) and the management network server (`server.rs`).
 
 | Module | Test Target | Verification Objectives | Status |
 | :--- | :--- | :--- | :---: |

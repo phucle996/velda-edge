@@ -7,7 +7,7 @@
 //! - **Connection Reuse**: Keeps 1 persistent HTTP/2 TCP/TLS session open across flush intervals.
 //! - **Transparent Reconnect**: Automatically reconnects and retries once if remote closes connection.
 //! - **Framing**: Uses 5-byte Length-Prefixed Message framing conforming to the gRPC RFC specification.
-//! - **Auxiliary Execution**: Runs strictly on Shadow Worker background tasks.
+//! - **Shadow Execution**: Runs strictly on Shadow Worker background tasks.
 
 use std::pin::Pin;
 use std::sync::Arc;

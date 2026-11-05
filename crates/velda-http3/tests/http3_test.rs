@@ -187,7 +187,7 @@ async fn test_http3_roundtrip_requests() {
         Method::GET,
         "/get".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Empty,
     );
     let get_resp = client.send_request(get_req).await.unwrap();
@@ -220,7 +220,7 @@ async fn test_http3_roundtrip_requests() {
         Method::HEAD,
         "/head".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Empty,
     );
     let head_resp = client.send_request(head_req).await.unwrap();
@@ -232,7 +232,7 @@ async fn test_http3_roundtrip_requests() {
         Method::DELETE,
         "/no-content".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Empty,
     );
     let no_content_resp = client.send_request(no_content_req).await.unwrap();
@@ -248,7 +248,7 @@ async fn test_http3_roundtrip_requests() {
                 Method::POST,
                 format!("/concurrent-{}", i).parse::<Uri>().unwrap(),
                 http::Version::HTTP_3,
-                velda_core::HeaderWorkspace::empty(),
+                velda_core::HeaderWorkspace::default(),
                 Body::Bytes(Bytes::from(format!("payload-{}", i))),
             );
             let resp = client_clone.send_request(req).await.unwrap();
@@ -293,7 +293,7 @@ async fn test_http3_payload_limit_enforced() {
         Method::POST,
         "/bomb".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Bytes(Bytes::from(bomb_payload)),
     );
     let bomb_res = client.send_request(bomb_req).await;
@@ -304,7 +304,7 @@ async fn test_http3_payload_limit_enforced() {
         Method::GET,
         "/valid".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Empty,
     );
     let valid_resp = client.send_request(valid_req).await.unwrap();

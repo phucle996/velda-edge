@@ -21,9 +21,8 @@ async fn forward_client_stream(
     req: &L7Request,
     config: &Http3Config,
 ) -> Result<L7Response, Http3Error> {
-    if let Body::Bytes(ref b) = req.body
-        && b.len() > config.max_body_size
-    {
+    let b = req.body.as_slice();
+    if b.len() > config.max_body_size {
         return Err(Http3Error::PayloadTooLarge(b.len()));
     }
 
@@ -41,9 +40,8 @@ async fn forward_client_stream(
         ));
     }
 
-    if let Body::Bytes(ref b) = resp.body
-        && b.len() > config.max_body_size
-    {
+    let b = resp.body.as_slice();
+    if b.len() > config.max_body_size {
         return Err(Http3Error::PayloadTooLarge(b.len()));
     }
 

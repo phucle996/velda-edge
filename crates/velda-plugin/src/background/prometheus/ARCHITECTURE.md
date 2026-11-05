@@ -10,7 +10,7 @@ The Prometheus Exporter plugin (`crates/velda-plugin/src/background/prometheus/`
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                   Auxiliary Management Core (Core #0)                  │
+│                   Shadow Management Core (Core #0)                     │
 │                                                                        │
 │   Incoming Scrape (Prometheus / Victoriametrics / Datadog Agent)       │
 │                                │                                       │
@@ -43,7 +43,7 @@ The Prometheus Exporter plugin (`crates/velda-plugin/src/background/prometheus/`
 ```
 
 ### Core Invariants:
-1. **Auxiliary Domain Isolation**: Runs exclusively on supervisor/auxiliary core runtimes. It never touches traffic event loops, worker pinning, or request hot-path execution.
+1. **Shadow Domain Isolation**: Runs exclusively on Shadow Worker runtimes. It never touches traffic event loops, worker pinning, or request hot-path execution.
 2. **Pure Serialization / Zero Recalculation**: All rate calculations, percentages, and histograms are pre-aggregated and stored as pure 64-bit integers (`u64`/`i64`) by `velda-observability`. The formatter strictly serializes point-in-time snapshots into text without re-calculating business telemetry.
 3. **Zero Heap Churn**: Scrape responses reuse an allocated string buffer across sequential requests, avoiding per-scrape heap allocations and memory fragmentation.
 4. **Stack 2-Digit LUT ASCII Conversion**: High-performance integer-to-ASCII serialization using a static 200-byte lookup table (`DIGIT_PAIRS`), eliminating division loops and `std::fmt` overhead.
@@ -54,7 +54,7 @@ The Prometheus Exporter plugin (`crates/velda-plugin/src/background/prometheus/`
 ## 2. Component Structure
 
 - **`mod.rs`**: Module declarations and public interface.
-- **`server.rs`**: Auxiliary HTTP/1.1 and HTTPS server handling incoming connections, TLS termination, CORS preflight checks, authentication verification (Bearer / Basic), and scrape concurrency bounding via semaphore.
+- **`server.rs`**: HTTP/1.1 and HTTPS management server handling incoming connections, TLS termination, CORS preflight checks, authentication verification (Bearer / Basic), and scrape concurrency bounding via semaphore.
 - **`formatter.rs`**: Core serialization engine converting `MetricsSnapshot` into OpenMetrics/Prometheus text format with `fast_write_u64` and `fast_write_i64`.
 
 ---

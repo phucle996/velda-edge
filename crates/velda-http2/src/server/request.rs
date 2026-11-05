@@ -458,27 +458,164 @@ impl Http2StreamReceiver {
 
     /// Accumulates all remaining chunks into a [`Body`] while enforcing `max_body_size`.
     pub async fn consume_all(&mut self) -> Result<Body, crate::error::Http2Error> {
-        if self.is_end_stream() {
-            return Ok(Body::Empty);
-        }
+        self.consume_all_into_slab(None).await
+    }
 
-        let Some(first_chunk) = self.recv_chunk().await? else {
-            return Ok(Body::Empty);
+    /// Accumulates all remaining chunks into a pre-warmed [`velda_core::PayloadSlabPool`] slab
+    /// when payload size is $\le 64\text{ KB}$, falling back to heap [`bytes::BytesMut`] for larger bodies.
+    pub async fn consume_all_into_slab(
+        &mut self,
+        slab_pool: Option<&std::sync::Arc<velda_core::PayloadSlabPool>>,
+    ) -> Result<Body, crate::error::Http2Error> {
+        let first_chunk = loop {
+            if self.is_end_stream() {
+                return Ok(Body::Empty);
+            }
+            match self.body_stream.data().await {
+                Some(Ok(chunk)) => {
+                    let len = chunk.len();
+                    self.bytes_received += len;
+                    if let Some(tracker) = &self.flood_tracker {
+                        tracker.on_payload_read(len);
+                    }
+                    if self.bytes_received > self.max_body_size {
+                        let _ = self.body_stream.flow_control().release_capacity(len);
+                        return Err(crate::error::Http2Error::PayloadTooLarge(
+                            self.bytes_received,
+                        ));
+                    }
+                    let _ = self.body_stream.flow_control().release_capacity(len);
+                    if self.body_stream.is_end_stream() {
+                        self.eof = true;
+                    }
+                    if !chunk.is_empty() {
+                        break chunk;
+                    }
+                }
+                Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
+                None => {
+                    self.eof = true;
+                    return Ok(Body::Empty);
+                }
+            }
         };
 
-        if self.is_end_stream() {
-            return Ok(Body::Bytes(first_chunk));
-        }
-
-        let Some(second_chunk) = self.recv_chunk().await? else {
-            return Ok(Body::Bytes(first_chunk));
+        let second_chunk = loop {
+            if self.is_end_stream() {
+                if let Some(pool) = slab_pool
+                    && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
+                {
+                    let len = first_chunk.len();
+                    lease[..len].copy_from_slice(&first_chunk);
+                    return Ok(Body::from_slab(lease, len));
+                }
+                return Ok(Body::Bytes(first_chunk));
+            }
+            match self.body_stream.data().await {
+                Some(Ok(chunk)) => {
+                    let len = chunk.len();
+                    self.bytes_received += len;
+                    if let Some(tracker) = &self.flood_tracker {
+                        tracker.on_payload_read(len);
+                    }
+                    if self.bytes_received > self.max_body_size {
+                        let _ = self.body_stream.flow_control().release_capacity(len);
+                        return Err(crate::error::Http2Error::PayloadTooLarge(
+                            self.bytes_received,
+                        ));
+                    }
+                    let _ = self.body_stream.flow_control().release_capacity(len);
+                    if self.body_stream.is_end_stream() {
+                        self.eof = true;
+                    }
+                    if !chunk.is_empty() {
+                        break chunk;
+                    }
+                }
+                Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
+                None => {
+                    self.eof = true;
+                    if let Some(pool) = slab_pool
+                        && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
+                    {
+                        let len = first_chunk.len();
+                        lease[..len].copy_from_slice(&first_chunk);
+                        return Ok(Body::from_slab(lease, len));
+                    }
+                    return Ok(Body::Bytes(first_chunk));
+                }
+            }
         };
-        if second_chunk.is_empty() && self.is_end_stream() {
-            return Ok(Body::Bytes(first_chunk));
+
+        let two_len = first_chunk.len() + second_chunk.len();
+        if self.is_end_stream()
+            && let Some(pool) = slab_pool
+            && let Some(mut lease) = pool.acquire_for_size(two_len)
+        {
+            lease[..first_chunk.len()].copy_from_slice(&first_chunk);
+            lease[first_chunk.len()..two_len].copy_from_slice(&second_chunk);
+            return Ok(Body::from_slab(lease, two_len));
         }
 
-        let mut body_buf =
-            bytes::BytesMut::with_capacity((first_chunk.len() + second_chunk.len()) * 2);
+        if !self.is_end_stream()
+            && two_len <= velda_core::SlabClass::Large64K.byte_size()
+            && let Some(pool) = slab_pool
+            && let Some(mut lease) = pool.acquire(velda_core::SlabClass::Large64K)
+        {
+            lease[..first_chunk.len()].copy_from_slice(&first_chunk);
+            lease[first_chunk.len()..two_len].copy_from_slice(&second_chunk);
+            drop(first_chunk);
+            drop(second_chunk);
+            let mut offset = two_len;
+
+            while !self.is_end_stream() {
+                match self.body_stream.data().await {
+                    Some(Ok(chunk)) => {
+                        let len = chunk.len();
+                        self.bytes_received += len;
+                        if let Some(tracker) = &self.flood_tracker {
+                            tracker.on_payload_read(len);
+                        }
+                        if self.bytes_received > self.max_body_size {
+                            let _ = self.body_stream.flow_control().release_capacity(len);
+                            return Err(crate::error::Http2Error::PayloadTooLarge(
+                                self.bytes_received,
+                            ));
+                        }
+                        let _ = self.body_stream.flow_control().release_capacity(len);
+                        if self.body_stream.is_end_stream() {
+                            self.eof = true;
+                        }
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        if offset + len <= lease.len() {
+                            lease[offset..offset + len].copy_from_slice(&chunk);
+                            offset += len;
+                        } else {
+                            // Spillover beyond 64KB: migrate to heap BytesMut and immediately release slab
+                            let mut body_buf = bytes::BytesMut::with_capacity((offset + len) * 2);
+                            body_buf.extend_from_slice(&lease[..offset]);
+                            body_buf.extend_from_slice(&chunk);
+                            drop(lease);
+                            while let Some(rem) = self.recv_chunk().await? {
+                                body_buf.extend_from_slice(&rem);
+                            }
+                            return Ok(Body::Bytes(body_buf.freeze()));
+                        }
+                    }
+                    Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
+                    None => {
+                        self.eof = true;
+                        break;
+                    }
+                }
+            }
+
+            return Ok(Body::from_slab(lease, offset));
+        }
+
+        let mut body_buf = bytes::BytesMut::with_capacity(two_len * 2);
         body_buf.extend_from_slice(&first_chunk);
         body_buf.extend_from_slice(&second_chunk);
 

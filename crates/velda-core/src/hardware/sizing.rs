@@ -55,22 +55,12 @@ pub struct HardwareSizing {
     pub http1_max_buffer_size: usize,
     /// HTTP/1.1 maximum request header size (bounded [8 KB, 64 KB]).
     pub http1_max_header_size: usize,
-    /// HTTP/1.1 maximum header fields count (bounded [64, 256]).
-    pub http1_max_headers_count: usize,
     /// HTTP/1.1 maximum chunk size (bounded [64 KB, 1 MB]).
     pub http1_max_chunk_size: usize,
 
     // -------------------------------------------------------------------------
-    // L7 HTTP/2 & gRPC Multiplexing Engine
+    // L7 gRPC Protocol Engine
     // -------------------------------------------------------------------------
-    /// HTTP/2 initial stream-level flow control window size (bounded [256 KB, 4 MB]).
-    pub h2_initial_stream_window_size: u32,
-    /// HTTP/2 initial connection-level flow control window size (bounded [2 MB, 64 MB]).
-    pub h2_initial_connection_window_size: u32,
-    /// HTTP/2 maximum concurrent streams per peer connection (bounded [128, 1024]).
-    pub h2_max_concurrent_streams: u32,
-    /// HTTP/2 HPACK dynamic table size (bounded [4 KB, 16 KB]).
-    pub h2_header_table_size: u32,
     /// Maximum gRPC message frame payload size (bounded [4 MB, 64 MB]).
     pub grpc_max_message_size: usize,
 
@@ -144,13 +134,7 @@ impl HardwareSizing {
     ///   Any buffer overflow results in immediate packet loss. Allocating 1MB to 32MB ensures HTTP/3 QUIC
     ///   datagram bursts are absorbed without dropped frames.
     ///
-    /// ### 9. HTTP/2 & gRPC Flow Control Windows
-    /// - **Stream Window**: `(memory_bytes / 8192).clamp(256 * 1024, 4 * 1024 * 1024) as u32`
-    /// - **Connection Window**: `(stream_window * (cores * 2).clamp(4, 16)).clamp(2 * 1024 * 1024, 64 * 1024 * 1024) as u32`
-    /// - **Rationale**: Eliminates the 65,535-byte (64KB - 1B) RFC default stall while scaling connection-wide
-    ///   multiplexing capacity proportionally to both available RAM and CPU worker concurrency.
-    ///
-    /// ### 10. TLS Session Cache
+    /// ### 9. TLS Session Cache
     /// - **Formula**: `((memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536)`
     /// - **Rationale**: Each TLS session state entry consumes ~500 bytes. 1024 entries consume ~512KB on embedded nodes;
     ///   65,536 entries consume ~32MB on high-traffic gateways, yielding 99%+ session resumption hit rate.
@@ -325,17 +309,6 @@ impl HardwareSizing {
             }
         };
 
-        let http1_max_headers_count = {
-            let val = ram_gb * 32;
-            if val < 64 {
-                64
-            } else if val > 256 {
-                256
-            } else {
-                val
-            }
-        };
-
         let http1_max_chunk_size = {
             let val = ram_gb * 128 * KB;
             if val < 64 * KB {
@@ -347,53 +320,7 @@ impl HardwareSizing {
             }
         };
 
-        // 6. L7 HTTP/2 parameters
-        let stream_win_bytes = {
-            let val = ram / 8192;
-            if val < 256 * KB {
-                256 * KB
-            } else if val > 4 * MB {
-                4 * MB
-            } else {
-                val
-            }
-        };
-        let h2_initial_stream_window_size = stream_win_bytes as u32;
-
-        let h2_initial_connection_window_size = {
-            let conn_mult = {
-                let m = cores * 2;
-                if m < 4 {
-                    4
-                } else if m > 16 {
-                    16
-                } else {
-                    m
-                }
-            };
-            let val = stream_win_bytes * conn_mult;
-            if val < 2 * MB {
-                (2 * MB) as u32
-            } else if val > 64 * MB {
-                (64 * MB) as u32
-            } else {
-                val as u32
-            }
-        };
-
-        let h2_max_concurrent_streams = pool_max_concurrent_streams;
-
-        let h2_header_table_size = {
-            let val = (ram_gb * 2048) as u32;
-            if val < 4096 {
-                4096
-            } else if val > 16384 {
-                16384
-            } else {
-                val
-            }
-        };
-
+        // 6. L7 gRPC parameters
         let grpc_max_message_size = {
             let val = ram_gb * 4 * MB;
             if val < 4 * MB {
@@ -468,12 +395,7 @@ impl HardwareSizing {
             udp_batch_size,
             http1_max_buffer_size,
             http1_max_header_size,
-            http1_max_headers_count,
             http1_max_chunk_size,
-            h2_initial_stream_window_size,
-            h2_initial_connection_window_size,
-            h2_max_concurrent_streams,
-            h2_header_table_size,
             grpc_max_message_size,
             tls_session_cache_capacity,
             tls_send_tls13_tickets,
@@ -485,21 +407,21 @@ impl HardwareSizing {
 
     /// Computes recommended pre-warmed buffer and slab pool dimensions per traffic worker core.
     ///
-    /// Returns `(header_slots, headers_per_map, small_4k_slabs, medium_16k_slabs, large_64k_slabs)`.
+    /// Returns `(header_slots, small_4k_slabs, medium_16k_slabs, standard_32k_slabs, large_64k_slabs)`.
     #[inline]
     pub fn buffer_pool_dimensions_per_core(&self) -> (usize, usize, usize, usize, usize) {
-        let headers_per_map = self.http1_max_headers_count.clamp(32, 128);
         let header_slots = (self.optimal_max_idle_per_key * 2).clamp(256, 2048);
 
         let small_slabs = (header_slots / 2).clamp(128, 1024);
         let medium_slabs = (header_slots / 4).clamp(64, 512);
+        let standard_slabs = (header_slots / 8).clamp(32, 256);
         let large_slabs = (header_slots / 16).clamp(16, 128);
 
         (
             header_slots,
-            headers_per_map,
             small_slabs,
             medium_slabs,
+            standard_slabs,
             large_slabs,
         )
     }
@@ -533,25 +455,31 @@ impl HardwareSizing {
         total_memory_bytes: usize,
         num_cores: usize,
     ) -> AdaptiveBufferDimensions {
-        let (header_base, headers_per_map, small_base, med_base, large_base) =
+        let (header_base, small_base, med_base, std_base, large_base) =
             self.buffer_pool_dimensions_per_core();
 
-        // Estimated average header workspace footprint: ~2KB per workspace with 64 headers
-        let header_bytes = headers_per_map * 32;
-        let header_max =
-            Self::adaptive_burst_cap(header_base, total_memory_bytes, num_cores, header_bytes);
+        // Estimated baseline header workspace footprint: ~1KB per workspace.
+        const HEADER_WORKSPACE_BYTES: usize = 1024;
+        let header_max = Self::adaptive_burst_cap(
+            header_base,
+            total_memory_bytes,
+            num_cores,
+            HEADER_WORKSPACE_BYTES,
+        );
         let small_max = Self::adaptive_burst_cap(small_base, total_memory_bytes, num_cores, 4096);
         let med_max = Self::adaptive_burst_cap(med_base, total_memory_bytes, num_cores, 16384);
+        let std_max = Self::adaptive_burst_cap(std_base, total_memory_bytes, num_cores, 32768);
         let large_max = Self::adaptive_burst_cap(large_base, total_memory_bytes, num_cores, 65536);
 
         AdaptiveBufferDimensions {
             header_baseline: header_base,
             header_max_cap: header_max,
-            headers_per_map,
             small_baseline: small_base,
             small_max_cap: small_max,
             medium_baseline: med_base,
             medium_max_cap: med_max,
+            standard_baseline: std_base,
+            standard_max_cap: std_max,
             large_baseline: large_base,
             large_max_cap: large_max,
         }
@@ -563,11 +491,12 @@ impl HardwareSizing {
 pub struct AdaptiveBufferDimensions {
     pub header_baseline: usize,
     pub header_max_cap: usize,
-    pub headers_per_map: usize,
     pub small_baseline: usize,
     pub small_max_cap: usize,
     pub medium_baseline: usize,
     pub medium_max_cap: usize,
+    pub standard_baseline: usize,
+    pub standard_max_cap: usize,
     pub large_baseline: usize,
     pub large_max_cap: usize,
 }

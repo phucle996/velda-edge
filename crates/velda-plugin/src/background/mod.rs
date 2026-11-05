@@ -1,10 +1,10 @@
 //! Background Execution Phase Plugins (`phase: "background"`).
 //!
-//! Background plugins run strictly on auxiliary supervisory runtimes isolated from
+//! Background plugins run strictly on Shadow Logistics runtimes isolated from
 //! Data Plane traffic workers (e.g., Prometheus Exporter, Health Probes).
 //!
 //! # Strict Architectural Invariants
-//! - **Auxiliary-Only**: Background plugins MUST NEVER bind or poll client traffic sockets.
+//! - **Background-Only**: Background plugins MUST NEVER bind or poll client traffic sockets.
 //! - **Non-blocking Metrics Extraction**: Telemetry is extracted via lock-free atomic snapshots
 //!   (`MetricsStore::snapshot`), guaranteeing zero write contention on Data Plane worker hot paths.
 
@@ -24,7 +24,7 @@ pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus::{PrometheusExporter, format_snapshot};
 
-/// Contract for plugins operating as background auxiliary services.
+/// Contract for plugins operating as background logistics services.
 pub trait BackgroundPlugin: Send + Sync {
     /// Unique identifier of this background plugin instance.
     fn id(&self) -> &str;
@@ -47,14 +47,14 @@ pub trait BackgroundPlugin: Send + Sync {
         SupportedProtocols::empty()
     }
 
-    /// Execution direction. Always [`Direction::Background`] for background auxiliary plugins.
+    /// Execution direction. Always [`Direction::Background`] for background plugins.
     #[inline(always)]
     fn direction(&self) -> Direction {
         Direction::Background
     }
 }
 
-/// Spawns all declared background auxiliary plugins onto isolated Tokio tasks.
+/// Spawns all declared background plugins onto isolated Tokio tasks.
 ///
 /// Each task is configured with idle scheduling priority (`set_current_thread_idle_priority`)
 /// to guarantee zero CPU contention with traffic worker threads.
@@ -69,11 +69,11 @@ pub fn spawn_background_plugins(
         let handle = tokio::spawn(async move {
             velda_core::set_current_thread_idle_priority();
             let id = p.id().to_string();
-            tracing::info!(plugin_id = %id, "Background auxiliary plugin starting");
+            tracing::info!(plugin_id = %id, "Background plugin starting");
             if let Err(e) = p.run(shutdown_rx).await {
-                tracing::error!(plugin_id = %id, error = %e, "Background auxiliary plugin exited with error");
+                tracing::error!(plugin_id = %id, error = %e, "Background plugin exited with error");
             } else {
-                tracing::info!(plugin_id = %id, "Background auxiliary plugin stopped cleanly");
+                tracing::info!(plugin_id = %id, "Background plugin stopped cleanly");
             }
         });
         handles.push(handle);
@@ -81,10 +81,10 @@ pub fn spawn_background_plugins(
     handles
 }
 
-/// Sub-dispatcher: instantiates background auxiliary plugin descriptors.
+/// Sub-dispatcher: instantiates background plugin descriptors.
 ///
 /// # Open-Closed Principle (OCP)
-/// Background auxiliary services are instantiated on dedicated supervisory threads.
+/// Background services are instantiated on dedicated supervisory threads.
 pub fn instantiate(
     config: &velda_sync::post_sync::plugin::PluginConfig,
 ) -> Result<Arc<dyn BackgroundPlugin>, PluginError> {

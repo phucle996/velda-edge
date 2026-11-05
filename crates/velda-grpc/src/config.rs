@@ -10,8 +10,6 @@ pub struct GrpcConfig {
     pub max_message_size: usize,
     /// Maximum metadata / header size in bytes.
     pub max_header_size: usize,
-    /// Maximum number of metadata headers accepted.
-    pub max_headers: usize,
     /// Connection idle timeout in milliseconds.
     pub idle_timeout_ms: u64,
     /// Maximum number of concurrent streams allowed per connection.
@@ -41,9 +39,8 @@ impl GrpcConfig {
         Self {
             max_message_size: topo.sizing.grpc_max_message_size,
             max_header_size: topo.sizing.http1_max_header_size.max(16 * 1024),
-            max_headers: topo.sizing.http1_max_headers_count,
             idle_timeout_ms: 30_000,
-            max_concurrent_streams: topo.sizing.h2_max_concurrent_streams,
+            max_concurrent_streams: topo.sizing.pool_max_concurrent_streams,
             keepalive_ping_interval_ms: 45_000,
             keepalive_ping_timeout_ms: 10_000,
             max_call_duration_ms: 120_000,
@@ -83,17 +80,6 @@ impl GrpcConfig {
             }
         };
 
-        let max_headers = {
-            let val = ram_gb * 32;
-            if val < 32 {
-                32
-            } else if val > 128 {
-                128
-            } else {
-                val
-            }
-        };
-
         let max_concurrent_streams = {
             let val = (cores * 64) as u32;
             if val < 64 {
@@ -108,7 +94,6 @@ impl GrpcConfig {
         Self {
             max_message_size,
             max_header_size,
-            max_headers,
             idle_timeout_ms: 30_000,
             max_concurrent_streams,
             keepalive_ping_interval_ms: 45_000,
@@ -128,13 +113,6 @@ impl GrpcConfig {
     #[inline]
     pub const fn with_max_header_size(mut self, size: usize) -> Self {
         self.max_header_size = size;
-        self
-    }
-
-    /// Sets the maximum number of headers.
-    #[inline]
-    pub const fn with_max_headers(mut self, max: usize) -> Self {
-        self.max_headers = max;
         self
     }
 
@@ -192,7 +170,7 @@ mod tests {
         assert_eq!(config.max_message_size, topo.sizing.grpc_max_message_size);
         assert_eq!(
             config.max_concurrent_streams,
-            topo.sizing.h2_max_concurrent_streams
+            topo.sizing.pool_max_concurrent_streams
         );
     }
 }

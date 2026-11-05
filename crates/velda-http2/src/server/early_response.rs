@@ -28,7 +28,7 @@ pub fn precompiled_early_response(
 ) -> L7Response {
     let mut ws = match request_id {
         Some(req_id) => HeaderWorkspace::with_request_id(req_id.clone(), 4),
-        None => HeaderWorkspace::with_capacity(4),
+        None => HeaderWorkspace::new(4),
     };
     ws.insert(
         CONTENT_TYPE,

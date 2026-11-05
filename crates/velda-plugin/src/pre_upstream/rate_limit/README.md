@@ -1,6 +1,6 @@
 # Rate Limit Plugin (`rate_limit`)
 
-High-throughput request pacing and traffic shaping engine with multi-algorithm support, dual-backend architecture (in-memory lock-striped concurrent state + distributed Redis synchronization via auxiliary background workers), flexible key resolution strategies, and resilient failover behaviors.
+High-throughput request pacing and traffic shaping engine with multi-algorithm support, dual-backend architecture (in-memory lock-striped concurrent state + distributed Redis synchronization via shadow background workers), flexible key resolution strategies, and resilient failover behaviors.
 
 ---
 

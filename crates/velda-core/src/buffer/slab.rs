@@ -7,27 +7,37 @@
 //!    - Prevents Out-Of-Memory (OOM) crashes by strictly enforcing `max_burst_cap`
 //!      (Dual-Constraint formula: $\le 3\times$ baseline and $\le 20\%$ headroom RAM).
 //! 2. **Eager Physical Page Commit (Anti-Page-Fault)**:
-//!    - During cold-start initialization, every 4096-byte memory page in the baseline slabs
-//!      is touched (written to) to force the Linux Kernel to establish MMU PTE mappings upfront.
+//!    - During cold-start initialization and proactive shadow replenishment, every 4096-byte memory
+//!      page in the slabs is touched (written to) to force the Linux Kernel to establish MMU PTE
+//!      mappings upfront, eliminating runtime minor page faults.
 //! 3. **Two-Tier Adaptive Memory Management**:
 //!    - **Tier 1 (Hot Baseline Floor)**: Permanent pre-warmed physical slabs, never evicted.
 //!    - **Tier 2 (Burst Standby Queue with 15s TTL)**: Spills over dynamically during traffic spikes.
 //!      Excess slabs are stored with a return timestamp and reused across multi-wave micro-bursts,
 //!      eliminating libc/jemalloc heap churn (`malloc`/`free` thrashing).
-//! 4. **Non-Blocking Auxiliary Sweeper (`try_lock`)**:
-//!    - Eviction of expired burst slabs is performed periodically by the Auxiliary Core using
-//!      non-blocking `try_lock()`. If a Traffic Worker core is acquiring or releasing a slab,
-//!      the sweeper immediately skips that cycle without introducing any lock contention.
+//! 4. **Strict Core-Jailing & Shadow Maintenance**:
+//!    - Slabs are partitioned per CPU core into [`crate::buffer::CoreBufferPool`].
+//!    - Traffic Workers exclusively acquire from and recycle into their own core's pool (0 cross-core contention).
+//!    - Companion Shadow Logistics Worker (`velda-shadow-{id}`) maintains its core's pool inline
+//!      under `SCHED_IDLE` using non-blocking `try_lock()`:
+//!      - **Low-Watermark Proactive Replenishment**: When available pooled slabs drop $\le 25\%$ of baseline,
+//!        the shadow worker proactively commits a batch of physical slabs into the burst queue (15s TTL).
+//!      - **15s TTL Eviction**: Unused burst slabs idle $> 15s$ are dropped back to `jemalloc` RSS.
 //! 5. **Linux RSS Memory Retention**:
 //!    - When burst slabs are evicted after 15s of inactivity, they are returned to `jemalloc`.
 //!      Because jemalloc retains dirty pages in process Resident Set Size (RSS) across its decay
 //!      window, subsequent traffic bursts reacquire warm physical pages without kernel faults.
+//! 6. **Four Canonical Slab Classes with Contiguous Slicing**:
+//!    - `Small4K` (4 KB): small JSON payloads, auth tokens, small RPC.
+//!    - `Medium16K` (16 KB): standard REST payloads, chunks.
+//!    - `Standard32K` (32 KB): medium payloads (e.g. 18 KB - 32 KB), preventing 64KB over-allocation
+//!      while preserving a single contiguous memory slice `&[u8]` required for zero-copy SIMD WAF / JSON parsing.
+//!    - `Large64K` (64 KB): large uploads and full-frame buffering.
 
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// Canonical slab size classes for payload processing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +46,9 @@ pub enum SlabClass {
     Small4K = 4096,
     /// 16 KB slab for standard API payloads and buffered chunk processing.
     Medium16K = 16384,
+    /// 32 KB slab for medium payloads (16 KB - 32 KB), bridging the gap to 64 KB
+    /// while preserving a single contiguous memory slice `&[u8]` for zero-copy SIMD WAF.
+    Standard32K = 32768,
     /// 64 KB slab for large uploads, media streaming, and full-frame buffering.
     Large64K = 65536,
 }
@@ -54,6 +67,8 @@ impl SlabClass {
             Some(Self::Small4K)
         } else if len <= Self::Medium16K.byte_size() {
             Some(Self::Medium16K)
+        } else if len <= Self::Standard32K.byte_size() {
+            Some(Self::Standard32K)
         } else if len <= Self::Large64K.byte_size() {
             Some(Self::Large64K)
         } else {
@@ -121,24 +136,26 @@ impl PayloadSlab {
 struct SlabBucket {
     /// Baseline pre-warmed physical slabs. Permanent, never evicted.
     baseline: Vec<PayloadSlab>,
-    /// Burst standby slabs paired with their return timestamp.
+    /// Burst standby slabs paired with their return timestamp in coarse seconds.
     /// Ordered chronologically: oldest at front, newest at back.
-    burst: VecDeque<(Instant, PayloadSlab)>,
+    burst: VecDeque<(u64, PayloadSlab)>,
     /// Maximum number of permanent baseline slabs.
     baseline_limit: usize,
     /// Absolute ceiling of active + pooled slabs (anti-OOM protection).
     max_burst_limit: usize,
 }
 
-/// Pre-warmed two-tier adaptive slab pool managing Small (4KB), Medium (16KB), and Large (64KB) slabs.
+/// Pre-warmed two-tier adaptive slab pool managing Small (4KB), Medium (16KB), Standard (32KB), and Large (64KB) slabs.
 pub struct PayloadSlabPool {
     small_bucket: Mutex<SlabBucket>,
     medium_bucket: Mutex<SlabBucket>,
+    standard_bucket: Mutex<SlabBucket>,
     large_bucket: Mutex<SlabBucket>,
     active_small: AtomicUsize,
     active_medium: AtomicUsize,
+    active_standard: AtomicUsize,
     active_large: AtomicUsize,
-    idle_ttl: Duration,
+    idle_ttl_secs: u64,
 }
 
 impl std::fmt::Debug for PayloadSlabPool {
@@ -146,47 +163,71 @@ impl std::fmt::Debug for PayloadSlabPool {
         f.debug_struct("PayloadSlabPool")
             .field("active_small", &self.active_small.load(Ordering::Relaxed))
             .field("active_medium", &self.active_medium.load(Ordering::Relaxed))
+            .field(
+                "active_standard",
+                &self.active_standard.load(Ordering::Relaxed),
+            )
             .field("active_large", &self.active_large.load(Ordering::Relaxed))
             .finish()
     }
 }
 
+/// Configuration limits for an adaptive payload slab pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveSlabLimits {
+    pub small_baseline: usize,
+    pub small_max_cap: usize,
+    pub medium_baseline: usize,
+    pub medium_max_cap: usize,
+    pub standard_baseline: usize,
+    pub standard_max_cap: usize,
+    pub large_baseline: usize,
+    pub large_max_cap: usize,
+    pub idle_ttl_secs: u64,
+}
+
 impl PayloadSlabPool {
     /// Creates and eagerly warms up all slab classes with default 3x burst ceilings and 15s TTL.
-    pub fn new(small_baseline: usize, medium_baseline: usize, large_baseline: usize) -> Arc<Self> {
-        Self::with_adaptive_limits(
+    pub fn new(
+        small_baseline: usize,
+        medium_baseline: usize,
+        standard_baseline: usize,
+        large_baseline: usize,
+    ) -> Arc<Self> {
+        Self::with_adaptive_limits(AdaptiveSlabLimits {
             small_baseline,
-            small_baseline.saturating_mul(3).max(small_baseline + 16),
+            small_max_cap: small_baseline.saturating_mul(3).max(small_baseline + 16),
             medium_baseline,
-            medium_baseline.saturating_mul(3).max(medium_baseline + 8),
+            medium_max_cap: medium_baseline.saturating_mul(3).max(medium_baseline + 8),
+            standard_baseline,
+            standard_max_cap: standard_baseline
+                .saturating_mul(3)
+                .max(standard_baseline + 8),
             large_baseline,
-            large_baseline.saturating_mul(3).max(large_baseline + 4),
-            Duration::from_secs(15),
-        )
+            large_max_cap: large_baseline.saturating_mul(3).max(large_baseline + 4),
+            idle_ttl_secs: 15,
+        })
     }
 
-    /// Creates an adaptive slab pool with explicit baselines, max burst ceilings, and idle TTL.
-    pub fn with_adaptive_limits(
-        small_baseline: usize,
-        small_max_cap: usize,
-        medium_baseline: usize,
-        medium_max_cap: usize,
-        large_baseline: usize,
-        large_max_cap: usize,
-        idle_ttl: Duration,
-    ) -> Arc<Self> {
-        let mut small_vec = Vec::with_capacity(small_baseline);
-        for _ in 0..small_baseline {
+    /// Creates an adaptive slab pool with explicit baselines, max burst ceilings, and idle TTL in seconds.
+    pub fn with_adaptive_limits(limits: AdaptiveSlabLimits) -> Arc<Self> {
+        let mut small_vec = Vec::with_capacity(limits.small_baseline);
+        for _ in 0..limits.small_baseline {
             small_vec.push(PayloadSlab::new(SlabClass::Small4K));
         }
 
-        let mut medium_vec = Vec::with_capacity(medium_baseline);
-        for _ in 0..medium_baseline {
+        let mut medium_vec = Vec::with_capacity(limits.medium_baseline);
+        for _ in 0..limits.medium_baseline {
             medium_vec.push(PayloadSlab::new(SlabClass::Medium16K));
         }
 
-        let mut large_vec = Vec::with_capacity(large_baseline);
-        for _ in 0..large_baseline {
+        let mut standard_vec = Vec::with_capacity(limits.standard_baseline);
+        for _ in 0..limits.standard_baseline {
+            standard_vec.push(PayloadSlab::new(SlabClass::Standard32K));
+        }
+
+        let mut large_vec = Vec::with_capacity(limits.large_baseline);
+        for _ in 0..limits.large_baseline {
             large_vec.push(PayloadSlab::new(SlabClass::Large64K));
         }
 
@@ -194,25 +235,32 @@ impl PayloadSlabPool {
             small_bucket: Mutex::new(SlabBucket {
                 baseline: small_vec,
                 burst: VecDeque::new(),
-                baseline_limit: small_baseline,
-                max_burst_limit: small_max_cap.max(small_baseline),
+                baseline_limit: limits.small_baseline,
+                max_burst_limit: limits.small_max_cap.max(limits.small_baseline),
             }),
             medium_bucket: Mutex::new(SlabBucket {
                 baseline: medium_vec,
                 burst: VecDeque::new(),
-                baseline_limit: medium_baseline,
-                max_burst_limit: medium_max_cap.max(medium_baseline),
+                baseline_limit: limits.medium_baseline,
+                max_burst_limit: limits.medium_max_cap.max(limits.medium_baseline),
+            }),
+            standard_bucket: Mutex::new(SlabBucket {
+                baseline: standard_vec,
+                burst: VecDeque::new(),
+                baseline_limit: limits.standard_baseline,
+                max_burst_limit: limits.standard_max_cap.max(limits.standard_baseline),
             }),
             large_bucket: Mutex::new(SlabBucket {
                 baseline: large_vec,
                 burst: VecDeque::new(),
-                baseline_limit: large_baseline,
-                max_burst_limit: large_max_cap.max(large_baseline),
+                baseline_limit: limits.large_baseline,
+                max_burst_limit: limits.large_max_cap.max(limits.large_baseline),
             }),
             active_small: AtomicUsize::new(0),
             active_medium: AtomicUsize::new(0),
+            active_standard: AtomicUsize::new(0),
             active_large: AtomicUsize::new(0),
-            idle_ttl,
+            idle_ttl_secs: limits.idle_ttl_secs,
         })
     }
 
@@ -222,6 +270,7 @@ impl PayloadSlabPool {
         match class {
             SlabClass::Small4K => (&self.small_bucket, &self.active_small),
             SlabClass::Medium16K => (&self.medium_bucket, &self.active_medium),
+            SlabClass::Standard32K => (&self.standard_bucket, &self.active_standard),
             SlabClass::Large64K => (&self.large_bucket, &self.active_large),
         }
     }
@@ -304,25 +353,94 @@ impl PayloadSlabPool {
         guard.baseline.len() + guard.burst.len()
     }
 
-    /// Evicts burst slabs across all classes that have been idle longer than `idle_ttl`.
+    /// Performs non-blocking maintenance on this core's slab pool using [`crate::coarse_now_sec`].
     ///
-    /// # Auxiliary Core Invariant
-    /// Uses non-blocking `try_lock()` to ensure that the sweeper running on the Auxiliary Core
-    /// NEVER blocks or delays a Traffic Worker core servicing requests.
-    pub fn sweep_expired(&self, now: Instant) -> usize {
+    /// # Strict Core-Jailing & 1-ALU Cycle Coarse Clock Invariant
+    /// Executed exclusively by `velda-shadow-{core_id}` companion worker pinned to the same CPU core.
+    /// Uses non-blocking `try_lock()`: if the Traffic Worker on this core is currently acquiring
+    /// or recycling a slab, this cycle is immediately skipped with zero lock contention.
+    ///
+    /// # Two Responsibilities
+    /// 1. **15s TTL Standby Eviction**:
+    ///    Burst slabs idle $> \text{idle\_ttl\_secs}$ (default 15s) are evicted back to `jemalloc`.
+    ///    Crucially, jemalloc retains dirty pages in process Resident Set Size (RSS) across its
+    ///    decay window (10s), ensuring subsequent micro-bursts reacquire physical memory without
+    ///    incurring kernel minor page faults.
+    /// 2. **Low-Watermark Proactive Replenishment**:
+    ///    When available pooled slabs drop $\le 25\%$ of baseline capacity (due to traffic spike),
+    ///    the shadow worker proactively pre-warms a batch of slabs, eagerly touching each 4KB page
+    ///    (physical commit) and placing them into the burst standby queue with a 15s expiration timestamp.
+    ///    This guarantees that the frontline traffic worker never has to perform cold page allocations
+    ///    on the hot path.
+    ///
+    /// Returns `(slabs_evicted, slabs_replenished)`.
+    #[inline(always)]
+    pub fn maintain(&self) -> (usize, usize) {
+        let now_sec = crate::coarse_now_sec();
+        let mut evicted = 0;
+        let mut replenished = 0;
+
+        for class in [
+            SlabClass::Small4K,
+            SlabClass::Medium16K,
+            SlabClass::Standard32K,
+            SlabClass::Large64K,
+        ] {
+            let (bucket_mutex, active_counter) = self.bucket_and_counter(class);
+            if let Ok(mut guard) = bucket_mutex.try_lock() {
+                // 1. Evict expired burst standby slabs (> idle_ttl_secs)
+                while let Some((returned_at_sec, _)) = guard.burst.front() {
+                    if now_sec.saturating_sub(*returned_at_sec) >= self.idle_ttl_secs {
+                        if let Some((_, slab)) = guard.burst.pop_front() {
+                            drop(slab); // Evicted back to jemalloc RSS arena
+                            evicted += 1;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // 2. Low-watermark proactive replenishment
+                let available = guard.baseline.len() + guard.burst.len();
+                let active = active_counter.load(Ordering::Relaxed);
+                let low_watermark = (guard.baseline_limit / 4).max(1);
+
+                if available <= low_watermark {
+                    let batch_size = (guard.baseline_limit / 2).max(2);
+                    let current_total = available + active;
+                    let allowed = guard.max_burst_limit.saturating_sub(current_total);
+                    let to_replenish = batch_size.min(allowed);
+                    for _ in 0..to_replenish {
+                        let slab = PayloadSlab::new(class);
+                        guard.burst.push_back((now_sec, slab));
+                        replenished += 1;
+                    }
+                }
+            }
+        }
+
+        (evicted, replenished)
+    }
+
+    /// Evicts burst slabs across all classes that have been idle longer than `idle_ttl_secs`.
+    #[inline(always)]
+    pub fn sweep_expired(&self) -> usize {
+        let now_sec = crate::coarse_now_sec();
         let mut evicted = 0;
         for class in [
             SlabClass::Small4K,
             SlabClass::Medium16K,
+            SlabClass::Standard32K,
             SlabClass::Large64K,
         ] {
             let (bucket_mutex, _) = self.bucket_and_counter(class);
             if let Ok(mut guard) = bucket_mutex.try_lock() {
-                while let Some((returned_at, _)) = guard.burst.front() {
-                    if now.saturating_duration_since(*returned_at) >= self.idle_ttl {
-                        let (_, slab) = guard.burst.pop_front().unwrap();
-                        drop(slab); // Evicted back to allocator arena (retained in process RSS)
-                        evicted += 1;
+                while let Some((returned_at_sec, _)) = guard.burst.front() {
+                    if now_sec.saturating_sub(*returned_at_sec) >= self.idle_ttl_secs {
+                        if let Some((_, slab)) = guard.burst.pop_front() {
+                            drop(slab); // Evicted back to allocator arena (retained in process RSS)
+                            evicted += 1;
+                        }
                     } else {
                         // Slabs were pushed chronologically; front is oldest
                         break;
@@ -343,8 +461,9 @@ impl PayloadSlabPool {
         if guard.baseline.len() < guard.baseline_limit {
             guard.baseline.push(slab);
         } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
-            // Priority 2: Retain in burst standby queue with timestamp for 15s cooldown
-            guard.burst.push_back((Instant::now(), slab));
+            // Priority 2: Retain in burst standby queue with timestamp from coarse clock (~0.5ns L1 load)
+            let now_sec = crate::coarse_now_sec();
+            guard.burst.push_back((now_sec, slab));
         }
         // Priority 3: Above max_burst_limit -> slab drops and frees back to allocator
     }
@@ -420,14 +539,32 @@ mod tests {
         assert_eq!(med.len(), 16384);
         assert_eq!(med.class(), SlabClass::Medium16K);
 
+        let standard = PayloadSlab::new(SlabClass::Standard32K);
+        assert_eq!(standard.len(), 32768);
+        assert_eq!(standard.class(), SlabClass::Standard32K);
+
         let large = PayloadSlab::new(SlabClass::Large64K);
         assert_eq!(large.len(), 65536);
         assert_eq!(large.class(), SlabClass::Large64K);
     }
 
     #[test]
+    fn test_slab_class_selection_contiguous_slice() {
+        assert_eq!(SlabClass::for_size(100), Some(SlabClass::Small4K));
+        assert_eq!(SlabClass::for_size(4096), Some(SlabClass::Small4K));
+        assert_eq!(SlabClass::for_size(4097), Some(SlabClass::Medium16K));
+        assert_eq!(SlabClass::for_size(16384), Some(SlabClass::Medium16K));
+        // 18KB payload fits in 32KB standard slab (contiguous single slice &[u8])
+        assert_eq!(SlabClass::for_size(18 * 1024), Some(SlabClass::Standard32K));
+        assert_eq!(SlabClass::for_size(32768), Some(SlabClass::Standard32K));
+        assert_eq!(SlabClass::for_size(32769), Some(SlabClass::Large64K));
+        assert_eq!(SlabClass::for_size(65536), Some(SlabClass::Large64K));
+        assert_eq!(SlabClass::for_size(65537), None);
+    }
+
+    #[test]
     fn test_payload_slab_pool_acquire_and_recycle() {
-        let pool = PayloadSlabPool::new(2, 2, 2);
+        let pool = PayloadSlabPool::new(2, 2, 2, 2);
         assert_eq!(pool.baseline_slots(SlabClass::Small4K), 2);
         assert_eq!(pool.active_leases(SlabClass::Small4K), 0);
 
@@ -457,9 +594,18 @@ mod tests {
 
     #[test]
     fn test_payload_slab_pool_adaptive_burst_and_decay() {
-        // Pool with baseline=2, max_burst_cap=4, idle_ttl=50ms
-        let pool =
-            PayloadSlabPool::with_adaptive_limits(2, 4, 2, 4, 2, 4, Duration::from_millis(50));
+        // Pool with baseline=2, max_burst_cap=4, idle_ttl_secs=15
+        let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
+            small_baseline: 2,
+            small_max_cap: 4,
+            medium_baseline: 2,
+            medium_max_cap: 4,
+            standard_baseline: 2,
+            standard_max_cap: 4,
+            large_baseline: 2,
+            large_max_cap: 4,
+            idle_ttl_secs: 15,
+        });
         assert_eq!(pool.baseline_slots(SlabClass::Medium16K), 2);
         assert_eq!(pool.max_burst_cap(SlabClass::Medium16K), 4);
 
@@ -491,18 +637,77 @@ mod tests {
         assert_eq!(pool.total_pooled(SlabClass::Medium16K), 4);
         assert_eq!(pool.burst_standby_count(SlabClass::Medium16K), 2);
 
-        // Immediate sweep should evict 0 because 50ms TTL hasn't elapsed
-        let evicted = pool.sweep_expired(Instant::now());
+        // Immediate sweep should evict 0 because 15s TTL hasn't elapsed
+        let evicted = pool.sweep_expired();
         assert_eq!(evicted, 0);
         assert_eq!(pool.total_pooled(SlabClass::Medium16K), 4);
 
-        // Simulate time passage (> 50ms)
-        let future_time = Instant::now() + Duration::from_millis(100);
-        let evicted = pool.sweep_expired(future_time);
+        // Simulate time passage (> 15s) by backdating timestamps on burst slabs
+        {
+            let mut guard = pool.medium_bucket.lock().unwrap();
+            for (ts, _) in guard.burst.iter_mut() {
+                *ts = ts.saturating_sub(20);
+            }
+        }
+        let evicted = pool.sweep_expired();
         assert_eq!(evicted, 2);
 
         // Pool cleanly decayed back to baseline floor (2)
         assert_eq!(pool.total_pooled(SlabClass::Medium16K), 2);
         assert_eq!(pool.burst_standby_count(SlabClass::Medium16K), 0);
+    }
+
+    #[test]
+    fn test_shadow_low_watermark_replenishment_and_rss_decay() {
+        // Pool with baseline=4, max_burst_cap=12, idle_ttl_secs=15
+        let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
+            small_baseline: 4,
+            small_max_cap: 12,
+            medium_baseline: 4,
+            medium_max_cap: 12,
+            standard_baseline: 4,
+            standard_max_cap: 12,
+            large_baseline: 4,
+            large_max_cap: 12,
+            idle_ttl_secs: 15,
+        });
+        assert_eq!(pool.baseline_slots(SlabClass::Standard32K), 4);
+
+        // Traffic worker checks out 4 baseline slabs (pool available drops to 0 <= low_watermark 1)
+        let l1 = pool.acquire(SlabClass::Standard32K).unwrap();
+        let l2 = pool.acquire(SlabClass::Standard32K).unwrap();
+        let l3 = pool.acquire(SlabClass::Standard32K).unwrap();
+        let l4 = pool.acquire(SlabClass::Standard32K).unwrap();
+        assert_eq!(pool.active_leases(SlabClass::Standard32K), 4);
+        assert_eq!(pool.total_pooled(SlabClass::Standard32K), 0);
+
+        // Companion Shadow Logistics Worker runs inline maintenance on the same core:
+        // Automatically reads coarse_now_sec(), detects low watermark (0 <= 1), pre-warms a batch of slabs
+        let (evicted, replenished) = pool.maintain();
+        assert_eq!(evicted, 0);
+        assert!(replenished > 0);
+        assert!(pool.burst_standby_count(SlabClass::Standard32K) >= 2);
+
+        // Frontline traffic worker acquires next slab instantly from warm burst queue (0 alloc)!
+        let l5 = pool.acquire(SlabClass::Standard32K).unwrap();
+        assert_eq!(l5.len(), 32768);
+
+        drop(l1);
+        drop(l2);
+        drop(l3);
+        drop(l4);
+        drop(l5);
+
+        // After traffic burst subsides, simulate time passage (> 15s) by backdating burst timestamps
+        {
+            let mut guard = pool.standard_bucket.lock().unwrap();
+            for (ts, _) in guard.burst.iter_mut() {
+                *ts = ts.saturating_sub(20);
+            }
+        }
+        let (evicted_after, _) = pool.maintain();
+        assert!(evicted_after > 0);
+        // Pool cleanly returns to baseline floor without resource leak
+        assert_eq!(pool.burst_standby_count(SlabClass::Standard32K), 0);
     }
 }

@@ -460,9 +460,6 @@ fn resolve_http1_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
         if let Some(v) = h1.max_header_size {
             config.max_header_size = v;
         }
-        if let Some(v) = h1.max_headers {
-            config.max_headers = v;
-        }
         if let Some(v) = h1.idle_timeout_ms {
             config.idle_timeout_ms = v;
         }
@@ -496,9 +493,6 @@ fn resolve_http2_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
         if let Some(v) = h2.max_header_size {
             config.max_header_size = v;
             config.max_header_list_size = v as u32;
-        }
-        if let Some(v) = h2.max_headers {
-            config.max_headers = v;
         }
         if let Some(v) = h2.idle_timeout_ms {
             config.idle_timeout_ms = v;
@@ -565,9 +559,6 @@ fn resolve_grpc_config(listener: &ListenerConfig, cores: usize, ram_bytes: usize
         if let Some(v) = grpc.max_header_size {
             config.max_header_size = v;
         }
-        if let Some(v) = grpc.max_headers {
-            config.max_headers = v;
-        }
         if let Some(v) = grpc.idle_timeout_ms {
             config.idle_timeout_ms = v;
         }
@@ -597,9 +588,6 @@ fn resolve_http3_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
         }
         if let Some(v) = h3.max_header_size {
             config.max_header_size = v;
-        }
-        if let Some(v) = h3.max_headers {
-            config.max_headers = v;
         }
         if let Some(v) = h3.idle_timeout_ms {
             config.idle_timeout_ms = v;

@@ -102,10 +102,11 @@ impl GrpcUdpServerResponse {
         let mut write_buf = BytesMut::new();
         encode_udp_frame(&UdpFrame::Headers(header_payload.freeze()), &mut write_buf);
 
-        if let Body::Bytes(ref b) = self.body
-            && !b.is_empty()
-        {
-            encode_udp_frame(&UdpFrame::Data(b.clone()), &mut write_buf);
+        let b = self.body.as_slice();
+        if !b.is_empty() {
+            crate::udp::wire::encode_varint(0x00, &mut write_buf);
+            crate::udp::wire::encode_varint(b.len() as u64, &mut write_buf);
+            write_buf.extend_from_slice(b);
         }
 
         write_buf
@@ -125,10 +126,11 @@ impl GrpcUdpResponder {
         let mut write_buf = BytesMut::new();
         encode_udp_frame(&UdpFrame::Headers(header_payload.freeze()), &mut write_buf);
 
-        if let Body::Bytes(ref b) = response.body
-            && !b.is_empty()
-        {
-            encode_udp_frame(&UdpFrame::Data(b.clone()), &mut write_buf);
+        let b = response.body.as_slice();
+        if !b.is_empty() {
+            crate::udp::wire::encode_varint(0x00, &mut write_buf);
+            crate::udp::wire::encode_varint(b.len() as u64, &mut write_buf);
+            write_buf.extend_from_slice(b);
         }
 
         write_buf

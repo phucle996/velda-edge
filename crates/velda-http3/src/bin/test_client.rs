@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http::Method::GET,
         http::Uri::from_static("/ping"),
         http::Version::HTTP_3,
-        velda_core::HeaderWorkspace::empty(),
+        velda_core::HeaderWorkspace::default(),
         Body::Empty,
     );
     req.headers

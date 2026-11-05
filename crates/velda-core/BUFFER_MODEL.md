@@ -62,7 +62,7 @@ Instead of statically fixing buffer counts or allowing unbounded heap growth, po
  │ - Returned slabs/workspaces are stamped with Instant::now().           │
  │ - Reused across multi-wave micro-bursts without malloc/free thrashing. │
  └───────────────────────────────────┬────────────────────────────────────┘
-                                     │ Inactive > 15s (Auxiliary Sweeper)
+                                     │ Inactive > 15s (Shadow Logistics Worker)
                                      ▼
  ┌────────────────────────────────────────────────────────────────────────┐
  │ LINUX RSS DIRTY RETENTION (jemalloc Decay Window)                      │
@@ -81,11 +81,11 @@ Instead of statically fixing buffer counts or allowing unbounded heap growth, po
 - When burst leases are dropped, they are returned to `burst: VecDeque<(Instant, T)>` stamped with the return timestamp.
 - **Why 15 Seconds?**: Traffic spikes typically arrive in multi-wave ripples (e.g. client retries, microservices cascading requests). Keeping burst buffers alive for 15 seconds prevents destructive allocator thrashing (`malloc`/`free` cycles on every wave).
 
-### 3.3 Non-Blocking Auxiliary Sweeper (`try_lock`)
-Eviction of expired burst buffers is strictly decoupled from request traffic:
-- Driven by a background timer on an **Auxiliary Supervisor Core**.
+### 3.3 Non-Blocking Shadow Maintenance (`try_lock`)
+Eviction of expired burst buffers and proactive low-watermark replenishment are strictly handled by the companion worker:
+- Driven inline by the **Shadow Logistics Worker (`velda-shadow-{core_id}`)** running on `SCHED_IDLE` on the same CPU core.
 - Executes `guard.try_lock()`:
-  - If a Traffic Core is currently acquiring or releasing a buffer, the sweeper **immediately skips that tick**.
+  - If the Traffic Worker on this core is currently acquiring or releasing a buffer, the shadow worker **immediately skips that tick**.
   - **Zero Traffic Worker Lock Contention**: A traffic worker never waits on a background garbage collection sweep.
 
 ---

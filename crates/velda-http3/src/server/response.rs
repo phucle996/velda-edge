@@ -139,12 +139,11 @@ impl Http3ServerResponse {
             || self.status == StatusCode::NO_CONTENT
             || self.status == StatusCode::NOT_MODIFIED;
 
-        if !is_no_body
-            && let Body::Bytes(ref b) = self.body
-            && !b.is_empty()
-        {
-            let data_frame = Http3Frame::Data(b.clone());
-            encode_frame(&data_frame, &mut write_buf);
+        let b = self.body.as_slice();
+        if !is_no_body && !b.is_empty() {
+            encode_varint(frame_id::DATA, &mut write_buf);
+            encode_varint(b.len() as u64, &mut write_buf);
+            write_buf.extend_from_slice(b);
         }
 
         write_buf
@@ -187,10 +186,8 @@ impl Http3ServerResponse {
             || self.status == StatusCode::NO_CONTENT
             || self.status == StatusCode::NOT_MODIFIED;
 
-        if !is_no_body
-            && let Body::Bytes(ref b) = self.body
-            && !b.is_empty()
-        {
+        let b = self.body.as_slice();
+        if !is_no_body && !b.is_empty() {
             let mut hdr_buf = BytesMut::with_capacity(16);
             encode_varint(frame_id::DATA, &mut hdr_buf);
             encode_varint(b.len() as u64, &mut hdr_buf);
@@ -307,10 +304,8 @@ pub fn send_response(
 
     let mut remaining_body: Option<Bytes> = None;
 
-    if !is_no_body
-        && let Body::Bytes(ref b) = response.body
-        && !b.is_empty()
-    {
+    let b = response.body.as_slice();
+    if !is_no_body && !b.is_empty() {
         let mut hdr_buf = [0u8; 16];
         let mut hdr_len = encode_varint_slice(frame_id::DATA, &mut hdr_buf);
         hdr_len += encode_varint_slice(b.len() as u64, &mut hdr_buf[hdr_len..]);
@@ -342,7 +337,10 @@ pub fn send_response(
             }
         }
         if body_written < b.len() {
-            remaining_body = Some(b.slice(body_written..));
+            remaining_body = Some(match &response.body {
+                Body::Bytes(bytes) => bytes.slice(body_written..),
+                _ => Bytes::copy_from_slice(&b[body_written..]),
+            });
         }
     }
 

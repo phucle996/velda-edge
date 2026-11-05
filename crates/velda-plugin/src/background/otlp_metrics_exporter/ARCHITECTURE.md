@@ -36,7 +36,7 @@ flowchart TD
 ```
 
 ### Core Invariants:
-1. **Auxiliary Shadow Execution**: Runs strictly on `velda-shadow-0` under `SCHED_IDLE` priority. Frontline traffic workers (`velda-worker-{id}`) **NEVER** execute exporter loops, serialization, or network I/O.
+1. **Shadow Logistics Execution**: Runs strictly on `velda-shadow-0` under `SCHED_IDLE` priority. Frontline traffic workers (`velda-worker-{id}`) **NEVER** execute exporter loops, serialization, or network I/O.
 2. **Zero Hot-Path Contention**: Frontline workers write exclusively to core-local atomic counter shards (`slot_on_core(lane)`). Exporter reads snapshots using `Ordering::Relaxed` atomics, completely eliminating locking, mutexes, and thread contention.
 3. **Hardware Vector Reduction**: Snapshot extraction leverages AVX2 SIMD instructions (`_mm256_add_epi64` in `vector.rs`) to sum 20-counter arrays across all active core lanes in $< 0.1\ \mu\text{s}$.
 4. **Zero-Heap-Churn Protobuf Engine (`OtlpProtoTemplate`)**:

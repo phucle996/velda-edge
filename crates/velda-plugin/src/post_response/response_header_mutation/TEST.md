@@ -6,16 +6,20 @@ This document details the test architecture, automated unit test catalog, advers
 
 ## 1. Test Architecture & Scope
 
-The `response_header_mutation` test suite covers four essential functional and security dimensions:
+The `response_header_mutation` test suite covers four essential functional, hardware-acceleration, and security dimensions:
 
 ```mermaid
 flowchart TD
     subgraph EngineUnit["Unit Test Suite (velda-plugin)"]
         T1["test_remove_sensitive_headers\n(Sensitive Header Stripping)"]
-        T2["test_set_and_dynamic_variables\n(Dynamic $vars, $status fast-path, $timestamp)"]
-        T3["test_set_if_missing\n(Conditional insertion without clobbering)"]
-        T4["test_add_multi_value_headers\n(Preserve existing & append multi-value)"]
-        T5["test_from_config_strict_validation\n(JSON config compilation & partition)"]
+        T2["test_remove_with_simd_probe_optimization\n(SIMD Fingerprint Fast Probe)"]
+        T3["test_set_and_dynamic_variables\n(Dynamic $vars, $status fast-path, $timestamp)"]
+        T4["test_set_if_missing\n(Conditional insertion without clobbering)"]
+        T5["test_add_multi_value_headers\n(Preserve existing & append multi-value)"]
+        T6["test_from_config_strict_validation\n(JSON config compilation & partition)"]
+        T7["test_status_blob_integrity\n(Compile-time 1500B status table)"]
+        T8["test_validate_header_value_correctness\n(SIMD RFC 9110 character scanner)"]
+        T9["test_fingerprint_matching_all_backends\n(AVX2 / SSE2 / Scalar vector probe)"]
     end
 
     subgraph SyncUnit["Validation Suite (velda-sync)"]
@@ -35,32 +39,23 @@ flowchart TD
     end
 ```
 
-1. **Information Disclosure Prevention & Header Stripping**:
-   - Ensures upstream fingerprinting headers (`Server`, `X-Powered-By`, `X-AspNet-Version`) are removed prior to transmitting response frames to downstream clients.
-2. **Dynamic Runtime Variable Interpolation**:
-   - Validates resolution of `$request_id` (Slot 0 W3C request identifier), `$status` (numeric string), and `$timestamp_epoch` (Unix timestamp).
-   - Validates that `$status` utilizes pre-baked static slices for common codes (`200`, `404`, `500`, etc.) without heap allocations.
-3. **Conditional Header Insertion (`set_if_missing`)**:
-   - Validates that default security headers (e.g. `X-Content-Type-Options: nosniff`) are injected only when the upstream backend did not already specify them.
-4. **Declarative Synchronization & Defense-in-Depth (`velda-sync`)**:
-   - Rejection of CRLF (`\r`, `\n`) or null bytes in header names or values to neutralize HTTP Response Splitting.
-   - Rejection of manipulations targeting forbidden protocol framing headers (`Content-Length`, `Transfer-Encoding`, `Connection`).
-   - Rejection of unrecognized dynamic variable tokens.
-   - Rejection of empty or no-op configurations.
-
 ---
 
 ## 2. Automated Test Catalog
 
-### 2.1 Plugin Engine Suite (`crates/velda-plugin/src/post_response/response_header_mutation/plugin.rs`)
+### 2.1 Plugin Engine Suite (`crates/velda-plugin/src/post_response/response_header_mutation/`)
 
-| Test Function | Purpose | Key Assertions |
-| :--- | :--- | :--- |
-| `test_remove_sensitive_headers` | Sensitive header stripping | Removes `x-powered-by` and `server`; preserves unrelated response headers. |
-| `test_set_and_dynamic_variables` | Static set and dynamic variable resolution | Sets static `x-gateway`; resolves `$request_id`, `$status` (`"200"`), and `$timestamp_epoch`. |
-| `test_set_if_missing` | Conditional insertion | Injects `x-content-type-options: nosniff` when missing; retains upstream value when already present. |
-| `test_add_multi_value_headers` | Multi-value header appending | Appends `vary: Accept-Encoding` without overwriting existing `vary` entries. |
-| `test_from_config_strict_validation` | Configuration loading and partitioning | Pre-partitions static vs dynamic sets, adds, and set-if-missing rules. |
+| Test Function | Source Module | Purpose | Key Assertions |
+| :--- | :--- | :--- | :--- |
+| `test_remove_sensitive_headers` | `plugin.rs` | Sensitive header stripping | Removes `x-powered-by` and `server`; preserves unrelated response headers. |
+| `test_remove_with_simd_probe_optimization` | `plugin.rs` | SIMD fingerprint filter | Skips linear removal scan when zero response headers match fingerprint vector. |
+| `test_set_and_dynamic_variables` | `plugin.rs` | Static set and dynamic variable resolution | Resolves `$request_id`, `$status` (`"201"`), and `$timestamp_epoch`. |
+| `test_set_if_missing` | `plugin.rs` | Conditional insertion | Injects `x-content-type-options: nosniff` when missing; retains upstream value when present. |
+| `test_add_multi_value_headers` | `plugin.rs` | Multi-value header appending | Appends `vary: Accept-Encoding` without overwriting existing `vary` entries. |
+| `test_from_config_strict_validation` | `plugin.rs` | Configuration loading and partitioning | Pre-partitions static vs dynamic sets, adds, and set-if-missing rules. |
+| `test_status_blob_integrity` | `var.rs` | Compile-time status table | Verifies 1,500-byte buffer correctly resolves all standard status codes 100..=599. |
+| `test_validate_header_value_correctness` | `simd.rs` | RFC 9110 character validation | Validates acceptable chars; rejects CRLF, null, DEL, and control characters. |
+| `test_fingerprint_matching_all_backends` | `simd.rs` | SIMD fingerprint matching | Validates AVX2, SSE2, and scalar fingerprint matching correctness. |
 
 ### 2.2 Sync Validation Suite (`crates/velda-sync/src/post_sync/plugin/post_response/response_header_mutation.rs`)
 
@@ -83,7 +78,7 @@ flowchart TD
 
 ### Scenario 2: HTTP Response Splitting & CRLF Defense
 - **Threat**: An attacker attempts to inject newline characters (`\r\nSet-Cookie: admin=1`) into response headers via configuration or reflection.
-- **Mitigation**: `velda-sync` validates every header string against RFC 9110 printable ASCII requirements (`0x20..=0x7E`), rejecting control characters at compile time.
+- **Mitigation**: `velda-sync` and `simd.rs` validate every header string against RFC 9110 printable ASCII requirements (`0x20..=0x7E`), rejecting control characters at compile time and runtime.
 
 ### Scenario 3: Conditional Security Header Injection
 - **Threat**: Forcing hard overwrite of security headers can break upstream applications that supply specialized `Content-Security-Policy` or `Cache-Control` headers.
@@ -101,26 +96,4 @@ cargo test -p velda-plugin --lib post_response::response_header_mutation
 
 # Run sync validator tests for response_header_mutation
 cargo test -p velda-sync --lib post_sync::plugin::post_response::response_header_mutation
-
-# Run full plugin crate test suite
-cargo test -p velda-plugin
-```
-
----
-
-## 5. Live Azure Reproduction & Verification
-
-Executed directly from client node (VM2 `172.16.0.5`) against gateway node (VM1 `172.16.0.4:80`):
-
-```bash
-# 1. Send request and inspect response headers
-curl -s -i http://172.16.0.4:80/api/headermut/ping
-
-# Expected Response Headers:
-# HTTP/1.1 200 OK
-# server: velda-edge
-# x-content-type-options: nosniff
-# x-request-id: <monotonic-uuid>
-# x-status-reflected: 200
-# (Server / X-Powered-By from backend are stripped)
 ```

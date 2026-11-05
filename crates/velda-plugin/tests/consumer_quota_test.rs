@@ -50,6 +50,8 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let mut r1 = build_test_request(h1);
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
+    assert_eq!(r1.headers.get_u64("x-quota-remaining"), Some(2));
+    r1.headers.render();
     assert_eq!(r1.headers.get("x-quota-remaining").unwrap(), "2");
     assert_eq!(r1.headers.get("x-quota-window").unwrap(), "burst_limit");
 
@@ -62,6 +64,8 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let mut r2 = build_test_request(h2);
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
+    assert_eq!(r2.headers.get_u64("x-quota-remaining"), Some(1));
+    r2.headers.render();
     assert_eq!(r2.headers.get("x-quota-remaining").unwrap(), "1");
 
     // Request 3: Allowed, remaining = 0
@@ -73,6 +77,8 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let mut r3 = build_test_request(h3);
     let act3 = plugin.on_upstream_request(&mut r3, &mut target);
     assert!(matches!(act3, Action::Continue));
+    assert_eq!(r3.headers.get_u64("x-quota-remaining"), Some(0));
+    r3.headers.render();
     assert_eq!(r3.headers.get("x-quota-remaining").unwrap(), "0");
 
     // Request 4: Exhausted -> Action::Reject(TooManyRequests) with Bit-1 bypass headers
@@ -86,10 +92,12 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     match act4 {
         Action::Reject(reason) => {
             assert_eq!(reason, RejectReason::TooManyRequests);
-            assert!(r4.headers.has_bypass_headers());
+            assert_eq!(r4.headers.get_u64("x-quota-remaining"), Some(0));
+            assert!(r4.headers.contains_key(RETRY_AFTER));
+            r4.headers.render();
+            assert!(r4.headers.bypass_headers().count() >= 2);
             assert_eq!(r4.headers.get("x-quota-remaining").unwrap(), "0");
             assert_eq!(r4.headers.get("x-quota-window").unwrap(), "burst_limit");
-            assert!(r4.headers.contains_key(RETRY_AFTER));
         }
         other => panic!("Expected Action::Reject(TooManyRequests), got {other:?}"),
     }
@@ -145,6 +153,8 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
     let mut req_bob = build_test_request(h_bob);
     let act_bob = plugin.on_upstream_request(&mut req_bob, &mut target);
     assert!(matches!(act_bob, Action::Continue));
+    assert_eq!(req_bob.headers.get_u64("x-quota-remaining"), Some(1));
+    req_bob.headers.render();
     assert_eq!(req_bob.headers.get("x-quota-remaining").unwrap(), "1");
 }
 

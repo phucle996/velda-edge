@@ -174,9 +174,7 @@ fn is_compressible_mime(content_type: Option<&HeaderValue>) -> bool {
 
 #[inline]
 fn precompress_variants(body: &bytes::Bytes) -> CompressedVariants {
-    use crate::post_response::response_compression::algorithm::{
-        encode_brotli, encode_gzip, encode_zstd,
-    };
+    use crate::post_response::response_compression::{encode_brotli, encode_gzip, encode_zstd};
 
     // Pareto Level Tuning:
     // - Gzip: Level 1 (SIMD vectorized via zlib-rs, ~3x faster than L6 with ~95% ratio)
@@ -225,11 +223,9 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
             return;
         };
 
-        // Extract precomputed hash from req_headers headers map, then fallback to hashing
+        // Extract precomputed hash from req_headers arithmetic workspace in O(1), then fallback to hashing
         let hash = req_headers
-            .get(&X_VELDA_CACHE_HASH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
+            .get_u64(&X_VELDA_CACHE_HASH)
             .unwrap_or_else(|| HttpCacheStorage::hash_key(&cache_key));
 
         // 3. Status eligibility check
@@ -401,7 +397,7 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"data\":[1,2,3]}".to_vec())
             .with_headers(headers);
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -445,7 +441,7 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"brotli-compressed-binary".to_vec())
             .with_headers(headers);
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -481,7 +477,7 @@ mod tests {
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"secret\":true}".to_vec())
             .with_headers(headers);
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -513,7 +509,7 @@ mod tests {
 
         let large_payload = vec![b'x'; 200];
         let mut resp = L7Response::from_bytes(StatusCode::OK, large_payload).with_headers(headers);
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         plugin.on_response(&req_headers, &mut resp);
 
@@ -547,7 +543,7 @@ mod tests {
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec())
             .with_headers(headers);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(
             http::header::AUTHORIZATION,
             "Bearer secret_token".parse().unwrap(),
@@ -586,7 +582,7 @@ mod tests {
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"news\":\"all\"}".to_vec())
             .with_headers(headers);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(
             http::header::AUTHORIZATION,
             "Bearer any_token".parse().unwrap(),
@@ -623,7 +619,7 @@ mod tests {
         let mut resp = L7Response::from_bytes(StatusCode::OK, b"{\"user\":\"alice\"}".to_vec())
             .with_headers(headers);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(http::header::AUTHORIZATION, "Bearer alice".parse().unwrap());
 
         plugin.on_response(&req_headers, &mut resp);
@@ -660,7 +656,7 @@ mod tests {
         let mut resp =
             L7Response::from_bytes(StatusCode::OK, payload.clone()).with_headers(headers);
 
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
         plugin.on_response(&req_headers, &mut resp);
 
         assert_eq!(resp.headers.get("x-cache").unwrap(), "MISS");
@@ -716,7 +712,7 @@ mod tests {
         let mut resp =
             L7Response::from_bytes(StatusCode::OK, payload.clone()).with_headers(headers);
 
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
         plugin.on_response(&req_headers, &mut resp);
 
         let hash = HttpCacheStorage::hash_key(cache_key);
@@ -792,7 +788,7 @@ mod tests {
         let cache_key = "GET:api.example.com:/fast-path";
         let precomputed_hash = HttpCacheStorage::hash_key(cache_key);
 
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(X_VELDA_CACHE_KEY, cache_key.parse().unwrap());
         req_headers.insert(X_VELDA_CACHE_HASH, HeaderValue::from(precomputed_hash));
 

@@ -1,6 +1,6 @@
 # Response Header Mutation Plugin (`response_header_mutation`)
 
-High-performance, in-place HTTP response header manipulation plugin evaluated during the `post_response` phase. Provides explicit, user-controlled header stripping, setting, appending, and conditional insertion (`set_if_missing`).
+High-performance, in-place HTTP response header manipulation plugin evaluated during the `post_response` phase. Provides explicit, user-controlled header stripping, setting, appending, and conditional insertion (`set_if_missing`) with single-instruction ALU bitmask dispatch, SIMD fingerprint probing, and compile-time $O(1)$ status resolution.
 
 > [!IMPORTANT]
 > **100% Explicit Configuration Invariant**: Every configuration parameter must be declared explicitly in `plugins.json`. No silent fallbacks, implicit defaults, or hidden behaviors are permitted. Empty arrays `[]` or maps `{}` must be explicitly declared when unused.
@@ -19,7 +19,8 @@ High-performance, in-place HTTP response header manipulation plugin evaluated du
 | **Lifecycle Phase** | `post_response` (Statically inferred) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Hot Path Latency** | ~15ns to 30ns (In-place mutation, zero heap allocation for static headers) |
+| **Hot Path Latency** | ~10ns to 25ns (In-place mutation, zero heap allocation, SIMD accelerated) |
+| **Hardware Alignment** | Aligned to 64-byte L1 CPU cacheline boundary (`#[repr(align(64))]`) |
 
 ---
 
@@ -51,7 +52,8 @@ High-performance, in-place HTTP response header manipulation plugin evaluated du
         "set_headers": {
           "server": "velda-edge",
           "x-request-id": "$request_id",
-          "x-status-reflected": "$status"
+          "x-status-reflected": "$status",
+          "x-timestamp": "$timestamp_epoch"
         },
         "append_headers": {
           "vary": "User-Agent"
@@ -92,15 +94,17 @@ Attach the plugin to an HTTP route via its unique identifier in the `plugins` ar
 
 ---
 
-## 5. Dynamic Variables
+## 5. Dynamic Runtime Variables
 
 Dynamic variables can be specified with a leading `$` in header value strings:
 
-| Variable | Description |
-| :--- | :--- |
-| `$request_id` | Propagates the unique request ID (from `x-request-id` header or Slot 0 system generator) |
-| `$status` | Numeric HTTP response status code as string (e.g. `"200"`, `"503"`) |
-| `$timestamp_epoch` | Monotonic Unix epoch timestamp in seconds |
+| Variable | Resolution Mechanism | Complexity | Description |
+| :--- | :--- | :---: | :--- |
+| `$request_id` | Slot 0 W3C request identifier | $O(1)$, zero-alloc | Propagates the authoritative request ID from incoming `HeaderWorkspace`. |
+| `$status` | Direct subtraction index into compile-time 1500-byte `.rodata` table | $O(1)$, zero-alloc | Numeric HTTP response status code as static string for codes 100..=599. |
+| `$timestamp_epoch` | Thread-local epoch cache (`EPOCH_CACHE`) + stack local cache | $O(1)$, cached | Monotonic Unix epoch timestamp in seconds (99.998% cache hit rate under load). |
+
+To output a literal `$` character in a header value, escape it as `$$`.
 
 ---
 
@@ -118,9 +122,9 @@ Dynamic variables can be specified with a leading `$` in header value strings:
 
 ## 7. Documentation Suite Links
 
-For comprehensive architectural design, empirical Azure benchmarks, and security test matrices, refer to the dedicated documents:
+For comprehensive architectural design, operational runbooks, empirical Azure benchmarks, and security test matrices, refer to the dedicated documents:
 
-- **[Architectural Specification](ARCHITECTURE.md)**: Internal data structures, in-place mutation, and pre-partitioned static/dynamic arrays.
-- **[Performance Benchmark Report](BENCHMARK.md)**: Live Azure VM cluster measurements, latency percentiles, and sub-15ns hot-path overhead.
-- **[Test Plan & Security Verification](TEST.md)**: Automated unit test catalog, CRLF injection defense, and live cURL reproduction logs.
-
+- **[Architectural Specification](ARCHITECTURE.md)**: Internal data structures, ALU bitmask gating, SIMD fingerprint filter, and $O(1)$ status table.
+- **[Operational Runbook](RUNBOOK.md)**: Production deployment, monitoring, health checks, troubleshooting, and tuning.
+- **[Performance Benchmark Report](BENCHMARK.md)**: Live Azure cluster measurements, Envoy/Kong/APISIX comparisons, and hardware counters.
+- **[Test Plan & Security Verification](TEST.md)**: Automated test catalog, SIMD tests, CRLF injection defense, and verification reproduction.

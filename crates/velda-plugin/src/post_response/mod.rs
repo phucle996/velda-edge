@@ -70,7 +70,8 @@ pub trait PostResponsePlugin: Send + Sync {
     }
 }
 
-/// Executes a linear chain of post-response plugins on the outgoing response.
+/// Executes a linear chain of post-response plugins on the outgoing response
+/// and batch-renders all arithmetic header mutations into `resp.headers` in a single pass.
 #[inline]
 pub fn run_post_response_plugins(
     chain: &[Arc<dyn PostResponsePlugin>],
@@ -80,6 +81,7 @@ pub fn run_post_response_plugins(
     for plugin in chain {
         plugin.on_response(req_headers, resp);
     }
+    resp.headers.render();
 }
 
 /// Sub-dispatcher: instantiates concrete [`PostResponsePlugin`] instances for this phase.
@@ -121,7 +123,7 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
-        let req_headers = velda_core::HeaderWorkspace::empty();
+        let req_headers = velda_core::HeaderWorkspace::default();
 
         run_post_response_plugins(&chain, &req_headers, &mut resp);
 
@@ -147,7 +149,7 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
-        let mut req_headers = velda_core::HeaderWorkspace::empty();
+        let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(
             "origin",
             http::HeaderValue::from_static("https://app.example.com"),

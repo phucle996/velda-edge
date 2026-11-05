@@ -160,7 +160,7 @@ impl CachedResponseDirective {
     /// Converts this cached directive into an [`L7Response`] with standard HTTP cache headers
     /// populated in a pre-warmed [`HeaderWorkspace`].
     pub fn into_l7_response(self) -> L7Response {
-        let mut resp_headers = HeaderWorkspace::with_capacity(6);
+        let mut resp_headers = HeaderWorkspace::new(6);
         if let Some(ct) = self.content_type {
             resp_headers.insert(http::header::CONTENT_TYPE, ct);
         }
