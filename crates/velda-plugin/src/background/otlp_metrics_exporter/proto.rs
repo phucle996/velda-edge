@@ -5,7 +5,7 @@
 //! `opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest`
 
 use prost::Message;
-use velda_observability::MetricsSnapshot;
+use velda_observability::{MetricsSnapshot, MetricsStore};
 
 /// Root export request for OpenTelemetry Metrics Service.
 #[derive(Clone, PartialEq, Message)]
@@ -159,156 +159,243 @@ impl KeyValue {
     }
 }
 
-/// Encodes a [`MetricsSnapshot`] into compliant OpenTelemetry binary Protobuf bytes.
-pub fn format_otlp_metrics_proto(snapshot: &MetricsSnapshot, service_name: &str) -> Vec<u8> {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+/// Pre-allocated, zero-heap-churn template for OTLP Protobuf metrics export.
+///
+/// Pre-instantiates the full `ExportMetricsServiceRequest` AST structure
+/// (including all Metric descriptors, Scopes, Resources, and all DataPoints with their
+/// static KeyValue attributes) once at initialization.
+///
+/// On every export cycle, `update_and_encode` walks the pre-allocated DataPoints,
+/// updates `time_unix_nano` and `value` in-place, and serializes directly into
+/// a reusable `Vec<u8>` buffer without a single heap allocation.
+pub struct OtlpProtoTemplate {
+    request: ExportMetricsServiceRequest,
+}
 
-    let mut metrics = Vec::new();
+impl OtlpProtoTemplate {
+    /// Creates a new template pre-populated with metric definitions and static dimension attributes.
+    pub fn new(service_name: &str) -> Self {
+        // Build Metric 0: velda.requests.total
+        let mut request_datapoints = Vec::with_capacity(36 * 5);
+        for slot_idx in 0..36 {
+            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+            let downstream_str = down.as_str();
+            let upstream_str = up.as_str();
+            let pipe_str = pipe.as_str();
 
-    // 1. velda.requests.total (Cumulative Sum)
-    let mut request_datapoints = Vec::new();
-    for p in &snapshot.pipelines {
-        let downstream_str = p.downstream.as_str();
-        let upstream_str = p.upstream.as_str();
-        let pipe_str = p.pipe.as_str();
+            let classes = ["2xx", "3xx", "4xx", "5xx", "other"];
+            for class in classes {
+                request_datapoints.push(NumberDataPoint {
+                    attributes: vec![
+                        KeyValue::new_string("downstream", downstream_str),
+                        KeyValue::new_string("upstream", upstream_str),
+                        KeyValue::new_string("pipe", pipe_str),
+                        KeyValue::new_string("status_class", class),
+                    ],
+                    start_time_unix_nano: 0,
+                    time_unix_nano: 0,
+                    value: Some(number_data_point::Value::AsInt(0)),
+                    flags: 0,
+                });
+            }
+        }
 
-        let classes = [
-            ("2xx", p.requests_2xx),
-            ("3xx", p.requests_3xx),
-            ("4xx", p.requests_4xx),
-            ("5xx", p.requests_5xx),
-            ("other", p.requests_other),
-        ];
+        let metric_requests = Metric {
+            name: "velda.requests.total".to_string(),
+            description: "Total number of HTTP requests processed across pipeline dimensions"
+                .to_string(),
+            unit: "1".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                data_points: request_datapoints,
+                aggregation_temporality: 2, // AGGREGATION_TEMPORALITY_CUMULATIVE
+                is_monotonic: true,
+            })),
+        };
 
-        for (class, count) in classes {
-            request_datapoints.push(NumberDataPoint {
+        // Build Metric 1: velda.active_streams
+        let mut active_datapoints = Vec::with_capacity(36);
+        for slot_idx in 0..36 {
+            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+            active_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", downstream_str),
-                    KeyValue::new_string("upstream", upstream_str),
-                    KeyValue::new_string("pipe", pipe_str),
-                    KeyValue::new_string("status_class", class),
+                    KeyValue::new_string("downstream", down.as_str()),
+                    KeyValue::new_string("upstream", up.as_str()),
+                    KeyValue::new_string("pipe", pipe.as_str()),
                 ],
                 start_time_unix_nano: 0,
-                time_unix_nano: now_nanos,
-                value: Some(number_data_point::Value::AsInt(count as i64)),
+                time_unix_nano: 0,
+                value: Some(number_data_point::Value::AsInt(0)),
                 flags: 0,
             });
         }
-    }
 
-    metrics.push(Metric {
-        name: "velda.requests.total".to_string(),
-        description: "Total number of HTTP requests processed across pipeline dimensions"
-            .to_string(),
-        unit: "1".to_string(),
-        data: Some(metric::Data::Sum(Sum {
-            data_points: request_datapoints,
-            aggregation_temporality: 2, // AGGREGATION_TEMPORALITY_CUMULATIVE
-            is_monotonic: true,
-        })),
-    });
+        let metric_active = Metric {
+            name: "velda.active_streams".to_string(),
+            description: "Number of streams actively in-flight".to_string(),
+            unit: "1".to_string(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: active_datapoints,
+            })),
+        };
 
-    // 2. velda.active_streams (Gauge)
-    let mut active_datapoints = Vec::new();
-    for p in &snapshot.pipelines {
-        active_datapoints.push(NumberDataPoint {
-            attributes: vec![
-                KeyValue::new_string("downstream", p.downstream.as_str()),
-                KeyValue::new_string("upstream", p.upstream.as_str()),
-                KeyValue::new_string("pipe", p.pipe.as_str()),
-            ],
-            start_time_unix_nano: 0,
-            time_unix_nano: now_nanos,
-            value: Some(number_data_point::Value::AsInt(p.active_streams)),
-            flags: 0,
-        });
-    }
+        // Build Metric 2: velda.bytes_received_total & Metric 3: velda.bytes_transmitted_total
+        let mut rx_datapoints = Vec::with_capacity(36);
+        let mut tx_datapoints = Vec::with_capacity(36);
+        for slot_idx in 0..36 {
+            let (down, up, _pipe) = MetricsStore::decode_slot_index(slot_idx);
+            rx_datapoints.push(NumberDataPoint {
+                attributes: vec![
+                    KeyValue::new_string("downstream", down.as_str()),
+                    KeyValue::new_string("upstream", up.as_str()),
+                ],
+                start_time_unix_nano: 0,
+                time_unix_nano: 0,
+                value: Some(number_data_point::Value::AsInt(0)),
+                flags: 0,
+            });
+            tx_datapoints.push(NumberDataPoint {
+                attributes: vec![
+                    KeyValue::new_string("downstream", down.as_str()),
+                    KeyValue::new_string("upstream", up.as_str()),
+                ],
+                start_time_unix_nano: 0,
+                time_unix_nano: 0,
+                value: Some(number_data_point::Value::AsInt(0)),
+                flags: 0,
+            });
+        }
 
-    metrics.push(Metric {
-        name: "velda.active_streams".to_string(),
-        description: "Number of streams actively in-flight".to_string(),
-        unit: "1".to_string(),
-        data: Some(metric::Data::Gauge(Gauge {
-            data_points: active_datapoints,
-        })),
-    });
+        let metric_rx = Metric {
+            name: "velda.bytes_received_total".to_string(),
+            description: "Total bytes received from downstream clients".to_string(),
+            unit: "By".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                data_points: rx_datapoints,
+                aggregation_temporality: 2,
+                is_monotonic: true,
+            })),
+        };
 
-    // 3. velda.bytes_received_total & velda.bytes_transmitted_total
-    let mut rx_datapoints = Vec::new();
-    let mut tx_datapoints = Vec::new();
-    for p in &snapshot.pipelines {
-        rx_datapoints.push(NumberDataPoint {
-            attributes: vec![
-                KeyValue::new_string("downstream", p.downstream.as_str()),
-                KeyValue::new_string("upstream", p.upstream.as_str()),
-            ],
-            start_time_unix_nano: 0,
-            time_unix_nano: now_nanos,
-            value: Some(number_data_point::Value::AsInt(p.bytes_rx as i64)),
-            flags: 0,
-        });
-        tx_datapoints.push(NumberDataPoint {
-            attributes: vec![
-                KeyValue::new_string("downstream", p.downstream.as_str()),
-                KeyValue::new_string("upstream", p.upstream.as_str()),
-            ],
-            start_time_unix_nano: 0,
-            time_unix_nano: now_nanos,
-            value: Some(number_data_point::Value::AsInt(p.bytes_tx as i64)),
-            flags: 0,
-        });
-    }
+        let metric_tx = Metric {
+            name: "velda.bytes_transmitted_total".to_string(),
+            description: "Total bytes transmitted to downstream clients".to_string(),
+            unit: "By".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                data_points: tx_datapoints,
+                aggregation_temporality: 2,
+                is_monotonic: true,
+            })),
+        };
 
-    metrics.push(Metric {
-        name: "velda.bytes_received_total".to_string(),
-        description: "Total bytes received from downstream clients".to_string(),
-        unit: "By".to_string(),
-        data: Some(metric::Data::Sum(Sum {
-            data_points: rx_datapoints,
-            aggregation_temporality: 2,
-            is_monotonic: true,
-        })),
-    });
-
-    metrics.push(Metric {
-        name: "velda.bytes_transmitted_total".to_string(),
-        description: "Total bytes transmitted to downstream clients".to_string(),
-        unit: "By".to_string(),
-        data: Some(metric::Data::Sum(Sum {
-            data_points: tx_datapoints,
-            aggregation_temporality: 2,
-            is_monotonic: true,
-        })),
-    });
-
-    let request = ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Some(Resource {
-                attributes: vec![KeyValue::new_string("service.name", service_name)],
-                dropped_attributes_count: 0,
-            }),
-            scope_metrics: vec![ScopeMetrics {
-                scope: Some(InstrumentationScope {
-                    name: "velda-edge".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    attributes: Vec::new(),
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![
+                        KeyValue::new_string("service.name", service_name),
+                        KeyValue::new_string("telemetry.sdk.name", "velda-edge"),
+                        KeyValue::new_string("telemetry.sdk.language", "rust"),
+                    ],
                     dropped_attributes_count: 0,
                 }),
-                metrics,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(InstrumentationScope {
+                        name: "velda-edge".to_string(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        attributes: Vec::new(),
+                        dropped_attributes_count: 0,
+                    }),
+                    metrics: vec![metric_requests, metric_active, metric_rx, metric_tx],
+                    schema_url: String::new(),
+                }],
                 schema_url: String::new(),
             }],
-            schema_url: String::new(),
-        }],
-    };
+        };
 
-    let mut buf = Vec::with_capacity(request.encoded_len());
-    request
-        .encode(&mut buf)
-        .expect("protobuf encoding is infallible");
+        Self { request }
+    }
+
+    /// In-place updates all metric data points from `snapshot` and encodes into `buf` with zero heap allocations.
+    pub fn update_and_encode(&mut self, snapshot: &MetricsSnapshot, buf: &mut Vec<u8>) {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let metrics = &mut self.request.resource_metrics[0].scope_metrics[0].metrics;
+
+        // 1. velda.requests.total
+        if let Some(metric::Data::Sum(ref mut sum)) = metrics[0].data {
+            let mut dp_idx = 0;
+            for p in &snapshot.pipelines {
+                let classes = [
+                    p.requests_2xx,
+                    p.requests_3xx,
+                    p.requests_4xx,
+                    p.requests_5xx,
+                    p.requests_other,
+                ];
+                for &count in &classes {
+                    if let Some(dp) = sum.data_points.get_mut(dp_idx) {
+                        dp.time_unix_nano = now_nanos;
+                        dp.value = Some(number_data_point::Value::AsInt(count as i64));
+                    }
+                    dp_idx += 1;
+                }
+            }
+        }
+
+        // 2. velda.active_streams
+        if let Some(metric::Data::Gauge(ref mut gauge)) = metrics[1].data {
+            for (i, p) in snapshot.pipelines.iter().enumerate() {
+                if let Some(dp) = gauge.data_points.get_mut(i) {
+                    dp.time_unix_nano = now_nanos;
+                    dp.value = Some(number_data_point::Value::AsInt(p.active_streams));
+                }
+            }
+        }
+
+        // 3. velda.bytes_received_total
+        if let Some(metric::Data::Sum(ref mut sum)) = metrics[2].data {
+            for (i, p) in snapshot.pipelines.iter().enumerate() {
+                if let Some(dp) = sum.data_points.get_mut(i) {
+                    dp.time_unix_nano = now_nanos;
+                    dp.value = Some(number_data_point::Value::AsInt(p.bytes_rx as i64));
+                }
+            }
+        }
+
+        // 4. velda.bytes_transmitted_total
+        if let Some(metric::Data::Sum(ref mut sum)) = metrics[3].data {
+            for (i, p) in snapshot.pipelines.iter().enumerate() {
+                if let Some(dp) = sum.data_points.get_mut(i) {
+                    dp.time_unix_nano = now_nanos;
+                    dp.value = Some(number_data_point::Value::AsInt(p.bytes_tx as i64));
+                }
+            }
+        }
+
+        buf.clear();
+        self.request
+            .encode(buf)
+            .expect("protobuf encoding is infallible");
+    }
+}
+
+/// Encodes a [`MetricsSnapshot`] into compliant OpenTelemetry binary Protobuf bytes.
+pub fn format_otlp_metrics_proto(snapshot: &MetricsSnapshot, service_name: &str) -> Vec<u8> {
+    let mut template = OtlpProtoTemplate::new(service_name);
+    let mut buf = Vec::with_capacity(32 * 1024);
+    template.update_and_encode(snapshot, &mut buf);
     buf
+}
+
+/// In-place updates an existing [`OtlpProtoTemplate`] and encodes into `buf` with zero allocations.
+pub fn format_otlp_metrics_proto_into(
+    template: &mut OtlpProtoTemplate,
+    snapshot: &MetricsSnapshot,
+    buf: &mut Vec<u8>,
+) {
+    template.update_and_encode(snapshot, buf);
 }
 
 #[cfg(test)]
@@ -332,5 +419,36 @@ mod tests {
             rm.resource.as_ref().unwrap().attributes[0].key,
             "service.name"
         );
+        assert_eq!(
+            rm.resource.as_ref().unwrap().attributes[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .value,
+            Some(any_value::Value::StringValue("test-service".to_string()))
+        );
+
+        let metrics = &rm.scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 4);
+        assert_eq!(metrics[0].name, "velda.requests.total");
+        assert_eq!(metrics[1].name, "velda.active_streams");
+        assert_eq!(metrics[2].name, "velda.bytes_received_total");
+        assert_eq!(metrics[3].name, "velda.bytes_transmitted_total");
+    }
+
+    #[test]
+    fn test_proto_template_reuse() {
+        let store = MetricsStore::new();
+        let mut template = OtlpProtoTemplate::new("reuse-service");
+        let mut buf = Vec::with_capacity(32 * 1024);
+
+        let snap1 = store.snapshot();
+        template.update_and_encode(&snap1, &mut buf);
+        assert!(!buf.is_empty());
+        let len1 = buf.len();
+
+        let snap2 = store.snapshot();
+        template.update_and_encode(&snap2, &mut buf);
+        assert_eq!(buf.len(), len1);
     }
 }

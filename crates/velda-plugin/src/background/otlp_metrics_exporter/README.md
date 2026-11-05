@@ -111,3 +111,12 @@ The exporter encapsulates two fully isolated, high-performance transport clients
 1. **Hot-Path Isolation**: Metrics are read via atomic lock-free snapshots with `Ordering::Relaxed`. Metric collection **never halts or blocks request-serving worker threads**, even if the OTLP Collector is completely unreachable or deadlocked.
 2. **Persistent Keep-Alive & Reconnect**: The exporter maintains exactly 1 persistent connection to the collector. If the remote collector restarts or closes the connection while idle, the client detects EOF, clears the socket, and reconnects transparently on the next tick.
 3. **Graceful Shutdown**: Listens to the Data Plane supervisory `shutdown` watch channel. In-flight flushes complete cleanly before terminating the background worker thread.
+
+---
+
+## 6. Documentation Suite
+
+- [Architecture Specification](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/ARCHITECTURE.md)
+- [Performance Benchmark Analysis](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/BENCHMARK.md)
+- [Test Specification](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/TEST.md)
+- [SRE Operational Runbook](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/RUNBOOK.md)

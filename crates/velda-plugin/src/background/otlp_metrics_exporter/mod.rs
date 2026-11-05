@@ -8,6 +8,9 @@ pub mod proto;
 
 pub use client::{OtlpEndpoint, OtlpMetricsClient};
 pub use client_grpc::{OtlpGrpcEndpoint, OtlpMetricsGrpcClient};
-pub use format::format_otlp_metrics_json;
+pub use format::{format_otlp_metrics_into, format_otlp_metrics_json};
 pub use plugin::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
-pub use proto::{ExportMetricsServiceRequest, format_otlp_metrics_proto};
+pub use proto::{
+    ExportMetricsServiceRequest, OtlpProtoTemplate, format_otlp_metrics_proto,
+    format_otlp_metrics_proto_into,
+};

@@ -24,8 +24,8 @@ use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::client::OtlpMetricsClient;
 use super::client_grpc::OtlpMetricsGrpcClient;
-use super::format::format_otlp_metrics_json;
-use super::proto::format_otlp_metrics_proto;
+use super::format::format_otlp_metrics_into;
+use super::proto::{OtlpProtoTemplate, format_otlp_metrics_proto_into};
 use crate::background::BackgroundPlugin;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -152,13 +152,16 @@ impl BackgroundPlugin for OtlpMetricsExporterPlugin {
                     connect_timeout,
                     request_timeout,
                 )?;
+                let mut proto_template = OtlpProtoTemplate::new(&self.config.service_name);
+                let mut proto_buf = Vec::with_capacity(32 * 1024);
+
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
                             let snapshot = self.metrics_store.snapshot();
-                            let proto_payload = format_otlp_metrics_proto(&snapshot, &self.config.service_name);
+                            format_otlp_metrics_proto_into(&mut proto_template, &snapshot, &mut proto_buf);
 
-                            match grpc_client.send_metrics(&proto_payload, &self.custom_headers).await {
+                            match grpc_client.send_metrics(&proto_buf, &self.custom_headers).await {
                                 Ok(()) => {
                                     self.flushed_count.fetch_add(1, Ordering::Relaxed);
                                     tracing::debug!(plugin_id = %self.id, "Flushed OTLP metrics batch via gRPC successfully");
@@ -181,13 +184,15 @@ impl BackgroundPlugin for OtlpMetricsExporterPlugin {
                     connect_timeout,
                     request_timeout,
                 )?;
+                let mut json_buf = Vec::with_capacity(64 * 1024);
+
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
                             let snapshot = self.metrics_store.snapshot();
-                            let json_payload = format_otlp_metrics_json(&snapshot, &self.config.service_name);
+                            format_otlp_metrics_into(&snapshot, &self.config.service_name, &mut json_buf);
 
-                            match http_client.send_metrics(json_payload.as_bytes(), &self.custom_headers).await {
+                            match http_client.send_metrics(&json_buf, &self.custom_headers).await {
                                 Ok(status) => {
                                     if (200..300).contains(&status) {
                                         self.flushed_count.fetch_add(1, Ordering::Relaxed);

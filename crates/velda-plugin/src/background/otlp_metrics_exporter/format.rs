@@ -8,52 +8,96 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use velda_observability::MetricsSnapshot;
 
+/// Two-digit ASCII lookup table covering numbers from 00 to 99.
+///
+/// Enables emitting two ASCII bytes simultaneously with zero division instructions.
+const DIGIT_PAIRS: &[u8; 200] = b"\
+    00010203040506070809\
+    10111213141516171819\
+    20212223242526272829\
+    30313233343536373839\
+    40414243444546474849\
+    50515253545556575859\
+    60616263646566676869\
+    70717273747576777879\
+    80818283848586878889\
+    90919293949596979899";
+
+/// High-speed stack-based integer to ASCII serialization using 2-digit lookup pairs.
 #[inline(always)]
-fn write_u64(buf: &mut Vec<u8>, mut n: u64) {
-    if n == 0 {
-        buf.push(b'0');
+pub fn fast_write_u64(buf: &mut Vec<u8>, mut n: u64) {
+    if n < 10 {
+        buf.push(b'0' + n as u8);
         return;
     }
+
     let mut temp = [0u8; 20];
-    let mut i = 0;
-    while n > 0 {
-        temp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
+    let mut curr = 20;
+
+    while n >= 100 {
+        let rem = (n % 100) as usize * 2;
+        n /= 100;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
-    while i > 0 {
-        i -= 1;
-        buf.push(temp[i]);
+
+    if n < 10 {
+        curr -= 1;
+        temp[curr] = b'0' + n as u8;
+    } else {
+        let rem = n as usize * 2;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
+
+    buf.extend_from_slice(&temp[curr..20]);
 }
 
+/// Serializes signed 64-bit integer with negative sign check.
 #[inline(always)]
-fn write_i64(buf: &mut Vec<u8>, n: i64) {
+pub fn fast_write_i64(buf: &mut Vec<u8>, n: i64) {
     if n < 0 {
         buf.push(b'-');
-        write_u64(buf, n.unsigned_abs());
+        fast_write_u64(buf, n.unsigned_abs());
     } else {
-        write_u64(buf, n as u64);
+        fast_write_u64(buf, n as u64);
     }
 }
 
+/// Formats a 128-bit integer into a stack buffer without heap allocation.
 #[inline(always)]
-fn write_u128(buf: &mut Vec<u8>, mut n: u128) {
-    if n == 0 {
-        buf.push(b'0');
-        return;
+pub fn fast_format_u128_into(buf: &mut [u8; 40], mut n: u128) -> usize {
+    if n < 10 {
+        buf[0] = b'0' + n as u8;
+        return 1;
     }
+
     let mut temp = [0u8; 40];
-    let mut i = 0;
-    while n > 0 {
-        temp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
+    let mut curr = 40;
+
+    while n >= 100 {
+        let rem = (n % 100) as usize * 2;
+        n /= 100;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
-    while i > 0 {
-        i -= 1;
-        buf.push(temp[i]);
+
+    if n < 10 {
+        curr -= 1;
+        temp[curr] = b'0' + n as u8;
+    } else {
+        let rem = n as usize * 2;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
+
+    let len = 40 - curr;
+    buf[..len].copy_from_slice(&temp[curr..40]);
+    len
 }
 
 /// Encodes a [`MetricsSnapshot`] into compliant OpenTelemetry ResourceMetrics JSON.
@@ -73,9 +117,9 @@ pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, 
         .map(|d| d.as_nanos())
         .unwrap_or(0);
 
-    let mut nanos_vec = Vec::with_capacity(40);
-    write_u128(&mut nanos_vec, now_nanos);
-    let nanos_bytes = nanos_vec.as_slice();
+    let mut nanos_buf = [0u8; 40];
+    let nanos_len = fast_format_u128_into(&mut nanos_buf, now_nanos);
+    let nanos_bytes = &nanos_buf[..nanos_len];
 
     // Root JSON envelope
     buf.extend_from_slice(b"{\"resourceMetrics\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"");
@@ -111,7 +155,7 @@ pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, 
             buf.extend_from_slice(b"{\"timeUnixNano\":\"");
             buf.extend_from_slice(nanos_bytes);
             buf.extend_from_slice(b"\",\"asInt\":\"");
-            write_u64(buf, *count);
+            fast_write_u64(buf, *count);
             buf.extend_from_slice(
                 b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
             );
@@ -140,7 +184,7 @@ pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, 
         buf.extend_from_slice(b"{\"timeUnixNano\":\"");
         buf.extend_from_slice(nanos_bytes);
         buf.extend_from_slice(b"\",\"asInt\":\"");
-        write_i64(buf, p.active_streams);
+        fast_write_i64(buf, p.active_streams);
         buf.extend_from_slice(
             b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
         );
@@ -166,7 +210,7 @@ pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, 
         buf.extend_from_slice(b"{\"timeUnixNano\":\"");
         buf.extend_from_slice(nanos_bytes);
         buf.extend_from_slice(b"\",\"asInt\":\"");
-        write_u64(buf, p.bytes_rx);
+        fast_write_u64(buf, p.bytes_rx);
         buf.extend_from_slice(
             b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
         );
@@ -190,7 +234,7 @@ pub fn format_otlp_metrics_into(snapshot: &MetricsSnapshot, service_name: &str, 
         buf.extend_from_slice(b"{\"timeUnixNano\":\"");
         buf.extend_from_slice(nanos_bytes);
         buf.extend_from_slice(b"\",\"asInt\":\"");
-        write_u64(buf, p.bytes_tx);
+        fast_write_u64(buf, p.bytes_tx);
         buf.extend_from_slice(
             b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
         );
@@ -225,5 +269,32 @@ mod tests {
         );
         let metrics = &parsed["resourceMetrics"][0]["scopeMetrics"][0]["metrics"];
         assert!(metrics.as_array().unwrap().len() >= 4);
+    }
+
+    #[test]
+    fn test_fast_writers() {
+        let mut buf = Vec::new();
+        fast_write_u64(&mut buf, 0);
+        assert_eq!(buf, b"0");
+
+        buf.clear();
+        fast_write_u64(&mut buf, 9);
+        assert_eq!(buf, b"9");
+
+        buf.clear();
+        fast_write_u64(&mut buf, 42);
+        assert_eq!(buf, b"42");
+
+        buf.clear();
+        fast_write_u64(&mut buf, 1234567890);
+        assert_eq!(buf, b"1234567890");
+
+        buf.clear();
+        fast_write_i64(&mut buf, -98765);
+        assert_eq!(buf, b"-98765");
+
+        let mut stack = [0u8; 40];
+        let len = fast_format_u128_into(&mut stack, 1700000000000000000u128);
+        assert_eq!(&stack[..len], b"1700000000000000000");
     }
 }
