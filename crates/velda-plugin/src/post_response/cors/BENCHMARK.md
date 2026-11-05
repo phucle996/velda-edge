@@ -148,7 +148,7 @@ Mỗi kịch bản cốt lõi đều được phân tích định lượng đồ
 | | **Tổng số requests phục vụ (Total Requests)** | **663,253 requests** | **661,276 requests** | 342,750 requests | 325,200 requests | **Velda phục vụ gấp 2.03x Envoy** |
 | | **Throughput (req/s)** | **44,216.92** | **44,085.10** | 22,850.00 | 21,680.00 | **Velda vượt trội +103.3% vs Envoy** |
 | | **Băng thông truyền tải (MB/s)** | **92.45 MB/s** | **94.85 MB/s** | 47.80 MB/s | 46.85 MB/s | Băng thông wire L7 tăng do CORS header |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | **0.00% (Baseline)** | **-5.12% (Suy hao)** | **Suy hao Velda thấp hơn 17.1 lần vs Envoy** |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | **-5.12% (Suy hao)** | **Suy hao Velda thấp hơn 17.1 lần vs Envoy** |
 | | **Tổng headers CORS đã chèn (Headers Injected)** | **0 headers** | **661,276 headers** | 0 headers | 325,200 headers | 100% request được gắn `Allow-Origin: *` |
 | | **Tốc độ chèn header CORS (Headers/sec)** | **0 headers/s** | **44,085.10 h/s** | 0 headers/s | 21,680.00 h/s | Chèn header ở tốc độ wire-speed |
 | | **Độ trễ trung bình (Mean Latency)** | **2.26 ms** | **2.27 ms** | 4.38 ms | 4.61 ms | **Độ trễ Velda thấp hơn 50.8% vs Envoy** |
@@ -209,7 +209,7 @@ Mỗi kịch bản cốt lõi đều được phân tích định lượng đồ
 | | **Tổng số requests phục vụ (Total Requests)** | **663,253 requests** | **659,706 requests** | 342,750 requests | 321,300 requests | **Velda phục vụ gấp 2.05x Envoy** |
 | | **Throughput (req/s)** | **44,216.92** | **43,980.40** | 22,850.00 | 21,420.00 | **Velda vượt trội +105.3% vs Envoy** |
 | | **Băng thông truyền tải (MB/s)** | **92.45 MB/s** | **96.50 MB/s** | 47.80 MB/s | 46.95 MB/s | Gắn 3 CORS headers: Origin, Creds, Vary |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.53% (Tàng hình)** | **0.00% (Baseline)** | **-6.26% (Suy hao)** | **Suy hao Velda thấp hơn 11.8 lần vs Envoy** |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.53% (Tàng hình)** | — | **-6.26% (Suy hao)** | **Suy hao Velda thấp hơn 11.8 lần vs Envoy** |
 | | **Tổng headers CORS đã chèn (Headers Injected)** | **0 headers** | **1,979,118 headers** | 0 headers | 963,900 headers | 3 headers / req hoàn tất trơn tru |
 | | **Tốc độ chèn header CORS (Headers/sec)** | **0 headers/s** | **131,941.20 h/s** | 0 headers/s | 64,260.00 h/s | **> 131,900 headers CORS chèn / giây** |
 | | **Độ trễ trung bình (Mean Latency)** | **2.26 ms** | **2.27 ms** | 4.38 ms | 4.67 ms | **Độ trễ Velda thấp hơn 51.4% vs Envoy** |
@@ -270,7 +270,7 @@ Mỗi kịch bản cốt lõi đều được phân tích định lượng đồ
 | | **Tổng số requests phục vụ (Total Requests)** | **663,253 requests** | **660,225 requests** | 342,750 requests | 319,200 requests | **Velda phục vụ gấp 2.07x Envoy** |
 | | **Throughput (req/s)** | **44,216.92** | **44,015.00** | 22,850.00 | 21,280.00 | **Velda vượt trội +106.8% vs Envoy** |
 | | **Băng thông truyền tải (MB/s)** | **92.45 MB/s** | **95.60 MB/s** | 47.80 MB/s | 46.50 MB/s | Gắn Origin phản xạ và Vary |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.46% (Tàng hình)** | **0.00% (Baseline)** | **-6.87% (Suy hao)** | **Suy hao Velda thấp hơn 14.9 lần vs Envoy** |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.46% (Tàng hình)** | — | **-6.87% (Suy hao)** | **Suy hao Velda thấp hơn 14.9 lần vs Envoy** |
 | | **Tổng headers CORS đã chèn (Headers Injected)** | **0 headers** | **1,320,450 headers** | 0 headers | 638,400 headers | 2 headers / req (Origin + Vary) |
 | | **Tốc độ chèn header CORS (Headers/sec)** | **0 headers/s** | **88,030.00 h/s** | 0 headers/s | 42,560.00 h/s | Xử lý regex-free ở tốc độ dây |
 | | **Độ trễ trung bình (Mean Latency)** | **2.26 ms** | **2.27 ms** | 4.38 ms | 4.70 ms | **Độ trễ Velda thấp hơn 51.7% vs Envoy** |
@@ -331,7 +331,7 @@ Mỗi kịch bản cốt lõi đều được phân tích định lượng đồ
 | | **Tổng số requests phục vụ (Total Requests)** | **663,253 requests** | **663,150 requests** | 342,750 requests | 338,700 requests | **Velda phục vụ gấp 1.96x Envoy** |
 | | **Throughput (req/s)** | **44,216.92** | **44,210.00** | 22,850.00 | 22,580.00 | **Velda vượt trội +95.8% vs Envoy** |
 | | **Băng thông truyền tải (MB/s)** | **92.45 MB/s** | **92.44 MB/s** | 47.80 MB/s | 47.25 MB/s | Băng thông tương đương Raw proxy |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.02% (Bypass tuyệt đối)**| **0.00% (Baseline)** | **-1.18% (Suy hao)** | **Mức suy hao Velda gần như bằng 0** |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.02% (Bypass tuyệt đối)**| — | **-1.18% (Suy hao)** | **Mức suy hao Velda gần như bằng 0** |
 | | **Tổng headers CORS đã chèn (Headers Injected)** | **0 headers** | **0 headers** | 0 headers | 0 headers | Hoàn toàn không chèn header |
 | | **Tốc độ chèn header CORS (Headers/sec)** | **0 headers/s** | **0.00 h/s** | 0 headers/s | 0.00 h/s | Không can thiệp lưu lượng non-CORS |
 | | **Độ trễ trung bình (Mean Latency)** | **2.26 ms** | **2.26 ms** | 4.38 ms | 4.43 ms | **Độ trễ Velda thấp hơn 49.0% vs Envoy** |
@@ -392,7 +392,7 @@ Mỗi kịch bản cốt lõi đều được phân tích định lượng đồ
 | | **Tổng số requests phục vụ (Total Requests)** | **663,253 requests** | **662,250 requests** | 342,750 requests | 331,800 requests | **Velda phục vụ gấp 2.00x Envoy** |
 | | **Throughput (req/s)** | **44,216.92** | **44,150.00** | 22,850.00 | 22,120.00 | **Velda vượt trội +99.6% vs Envoy** |
 | | **Băng thông truyền tải (MB/s)** | **92.45 MB/s** | **92.35 MB/s** | 47.80 MB/s | 46.28 MB/s | Băng thông tương đương Raw proxy |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.15% (Tàng hình)** | **0.00% (Baseline)** | **-3.20% (Suy hao)** | **Suy hao Velda thấp hơn 21.3 lần vs Envoy** |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.15% (Tàng hình)** | — | **-3.20% (Suy hao)** | **Suy hao Velda thấp hơn 21.3 lần vs Envoy** |
 | | **Tổng headers CORS đã chèn (Headers Injected)** | **0 headers** | **0 headers** | 0 headers | 0 headers | Chặn đứng 100% header injection |
 | | **Tốc độ chèn header CORS (Headers/sec)** | **0 headers/s** | **0.00 h/s** | 0 headers/s | 0.00 h/s | Không cấp phép cho domain độc |
 | | **Độ trễ trung bình (Mean Latency)** | **2.26 ms** | **2.26 ms** | 4.38 ms | 4.52 ms | **Độ trễ Velda thấp hơn 50.0% vs Envoy** |
@@ -454,7 +454,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **39,120.00** | **38,980.00** | **21,500.00** | **20,380.00** | **Velda dẫn trước +91.3% vs Envoy CORS** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.36% (Tàng hình)** | **0.00% (Baseline)** | **-5.21% (Suy hao)** | **Mức suy hao Velda thấp hơn 14.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.36% (Tàng hình)** | — | **-5.21% (Suy hao)** | **Mức suy hao Velda thấp hơn 14.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.35 ms** | **2.36 ms** | 4.80 ms | 5.12 ms | P50 Velda nhanh hơn gấp 2.17 lần |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.90 ms** | **4.92 ms** | 8.90 ms | 9.60 ms | P90 ổn định tuyệt đối |
 | **Độ Trễ Phân Vị P99 (ms)** | **7.46 ms** | **7.48 ms** | 12.80 ms | 13.90 ms | Không có hiện tượng phình đuôi trễ |
@@ -466,7 +466,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **37,450.00** | **37,310.00** | **15,800.00** | **14,920.00** | **Velda dẫn trước +150.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.37% (Tàng hình)** | **0.00% (Baseline)** | **-5.57% (Suy hao)** | **Suy hao Velda thấp hơn 15.1 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.37% (Tàng hình)** | — | **-5.57% (Suy hao)** | **Suy hao Velda thấp hơn 15.1 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.45 ms** | **2.46 ms** | 5.20 ms | 5.55 ms | SSE chunks truyền thẳng qua downstream |
 | **Độ Trễ Phân Vị P90 (ms)** | **5.50 ms** | **5.53 ms** | 10.20 ms | 11.10 ms | Kiểm soát jitter mượt mà |
 | **Độ Trễ Phân Vị P99 (ms)** | **8.40 ms** | **8.42 ms** | 14.80 ms | 16.10 ms | Bounded tail latency |
@@ -478,7 +478,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **37,150.00** | **37,010.00** | **14,500.00** | **13,680.00** | **Velda vượt trội +170.5% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.38% (Tàng hình)** | **0.00% (Baseline)** | **-5.66% (Suy hao)** | **Suy hao Velda thấp hơn 14.9 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.38% (Tàng hình)** | — | **-5.66% (Suy hao)** | **Suy hao Velda thấp hơn 14.9 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.50 ms** | **2.51 ms** | 5.50 ms | 5.90 ms | Upload chunks streaming zero-copy |
 | **Độ Trễ Phân Vị P90 (ms)** | **5.80 ms** | **5.83 ms** | 11.20 ms | 12.10 ms | Ổn định áp suất ngược backpressure |
 | **Độ Trễ Phân Vị P99 (ms)** | **8.95 ms** | **8.98 ms** | 16.50 ms | 17.80 ms | Đuôi trễ ngắn |
@@ -490,7 +490,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **35,800.00** | **35,660.00** | **13,200.00** | **12,420.00** | **Velda dẫn trước +187.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.39% (Tàng hình)** | **0.00% (Baseline)** | **-5.91% (Suy hao)** | **Mức suy hao Velda thấp hơn 15.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.39% (Tàng hình)** | — | **-5.91% (Suy hao)** | **Mức suy hao Velda thấp hơn 15.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.65 ms** | **2.66 ms** | 6.20 ms | 6.70 ms | Song công hai chiều trơn tru |
 | **Độ Trễ Phân Vị P90 (ms)** | **6.10 ms** | **6.13 ms** | 12.50 ms | 13.50 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **9.40 ms** | **9.43 ms** | 18.20 ms | 19.80 ms | Bounded tail latency |
@@ -502,7 +502,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **42,500.00** | **42,350.00** | **20,400.00** | **19,300.00** | **Velda dẫn trước +119.4% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.35% (Tàng hình)** | **0.00% (Baseline)** | **-5.39% (Suy hao)** | **Suy hao Velda thấp hơn 15.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.35% (Tàng hình)** | — | **-5.39% (Suy hao)** | **Suy hao Velda thấp hơn 15.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.10 ms** | **2.11 ms** | 4.60 ms | 4.90 ms | Ghép kênh H2 upstream giảm RTT |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.20 ms** | **4.22 ms** | 8.20 ms | 8.85 ms | Cực kỳ ổn định |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.80 ms** | **6.82 ms** | 12.10 ms | 13.20 ms | Đuôi trễ ngắn |
@@ -514,7 +514,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **40,100.00** | **39,950.00** | **16,200.00** | **15,300.00** | **Velda vượt trội +161.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.37% (Tàng hình)** | **0.00% (Baseline)** | **-5.56% (Suy hao)** | **Suy hao Velda thấp hơn 15.0 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.37% (Tàng hình)** | — | **-5.56% (Suy hao)** | **Suy hao Velda thấp hơn 15.0 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.25 ms** | **2.26 ms** | 5.10 ms | 5.45 ms | Data frames H2 chuyển sang H1 chunked |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.80 ms** | **4.82 ms** | 9.50 ms | 10.30 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **7.50 ms** | **7.52 ms** | 14.20 ms | 15.40 ms | Bounded tail latency |
@@ -526,7 +526,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **39,800.00** | **39,650.00** | **15,100.00** | **14,240.00** | **Velda vượt trội +178.4% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.38% (Tàng hình)** | **0.00% (Baseline)** | **-5.70% (Suy hao)** | **Suy hao Velda thấp hơn 15.0 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.38% (Tàng hình)** | — | **-5.70% (Suy hao)** | **Suy hao Velda thấp hơn 15.0 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.30 ms** | **2.31 ms** | 5.30 ms | 5.70 ms | Flow control H2 upstream nhịp nhàng |
 | **Độ Trễ Phân Vị P90 (ms)** | **5.10 ms** | **5.13 ms** | 10.50 ms | 11.40 ms | Kiểm soát backpressure hoàn hảo |
 | **Độ Trễ Phân Vị P99 (ms)** | **7.90 ms** | **7.93 ms** | 15.60 ms | 16.90 ms | Đuôi trễ ngắn |
@@ -538,7 +538,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **38,200.00** | **38,050.00** | **13,800.00** | **12,980.00** | **Velda dẫn trước +193.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.39% (Tàng hình)** | **0.00% (Baseline)** | **-5.94% (Suy hao)** | **Suy hao Velda thấp hơn 15.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.39% (Tàng hình)** | — | **-5.94% (Suy hao)** | **Suy hao Velda thấp hơn 15.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.40 ms** | **2.41 ms** | 5.80 ms | 6.25 ms | Cầu nối song công H1-H2 hiệu quả |
 | **Độ Trễ Phân Vị P90 (ms)** | **5.40 ms** | **5.43 ms** | 11.80 ms | 12.80 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **8.20 ms** | **8.23 ms** | 17.10 ms | 18.60 ms | Bounded tail latency |
@@ -550,7 +550,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **46,200.00** | **46,050.00** | **21,800.00** | **20,600.00** | **Velda dẫn trước +123.5% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.32% (Tàng hình)** | **0.00% (Baseline)** | **-5.50% (Suy hao)** | **Suy hao Velda thấp hơn 17.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.32% (Tàng hình)** | — | **-5.50% (Suy hao)** | **Suy hao Velda thấp hơn 17.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.85 ms** | **1.86 ms** | 4.20 ms | 4.50 ms | QUIC UDP datagram loại bỏ HOL blocking |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.80 ms** | **3.82 ms** | 7.50 ms | 8.10 ms | Độ trễ cực thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.10 ms** | **6.12 ms** | 11.20 ms | 12.20 ms | Đuôi trễ ngắn |
@@ -562,7 +562,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **43,800.00** | **43,650.00** | **17,500.00** | **16,520.00** | **Velda vượt trội +164.2% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.34% (Tàng hình)** | **0.00% (Baseline)** | **-5.60% (Suy hao)** | **Suy hao Velda thấp hơn 16.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.34% (Tàng hình)** | — | **-5.60% (Suy hao)** | **Suy hao Velda thấp hơn 16.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.95 ms** | **1.96 ms** | 4.60 ms | 4.95 ms | QUIC frames chuyển sang H1 SSE chunks |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.10 ms** | **4.12 ms** | 8.60 ms | 9.30 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.80 ms** | **6.82 ms** | 13.10 ms | 14.20 ms | Bounded tail latency |
@@ -574,7 +574,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **43,200.00** | **43,050.00** | **16,200.00** | **15,280.00** | **Velda vượt trội +181.7% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.35% (Tàng hình)** | **0.00% (Baseline)** | **-5.68% (Suy hao)** | **Suy hao Velda thấp hơn 16.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.35% (Tàng hình)** | — | **-5.68% (Suy hao)** | **Suy hao Velda thấp hơn 16.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.00 ms** | **2.01 ms** | 4.80 ms | 5.20 ms | H1 upload stream sang QUIC stream frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.40 ms** | **4.42 ms** | 9.20 ms | 10.10 ms | Kiểm soát backpressure hoàn hảo |
 | **Độ Trễ Phân Vị P99 (ms)** | **7.10 ms** | **7.13 ms** | 14.20 ms | 15.40 ms | Đuôi trễ ngắn |
@@ -586,7 +586,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **41,500.00** | **41,350.00** | **14,800.00** | **13,920.00** | **Velda dẫn trước +197.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.36% (Tàng hình)** | **0.00% (Baseline)** | **-5.95% (Suy hao)** | **Suy hao Velda thấp hơn 16.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.36% (Tàng hình)** | — | **-5.95% (Suy hao)** | **Suy hao Velda thấp hơn 16.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **2.10 ms** | **2.11 ms** | 5.20 ms | 5.65 ms | Cầu nối song công H1-H3 nhịp nhàng |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.60 ms** | **4.63 ms** | 10.50 ms | 11.50 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **7.50 ms** | **7.53 ms** | 15.80 ms | 17.20 ms | Bounded tail latency |
@@ -602,7 +602,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **51,800.00** | **51,620.00** | **23,100.00** | **21,850.00** | **Velda dẫn trước +136.2% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.35% (Tàng hình)** | **0.00% (Baseline)** | **-5.41% (Suy hao)** | **Suy hao Velda thấp hơn 15.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.35% (Tàng hình)** | — | **-5.41% (Suy hao)** | **Suy hao Velda thấp hơn 15.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.70 ms** | **1.71 ms** | 3.80 ms | 4.10 ms | Ghép kênh downstream giải phóng socket |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.50 ms** | **3.52 ms** | 6.80 ms | 7.45 ms | P90 ổn định tuyệt đối |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.60 ms** | **5.62 ms** | 10.20 ms | 11.20 ms | Không có hiện tượng nghẽn đầu hàng |
@@ -614,7 +614,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **49,200.00** | **49,020.00** | **18,500.00** | **17,450.00** | **Velda vượt trội +180.9% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.37% (Tàng hình)** | **0.00% (Baseline)** | **-5.68% (Suy hao)** | **Suy hao Velda thấp hơn 15.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.37% (Tàng hình)** | — | **-5.68% (Suy hao)** | **Suy hao Velda thấp hơn 15.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.80 ms** | **1.81 ms** | 4.20 ms | 4.55 ms | H1 chunked sang H2 DATA frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.80 ms** | **3.82 ms** | 7.80 ms | 8.50 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.10 ms** | **6.12 ms** | 11.50 ms | 12.60 ms | Bounded tail latency |
@@ -626,7 +626,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **48,600.00** | **48,420.00** | **17,200.00** | **16,210.00** | **Velda vượt trội +198.7% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.37% (Tàng hình)** | **0.00% (Baseline)** | **-5.76% (Suy hao)** | **Suy hao Velda thấp hơn 15.6 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.37% (Tàng hình)** | — | **-5.76% (Suy hao)** | **Suy hao Velda thấp hơn 15.6 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.85 ms** | **1.86 ms** | 4.40 ms | 4.75 ms | Stream upload multiplexed an toàn |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.00 ms** | **4.02 ms** | 8.20 ms | 9.00 ms | Flow control H2 chặt chẽ |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.40 ms** | **6.43 ms** | 12.40 ms | 13.60 ms | Đuôi trễ ngắn |
@@ -638,7 +638,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **47,100.00** | **46,920.00** | **15,800.00** | **14,860.00** | **Velda dẫn trước +215.7% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.38% (Tàng hình)** | **0.00% (Baseline)** | **-5.95% (Suy hao)** | **Suy hao Velda thấp hơn 15.7 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.38% (Tàng hình)** | — | **-5.95% (Suy hao)** | **Suy hao Velda thấp hơn 15.7 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.92 ms** | **1.93 ms** | 4.80 ms | 5.20 ms | Song công chuyển đổi giao thức mượt |
 | **Độ Trễ Phân Vị P90 (ms)** | **4.20 ms** | **4.23 ms** | 9.10 ms | 10.00 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.80 ms** | **6.83 ms** | 13.90 ms | 15.20 ms | Bounded tail latency |
@@ -650,7 +650,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **54,820.00** | **54,650.00** | **24,500.00** | **23,180.00** | **Velda dẫn trước +135.8% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.31% (Tàng hình)** | **0.00% (Baseline)** | **-5.39% (Suy hao)** | **Suy hao Velda thấp hơn 17.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.31% (Tàng hình)** | — | **-5.39% (Suy hao)** | **Suy hao Velda thấp hơn 17.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.55 ms** | **1.56 ms** | 3.50 ms | 3.75 ms | Thuần nhị phân H2 hai đầu |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.10 ms** | **3.12 ms** | 6.20 ms | 6.75 ms | Độ trễ cực thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.05 ms** | **5.07 ms** | 9.40 ms | 10.30 ms | Đuôi trễ ngắn |
@@ -662,7 +662,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **52,100.00** | **51,930.00** | **19,800.00** | **18,680.00** | **Velda vượt trội +178.0% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.33% (Tàng hình)** | **0.00% (Baseline)** | **-5.66% (Suy hao)** | **Suy hao Velda thấp hơn 17.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.33% (Tàng hình)** | — | **-5.66% (Suy hao)** | **Suy hao Velda thấp hơn 17.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.65 ms** | **1.66 ms** | 3.90 ms | 4.20 ms | DATA frames forward trực tiếp |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.40 ms** | **3.42 ms** | 7.10 ms | 7.70 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.50 ms** | **5.52 ms** | 10.80 ms | 11.80 ms | Bounded tail latency |
@@ -674,7 +674,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **51,400.00** | **51,230.00** | **18,400.00** | **17,350.00** | **Velda vượt trội +195.3% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.33% (Tàng hình)** | **0.00% (Baseline)** | **-5.71% (Suy hao)** | **Suy hao Velda thấp hơn 17.3 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.33% (Tàng hình)** | — | **-5.71% (Suy hao)** | **Suy hao Velda thấp hơn 17.3 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.70 ms** | **1.71 ms** | 4.10 ms | 4.40 ms | Client frames forward trực tiếp |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.60 ms** | **3.62 ms** | 7.50 ms | 8.20 ms | Flow control đồng bộ hai đầu |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.80 ms** | **5.82 ms** | 11.50 ms | 12.60 ms | Đuôi trễ ngắn |
@@ -686,7 +686,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **49,800.00** | **49,630.00** | **16,900.00** | **15,900.00** | **Velda dẫn trước +212.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.34% (Tàng hình)** | **0.00% (Baseline)** | **-5.92% (Suy hao)** | **Suy hao Velda thấp hơn 17.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.34% (Tàng hình)** | — | **-5.92% (Suy hao)** | **Suy hao Velda thấp hơn 17.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.75 ms** | **1.76 ms** | 4.40 ms | 4.75 ms | Ghép kênh song công thuần nhị phân |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.80 ms** | **3.82 ms** | 8.20 ms | 9.00 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.10 ms** | **6.13 ms** | 12.80 ms | 14.10 ms | Bounded tail latency |
@@ -698,7 +698,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **56,200.00** | **56,030.00** | **23,800.00** | **22,500.00** | **Velda dẫn trước +149.0% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | **0.00% (Baseline)** | **-5.46% (Suy hao)** | **Suy hao Velda thấp hơn 18.2 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | **-5.46% (Suy hao)** | **Suy hao Velda thấp hơn 18.2 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.45 ms** | **1.46 ms** | 3.40 ms | 3.65 ms | Cầu nối H2 ghép kênh sang QUIC datagrams |
 | **Độ Trễ Phân Vị P90 (ms)** | **2.90 ms** | **2.92 ms** | 5.90 ms | 6.45 ms | Độ trễ cực thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **4.75 ms** | **4.77 ms** | 9.10 ms | 10.00 ms | Đuôi trễ ngắn |
@@ -710,7 +710,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **53,500.00** | **53,330.00** | **19,200.00** | **18,120.00** | **Velda vượt trội +194.3% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.32% (Tàng hình)** | **0.00% (Baseline)** | **-5.63% (Suy hao)** | **Suy hao Velda thấp hơn 17.6 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.32% (Tàng hình)** | — | **-5.63% (Suy hao)** | **Suy hao Velda thấp hơn 17.6 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.55 ms** | **1.56 ms** | 3.80 ms | 4.10 ms | QUIC datagrams sang H2 DATA frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.20 ms** | **3.22 ms** | 6.80 ms | 7.40 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.20 ms** | **5.22 ms** | 10.50 ms | 11.50 ms | Bounded tail latency |
@@ -722,7 +722,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **52,800.00** | **52,630.00** | **18,100.00** | **17,080.00** | **Velda vượt trội +208.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.32% (Tàng hình)** | **0.00% (Baseline)** | **-5.64% (Suy hao)** | **Suy hao Velda thấp hơn 17.6 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.32% (Tàng hình)** | — | **-5.64% (Suy hao)** | **Suy hao Velda thấp hơn 17.6 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.60 ms** | **1.61 ms** | 4.00 ms | 4.30 ms | H2 upload frames sang QUIC stream |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.30 ms** | **3.32 ms** | 7.20 ms | 7.90 ms | Flow control chặt chẽ |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.45 ms** | **5.47 ms** | 11.10 ms | 12.20 ms | Đuôi trễ ngắn |
@@ -734,7 +734,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **51,200.00** | **51,030.00** | **16,500.00** | **15,520.00** | **Velda dẫn trước +228.8% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.33% (Tàng hình)** | **0.00% (Baseline)** | **-5.94% (Suy hao)** | **Suy hao Velda thấp hơn 18.0 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.33% (Tàng hình)** | — | **-5.94% (Suy hao)** | **Suy hao Velda thấp hơn 18.0 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.65 ms** | **1.66 ms** | 4.30 ms | 4.65 ms | Cầu nối song công H2-H3 mượt mà |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.50 ms** | **3.52 ms** | 7.90 ms | 8.65 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.80 ms** | **5.83 ms** | 12.40 ms | 13.70 ms | Bounded tail latency |
@@ -750,7 +750,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **53,500.00** | **53,340.00** | **21,500.00** | **20,320.00** | **Velda dẫn trước +162.5% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | **0.00% (Baseline)** | **-5.49% (Suy hao)** | **Suy hao Velda thấp hơn 18.3 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | **-5.49% (Suy hao)** | **Suy hao Velda thấp hơn 18.3 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.50 ms** | **1.51 ms** | 3.60 ms | 3.90 ms | Ingress QUIC 0-RTT handshakes |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.05 ms** | **3.07 ms** | 6.40 ms | 7.00 ms | Độ trễ cực thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **4.90 ms** | **4.92 ms** | 9.80 ms | 10.80 ms | Đuôi trễ ngắn |
@@ -762,7 +762,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **50,800.00** | **50,640.00** | **17,500.00** | **16,500.00** | **Velda vượt trội +206.9% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.31% (Tàng hình)** | **0.00% (Baseline)** | **-5.71% (Suy hao)** | **Suy hao Velda thấp hơn 18.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.31% (Tàng hình)** | — | **-5.71% (Suy hao)** | **Suy hao Velda thấp hơn 18.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.60 ms** | **1.61 ms** | 4.00 ms | 4.35 ms | H1 chunks chuyển sang QUIC frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.30 ms** | **3.32 ms** | 7.20 ms | 7.90 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.40 ms** | **5.42 ms** | 11.20 ms | 12.30 ms | Bounded tail latency |
@@ -774,7 +774,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **50,100.00** | **49,940.00** | **16,200.00** | **15,260.00** | **Velda vượt trội +227.3% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.32% (Tàng hình)** | **0.00% (Baseline)** | **-5.80% (Suy hao)** | **Suy hao Velda thấp hơn 18.1 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.32% (Tàng hình)** | — | **-5.80% (Suy hao)** | **Suy hao Velda thấp hơn 18.1 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.65 ms** | **1.66 ms** | 4.20 ms | 4.55 ms | QUIC upload stream sang H1 socket |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.50 ms** | **3.52 ms** | 7.60 ms | 8.35 ms | Flow control đồng bộ hai đầu |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.70 ms** | **5.72 ms** | 12.00 ms | 13.20 ms | Đuôi trễ ngắn |
@@ -786,7 +786,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **48,500.00** | **48,340.00** | **15,100.00** | **14,200.00** | **Velda dẫn trước +240.4% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.33% (Tàng hình)** | **0.00% (Baseline)** | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 18.1 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.33% (Tàng hình)** | — | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 18.1 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.70 ms** | **1.71 ms** | 4.50 ms | 4.90 ms | Cầu nối song công H3-H1 trơn tru |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.70 ms** | **3.72 ms** | 8.50 ms | 9.40 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **6.10 ms** | **6.13 ms** | 13.20 ms | 14.60 ms | Bounded tail latency |
@@ -798,7 +798,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **55,400.00** | **55,240.00** | **22,800.00** | **21,550.00** | **Velda dẫn trước +156.3% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.29% (Tàng hình)** | **0.00% (Baseline)** | **-5.48% (Suy hao)** | **Suy hao Velda thấp hơn 18.9 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.29% (Tàng hình)** | — | **-5.48% (Suy hao)** | **Suy hao Velda thấp hơn 18.9 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.45 ms** | **1.46 ms** | 3.50 ms | 3.75 ms | Cầu nối nhị phân QPACK sang HPACK |
 | **Độ Trễ Phân Vị P90 (ms)** | **2.95 ms** | **2.97 ms** | 6.10 ms | 6.70 ms | Độ trễ cực thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **4.80 ms** | **4.82 ms** | 9.30 ms | 10.20 ms | Đuôi trễ ngắn |
@@ -810,7 +810,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **52,800.00** | **52,640.00** | **18,600.00** | **17,540.00** | **Velda vượt trội +200.1% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | **0.00% (Baseline)** | **-5.70% (Suy hao)** | **Suy hao Velda thấp hơn 19.0 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | **-5.70% (Suy hao)** | **Suy hao Velda thấp hơn 19.0 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.55 ms** | **1.56 ms** | 3.90 ms | 4.25 ms | H2 DATA frames chuyển sang QUIC frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.20 ms** | **3.22 ms** | 7.00 ms | 7.70 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.25 ms** | **5.27 ms** | 10.80 ms | 11.90 ms | Bounded tail latency |
@@ -822,7 +822,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **52,100.00** | **51,940.00** | **17,400.00** | **16,400.00** | **Velda vượt trội +216.7% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.31% (Tàng hình)** | **0.00% (Baseline)** | **-5.75% (Suy hao)** | **Suy hao Velda thấp hơn 18.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.31% (Tàng hình)** | — | **-5.75% (Suy hao)** | **Suy hao Velda thấp hơn 18.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.60 ms** | **1.61 ms** | 4.10 ms | 4.45 ms | QUIC upload frames sang H2 DATA frames |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.40 ms** | **3.42 ms** | 7.40 ms | 8.15 ms | Flow control đồng bộ hai đầu |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.50 ms** | **5.52 ms** | 11.60 ms | 12.80 ms | Đuôi trễ ngắn |
@@ -834,7 +834,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **50,500.00** | **50,340.00** | **16,100.00** | **15,140.00** | **Velda dẫn trước +232.5% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.32% (Tàng hình)** | **0.00% (Baseline)** | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 18.6 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.32% (Tàng hình)** | — | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 18.6 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.65 ms** | **1.66 ms** | 4.40 ms | 4.80 ms | Cầu nối song công H3-H2 trơn tru |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.60 ms** | **3.62 ms** | 8.10 ms | 9.00 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.90 ms** | **5.93 ms** | 12.80 ms | 14.10 ms | Bounded tail latency |
@@ -846,7 +846,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **58,400.00** | **58,240.00** | **25,200.00** | **23,850.00** | **Velda dẫn trước +144.2% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.27% (Tàng hình)** | **0.00% (Baseline)** | **-5.36% (Suy hao)** | **Suy hao Velda thấp hơn 19.9 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.27% (Tàng hình)** | — | **-5.36% (Suy hao)** | **Suy hao Velda thấp hơn 19.9 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.35 ms** | **1.36 ms** | 3.20 ms | 3.45 ms | Thuần QUIC datagrams hai đầu |
 | **Độ Trễ Phân Vị P90 (ms)** | **2.75 ms** | **2.77 ms** | 5.60 ms | 6.15 ms | Triệt tiêu hoàn toàn TCP HOL blocking |
 | **Độ Trễ Phân Vị P99 (ms)** | **4.45 ms** | **4.47 ms** | 8.60 ms | 9.45 ms | Đuôi trễ ngắn nhất hệ sinh thái |
@@ -858,7 +858,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **55,600.00** | **55,440.00** | **20,400.00** | **19,250.00** | **Velda vượt trội +188.0% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.29% (Tàng hình)** | **0.00% (Baseline)** | **-5.64% (Suy hao)** | **Suy hao Velda thấp hơn 19.4 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.29% (Tàng hình)** | — | **-5.64% (Suy hao)** | **Suy hao Velda thấp hơn 19.4 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.45 ms** | **1.46 ms** | 3.60 ms | 3.90 ms | Forward QUIC frames qua UDP socket |
 | **Độ Trễ Phân Vị P90 (ms)** | **2.95 ms** | **2.97 ms** | 6.50 ms | 7.15 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **4.85 ms** | **4.87 ms** | 9.90 ms | 10.90 ms | Bounded tail latency |
@@ -870,7 +870,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **54,900.00** | **54,740.00** | **19,100.00** | **18,020.00** | **Velda vượt trội +203.8% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.29% (Tàng hình)** | **0.00% (Baseline)** | **-5.65% (Suy hao)** | **Suy hao Velda thấp hơn 19.5 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.29% (Tàng hình)** | — | **-5.65% (Suy hao)** | **Suy hao Velda thấp hơn 19.5 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.50 ms** | **1.51 ms** | 3.80 ms | 4.10 ms | Upload stream qua QUIC datagrams |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.10 ms** | **3.12 ms** | 6.80 ms | 7.50 ms | Flow control đồng bộ hai đầu |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.10 ms** | **5.12 ms** | 10.50 ms | 11.60 ms | Đuôi trễ ngắn |
@@ -882,7 +882,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Tiêu Chí Đo Lường Kỹ Thuật | Velda Raw Proxy | Velda Edge (`cors`) | Envoy Raw Proxy | Envoy Proxy 1.31 (CORS) | Nhận Xét & Phân Tích Vi Kiến Trúc |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Throughput (req/s)** | **53,200.00** | **53,040.00** | **17,800.00** | **16,740.00** | **Velda dẫn trước +216.8% vs Envoy** |
-| **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | **0.00% (Baseline)** | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 19.9 lần** |
+| **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | **-5.96% (Suy hao)** | **Suy hao Velda thấp hơn 19.9 lần** |
 | **Độ Trễ Phân Vị P50 (ms)** | **1.55 ms** | **1.56 ms** | 4.10 ms | 4.45 ms | Song công hai chiều thuần QUIC |
 | **Độ Trễ Phân Vị P90 (ms)** | **3.25 ms** | **3.27 ms** | 7.40 ms | 8.20 ms | Jitter thấp |
 | **Độ Trễ Phân Vị P99 (ms)** | **5.40 ms** | **5.43 ms** | 11.60 ms | 12.80 ms | Bounded tail latency |
@@ -903,7 +903,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Raw Proxy** | **Velda Edge** (`cors`) | **Envoy Raw Proxy** | **Envoy 1.31** (CORS) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Throughput & L7)** | **Throughput phục vụ thành công (req/s)** | **41,500.00** | **41,380.00** | 20,800.00 | 19,850.00 | **Velda duy trì thông lượng gấp 2.08x Envoy** |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.29% (Tàng hình)** | 0.00% (Baseline) | -4.57% (Suy hao) | Không bị ảnh hưởng bởi client RST |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.29% (Tàng hình)** | — | -4.57% (Suy hao) | Không bị ảnh hưởng bởi client RST |
 | | **Độ trễ đuôi P99 (ms)** | **8.80 ms** | **8.82 ms** | 16.50 ms | 17.80 ms | Đuôi trễ ngắn hơn gấp đôi |
 | **Tài Nguyên & Thu Hồi** | **Thời gian thu hồi tài nguyên Header** | **Tức thì (~6ns)** | **Tức thì (~6ns)** | Chậm (~45ms) | Chậm (~55ms) | **RAII Scope Drop giải phóng tức thì** |
 | | **Bộ nhớ rò rỉ khi Client ngắt ngang** | **0 Bytes** | **0 Bytes** | ~1.4 MB | ~2.8 MB | Zero memory leak |
@@ -920,7 +920,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Raw Proxy** | **Velda Edge** (`cors`) | **Envoy Raw Proxy** | **Envoy 1.31** (CORS) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Throughput & L7)** | **Throughput phục vụ (req/s)** | **36,200.00** | **36,080.00** | 17,500.00 | 16,680.00 | **Velda vượt trội +116.3% vs Envoy** |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.33% (Tàng hình)** | 0.00% (Baseline) | -4.69% (Suy hao) | Xử lý timeout mượt mà |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.33% (Tàng hình)** | — | -4.69% (Suy hao) | Xử lý timeout mượt mà |
 | | **Độ trễ đuôi P99 (ms)** | **14.50 ms** | **14.53 ms** | 28.50 ms | 30.80 ms | P99 Velda ngắn hơn 52.8% |
 | **Tính Toàn Vẹn CORS** | **Headers CORS trên phản hồi 504** | N/A | **100% gắn đủ CORS** | N/A | **42% bị nuốt CORS** | **Frontend đọc được body lỗi 504** |
 | | **Header `Vary: Origin` trên 504** | N/A | **100% có mặt** | N/A | Thiếu hụt | Bảo vệ CDN không cache nhầm 504 |
@@ -936,7 +936,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Raw Proxy** | **Velda Edge** (`cors`) | **Envoy Raw Proxy** | **Envoy 1.31** (CORS) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Throughput & L7)** | **Throughput luồng bình thường (req/s)** | **28,400.00** | **28,300.00** | 12,800.00 | 12,050.00 | **Velda dẫn trước +134.9% vs Envoy** |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.35% (Tàng hình)** | 0.00% (Baseline) | -5.86% (Suy hao) | Tách biệt hoàn hảo |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.35% (Tàng hình)** | — | -5.86% (Suy hao) | Tách biệt hoàn hảo |
 | | **Độ trễ đuôi P99 (ms)** | **18.20 ms** | **18.25 ms** | 38.50 ms | 42.00 ms | Không bị kéo trễ lây lan |
 | **Áp Suất Ngược Bộ Đệm** | **Bộ đệm L7 Memory Churn** | **0 B** | **0 B** | Phình to 180MB | Phình to 215MB | **Không tích lũy heap buffer** |
 | | **Đỉnh Bộ Nhớ RAM (Peak RSS)** | **35.5 MB** | **35.9 MB** | 240.0 MB | 275.0 MB | RAM Velda giữ phẳng ở ~35.9MB |
@@ -952,7 +952,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Raw Proxy** | **Velda Edge** (`cors`) | **Envoy Raw Proxy** | **Envoy 1.31** (CORS) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Throughput & L7)** | **Throughput phục hồi (req/s)** | **39,800.00** | **39,680.00** | 19,200.00 | 18,280.00 | **Velda vượt trội +117.1% vs Envoy** |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.30% (Tàng hình)** | 0.00% (Baseline) | -4.79% (Suy hao) | Khôi phục thông lượng tức thì |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.30% (Tàng hình)** | — | -4.79% (Suy hao) | Khôi phục thông lượng tức thì |
 | | **Độ trễ đuôi P99 (ms)** | **9.80 ms** | **9.83 ms** | 18.20 ms | 19.80 ms | Đuôi trễ ngắn hơn gấp đôi |
 | **Khả Năng Phục Hồi** | **Thời gian dọn dẹp và cô lập backend hỏng** | **Tức thì (~8ns)** | **Tức thì (~8ns)** | Chậm 85ms | Chậm 110ms | **Lập tức gạch tên socket chết** |
 | | **Header Workspace Leakage** | **0 Bytes** | **0 Bytes** | ~120 KB rò rỉ | ~350 KB rò rỉ | Giải phóng trọn vẹn HeaderWorkspace |
@@ -968,7 +968,7 @@ Toàn bộ 36 kịch bản pipe bridges đều được thử nghiệm trên mô
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Raw Proxy** | **Velda Edge** (`cors`) | **Envoy Raw Proxy** | **Envoy 1.31** (CORS) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Throughput & L7)** | **Throughput khi mất 2% gói (req/s)** | **47,200.00** | **47,020.00** | 21,200.00 | 19,950.00 | **Velda dẫn trước +135.7% vs Envoy** |
-| | **Tỷ Lệ Suy Hao (% Suy Hao)** | **0.00% (Baseline)** | **-0.38% (Tàng hình)** | 0.00% (Baseline) | -5.90% (Suy hao) | Không bị cộng dồn suy hao |
+| | **Tỷ Lệ Suy Hao (% Suy Hao)** | — | **-0.38% (Tàng hình)** | — | -5.90% (Suy hao) | Không bị cộng dồn suy hao |
 | | **Độ trễ phân vị P50 (ms)** | **1.55 ms** | **1.56 ms** | 3.25 ms | 3.50 ms | QUIC stream độc lập, không HOL |
 | | **Độ trễ đuôi P99 (ms)** | **5.20 ms** | **5.23 ms** | 9.80 ms | 10.85 ms | Đuôi trễ cực kỳ kiểm soát |
 | **Khả Năng Bù Gói QUIC** | **Thời gian phát hiện mất gói** | **1 RTT (~0.68ms)** | **1 RTT (~0.68ms)** | 2.5 RTT | 2.8 RTT | BBR v2 congestion control |

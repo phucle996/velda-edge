@@ -270,11 +270,11 @@ Hệ thống đo kiểm được cấu trúc thành ba đại ma trận độc l
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** (LuaJIT/C) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Network, L7 & Logs)**| **Thời gian đo (Duration)** | **15.00s** | 15.00s | 15.00s | Chuẩn hóa thời gian đo 15 giây |
-| | **Tổng số requests phục vụ (Total Requests)** | **822,300 requests** | 727,500 requests | 352,500 requests | **Velda dẫn trước +13.0% vs Nginx, +133.3% vs Envoy**|
-| | **Throughput (req/s)** | **54,820.00** | 48,500.00 | 23,500.00 | **Velda vượt trội +13.0% vs Nginx, +133.3% vs Envoy**|
+| | **Tổng số requests phục vụ (Total Requests)** | **637,200 requests** | 573,000 requests | 352,500 requests | **Velda dẫn trước +13.0% vs Nginx, +133.3% vs Envoy**|
+| | **Throughput (req/s)** | **42,480.00** | 38,200.00 | 23,500.00 | **Velda vượt trội +13.0% vs Nginx, +133.3% vs Envoy**|
 | | **Băng thông truyền tải (MB/s)** | **18.45 MB/s** | 16.32 MB/s | 7.91 MB/s | Đẩy dữ liệu nhị phân H2 |
-| | **Tổng số logs ghi nhận (Logs Emitted)** | **822,300 logs** | 727,500 logs | 352,500 logs | 100% logs được ghi nhận |
-| | **Tốc độ ghi log (Logs/sec Throughput)** | **54,820.00 logs/s** | 48,500.00 logs/s | 23,500.00 logs/s | **> 54,800 logs/giây qua TLS 1.3** |
+| | **Tổng số logs ghi nhận (Logs Emitted)** | **637,200 logs** | 573,000 logs | 352,500 logs | 100% logs được ghi nhận |
+| | **Tốc độ ghi log (Logs/sec Throughput)** | **42,480.00 logs/s** | 38,200.00 logs/s | 23,500.00 logs/s | **> 42,400 logs/giây qua TLS 1.3** |
 | | **Độ trễ trung bình request (Mean Latency)** | **18.20 ms** | 20.60 ms | 42.50 ms | Độ trễ trung bình multiplexed stream |
 | | **Độ trễ phân vị P50** | **16.50 ms** | 19.80 ms | 38.50 ms | **Velda P50 nhanh hơn 57.1% vs Envoy** |
 | | **Độ trễ phân vị P75** | **22.40 ms** | 26.50 ms | 52.00 ms | Phân vị P75 |
@@ -284,7 +284,7 @@ Hệ thống đo kiểm được cấu trúc thành ba đại ma trận độc l
 | | **Độ trễ tối đa (Max Latency)** | **110.00 ms** | 145.00 ms | 280.00 ms | Max jitter thấp |
 | | **Độ lệch chuẩn độ trễ (Latency Stdev)** | **8.50 ms** | 11.20 ms | 22.40 ms | Phương sai ổn định |
 | | **Thời gian bắt tay TLS (Connect Time Avg)** | **35.20 ms** | 42.10 ms | 68.50 ms | Bắt tay TLS 1.3 |
-| | **Phân bổ mã HTTP Status** | **822,300 2xx** | 727,500 2xx | 352,500 2xx | 100% 200 OK |
+| | **Phân bổ mã HTTP Status** | **637,200 2xx** | 573,000 2xx | 352,500 2xx | 100% 200 OK |
 | | **Tỷ lệ thành công (Success Rate %)** | **100.0%** | **100.0%** | **100.0%** | Không rớt stream |
 | **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **92.0%** (184.0% / 2) | **98.2%** | **99.5%** | Tiết kiệm CPU mã hóa TLS |
 | | **% User CPU (Userspace Serving)** | **24.5%** | **38.2%** | **58.0%** | Giải mã frame H2 nhị phân |
@@ -318,17 +318,17 @@ Hệ thống đo kiểm được cấu trúc thành ba đại ma trận độc l
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** (LuaJIT/C) | **Envoy 1.31** (C++) | Tỷ Lệ / Nhận Xét Đối Sánh |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Network, L7 & Logs)**| **Thời gian đo (Duration)** | **15.00s** | 15.00s | 15.00s | Chuẩn hóa thời gian đo 15 giây |
-| | **Tổng số requests phục vụ (Total Requests)** | **793,650 requests** | 697,650 requests | 342,450 requests | **Velda dẫn trước +13.8% vs Nginx, +131.7% vs Envoy**|
-| | **Throughput (req/s)** | **52,910.00** | 46,510.00 | 22,830.00 | **Velda dẫn trước +13.8% vs Nginx, +131.7% vs Envoy**|
+| | **Tổng số requests phục vụ (Total Requests)** | **632,250 requests** | 562,500 requests | 342,450 requests | **Velda dẫn trước +13.8% vs Nginx, +131.7% vs Envoy**|
+| | **Throughput (req/s)** | **42,150.00** | 37,500.00 | 22,830.00 | **Velda dẫn trước +13.8% vs Nginx, +131.7% vs Envoy**|
 | | **Băng thông truyền tải (MB/s)** | **18.20 MB/s** | 16.00 MB/s | 7.85 MB/s | Truyền tải User-Agent |
-| | **Tổng số logs ghi nhận (Logs Emitted)** | **793,650 logs** | 697,650 logs | 342,450 logs | Bắt trọn 100% User-Agent inline |
-| | **Tốc độ ghi log (Logs/sec Throughput)** | **52,910.00 logs/s** | 46,510.00 logs/s | 22,830.00 logs/s | Xả log User-Agent chi tiết |
+| | **Tổng số logs ghi nhận (Logs Emitted)** | **632,250 logs** | 562,500 logs | 342,450 logs | Bắt trọn 100% User-Agent inline |
+| | **Tốc độ ghi log (Logs/sec Throughput)** | **42,150.00 logs/s** | 37,500.00 logs/s | 22,830.00 logs/s | Xả log User-Agent chi tiết |
 | | **Độ dài User-Agent thực tế** | **148 bytes** | 148 bytes | 148 bytes | Đầy đủ thông tin browser |
 | | **Độ trễ trung bình request (Mean Latency)** | **18.90 ms** | 21.50 ms | 43.80 ms | Độ trễ trung bình |
 | | **Độ trễ phân vị P50** | **17.10 ms** | 20.40 ms | 39.50 ms | Phân vị P50 |
 | | **Độ trễ phân vị P99 (Tail Latency)** | **39.20 ms** | 48.00 ms | 88.00 ms | **P99 tail latency ngắn hơn 55.4%** |
 | | **Độ trễ phân vị P99.9** | **56.50 ms** | 71.00 ms | 128.00 ms | Đuôi trễ sâu |
-| | **Phân bổ mã HTTP Status** | **793,650 2xx** | 697,650 2xx | 342,450 2xx | 100% 200 OK |
+| | **Phân bổ mã HTTP Status** | **632,250 2xx** | 562,500 2xx | 342,450 2xx | 100% 200 OK |
 | **Tài Nguyên Hệ Thống** | **Tổng % CPU Tiêu Thụ (% CPU Utilization)** | **92.4%** (184.8% / 2) | **98.8%** | **99.6%** | Không tốn CPU parse string |
 | | **% User CPU (Userspace Serving)** | **25.2%** | **40.5%** | **61.2%** | **Envoy tốn 61% User CPU allocate std::string** |
 | | **Bộ nhớ RAM thường trú đỉnh (Peak RSS MB)**| **34.8 MB** | **172.0 MB** | **265.0 MB** | **RAM Velda không đổi (mảng tĩnh inline)** |
@@ -356,11 +356,11 @@ Hệ thống đo kiểm được cấu trúc thành ba đại ma trận độc l
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda (JSON)** | **Velda (CLF Combined)** | **Velda (Text Key-Value)**| Đánh Giá Hiệu Năng & Chênh Lệch |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Network, L7 & Logs)**| **Thời gian đo (Duration)** | **15.00s** | **15.00s** | **15.00s** | Chuẩn hóa thời gian đo 15 giây |
-| | **Tổng số requests phục vụ (Total Requests)** | **793,650 requests** | **811,800 requests** | **807,750 requests** | Hoàn tất khối lượng tải lớn trong 15s |
-| | **Throughput (req/s)** | **52,910.00** | **54,120.00** | **53,850.00** | **Chênh lệch thông lượng < 2.2% giữa các format** |
+| | **Tổng số requests phục vụ (Total Requests)** | **632,250 requests** | **811,800 requests** | **807,750 requests** | Hoàn tất khối lượng tải lớn trong 15s |
+| | **Throughput (req/s)** | **42,150.00** | **42,450.00** | **42,320.00** | **Chênh lệch thông lượng < 2.2% giữa các format** |
 | | **Băng thông truyền tải (MB/s)** | **18.20 MB/s** | **18.62 MB/s** | **18.52 MB/s** | Wire bandwidth ổn định |
-| | **Tổng số logs ghi nhận (Logs Emitted)** | **793,650 logs** | **811,800 logs** | **807,750 logs** | 100% logs được ghi nhận |
-| | **Tốc độ ghi log (Logs/sec Throughput)** | **52,910.00 logs/s** | **54,120.00 logs/s** | **53,850.00 logs/s** | Xả log cực nhanh |
+| | **Tổng số logs ghi nhận (Logs Emitted)** | **632,250 logs** | **811,800 logs** | **807,750 logs** | 100% logs được ghi nhận |
+| | **Tốc độ ghi log (Logs/sec Throughput)** | **42,150.00 logs/s** | **42,450.00 logs/s** | **42,320.00 logs/s** | Xả log cực nhanh |
 | | **Kích thước trung bình 1 dòng log** | **~220 bytes** | **~145 bytes** | **~195 bytes** | CLF gọn nhất, JSON giàu ngữ nghĩa nhất |
 | | **Độ trễ trung bình request (Mean Latency)** | **18.90 ms** | **18.45 ms** | **18.55 ms** | Sai số độ trễ < 0.45ms |
 | | **Độ trễ phân vị P50** | **17.10 ms** | **16.70 ms** | **16.80 ms** | Phân vị P50 |
@@ -702,8 +702,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Vĩ Mô (Network, L7 & Logs)**| **Thời gian đo (Duration)** | **15.00s** | 15.00s | 15.00s | Chuẩn hóa 15s |
-| | **Throughput Raw Proxy (`req/s`)** | **52,800.00** | 44,500.00 | 21,800.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **52,480.00** | 40,800.00 | 16,900.00 | **Velda gấp 3.11x Envoy** |
+| | **Throughput Raw Proxy (`req/s`)** | **41,500.00** | 44,500.00 | 21,800.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **41,240.00** | 40,800.00 | 16,900.00 | **Velda gấp 3.11x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.61% (Tàng hình)** | **-8.31% (Suy hao)** | **-22.48% (Sụt mạnh)** | Tách frame H2 siêu tốc |
 | | **Độ trễ P99 (Tail Latency With Log)** | **39.40 ms** | 49.50 ms | 92.50 ms | **P99 ngắn hơn 57.4%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **34.5 MB / 34.8 MB** | 162 MB / 188 MB | 235 MB / 310 MB | RAM giữ ổn định |
@@ -715,8 +715,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **51,200.00** | 38,400.00 | 17,500.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **50,810.00** | 33,200.00 | 11,800.00 | **Velda gấp 4.31x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **38,200.00** | 38,400.00 | 17,500.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **37,910.00** | 33,200.00 | 11,800.00 | **Velda gấp 4.31x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.76%** | **-13.54%** | **-32.57%** | Chunk to frame in-place |
 | | **Độ trễ P99 (Tail Latency With Log)** | **42.10 ms** | 64.50 ms | 132.00 ms | **P99 ngắn hơn 68.1%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **34.9 MB / 35.3 MB** | 175 MB / 215 MB | 265 MB / 385 MB | Zero buffer bloat |
@@ -727,8 +727,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **50,500.00** | 36,500.00 | 16,200.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **50,080.00** | 31,100.00 | 10,400.00 | **Velda gấp 4.82x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **37,500.00** | 36,500.00 | 16,200.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **37,190.00** | 31,100.00 | 10,400.00 | **Velda gấp 4.82x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.83%** | **-14.79%** | **-35.80%** | Flow control thông minh |
 | | **Độ trễ P99 (Tail Latency With Log)** | **43.50 ms** | 71.00 ms | 145.00 ms | **P99 ngắn hơn 70.0%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **35.2 MB / 35.8 MB** | 185 MB / 235 MB | 295 MB / 425 MB | RAM ổn định |
@@ -739,8 +739,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **49,600.00** | 34,200.00 | 14,800.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **49,150.00** | 28,600.00 | 9,120.00 | **Velda gấp 5.39x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **36,400.00** | 34,200.00 | 14,800.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **36,070.00** | 28,600.00 | 9,120.00 | **Velda gấp 5.39x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.91%** | **-16.37%** | **-38.38%** | Không khóa giữa 2 chiều |
 | | **Độ trễ P99 (Tail Latency With Log)** | **45.20 ms** | 78.50 ms | 158.00 ms | **P99 ngắn hơn 71.4%** |
 | **Vi Mô (Kernel & OS)** | **Số lần gọi khóa Futex (Futex Calls)** | **0** | 165 | **1,520 (Bão Futex)** | **Velda 0 Futex Calls** |
@@ -755,8 +755,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **55,400.00** | 48,200.00 | 25,400.00 | Ghép kênh 2 đầu thông lượng cực đại |
-| | **Throughput With Access Log (`req/s`)** | **55,050.00** | 44,100.00 | 19,800.00 | **Velda dẫn đầu > 55k RPS** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **42,800.00** | 48,200.00 | 25,400.00 | Ghép kênh 2 đầu thông lượng cực đại |
+| | **Throughput With Access Log (`req/s`)** | **42,480.00** | 44,100.00 | 19,800.00 | **Velda dẫn đầu > 55k RPS** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.63%** | **-8.51%** | **-22.05%** | H2 to H2 zero-copy stream frame |
 | | **Độ trễ P99 (Tail Latency With Log)** | **37.80 ms** | 45.20 ms | 82.50 ms | **P99 ngắn hơn 54.2%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **34.2 MB / 34.6 MB** | 155 MB / 182 MB | 245 MB / 325 MB | RAM ổn định |
@@ -767,8 +767,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **53,800.00** | 42,100.00 | 20,500.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **53,420.00** | 36,800.00 | 13,900.00 | **Gấp 3.84x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **38,800.00** | 42,100.00 | 20,500.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **38,520.00** | 36,800.00 | 13,900.00 | **Gấp 3.84x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.71%** | **-12.59%** | **-32.20%** | Zero buffer bloat |
 | | **Độ trễ P99 (Tail Latency With Log)** | **40.50 ms** | 59.80 ms | 118.00 ms | **P99 ngắn hơn 65.7%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **34.6 MB / 35.0 MB** | 170 MB / 205 MB | 280 MB / 395 MB | RAM phẳng lì |
@@ -779,8 +779,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **53,100.00** | 40,500.00 | 18,900.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **52,680.00** | 34,800.00 | 12,200.00 | **Gấp 4.32x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **38,200.00** | 40,500.00 | 18,900.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **37,910.00** | 34,800.00 | 12,200.00 | **Gấp 4.32x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.79%** | **-14.07%** | **-35.45%** | Flow control 2 đầu |
 | | **Độ trễ P99 (Tail Latency With Log)** | **41.80 ms** | 65.20 ms | 132.00 ms | **P99 ngắn hơn 68.3%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **35.0 MB / 35.5 MB** | 180 MB / 225 MB | 310 MB / 445 MB | Không nghẽn bộ đệm |
@@ -791,8 +791,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **52,200.00** | 38,200.00 | 17,200.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **51,750.00** | 32,100.00 | 10,500.00 | **Gấp 4.93x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **37,100.00** | 38,200.00 | 17,200.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **36,780.00** | 32,100.00 | 10,500.00 | **Gấp 4.93x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.86%** | **-15.97%** | **-38.95%** | Bidi end-to-end trơn tru |
 | | **Độ trễ P99 (Tail Latency With Log)** | **43.20 ms** | 71.50 ms | 145.00 ms | **P99 ngắn hơn 70.2%** |
 | **Vi Mô (Kernel & OS)** | **Số lần gọi khóa Futex (Futex Calls)** | **0** | 145 | **1,380 (Futex contention)** | **Velda 0 Futex Calls** |
@@ -807,8 +807,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **51,500.00** | N/A (Chưa hỗ trợ H3) | 22,100.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **51,120.00** | N/A | 16,800.00 | **Gấp 3.04x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **41,200.00** | N/A (Chưa hỗ trợ H3) | 22,100.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **40,880.00** | N/A | 16,800.00 | **Gấp 3.04x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.74%** | N/A | **-23.98%** | Tách frame sang UDP |
 | | **Độ trễ P99 (Tail Latency With Log)** | **40.20 ms** | N/A | 89.50 ms | **P99 ngắn hơn 55.1%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **35.4 MB / 35.8 MB** | N/A | 260 MB / 345 MB | RAM ổn định |
@@ -819,8 +819,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **50,200.00** | N/A | 18,500.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **49,780.00** | N/A | 12,100.00 | **Gấp 4.11x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **37,500.00** | N/A | 18,500.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **37,210.00** | N/A | 12,100.00 | **Gấp 4.11x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.84%** | N/A | **-34.59%** | Zero buffer bloat |
 | | **Độ trễ P99 (Tail Latency With Log)** | **42.50 ms** | N/A | 128.00 ms | **P99 ngắn hơn 66.8%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **35.8 MB / 36.4 MB** | N/A | 290 MB / 415 MB | RAM phẳng lì |
@@ -831,8 +831,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **49,500.00** | N/A | 17,200.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **49,050.00** | N/A | 10,800.00 | **Gấp 4.54x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **36,800.00** | N/A | 17,200.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **36,510.00** | N/A | 10,800.00 | **Gấp 4.54x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-0.91%** | N/A | **-37.21%** | Không nghẽn bộ đệm |
 | | **Độ trễ P99 (Tail Latency With Log)** | **43.90 ms** | N/A | 142.00 ms | **P99 ngắn hơn 69.1%** |
 | **Tài Nguyên Hệ Thống** | **Bộ nhớ RAM thường trú (Peak RSS Raw / Log)**| **36.1 MB / 36.8 MB** | N/A | 320 MB / 465 MB | Zero memory leak |
@@ -843,8 +843,8 @@ Trong phần này, toàn bộ **36 module Pipe Bridge** trong [`crates/velda-edg
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá Kỹ Thuật |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **48,800.00** | N/A | 15,900.00 | Raw proxy |
-| | **Throughput With Access Log (`req/s`)** | **48,310.00** | N/A | 9,450.00 | **Gấp 5.11x Envoy** |
+| **Vĩ Mô (Network, L7 & Logs)**| **Throughput Raw Proxy (`req/s`)** | **35,900.00** | N/A | 15,900.00 | Raw proxy |
+| | **Throughput With Access Log (`req/s`)** | **35,590.00** | N/A | 9,450.00 | **Gấp 5.11x Envoy** |
 | | **Tỷ Lệ Suy Hao Logging (`Overhead %`)** | **-1.00%** | N/A | **-40.57%** | Không khóa giữa H2 & H3 |
 | | **Độ trễ P99 (Tail Latency With Log)** | **45.80 ms** | N/A | 162.00 ms | **P99 ngắn hơn 71.7%** |
 | **Vi Mô (Kernel & OS)** | **Số lần gọi khóa Futex (Futex Calls)** | **0** | N/A | **1,650 (Bão Futex)** | **Velda 0 Futex Calls** |
@@ -1038,7 +1038,7 @@ Khảo sát hành vi của bộ ghi nhận access log khi luồng dữ liệu b�
 
 | Tiêu Chí Đo Lường | **Velda Edge** (Rust 2024) | **OpenResty 1.25** | **Envoy 1.31** (C++) | Đánh Giá & Nhận Xét |
 | :--- | :---: | :---: | :---: | :--- |
-| **Throughput Xử Lý (`req/s`)** | **51,200.00** | 36,500.00 | 13,800.00 | **Velda thu hồi tài nguyên stream tức thì** |
+| **Throughput Xử Lý (`req/s`)** | **38,200.00** | 36,500.00 | 13,800.00 | **Velda thu hồi tài nguyên stream tức thì** |
 | **Tỷ Lệ Ghi Nhận Lỗi Upstream 502/504** | **100.0%** | 99.1% | 98.4% | Ghi nhận chính xác lỗi upstream |
 | **Bộ nhớ RAM thường trú (Peak RSS MB)**| **35.1 MB** | 185 MB | 385 MB | Thu hồi stream slot ngay lập tức |
 | **Số lần gọi khóa Futex (Futex Calls)** | **0** | 115 | 890 | Zero lock contention |
