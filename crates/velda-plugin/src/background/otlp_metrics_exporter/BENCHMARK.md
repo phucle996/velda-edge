@@ -20,13 +20,13 @@
   - **Hệ điều hành**: **Ubuntu 24.04 LTS (Kernel Linux 7.0.0-1017-azure)**.
   - **Dịch vụ chạy**: `velda-edge.service` (Rust Edition 2024, profile `release` tối ưu hóa LTO).
   - **Cổng tiếp nhận downstream**: Cổng 80 (HTTP/1.1 Plaintext), Cổng 443 (HTTP/2 TLS 1.3 & HTTP/3 QUIC), Cổng 50050 (gRPC).
-- **Máy chủ Backend Mock & Máy Phát Tải (VM2: `172.16.0.5` / Public IP `20.205.137.141`)**:
+- **Máy chủ Backend Mock, Máy Phát Tải & OTel Collector Thật (VM2: `172.16.0.5` / Public IP `20.205.137.141`)**:
   - **CPU**: **2 vCPUs AMD EPYC 7763 64-Core Processor** (xung nhịp 2.45 GHz, kiến trúc AMD Zen 3).
   - **Bộ nhớ RAM**: **4 GB RAM** (3,890 MB khả dụng).
   - **Hệ điều hành**: **Ubuntu 24.04 LTS (Kernel Linux 7.0.0-1017-azure)**.
   - **Dịch vụ chạy**:
     - `velda-bench-backend`: Lắng nghe trên cổng 8081 (HTTP/1.1 upstream), 8082 (H2C), 8441 (H1 TLS), 8442 (H2 TLS). Trả về response `200 OK` body `pong` tiêu chuẩn qua pipeline `backend-buffered`.
-    - `mock_otlp_collector.py`: Lắng nghe trên `0.0.0.0:4318`, tiếp nhận HTTP/1.1 Keep-Alive `POST /v1/metrics`, phản hồi HTTP 200 JSON tiêu chuẩn.
+    - **OpenTelemetry Collector Contrib v0.113.0 chính thức (Real OTel Sink)**: Lắng nghe trên cổng 4317 (gRPC) và 4318 (HTTP), tiếp nhận toàn bộ dữ liệu OTLP, ghi nhận và xuất file `/tmp/otel_received_metrics.json` và log `debug`.
   - **Công cụ phát tải**:
     - `wrk` v4.2.0 (HTTP/1.1 multi-threading, persistent keep-alive connections).
     - `h2load` v1.59.0 (HTTP/2 multiplexing qua TLS 1.3, 100 streams / connection).
@@ -47,23 +47,24 @@
 
 ### 2.1 Bảng Số Liệu Đo Lường Thực Nghiệm (Thời lượng 15.00s, 128 Keep-Alive Connections)
 
-| Chỉ Số Đo Lường | Chế Độ Raw Baseline (Không Plugin) | Chế Độ Active Exporter (`interval: 2s`) | Độ Lệch Thực Nghiệm (Delta) | Tỷ Lệ Ảnh Hưởng (%) |
+| Chỉ Số Đo Lường | Chế Độ Raw Baseline (Không Plugin) | Chế Độ Active Exporter (Kết Nối OTel Thật) | Độ Lệch Thực Nghiệm (Delta) | Tỷ Lệ Ảnh Hưởng (%) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Throughput (req/s)** | **47,263.23** | **47,046.01** | **-217.22 req/s** | **-0.46% (Không đáng kể)** |
-| **Tổng số requests phục vụ** | **710,171 requests** | **706,947 requests** | -3,224 requests | -0.45% |
-| **Băng thông Downstream Wire** | **6.90 MB/s** (103.62 MB) | **6.86 MB/s** (103.15 MB) | -0.04 MB/s | -0.58% |
-| **Độ trễ trung bình (Mean Latency)** | **2.65 ms** | **2.71 ms** | **+0.06 ms** | +2.26% |
-| **Độ trễ Trung vị (P50 Latency)** | **2.39 ms** | **2.40 ms** | **+0.01 ms** | **+0.42%** |
-| **Độ trễ Phân vị P75** | **2.91 ms** | **2.92 ms** | **+0.01 ms** | +0.34% |
-| **Độ trễ Phân vị P90** | **3.62 ms** | **3.65 ms** | **+0.03 ms** | +0.83% |
-| **Độ trễ Đuôi P99 (Tail Latency)** | **10.34 ms** | **12.83 ms** | **+2.49 ms** | +24.08% |
-| **Độ trễ Cực đại (Max Latency)** | **44.19 ms** | **31.73 ms** | -12.46 ms | Ổn định |
-| **Độ lệch chuẩn (Latency Stdev)** | **1.65 ms** | **1.92 ms** | +0.27 ms | — |
-| **Tổng % CPU Gateway (`pidstat`)** | **247.31%** (trên 400%) | **244.38%** (trên 400%) | -2.93% | Trong dung sai đo |
-| **% CPU User** | 66.19% | 65.00% | -1.19% | — |
-| **% CPU System (Kernel I/O)** | 181.12% | 179.38% | -1.74% | — |
-| **Bộ nhớ thường trú (Peak RSS)** | **79.9 MB** (79,931 KB) | **78.5 MB** (78,548 KB) | -1.4 MB | **0.48% tổng RAM** |
+| **Throughput (req/s)** | **46,668.34** | **46,881.02** | **+212.68 req/s** | **+0.45% (Trong dung sai mạng)** |
+| **Tổng số requests phục vụ** | **701,101 requests** | **704,724 requests** | +3,623 requests | +0.52% |
+| **Băng thông Downstream Wire** | **6.81 MB/s** (102.30 MB) | **6.84 MB/s** (102.83 MB) | +0.03 MB/s | +0.44% |
+| **Độ trễ trung bình (Mean Latency)** | **2.71 ms** | **2.69 ms** | **-0.02 ms** | -0.74% |
+| **Độ trễ Trung vị (P50 Latency)** | **2.43 ms** | **2.40 ms** | **-0.03 ms** | **-1.23%** |
+| **Độ trễ Phân vị P75** | **2.94 ms** | **2.92 ms** | **-0.02 ms** | -0.68% |
+| **Độ trễ Phân vị P90** | **3.65 ms** | **3.66 ms** | **+0.01 ms** | +0.27% |
+| **Độ trễ Đuôi P99 (Tail Latency)** | **11.47 ms** | **11.12 ms** | **-0.35 ms** | -3.05% |
+| **Độ trễ Cực đại (Max Latency)** | **27.60 ms** | **34.44 ms** | +6.84 ms | Ổn định |
+| **Độ lệch chuẩn (Latency Stdev)** | **1.76 ms** | **1.74 ms** | -0.02 ms | — |
+| **Tổng % CPU Gateway (`pidstat`)** | **233.25%** (trên 400%) | **246.25%** (trên 400%) | +13.00% | ~3.2% CPU / core |
+| **% CPU User** | 62.94% | 65.19% | +2.25% | — |
+| **% CPU System (Kernel I/O)** | 170.31% | 181.06% | +10.75% | — |
+| **Bộ nhớ thường trú (Peak RSS)** | **78.1 MB** (78,137 KB) | **77.5 MB** (77,548 KB) | -0.6 MB | **0.47% tổng RAM** |
 | **Tỷ lệ thành công (Success Rate)** | **100.00%** | **100.00%** | 0.00% | 0 lỗi 4xx / 5xx |
+| **OTel Collector Nhận Đủ Data** | Không kết nối | **288 Data Points / mẻ (100% khớp)** | — | **Đã ghi nhận 704,850 reqs** |
 
 ---
 
@@ -75,43 +76,54 @@ phucle@vm2:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
 Running 15s test @ http://172.16.0.4:80/api/v1/ping
   2 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.65ms    1.65ms  44.19ms   93.14%
-    Req/Sec    23.76k     0.87k   25.68k    69.67%
+    Latency     2.71ms    1.76ms  27.60ms   93.66%
+    Req/Sec    23.46k   843.27    26.13k    75.67%
   Latency Distribution
-     50%    2.39ms
-     75%    2.91ms
-     90%    3.62ms
-     99%   10.34ms
-  710171 requests in 15.03s, 103.62MB read
-Requests/sec:  47263.23
-Transfer/sec:      6.90MB
+     50%    2.43ms
+     75%    2.94ms
+     90%    3.65ms
+     99%   11.47ms
+  701101 requests in 15.02s, 102.30MB read
+Requests/sec:  46668.34
+Transfer/sec:      6.81MB
 ```
 
-#### B. Active OTLP Exporter Output (`wrk -t2 -c128 -d15s --latency`)
+#### B. Active OTLP Exporter Output Kết Nối OTel Collector Thật (`wrk -t2 -c128 -d15s --latency`)
 ```text
 phucle@vm2:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
 Running 15s test @ http://172.16.0.4:80/api/v1/ping
   2 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.71ms    1.92ms  31.73ms   94.75%
-    Req/Sec    23.65k   847.64    25.79k    70.33%
+    Latency     2.69ms    1.74ms  34.44ms   93.31%
+    Req/Sec    23.57k     0.89k   26.30k    71.67%
   Latency Distribution
      50%    2.40ms
      75%    2.92ms
-     90%    3.65ms
-     99%   12.83ms
-  706947 requests in 15.03s, 103.15MB read
-Requests/sec:  47046.01
-Transfer/sec:      6.86MB
+     90%    3.66ms
+     99%   11.12ms
+  704724 requests in 15.03s, 102.83MB read
+Requests/sec:  46881.02
+Transfer/sec:      6.84MB
 ```
 
-#### C. Nhật Ký Xuất Bản Của `velda-edge` (`journalctl -u velda-edge.service`)
+#### C. Nhật Ký Tiếp Nhận Của OpenTelemetry Collector Contrib v0.113.0
 ```text
-vm1 velda-edge[12149]: INFO Background auxiliary plugin starting on Shadow Worker plugin_id=otlp_metrics_exporter
-vm1 velda-edge[12149]: INFO Starting OTLP metrics background exporter loop plugin_id=otlp_metrics_exporter endpoint=http://172.16.0.5:4318/v1/metrics is_grpc=false interval_secs=2
-vm1 velda-edge[12149]: DEBUG Flushed OTLP metrics batch successfully plugin_id=otlp_metrics_exporter status=200
-vm1 velda-edge[12149]: DEBUG Flushed OTLP metrics batch successfully plugin_id=otlp_metrics_exporter status=200
-vm1 velda-edge[12149]: DEBUG Flushed OTLP metrics batch successfully plugin_id=otlp_metrics_exporter status=200
+2026-11-05T03:11:14.038Z	info	Metrics	{"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 1, "metrics": 4, "data points": 288}
+2026-11-05T03:11:16.059Z	info	Metrics	{"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 1, "metrics": 4, "data points": 288}
+2026-11-05T03:11:18.080Z	info	Metrics	{"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 1, "metrics": 4, "data points": 288}
+2026-11-05T03:11:20.088Z	info	Metrics	{"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 1, "metrics": 4, "data points": 288}
+```
+
+#### D. Kiểm Tra Dữ Liệu Đã Ghi Nhận Tại Sink OTel (`/tmp/otel_received_metrics.json`)
+```python
+# Trích xuất từ /tmp/otel_received_metrics.json (2.9 MB dữ liệu thực nhận):
+Total batches received by OTel Collector: 29
+Metric: velda.requests.total, total data points: 180
+  -> attrs: {'downstream': 'h1', 'upstream': 'h1', 'pipe': 'buffered', 'status_class': '2xx'}, value: 704850
+Metric: velda.active_streams, total data points: 36
+Metric: velda.bytes_received_total, total data points: 36
+Metric: velda.bytes_transmitted_total, total data points: 36
+# Tổng data points mỗi batch: 180 + 36 + 36 + 36 = 288 data points (100% đầy đủ)
 ```
 
 ---
