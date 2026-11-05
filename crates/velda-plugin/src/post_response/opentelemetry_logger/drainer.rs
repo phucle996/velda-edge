@@ -65,10 +65,10 @@ impl ShadowOtlpDrainer {
             self.run().await;
         });
 
-        if let Err(task) = crate::hook::try_dispatch_shadow(flusher_task) {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(task);
-            }
+        if let Err(task) = crate::hook::try_dispatch_shadow(flusher_task)
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(task);
         }
     }
 
