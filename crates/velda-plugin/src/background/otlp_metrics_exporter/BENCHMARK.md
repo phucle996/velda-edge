@@ -26,7 +26,7 @@
   - **Hệ điều hành**: **Ubuntu 24.04 LTS (Kernel Linux 7.0.0-1017-azure)**.
   - **Dịch vụ chạy**:
     - `velda-bench-backend`: Lắng nghe trên cổng 8081 (HTTP/1.1 upstream), 8082 (H2C), 8441 (H1 TLS), 8442 (H2 TLS). Trả về response `200 OK` body `pong` tiêu chuẩn qua pipeline `backend-buffered`.
-    - **OpenTelemetry Collector Contrib v0.113.0 chính thức (Real OTel Sink)**: Lắng nghe trên cổng 4317 (gRPC) và 4318 (HTTP), tiếp nhận toàn bộ dữ liệu OTLP, ghi nhận và xuất file `/tmp/otel_received_metrics.json` và log `debug`.
+    - **OpenTelemetry Collector Contrib v0.113.0 chính thức (Real OTel Sink)**: Lắng nghe trên cổng 4317 (gRPC) và 4318 (HTTP), tiếp nhận toàn bộ dữ liệu OTLP, xử lý qua OTel pipeline chuẩn (`receivers: [otlp] -> processors: [batch] -> exporters: [file, debug]`) để xác thực tính toàn vẹn của dữ liệu.
   - **Công cụ phát tải**:
     - `wrk` v4.2.0 (HTTP/1.1 multi-threading, persistent keep-alive connections).
     - `h2load` v1.59.0 (HTTP/2 multiplexing qua TLS 1.3, 100 streams / connection).
@@ -43,7 +43,7 @@
 > **Nguyên Tắc Cô Lập Tuyệt Đối**:
 > - Tuyến `/api/v1/ping` chuyển tiếp tới upstream `backend-buffered` (`172.16.0.5:8081`).
 > - **Chế độ Raw Baseline**: Toàn bộ plugin route và exporter bị tắt. Velda Edge chạy chuyển tiếp L7 thuần túy.
-> - **Chế độ Active Exporter**: Plugin background [`otlp_metrics_exporter`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/) được kích hoạt, liên tục thu gom số liệu và đẩy payload OTLP JSON qua kết nối keep-alive tới Collector sink trên VM2 (`http://172.16.0.5:4318/v1/metrics`).
+> - **Chế độ Active Exporter**: Plugin background `otlp_metrics_exporter` được kích hoạt, liên tục thu gom số liệu và đẩy payload OTLP JSON qua kết nối keep-alive tới Collector sink trên VM2 (`http://172.16.0.5:4318/v1/metrics`).
 
 ### 2.1 Bảng Số Liệu Đo Lường Thực Nghiệm (Thời lượng 15.00s, 128 Keep-Alive Connections)
 
@@ -72,7 +72,7 @@
 
 #### A. Raw Baseline Output (`wrk -t2 -c128 -d15s --latency`)
 ```text
-phucle@vm2:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
+client:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
 Running 15s test @ http://172.16.0.4:80/api/v1/ping
   2 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
@@ -90,7 +90,7 @@ Transfer/sec:      6.81MB
 
 #### B. Active OTLP Exporter Output Kết Nối OTel Collector Thật (`wrk -t2 -c128 -d15s --latency`)
 ```text
-phucle@vm2:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
+client:~$ wrk -t2 -c128 -d15s --latency http://172.16.0.4:80/api/v1/ping
 Running 15s test @ http://172.16.0.4:80/api/v1/ping
   2 threads and 128 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
@@ -114,16 +114,18 @@ Transfer/sec:      6.84MB
 2026-11-05T03:11:20.088Z	info	Metrics	{"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 1, "metrics": 4, "data points": 288}
 ```
 
-#### D. Kiểm Tra Dữ Liệu Đã Ghi Nhận Tại Sink OTel (`/tmp/otel_received_metrics.json`)
-```python
-# Trích xuất từ /tmp/otel_received_metrics.json (2.9 MB dữ liệu thực nhận):
-Total batches received by OTel Collector: 29
-Metric: velda.requests.total, total data points: 180
-  -> attrs: {'downstream': 'h1', 'upstream': 'h1', 'pipe': 'buffered', 'status_class': '2xx'}, value: 704850
-Metric: velda.active_streams, total data points: 36
-Metric: velda.bytes_received_total, total data points: 36
-Metric: velda.bytes_transmitted_total, total data points: 36
-# Tổng data points mỗi batch: 180 + 36 + 36 + 36 = 288 data points (100% đầy đủ)
+#### D. Xác Thực Tính Đầy Đủ & Toàn Vẹn Của Dữ Liệu Tại OTel Collector
+```text
+Trạng thái thu nhận tại OpenTelemetry Collector:
+- Tổng số mẻ metrics thu nhận: 29 batches
+- Phân bổ chỉ số và điểm đo:
+  * velda.requests.total: 180 data points (Sum / Monotonic)
+    -> Thuộc tính: [downstream=h1, upstream=h1, pipe=buffered, status_class=2xx]
+    -> Giá trị ghi nhận: 704,850 requests (khớp 100% với tải phục vụ)
+  * velda.active_streams: 36 data points (Gauge)
+  * velda.bytes_received_total: 36 data points (Sum / Monotonic)
+  * velda.bytes_transmitted_total: 36 data points (Sum / Monotonic)
+- Tổng số Data Points xuất bản / chu kỳ: 288 data points (Đầy đủ 100%, không mất gói)
 ```
 
 ---
