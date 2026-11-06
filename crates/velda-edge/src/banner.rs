@@ -27,7 +27,9 @@ pub fn format_startup_banner(
         "dev"
     };
 
-    let ram_gb = hardware.memory.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let ram_display = hardware.memory.format_summary();
+    let cpu_branding = read_cpu_branding(hardware.available_cores);
+    let (nic_name, nic_caps) = read_nic_summary(hardware);
     let accel_str = hardware.kernel.acceleration.as_str();
     let kernel_ver_str = hardware.kernel.version.to_string();
 
@@ -95,12 +97,11 @@ pub fn format_startup_banner(
                 prov.version, build_type, prov.git_hash
             ),
             format!(
-                "{c_gray}CPU Detect   :{c_reset} {c_white}{} Cores{c_reset} {c_gray}({} Workers, Pinning: {}){c_reset}",
-                hardware.available_cores, worker_threads, pin_str
+                "{c_gray}CPU Detect   :{c_reset} {c_white}{cpu_branding}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Workers{c_reset} {c_gray}(Pinning: {}){c_reset}",
+                worker_threads, pin_str
             ),
             format!(
-                "{c_gray}RAM Detect   :{c_reset} {c_white}{:.1} GB{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Shards, {} Max Sockets{c_reset}",
-                ram_gb,
+                "{c_gray}RAM Detect   :{c_reset} {c_white}{ram_display}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Shards, {} Max Sockets{c_reset}",
                 hardware.concurrency_shards,
                 (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
             ),
@@ -109,12 +110,7 @@ pub fn format_startup_banner(
                 kernel_ver_str, accel_str
             ),
             format!(
-                "{c_gray}RDMA Detect  :{c_reset} {}{c_reset}",
-                if hardware.rdma.is_available {
-                    format!("{c_green}{}{c_reset}", hardware.rdma.display_summary())
-                } else {
-                    format!("{c_white}None{c_reset} {c_gray}(Standard Socket Path){c_reset}")
-                }
+                "{c_gray}NIC Detect   :{c_reset} {c_white}{nic_name}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{nic_caps}{c_reset}"
             ),
             format!(
                 "{c_gray}Runtime Dir  :{c_reset} {c_white}{}{c_reset}",
@@ -170,12 +166,11 @@ pub fn format_startup_banner(
                 prov.version, build_type, prov.git_hash
             ),
             format!(
-                "CPU Detect   : {} Cores ({} Workers, Pinning: {})",
-                hardware.available_cores, worker_threads, pin_str
+                "CPU Detect   : {cpu_branding} => {} Workers (Pinning: {})",
+                worker_threads, pin_str
             ),
             format!(
-                "RAM Detect   : {:.1} GB => {} Shards, {} Max Sockets",
-                ram_gb,
+                "RAM Detect   : {ram_display} => {} Shards, {} Max Sockets",
                 hardware.concurrency_shards,
                 (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
             ),
@@ -183,14 +178,7 @@ pub fn format_startup_banner(
                 "Kernel       : Linux {} => Accel: {}",
                 kernel_ver_str, accel_str
             ),
-            format!(
-                "RDMA Detect  : {}",
-                if hardware.rdma.is_available {
-                    hardware.rdma.display_summary()
-                } else {
-                    "None (Standard Socket Path)".to_string()
-                }
-            ),
+            format!("NIC Detect   : {nic_name} => {nic_caps}"),
             format!("Runtime Dir  : {runtime_dir_display}"),
             format!("Listeners    : {listeners_display}"),
             "Data Plane   : Initializing Supervisor...".to_string(),
@@ -242,6 +230,105 @@ pub fn print_startup_banner(
     println!("{banner}");
 }
 
+/// Reads CPU branding and core/thread topology directly from `/proc/cpuinfo`.
+fn read_cpu_branding(fallback_cores: usize) -> String {
+    if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
+        let mut model: Option<String> = None;
+        let mut cores: Option<u16> = None;
+        let mut siblings: Option<u16> = None;
+
+        for line in content.lines() {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim();
+                let val = v.trim();
+                if (key == "model name"
+                    || key == "Model"
+                    || key == "Processor"
+                    || key == "Hardware")
+                    && model.is_none()
+                    && !val.is_empty()
+                {
+                    let cleaned = val
+                        .replace("(R)", "")
+                        .replace("(TM)", "")
+                        .replace("(r)", "")
+                        .replace("(tm)", "");
+                    let normalized: Vec<&str> = cleaned.split_whitespace().collect();
+                    model = Some(normalized.join(" "));
+                } else if key == "cpu cores" && cores.is_none() {
+                    cores = val.parse::<u16>().ok();
+                } else if key == "siblings" && siblings.is_none() {
+                    siblings = val.parse::<u16>().ok();
+                }
+            }
+        }
+
+        if let Some(m) = model {
+            if let (Some(c), Some(s)) = (cores, siblings) {
+                return format!("{m} ({c}C/{s}T)");
+            }
+            return m;
+        }
+    }
+    format!("{fallback_cores} Cores")
+}
+
+/// Synthesizes primary network card branding, hardware RSS, and RDMA capabilities.
+fn read_nic_summary(hardware: &HardwareTopology) -> (String, String) {
+    if hardware.rdma.is_available {
+        let name = if hardware.rdma.vendor != velda_core::hardware::RdmaVendor::Unknown {
+            hardware.rdma.vendor.as_str().to_string()
+        } else {
+            "RDMA NIC".to_string()
+        };
+        let mut caps = Vec::new();
+        if hardware.nic.authority == velda_core::hardware::IngressHashAuthority::HardwareRss {
+            caps.push(format!("Hardware RSS ({} Queues)", hardware.nic.rx_queues));
+        }
+        caps.push(hardware.rdma.display_summary());
+        (name, caps.join(", "))
+    } else {
+        let iface = find_active_physical_interface().unwrap_or_else(|| "eth0".to_string());
+        let name = format!("Standard NIC ({iface})");
+        let caps =
+            if hardware.nic.authority == velda_core::hardware::IngressHashAuthority::HardwareRss {
+                format!("Hardware RSS ({} Queues)", hardware.nic.rx_queues)
+            } else {
+                "Software Hash (Standard Socket Path)".to_string()
+            };
+        (name, caps)
+    }
+}
+
+fn find_active_physical_interface() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/net").ok()?;
+    let mut fallback = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "lo"
+            || name.starts_with("docker")
+            || name.starts_with("br-")
+            || name.starts_with("virbr")
+            || name.starts_with("lxcbr")
+        {
+            continue;
+        }
+        if !entry.path().join("device").exists() {
+            continue;
+        }
+        let operstate = std::fs::read_to_string(entry.path().join("operstate"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if operstate == "up" {
+            return Some(name);
+        }
+        if fallback.is_none() {
+            fallback = Some(name);
+        }
+    }
+    fallback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,7 +350,7 @@ mod tests {
         assert!(plain.contains("CPU Detect   :"));
         assert!(plain.contains("RAM Detect   :"));
         assert!(plain.contains("Kernel       :"));
-        assert!(plain.contains("RDMA Detect  :"));
+        assert!(plain.contains("NIC Detect   :"));
         assert!(plain.contains("Listeners    :"));
         assert!(plain.contains("0.0.0.0:80 (HTTP1)"));
         assert!(plain.contains("┌─────────────────┐"));
@@ -274,7 +361,7 @@ mod tests {
 
         let colored = format_startup_banner(&prov, &hardware, 8, true, &path, &listeners, true);
         assert!(colored.contains("VELDA EDGE"));
-        assert!(colored.contains("RDMA Detect  :"));
+        assert!(colored.contains("NIC Detect   :"));
         assert!(colored.contains("\x1b["));
 
         // Test with active mock RDMA hardware attached
@@ -298,7 +385,8 @@ mod tests {
             &listeners,
             false,
         );
-        assert!(plain_rdma.contains("RDMA Detect  : RoCE v2 (100 Gbps, NUMA 0, NVIDIA/Mellanox)"));
+        assert!(plain_rdma.contains("NIC Detect   : NVIDIA/Mellanox =>"));
+        assert!(plain_rdma.contains("RoCE v2 (100 Gbps, NUMA 0, NVIDIA/Mellanox)"));
     }
 
     #[test]

@@ -210,8 +210,14 @@ impl CpuRegisterCapabilities {
 /// Discovered CPU concurrency and execution profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuProfile {
-    /// Number of logical CPU cores available to the process.
+    /// Number of logical CPU cores available to the process (respects container cgroups limits).
     pub available_cores: usize,
+    /// Physical CPU cores per socket on host (e.g. 6 in a 6C/12T CPU; 0 if unknown).
+    pub physical_cores: u16,
+    /// Logical sibling threads per socket on host (e.g. 12 in a 6C/12T CPU; 0 if unknown).
+    pub logical_cores: u16,
+    /// Canonical CPU brand/model name (e.g. "11th Gen Intel Core i5-11400H @ 2.70GHz").
+    pub model_name: &'static str,
     /// Provenance source indicating how CPU capacity was resolved.
     pub source: &'static str,
     /// Hardware register width capabilities detected at runtime via CPUID.
@@ -219,14 +225,30 @@ pub struct CpuProfile {
 }
 
 impl CpuProfile {
-    /// Creates a CPU profile with an explicit core count.
+    /// Creates a CPU profile with an explicit core count and default generic model.
     #[inline]
     pub fn new(available_cores: usize, source: &'static str) -> Self {
         let cores = available_cores.max(1);
         Self {
             available_cores: cores,
+            physical_cores: cores as u16,
+            logical_cores: cores as u16,
+            model_name: "Generic CPU",
             source,
             register_capabilities: CpuRegisterCapabilities::detect(),
+        }
+    }
+
+    /// Formats a clean descriptive string for banner and telemetry.
+    /// E.g. "11th Gen Intel Core i5-11400H @ 2.70GHz (6C/12T)" or "12 Cores".
+    pub fn format_model_and_topology(&self) -> String {
+        if self.physical_cores > 0 && self.logical_cores > 0 && self.model_name != "Generic CPU" {
+            format!(
+                "{} ({}C/{}T)",
+                self.model_name, self.physical_cores, self.logical_cores
+            )
+        } else {
+            format!("{} Cores", self.available_cores)
         }
     }
 }
@@ -409,8 +431,7 @@ pub fn copy_bulk_32(src: &[u8], dst: &mut [u8]) {
 /// 3. Host OS parallelism: `std::thread::available_parallelism()`
 /// 4. Safe baseline: 1 core
 pub fn probe_cpu() -> CpuProfile {
-    // 1. Check cgroup v2 cpu.max: "quota period" (e.g., "200000 100000")
-    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+    let (cores, source) = if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
         let mut parts = content.split_whitespace();
         if let (Some(quota_str), Some(period_str)) = (parts.next(), parts.next())
             && quota_str != "max"
@@ -418,12 +439,27 @@ pub fn probe_cpu() -> CpuProfile {
                 (quota_str.parse::<usize>(), period_str.parse::<usize>())
             && period > 0
         {
-            let cores = (quota / period).max(1);
-            return CpuProfile::new(cores, "cgroup_v2");
+            ((quota / period).max(1), "cgroup_v2")
+        } else {
+            probe_cgroup_v1_or_host()
         }
-    }
+    } else {
+        probe_cgroup_v1_or_host()
+    };
 
-    // 2. Check cgroup v1 CFS quota & period
+    let (model_name, physical_cores, logical_cores) = probe_cpuinfo_details();
+    let mut profile = CpuProfile::new(cores, source);
+    profile.model_name = model_name;
+    if physical_cores > 0 {
+        profile.physical_cores = physical_cores;
+    }
+    if logical_cores > 0 {
+        profile.logical_cores = logical_cores;
+    }
+    profile
+}
+
+fn probe_cgroup_v1_or_host() -> (usize, &'static str) {
     if let (Ok(quota_content), Ok(period_content)) = (
         std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
         std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
@@ -433,16 +469,69 @@ pub fn probe_cpu() -> CpuProfile {
     ) && quota > 0
         && period > 0
     {
-        let cores = (quota as usize / period as usize).max(1);
-        return CpuProfile::new(cores, "cgroup_v1");
+        ((quota as usize / period as usize).max(1), "cgroup_v1")
+    } else {
+        let host_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        (host_cores, "host_sysinfo")
+    }
+}
+
+/// Parses `/proc/cpuinfo` content to extract CPU model name, physical cores, and logical threads.
+pub fn parse_cpuinfo_content(content: &str) -> (&'static str, u16, u16) {
+    let mut model_name: Option<String> = None;
+    let mut physical_cores: u16 = 0;
+    let mut siblings: u16 = 0;
+    let mut processor_count: u16 = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((key, val)) = trimmed.split_once(':') {
+            let k = key.trim();
+            let v = val.trim();
+            if (k == "model name" || k == "Model" || k == "Processor" || k == "Hardware")
+                && model_name.is_none()
+                && !v.is_empty()
+            {
+                let cleaned = v
+                    .replace("(R)", "")
+                    .replace("(TM)", "")
+                    .replace("(r)", "")
+                    .replace("(tm)", "");
+                let normalized: Vec<&str> = cleaned.split_whitespace().collect();
+                model_name = Some(normalized.join(" "));
+            } else if k == "cpu cores" && physical_cores == 0 {
+                physical_cores = v.parse::<u16>().unwrap_or(0);
+            } else if k == "siblings" && siblings == 0 {
+                siblings = v.parse::<u16>().unwrap_or(0);
+            } else if k == "processor" {
+                processor_count = processor_count.saturating_add(1);
+            }
+        }
     }
 
-    // 3. Host OS available parallelism
-    let host_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    if siblings == 0 && processor_count > 0 {
+        siblings = processor_count;
+    }
+    if physical_cores == 0 && siblings > 0 {
+        physical_cores = siblings;
+    }
 
-    CpuProfile::new(host_cores, "host_sysinfo")
+    let static_model = match model_name {
+        Some(name) if !name.is_empty() => Box::leak(name.into_boxed_str()) as &'static str,
+        _ => "Generic CPU",
+    };
+
+    (static_model, physical_cores, siblings)
+}
+
+fn probe_cpuinfo_details() -> (&'static str, u16, u16) {
+    if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
+        parse_cpuinfo_content(&content)
+    } else {
+        ("Generic CPU", 0, 0)
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +544,30 @@ mod tests {
         assert!(cpu.available_cores >= 1);
         assert!(!cpu.source.is_empty());
         assert!(!cpu.register_capabilities.summary().is_empty());
+        assert!(!cpu.format_model_and_topology().is_empty());
+    }
+
+    #[test]
+    fn test_parse_cpuinfo_content() {
+        let sample = "\
+processor\t: 0
+model name\t: 11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz
+siblings\t: 12
+cpu cores\t: 6
+";
+        let (model, phys, sib) = parse_cpuinfo_content(sample);
+        assert_eq!(model, "11th Gen Intel Core i5-11400H @ 2.70GHz");
+        assert_eq!(phys, 6);
+        assert_eq!(sib, 12);
+
+        let mut prof = CpuProfile::new(12, "test");
+        prof.model_name = model;
+        prof.physical_cores = phys;
+        prof.logical_cores = sib;
+        assert_eq!(
+            prof.format_model_and_topology(),
+            "11th Gen Intel Core i5-11400H @ 2.70GHz (6C/12T)"
+        );
     }
 
     #[test]
