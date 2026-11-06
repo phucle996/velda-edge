@@ -66,25 +66,6 @@ Bảng số liệu đối chuẩn thực nghiệm chi tiết 4 tầng (Network, 
 
 ---
 
-### 2.1 Phân Tích Chuyên Sâu Tác Động Vi Kiến Trúc & Băng Thông
-
-1. **Hiệu Ứng Nở Băng Thông Wire Payload (+259% Băng Thông Mạng)**:
-   - Trong kịch bản Raw Baseline, mỗi phản hồi chỉ gồm các header tối thiểu (`content-type`, `content-length`, `date`, `x-request-id`), tổng cộng ~152 bytes header frame $\to$ tổng lượng dữ liệu đọc là **95.60 MB** (băng thông wire: **6.37 MB/s**).
-   - Khi kích hoạt 11 Security Headers đầy đủ, mỗi phản hồi được bổ sung thêm ~450 bytes các chỉ thị bảo mật chuẩn W3C/OWASP (HSTS, CSP, Permissions-Policy, COOP, COEP, CORP, Nosniff, Frame-Options, v.v.), làm kích thước frame phản hồi tăng vọt lên ~605 bytes (+298%).
-   - Tổng dữ liệu truyền tải trên mạng vọt lên **343.67 MB** (băng thông wire: **22.89 MB/s**). Mức sụt giảm nhẹ về RPS tuyệt đối (từ 43.6k xuống 38.7k req/s) chủ yếu đến từ việc driver mạng ảo hóa `netvsc` trên Azure VNet phải đóng gói và đẩy lượng frame lớn gấp 3.6 lần qua bus PCI ảo, hoàn toàn không phải do tắc nghẽn thuật toán trong userspace.
-
-2. **Cơ Chế Phân Tách 16-Byte Dual-Representation Tối Ưu Hóa CPU Register**:
-   - Đối với các headers kích thước nhỏ $\le 16$ bytes (`nosniff`, `SAMEORIGIN`, `require-corp`, `cross-origin`, `by-content-type`, `1; mode=block`), plugin ghi trực tiếp 128-bit integer vào slot thanh ghi `HeaderWorkspace` qua lệnh CPU `MOV` đơn lẻ.
-   - Nhờ đó, ngay cả khi nạp tải cực hạn, mức tiêu thụ CPU User chỉ tăng từ **18.2%** lên **22.5%**, và tỷ lệ Miss L1 Data Cache duy trì ở mức siêu thấp **0.06%**.
-   - Bộ nhớ RAM thực tế (Peak RSS) hoàn toàn phẳng ở mức **50.17 MB**, chứng minh tính chất zero heap allocation triệt để của kiến trúc.
-
-3. **Thử Nghiệm Tải Trọng Cực Đoan (Extreme Enterprise Stress Test - CSP 842 Bytes & Permissions-Policy 345 Bytes)**:
-   - Trong kịch bản này, cấu hình được nạp chuỗi CSP khổng lồ 842 bytes (liệt kê hơn 25 domain phụ, analytic sinks, script/style hashes) và Permissions-Policy 345 bytes (15 hardware features).
-   - Tỷ lệ con trỏ RAM tăng lên **54.5%** (6 headers chuỗi dài trỏ trực tiếp vào bộ đệm RAM đã biên dịch sẵn mà không clone chuỗi), trong khi 5 headers nhỏ còn lại vẫn duy trì cơ chế register.
-   - **Kết quả thực tế đo đạc**: Băng thông wire được đẩy lên tới **58.96 MB/s** (~472 Mbps) và tổng cộng **0.86 GB (860 MB)** dữ liệu được truyền tải thành công trong 15s mà không rớt một kết nối nào (100% 200 OK, P50 latency 2.86 ms, P99 latency 14.48 ms). Điều này chứng minh kiến trúc mảng phẳng và con trỏ RAM có khả năng chịu tải cực đoan xuất sắc mà không làm ô nhiễm CPU L1 Cache.
-
----
-
 ## 3. Báo Cáo Phân Tích Symbol Chuyên Sâu (Linux `perf report` & Call Graph Profiling)
 
 Dữ liệu call graph được ghi lại bằng `sudo perf record -F 500 -p $(pidof velda-edge) -g` trực tiếp trên máy chủ Edge Gateway (Azure VM2) khi hệ thống đang phục vụ ở mức tải bão hòa **38,711 RPS** với 100% security headers tiêm tự động:
