@@ -103,7 +103,9 @@ pub fn format_startup_banner(
             ),
             format!(
                 "{c_gray}RAM Detect   :{c_reset} {c_white}{:.1} GB{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Shards, {} Max Sockets{c_reset}",
-                ram_gb, hardware.sizing.concurrency_shards, hardware.sizing.tcp_max_connections
+                ram_gb,
+                hardware.concurrency_shards,
+                (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
             ),
             format!(
                 "{c_gray}Kernel       :{c_reset} {c_white}Linux {}{c_reset} {c_gray}=>{c_reset} {c_bcyan}Accel: {}{c_reset}",
@@ -169,7 +171,9 @@ pub fn format_startup_banner(
             ),
             format!(
                 "RAM Detect   : {:.1} GB => {} Shards, {} Max Sockets",
-                ram_gb, hardware.sizing.concurrency_shards, hardware.sizing.tcp_max_connections
+                ram_gb,
+                hardware.concurrency_shards,
+                (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
             ),
             format!(
                 "Kernel       : Linux {} => Accel: {}",

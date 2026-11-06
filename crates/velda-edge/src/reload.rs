@@ -114,9 +114,7 @@ pub fn load_initial_runtime(
     };
 
     let topo = velda_core::global_hardware_topology();
-    let dims = topo
-        .sizing
-        .adaptive_buffer_pool_dimensions_per_core(topo.memory_bytes, topo.available_cores);
+    let dims = velda_core::AdaptiveBufferDimensions::for_topology(topo);
     let pool_config = velda_core::AdaptivePoolConfig {
         header_slots: dims.header_baseline,
         header_max_cap: dims.header_max_cap,

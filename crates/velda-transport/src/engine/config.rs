@@ -41,7 +41,7 @@ impl EngineConfig {
         let reconcile_channel_capacity = (exact_cores * 32).clamp(64, 4096);
         Self {
             io_workers: exact_cores,
-            max_active_connections: topo.sizing.tcp_max_connections,
+            max_active_connections: (topo.memory_bytes / 32768).clamp(10_000, 2_000_000),
             reconcile_channel_capacity,
             tcp: TcpListenerConfig::for_topology(topo),
             udp: UdpSocketConfig::for_topology(topo),

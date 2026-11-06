@@ -61,10 +61,9 @@ impl UdpAccelerationPath {
             None
         };
 
-        let (recv_buffer_size, send_buffer_size) = (
-            topo.sizing.udp_recv_buffer_size,
-            topo.sizing.udp_send_buffer_size,
-        );
+        let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
+        let udp_buf = (ram_gb * 2 * 1024 * 1024).clamp(1024 * 1024, 32 * 1024 * 1024);
+        let (recv_buffer_size, send_buffer_size) = (udp_buf, udp_buf);
 
         Self {
             bind_address_no_port,

@@ -93,7 +93,8 @@ impl TcpAccelerationPath {
 
         let notsent_lowat =
             if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
-                Some(topo.sizing.tcp_notsent_lowat)
+                let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
+                Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32)
             } else {
                 None
             };

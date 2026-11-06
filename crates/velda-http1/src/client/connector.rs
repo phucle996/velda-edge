@@ -171,7 +171,8 @@ impl Http1AccelerationPath {
         let fastopen = is_tls && topo.kernel.supports_tcp_fastopen_connect();
 
         let notsent_lowat = if topo.kernel.supports_tcp_notsent_lowat() {
-            Some(topo.sizing.tcp_notsent_lowat)
+            let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
+            Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32)
         } else {
             None
         };

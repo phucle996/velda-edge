@@ -52,38 +52,29 @@ const fn clamp_usize(val: usize, min: usize, max: usize) -> usize {
 }
 
 impl Http1Config {
-    /// Creates configuration sized appropriately from hardware sizing parameters.
-    pub const fn from_sizing(sizing: &velda_core::HardwareSizing) -> Self {
+    /// Derives an [`Http1Config`] scaled continuously from host CPU cores and RAM bytes.
+    pub const fn from_hardware(_cores: usize, ram_bytes: usize) -> Self {
+        let ram_gb = ram_bytes / (1024 * 1024 * 1024);
+        let max_buffer_size = clamp_usize(ram_gb * 32 * 1024, 16 * 1024, 256 * 1024);
+        let max_header_size = clamp_usize(ram_gb * 8 * 1024, 8 * 1024, 64 * 1024);
+        let max_chunk_size = clamp_usize(ram_gb * 128 * 1024, 64 * 1024, 1024 * 1024);
+
         Self {
-            max_body_size: clamp_usize(
-                sizing.http1_max_chunk_size * 100,
-                10 * 1024 * 1024,
-                100 * 1024 * 1024,
-            ),
-            max_header_size: sizing.http1_max_header_size,
+            max_body_size: clamp_usize(max_chunk_size * 100, 10 * 1024 * 1024, 100 * 1024 * 1024),
+            max_header_size,
             max_headers: velda_core::MAX_WIRE_HEADERS,
             idle_timeout_ms: 30_000,
             max_keepalive_requests: 10_000_000,
             header_read_timeout_ms: 10_000,
-            initial_buffer_capacity: clamp_usize(
-                sizing.http1_max_buffer_size / 32,
-                4 * 1024,
-                8 * 1024,
-            ),
-            shrink_threshold: clamp_usize(sizing.http1_max_buffer_size / 8, 16 * 1024, 32 * 1024),
-            client_body_buffer_size: sizing.http1_max_buffer_size,
+            initial_buffer_capacity: clamp_usize(max_buffer_size / 32, 4 * 1024, 8 * 1024),
+            shrink_threshold: clamp_usize(max_buffer_size / 8, 16 * 1024, 32 * 1024),
+            client_body_buffer_size: max_buffer_size,
         }
-    }
-
-    /// Derives an [`Http1Config`] scaled continuously from host CPU cores and RAM bytes.
-    pub const fn from_hardware(cores: usize, ram_bytes: usize) -> Self {
-        let sizing = velda_core::HardwareSizing::from_hardware(cores, ram_bytes);
-        Self::from_sizing(&sizing)
     }
 
     /// Creates configuration sized appropriately from hardware topology.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
-        Self::from_sizing(&topo.sizing)
+        Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
     /// Auto-probes the host hardware topology and returns the appropriate config.

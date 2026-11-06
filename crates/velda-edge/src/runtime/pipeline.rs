@@ -290,9 +290,9 @@ impl PipelineTable {
                     };
                     udp.insert(listener.id.clone(), UdpPipeline::Raw { config });
                 } else {
-                    let default_buffer_size = velda_core::global_hardware_topology()
-                        .sizing
-                        .tcp_copy_buffer_size;
+                    let topo = velda_core::global_hardware_topology();
+                    let default_buffer_size =
+                        (topo.available_cores * 8 * 1024).clamp(16 * 1024, 64 * 1024);
                     let copy_buffer_size = listener
                         .raw
                         .and_then(|r| r.copy_buffer_size)

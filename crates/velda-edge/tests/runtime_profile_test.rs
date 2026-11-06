@@ -22,39 +22,33 @@ fn test_profile_continuous_scaling() {
         let hardware = HardwareTopology::with_workers_and_memory(cores, ram_bytes);
         let profile = RuntimeProfile::from_hardware(&hardware);
 
+        let expected_tcp_max_conns = (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000);
+        let expected_dns_cap = (hardware.memory_bytes / (1024 * 1024)).clamp(256, 16384);
+        let expected_tls_cap = ((hardware.memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536);
+        let expected_early_data = if hardware.memory_bytes >= 2 * 1024 * 1024 * 1024 {
+            16 * 1024
+        } else {
+            0
+        };
+
         assert_eq!(profile.transport.io_workers, cores);
         assert_eq!(
             profile.transport.max_active_connections,
-            hardware.sizing.tcp_max_connections
+            expected_tcp_max_conns
         );
-        assert_eq!(
-            profile.discovery.max_dns_cache_capacity,
-            hardware.sizing.dns_cache_capacity
-        );
+        assert_eq!(profile.discovery.max_dns_cache_capacity, expected_dns_cap);
         assert!(profile.discovery.max_lkg_capacity <= profile.discovery.max_dns_cache_capacity);
 
         // TLS profile assertions
-        assert_eq!(
-            profile.tls.session_cache_capacity,
-            hardware.sizing.tls_session_cache_capacity
-        );
-        assert_eq!(
-            profile.tls.max_early_data_size,
-            hardware.sizing.tls_max_early_data_size
-        );
+        assert_eq!(profile.tls.session_cache_capacity, expected_tls_cap);
+        assert_eq!(profile.tls.max_early_data_size, expected_early_data);
 
         let tls_params = profile.to_tls_server_params();
-        assert_eq!(
-            tls_params.session_cache_capacity,
-            hardware.sizing.tls_session_cache_capacity
-        );
-        assert_eq!(
-            tls_params.max_early_data_size,
-            hardware.sizing.tls_max_early_data_size
-        );
+        assert_eq!(tls_params.session_cache_capacity, expected_tls_cap);
+        assert_eq!(tls_params.max_early_data_size, expected_early_data);
 
         let dns_cfg = profile.to_dns_resolver_config();
-        assert_eq!(dns_cfg.cache_capacity, hardware.sizing.dns_cache_capacity);
+        assert_eq!(dns_cfg.cache_capacity, expected_dns_cap);
 
         let tcp_cfg = profile.to_tcp_listener_config();
         assert!(tcp_cfg.backlog >= 1024);
@@ -122,10 +116,8 @@ fn test_fallback_writeback() {
         "runtime.json must never contain io_workers"
     );
     let parsed: RuntimeProfile = serde_json::from_str(&content).unwrap();
-    assert_eq!(
-        parsed.discovery.max_dns_cache_capacity,
-        hardware.sizing.dns_cache_capacity
-    );
+    let expected_dns_cap = (hardware.memory_bytes / (1024 * 1024)).clamp(256, 16384);
+    assert_eq!(parsed.discovery.max_dns_cache_capacity, expected_dns_cap);
 }
 
 #[test]
@@ -150,13 +142,15 @@ fn test_partial_override() {
     assert_eq!(resolved.discovery.max_dns_cache_capacity, 99_999);
 
     // All missing fields MUST cleanly fallback to hardware defaults!
-    let expected_lkg = (hardware.sizing.dns_cache_capacity / 5).max(100);
+    let expected_dns_cap = (hardware.memory_bytes / (1024 * 1024)).clamp(256, 16384);
+    let expected_tcp_max_conns = (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000);
+    let expected_lkg = (expected_dns_cap / 5).max(100);
     assert_eq!(resolved.discovery.max_lkg_capacity, expected_lkg);
     assert_eq!(resolved.discovery.max_negative_ttl_secs, 60);
     assert_eq!(resolved.transport.io_workers, 4);
     assert_eq!(
         resolved.transport.max_active_connections,
-        hardware.sizing.tcp_max_connections
+        expected_tcp_max_conns
     );
 
     // Verify that the file was updated with the full merged state

@@ -36,15 +36,7 @@ impl GrpcConfig {
 
     /// Derives a [`GrpcConfig`] scaled deterministically from host hardware topology.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
-        Self {
-            max_message_size: topo.sizing.grpc_max_message_size,
-            max_header_size: topo.sizing.http1_max_header_size.max(16 * 1024),
-            idle_timeout_ms: 30_000,
-            max_concurrent_streams: topo.sizing.pool_max_concurrent_streams,
-            keepalive_ping_interval_ms: 45_000,
-            keepalive_ping_timeout_ms: 10_000,
-            max_call_duration_ms: 120_000,
-        }
+        Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
     /// Derives a [`GrpcConfig`] scaled continuously from host CPU cores and RAM bytes.
@@ -167,10 +159,7 @@ mod tests {
     fn test_for_topology() {
         let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
         let config = GrpcConfig::for_topology(&topo);
-        assert_eq!(config.max_message_size, topo.sizing.grpc_max_message_size);
-        assert_eq!(
-            config.max_concurrent_streams,
-            topo.sizing.pool_max_concurrent_streams
-        );
+        assert_eq!(config.max_message_size, 32 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_streams, 256);
     }
 }

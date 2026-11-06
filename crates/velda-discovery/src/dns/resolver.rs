@@ -108,7 +108,7 @@ impl Default for DnsResolverConfig {
 impl DnsResolverConfig {
     /// Constructs a resolver configuration tailored to the host's [`velda_core::HardwareTopology`].
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
-        let cache_capacity = topo.sizing.dns_cache_capacity;
+        let cache_capacity = (topo.memory_bytes / (1024 * 1024)).clamp(256, 16384);
         let lkg_capacity = (cache_capacity / 5).max(100);
         let query_timeout = if topo.available_cores >= 8 {
             Duration::from_millis(1500)

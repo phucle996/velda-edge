@@ -46,10 +46,14 @@ impl TlsServerParams {
     /// Creates parameters sized appropriately for the host hardware topology.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
         Self {
-            session_cache_capacity: topo.sizing.tls_session_cache_capacity,
-            session_shards: topo.sizing.concurrency_shards,
-            max_early_data_size: topo.sizing.tls_max_early_data_size,
-            send_tls13_tickets: topo.sizing.tls_send_tls13_tickets as usize,
+            session_cache_capacity: ((topo.memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536),
+            session_shards: topo.concurrency_shards,
+            max_early_data_size: if topo.memory_bytes >= 2 * 1024 * 1024 * 1024 {
+                16 * 1024
+            } else {
+                0
+            },
+            send_tls13_tickets: topo.available_cores.clamp(2, 8),
             handshake_timeout: Duration::from_secs(if topo.available_cores >= 8 { 5 } else { 10 }),
         }
     }
@@ -254,21 +258,15 @@ mod tests {
         let topo_1c_1g =
             velda_core::HardwareTopology::with_workers_and_memory(1, 1024 * 1024 * 1024);
         let p_1c = TlsServerParams::for_topology(&topo_1c_1g);
-        assert_eq!(
-            p_1c.session_cache_capacity,
-            topo_1c_1g.sizing.tls_session_cache_capacity
-        );
-        assert_eq!(p_1c.session_shards, topo_1c_1g.sizing.concurrency_shards);
+        assert_eq!(p_1c.session_cache_capacity, 2048);
+        assert_eq!(p_1c.session_shards, topo_1c_1g.concurrency_shards);
         assert_eq!(p_1c.handshake_timeout, Duration::from_secs(10));
 
         let topo_16c_32g =
             velda_core::HardwareTopology::with_workers_and_memory(16, 32 * 1024 * 1024 * 1024);
         let p_16c = TlsServerParams::for_topology(&topo_16c_32g);
-        assert_eq!(
-            p_16c.session_cache_capacity,
-            topo_16c_32g.sizing.tls_session_cache_capacity
-        );
-        assert_eq!(p_16c.session_shards, topo_16c_32g.sizing.concurrency_shards);
+        assert_eq!(p_16c.session_cache_capacity, 65536);
+        assert_eq!(p_16c.session_shards, topo_16c_32g.concurrency_shards);
         assert_eq!(p_16c.handshake_timeout, Duration::from_secs(5));
     }
 }

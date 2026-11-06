@@ -104,9 +104,11 @@ impl UdpSocketConfig {
 
     /// Pre-compiles UDP socket acceleration settings from probed hardware topology and evolutionary ladder.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+        let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
+        let udp_buf = (ram_gb * 2 * 1024 * 1024).clamp(1024 * 1024, 32 * 1024 * 1024);
         let mut cfg = Self {
-            recv_buffer_size: Some(topo.sizing.udp_recv_buffer_size),
-            send_buffer_size: Some(topo.sizing.udp_send_buffer_size),
+            recv_buffer_size: Some(udp_buf),
+            send_buffer_size: Some(udp_buf),
             concurrency_shards: topo.available_cores().max(1),
             ..Self::default()
         };

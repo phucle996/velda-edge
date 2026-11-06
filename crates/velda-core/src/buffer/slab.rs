@@ -3,7 +3,7 @@
 //! # Architecture and Invariants
 //! 1. **Continuous Mathematical Sizing & Anti-OOM Cap**:
 //!    - Baseline and maximum burst capacities are mathematically bounded via
-//!      [`crate::hardware::sizing::HardwareSizing`].
+//!      [`crate::buffer::adaptive::AdaptiveBufferDimensions`].
 //!    - Prevents Out-Of-Memory (OOM) crashes by strictly enforcing `max_burst_cap`
 //!      (Dual-Constraint formula: $\le 3\times$ baseline and $\le 20\%$ headroom RAM).
 //! 2. **Eager Physical Page Commit (Anti-Page-Fault)**:

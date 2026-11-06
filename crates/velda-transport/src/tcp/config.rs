@@ -214,8 +214,8 @@ impl TcpListenerConfig {
     /// Pre-compiles TCP listener acceleration settings from probed hardware topology.
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
         let mut cfg = Self {
-            backlog: topo.sizing.tcp_backlog as u32,
-            copy_buffer_size: topo.sizing.tcp_copy_buffer_size,
+            backlog: ((topo.available_cores * 1024).clamp(1024, 32768)) as u32,
+            copy_buffer_size: (topo.available_cores * 8 * 1024).clamp(16 * 1024, 64 * 1024),
             concurrency_shards: topo.available_cores().max(1),
             ..Self::default()
         };
@@ -234,7 +234,8 @@ impl TcpListenerConfig {
             cfg.incoming_cpu = true;
         }
         if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
-            cfg.notsent_lowat = Some(topo.sizing.tcp_notsent_lowat);
+            let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
+            cfg.notsent_lowat = Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32);
         }
         if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
             cfg.user_timeout = Some(Duration::from_secs(30));

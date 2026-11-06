@@ -19,10 +19,10 @@ pub mod kernel;
 pub mod memory;
 pub mod nic;
 pub mod overload;
-pub mod sizing;
 
 use std::sync::OnceLock;
 
+pub use crate::worker::CorePartition;
 pub use cpu::{CpuProfile, CpuRegisterCapabilities, RegisterWidth, copy_bulk_payload, probe_cpu};
 pub use kernel::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
@@ -32,8 +32,6 @@ pub use kernel::{
 pub use memory::{MemoryProfile, probe_memory};
 pub use nic::{IngressHashAuthority, NicProfile, ingress_steering_cpu, probe_nic};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
-pub use sizing::{AdaptiveBufferDimensions, HardwareSizing};
-pub use crate::worker::CorePartition;
 
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +50,6 @@ pub struct HardwareTopology {
     pub worker_threads: usize,
     /// Total/available memory in bytes (respects container cgroups limits).
     pub memory_bytes: usize,
-    /// Pre-computed hardware-driven resource capacities across all networking subsystems.
-    pub sizing: HardwareSizing,
     /// Pre-computed optimal idle connection capacity per upstream target (scaled from CPU concurrency).
     pub optimal_max_idle_per_key: usize,
     /// Pre-computed optimal shard count for concurrency distribution (power-of-two, bounded [8, 1024]).
@@ -134,7 +130,8 @@ impl HardwareTopology {
         let memory = probe_memory();
         let kernel = probe_kernel();
         let nic = probe_nic();
-        let sizing = HardwareSizing::from_hardware(cpu.available_cores, memory.total_bytes);
+        let (optimal_max_idle_per_key, concurrency_shards) =
+            compute_optimal_pool_concurrency(cpu.available_cores, memory.total_bytes);
 
         Self {
             cpu,
@@ -144,9 +141,8 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
-            sizing,
-            optimal_max_idle_per_key: sizing.optimal_max_idle_per_key,
-            concurrency_shards: sizing.concurrency_shards,
+            optimal_max_idle_per_key,
+            concurrency_shards,
         }
     }
 
@@ -154,7 +150,8 @@ impl HardwareTopology {
     #[inline]
     pub fn new(cpu: CpuProfile, memory: MemoryProfile) -> Self {
         let kernel = probe_kernel();
-        let sizing = HardwareSizing::from_hardware(cpu.available_cores, memory.total_bytes);
+        let (optimal_max_idle_per_key, concurrency_shards) =
+            compute_optimal_pool_concurrency(cpu.available_cores, memory.total_bytes);
         Self {
             cpu,
             memory,
@@ -163,9 +160,8 @@ impl HardwareTopology {
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
-            sizing,
-            optimal_max_idle_per_key: sizing.optimal_max_idle_per_key,
-            concurrency_shards: sizing.concurrency_shards,
+            optimal_max_idle_per_key,
+            concurrency_shards,
         }
     }
 

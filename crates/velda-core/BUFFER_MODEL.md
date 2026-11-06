@@ -73,7 +73,7 @@ Instead of statically fixing buffer counts or allowing unbounded heap growth, po
 ```
 
 ### 3.1 Tier 1: Hot Baseline Floor
-- Sized directly from continuous hardware probing via [`crate::hardware::sizing::HardwareSizing`].
+- Sized directly from continuous hardware probing via [`crate::buffer::adaptive::AdaptiveBufferDimensions`].
 - Workspaces and slabs in Tier 1 reside in memory for the entire life of the edge process.
 
 ### 3.2 Tier 2: Burst Standby Queue with 15s TTL

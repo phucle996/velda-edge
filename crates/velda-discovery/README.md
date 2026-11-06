@@ -111,7 +111,7 @@ ResolvConf (/etc/resolv.conf)      StaticServerProvider                      Udp
 
 ## Continuous Hardware Sizing (`DnsResolverConfig::for_topology`)
 
-Rather than relying on arbitrary discrete tiers, `velda-discovery` uses zero-quantization [`HardwareSizing`](../velda-core/src/hardware/sizing.rs) to continuously derive DNS cache and LKG capacities directly from host RAM:
+Rather than relying on arbitrary discrete tiers, `velda-discovery` uses continuous hardware topology probing (`for_topology`) to derive DNS cache and LKG capacities directly from host RAM:
 
 - **DNS Cache Capacity**: `(ram_bytes / (1024 * 1024)).clamp(256, 16384)`
 - **LKG Resilience Capacity**: `(cache_capacity / 5).max(100)`

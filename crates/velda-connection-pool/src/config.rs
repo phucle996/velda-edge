@@ -25,8 +25,8 @@ impl Default for PoolConfig {
     fn default() -> Self {
         let hw = velda_core::global_hardware_topology();
         Self {
-            max_idle_per_key: hw.sizing.optimal_max_idle_per_key,
-            max_concurrent_streams: hw.sizing.pool_max_concurrent_streams,
+            max_idle_per_key: hw.optimal_max_idle_per_key,
+            max_concurrent_streams: ((hw.available_cores.max(1) * 64) as u32).clamp(128, 1024),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
         }
@@ -37,12 +37,12 @@ impl PoolConfig {
     /// Returns pool configuration and concurrency shards directly using pre-computed values from [`HardwareTopology`].
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
         let config = Self {
-            max_idle_per_key: topo.sizing.optimal_max_idle_per_key,
-            max_concurrent_streams: topo.sizing.pool_max_concurrent_streams,
+            max_idle_per_key: topo.optimal_max_idle_per_key,
+            max_concurrent_streams: ((topo.available_cores.max(1) * 64) as u32).clamp(128, 1024),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
         };
-        (config, topo.sizing.concurrency_shards)
+        (config, topo.concurrency_shards)
     }
 }
 

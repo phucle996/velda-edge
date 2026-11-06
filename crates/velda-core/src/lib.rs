@@ -40,13 +40,13 @@ pub mod worker;
 // -----------------------------------------------------------------------------
 
 pub use buffer::{
-    AdaptivePoolConfig, AdaptiveSlabLimits, CoreBufferPool, HeaderPool, HeaderWorkspace,
-    HeaderWorkspaceLease, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, NumericFmt,
-    NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease, PayloadSlabPool,
-    ShardedBufferPool, SlabClass, X_REQUEST_ID, header_key, resolve_u64_header_value,
+    AdaptiveBufferDimensions, AdaptivePoolConfig, AdaptiveSlabLimits, CoreBufferPool, HeaderPool,
+    HeaderWorkspace, HeaderWorkspaceLease, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS,
+    MAX_NUMERIC_HEADERS, NumericFmt, NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease,
+    PayloadSlabPool, ShardedBufferPool, SlabClass, X_REQUEST_ID, header_key,
+    resolve_u64_header_value,
 };
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
-pub use hardware::AdaptiveBufferDimensions;
 
 /// Maximum physical wire headers allowed across all ingress protocols (Anti-OOM DoS ceiling).
 pub const MAX_WIRE_HEADERS: usize = 1024;
@@ -98,10 +98,10 @@ pub use lifecycle::{Action, CachedResponseDirective, Hook, HookPhase, Phase};
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
     AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, CpuRegisterCapabilities,
-    DeadPeerTeardownTier, HardwareSizing, HardwareTopology, IngressHashAuthority,
-    KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier,
-    MultiplexPacingTier, NicProfile, OutboundPortScalingTier, OverloadConfig, OverloadLevel,
-    OverloadTracker, RegisterWidth, UdpEgressTier, UdpOffloadTier, compute_optimal_pool_concurrency,
+    DeadPeerTeardownTier, HardwareTopology, IngressHashAuthority, KernelAccelerationLadder,
+    KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier, MultiplexPacingTier,
+    NicProfile, OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker,
+    RegisterWidth, UdpEgressTier, UdpOffloadTier, compute_optimal_pool_concurrency,
     concurrency_shards, copy_bulk_payload, global_hardware_topology, ingress_steering_cpu,
     init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
     probe_memory_usage, probe_nic, set_current_thread_idle_priority,
