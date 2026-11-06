@@ -38,6 +38,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::channel::RdmaChannel;
 
+/// Maximum discrete payload chunk size dispatched per RDMA Send Work Request (64 KB).
+pub const DEFAULT_RDMA_STREAM_MAX_CHUNK: usize = 65536;
+
 enum ReadState {
     Idle,
     Pending(Pin<Box<dyn Future<Output = Result<Bytes, io::Error>> + Send>>),
@@ -149,6 +152,21 @@ impl AsyncWrite for RdmaStream {
             }
         }
 
+        // Proactively kick off flush if write buffer has accumulated a full RDMA chunk and we are idle
+        if self.write_buf.len() >= DEFAULT_RDMA_STREAM_MAX_CHUNK
+            && matches!(self.write_state, WriteState::Idle)
+        {
+            let _ = self.as_mut().poll_flush(cx);
+        }
+
+        // Backpressure when staged write buffer exceeds high water mark (128 KB)
+        if self.write_buf.len() >= DEFAULT_RDMA_STREAM_MAX_CHUNK * 2 {
+            let _ = self.as_mut().poll_flush(cx);
+            if self.write_buf.len() >= DEFAULT_RDMA_STREAM_MAX_CHUNK * 2 {
+                return Poll::Pending;
+            }
+        }
+
         self.write_buf.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
@@ -161,7 +179,10 @@ impl AsyncWrite for RdmaStream {
                         return Poll::Ready(Ok(()));
                     }
 
-                    let data = self.write_buf.split().freeze();
+                    // Chunk outbound payloads so discrete WRs never exceed hardware slot capacity
+                    let chunk_len =
+                        std::cmp::min(self.write_buf.len(), DEFAULT_RDMA_STREAM_MAX_CHUNK);
+                    let data = self.write_buf.split_to(chunk_len).freeze();
                     let channel = self.channel.clone();
                     let fut = Box::pin(async move {
                         channel
@@ -174,7 +195,7 @@ impl AsyncWrite for RdmaStream {
                 WriteState::Pending(fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(())) => {
                         self.write_state = WriteState::Idle;
-                        return Poll::Ready(Ok(()));
+                        // Loop continues to flush any remaining chunks until write_buf is completely empty
                     }
                     Poll::Ready(Err(e)) => {
                         self.write_state = WriteState::Idle;

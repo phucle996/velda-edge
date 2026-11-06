@@ -1,4 +1,13 @@
 //! Sharded partition architecture with cache-aligned mutex tables.
+//!
+//! # Thread Lane Model & CPU Core Cache Affinity
+//! Each Frontline Traffic Worker thread (`velda-worker-{id}`) is assigned an exclusive thread lane
+//! corresponding to its CPU core pinning. The companion Shadow Logistics Worker (`velda-shadow-{id}`)
+//! pinned to the same physical core populates this lane shard during background connection pre-warming.
+//!
+//! Because both threads execute on the same CPU core, connection handle pointers and state reside warm
+//! within the core's private L1/L2 data cache, allowing frontline acquisitions to proceed with zero
+//! cross-core MESI/MOESI cache invalidation or NUMA interconnect bus traffic.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};

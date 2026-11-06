@@ -32,8 +32,8 @@ pub mod stream;
 pub mod wr;
 
 use bytes::Bytes;
-use parking_lot::Mutex as SyncMutex;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -55,36 +55,47 @@ use crate::verbs::qp::QueuePair;
 pub const DEFAULT_CHANNEL_SLOT_SIZE: usize = 65536;
 /// Work Request ID for standard Send WR operations.
 const WR_ID_SEND: u64 = 100;
-/// Work Request ID for One-Sided RDMA Write operations.
-const WR_ID_RDMA_WRITE: u64 = 101;
 
 /// Hardware-backed RDMA channel holding registered memory buffers and QP.
 pub struct HardwareChannel {
     qp: Arc<QueuePair>,
-    _cq: Arc<CompletionQueue>,
-    poller: AdaptiveCqPoller,
+    _send_cq: Arc<CompletionQueue>,
+    _recv_cq: Arc<CompletionQueue>,
+    send_poller: AdaptiveCqPoller,
+    recv_poller: AdaptiveCqPoller,
     flow_control: CreditFlowControl,
-    mr: MemoryRegion,
+    mr: Option<MemoryRegion>,
     raw_buf: *mut u8,
     buf_len: usize,
+    max_send_wr: u32,
+    max_recv_wr: u32,
     send_slot_size: usize,
     recv_slot_size: usize,
     timeout: Duration,
-    _guard: SyncMutex<()>,
+    send_slot_seq: AtomicU64,
 }
 
 unsafe impl Send for HardwareChannel {}
 unsafe impl Sync for HardwareChannel {}
 
 impl HardwareChannel {
-    /// Constructs a new hardware channel, pinning the internal memory buffer and pre-posting receive buffers.
+    /// Constructs a new hardware channel with dedicated Send and Receive Completion Queues,
+    /// pinning internal memory buffers and pre-posting initial receive work requests.
     pub fn new(
         qp: Arc<QueuePair>,
-        cq: Arc<CompletionQueue>,
+        send_cq: Arc<CompletionQueue>,
+        recv_cq: Arc<CompletionQueue>,
         pd: Arc<ProtectionDomain>,
         config: &RdmaConfig,
     ) -> Result<Self, RdmaError> {
-        let poller = AdaptiveCqPoller::new(cq.clone(), config.poll_spin_count)?;
+        if config.max_send_wr == 0 || config.max_recv_wr == 0 {
+            return Err(RdmaError::Config(
+                "RDMA max_send_wr and max_recv_wr must be greater than zero".into(),
+            ));
+        }
+
+        let send_poller = AdaptiveCqPoller::new(send_cq.clone(), config.poll_spin_count)?;
+        let recv_poller = AdaptiveCqPoller::new(recv_cq.clone(), config.poll_spin_count)?;
         let flow_control = CreditFlowControl::new(config.initial_credits);
 
         // 1. Pre-allocate contiguous pinned buffer for send/recv slots (64KB slots default).
@@ -104,20 +115,25 @@ impl HardwareChannel {
 
         let channel = Self {
             qp,
-            _cq: cq,
-            poller,
+            _send_cq: send_cq,
+            _recv_cq: recv_cq,
+            send_poller,
+            recv_poller,
             flow_control,
-            mr,
+            mr: Some(mr),
             raw_buf,
             buf_len,
+            max_send_wr: config.max_send_wr,
+            max_recv_wr: config.max_recv_wr,
             send_slot_size: slot_size,
             recv_slot_size: slot_size,
             timeout: Duration::from_millis(config.timeout_ms),
-            _guard: SyncMutex::new(()),
+            send_slot_seq: AtomicU64::new(0),
         };
 
         // 3. Pre-post initial Receive Work Requests into RQ before traffic arrives.
-        // This ensures the HCA hardware can immediately DMA incoming frames without triggering RNR NAKs.
+        // Each receive slot occupies its own distinct, non-overlapping memory offset
+        // keyed by `wr_id = i` to eliminate receive buffer aliasing under burst traffic.
         for i in 0..config.initial_credits as usize {
             let offset = (config.max_send_wr as usize + i) * slot_size;
             let recv_ptr = unsafe { raw_buf.add(offset) };
@@ -147,24 +163,36 @@ impl HardwareChannel {
         // Step 2: Acquire flow-control credit; blocks or errors if remote RQ buffer is exhausted.
         self.flow_control.try_acquire_send_credit()?;
 
-        // Step 3: Copy data into pinned send slot 0 and dispatch Two-Sided Send WR to HCA.
+        // Step 3: Copy data into a dedicated pinned send slot and dispatch Two-Sided Send WR to HCA.
+        let slot_idx = (self.send_slot_seq.fetch_add(1, Ordering::Relaxed) as usize)
+            % (self.max_send_wr as usize);
+        let send_offset = slot_idx * self.send_slot_size;
+        let lkey = self.mr.as_ref().map(|m| m.lkey()).unwrap_or(0);
+
         {
+            let send_ptr = unsafe { self.raw_buf.add(send_offset) };
             unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), self.raw_buf, data.len());
+                std::ptr::copy_nonoverlapping(data.as_ptr(), send_ptr, data.len());
             }
 
             let sge = [ibv_sge {
-                addr: self.raw_buf as u64,
+                addr: send_ptr as u64,
                 length: data.len() as u32,
-                lkey: self.mr.lkey(),
+                lkey,
             }];
 
-            let mut builder = SendWrBuilder::send(WR_ID_SEND, &sge, true);
-            unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
+            let mut builder = SendWrBuilder::send(slot_idx as u64, &sge, true);
+            if let Err(e) = unsafe { self.qp.post_send(builder.as_raw_mut()) } {
+                self.flow_control.add_remote_credits(1);
+                return Err(e);
+            }
         }
 
-        // Step 4: Await send completion from hardware CQ via adaptive poller.
-        self.poller.poll_one(self.timeout).await?;
+        // Step 4: Await send completion exclusively from dedicated hardware Send CQ.
+        let poll_res = self.send_poller.poll_one(self.timeout).await;
+        // Inflight Send WR completed; return credit to flow control quota
+        self.flow_control.add_remote_credits(1);
+        poll_res?;
         Ok(())
     }
 
@@ -182,13 +210,18 @@ impl HardwareChannel {
         // Step 2: Dispatch Two-Sided Send WR referencing the pre-registered memory address.
         {
             let sge = [ibv_sge { addr, length, lkey }];
-
             let mut builder = SendWrBuilder::send(WR_ID_SEND, &sge, true);
-            unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
+            if let Err(e) = unsafe { self.qp.post_send(builder.as_raw_mut()) } {
+                self.flow_control.add_remote_credits(1);
+                return Err(e);
+            }
         }
 
-        // Step 3: Await send completion from hardware CQ via adaptive poller.
-        self.poller.poll_one(self.timeout).await?;
+        // Step 3: Await send completion exclusively from dedicated hardware Send CQ.
+        let poll_res = self.send_poller.poll_one(self.timeout).await;
+        // Inflight Send WR completed; return credit to flow control quota
+        self.flow_control.add_remote_credits(1);
+        poll_res?;
         Ok(())
     }
 
@@ -208,25 +241,35 @@ impl HardwareChannel {
             .await
     }
 
-    /// Receives data from the RDMA Queue Pair.
-    pub async fn recv(&self) -> Result<Bytes, RdmaError> {
-        // Step 1: Await inbound Work Completion from hardware CQ.
-        let wc = self.poller.poll_one(self.timeout).await?;
+    /// Receives data from the RDMA Queue Pair using caller-specified timeout.
+    pub async fn recv(&self, timeout: Duration) -> Result<Bytes, RdmaError> {
+        // Step 1: Await inbound Work Completion exclusively from dedicated hardware Receive CQ.
+        let wc = self.recv_poller.poll_one(timeout).await?;
         let byte_len = wc.byte_len as usize;
 
-        // Step 2: Extract received bytes from the pinned receive slot.
-        let rx_offset = (self.buf_len / 2).min(self.buf_len - byte_len);
-        let rx_slice = unsafe { std::slice::from_raw_parts(self.raw_buf.add(rx_offset), byte_len) };
+        // Step 2: Identify designated receive slot by `wc.wr_id` to prevent buffer aliasing.
+        let slot_idx = (wc.wr_id as usize) % (self.max_recv_wr as usize);
+        let rx_offset = (self.max_send_wr as usize + slot_idx) * self.recv_slot_size;
+        let safe_len = byte_len.min(self.recv_slot_size);
+
+        let rx_slice = unsafe { std::slice::from_raw_parts(self.raw_buf.add(rx_offset), safe_len) };
         let payload = Bytes::copy_from_slice(rx_slice);
 
-        // Step 3: Immediately re-post receive buffer to replenish RQ capacity.
+        // Step 3: Immediately re-post receive buffer to replenish RQ capacity for this specific slot.
+        let lkey = self.mr.as_ref().map(|m| m.lkey()).unwrap_or(0);
         let sge = [ibv_sge {
             addr: unsafe { self.raw_buf.add(rx_offset) } as u64,
             length: self.recv_slot_size as u32,
-            lkey: self.mr.lkey(),
+            lkey,
         }];
-        let mut rwr = build_recv_wr(wc.wr_id, &sge);
-        let _ = unsafe { self.qp.post_recv(&mut rwr) };
+        let mut rwr = build_recv_wr(slot_idx as u64, &sge);
+        if let Err(e) = unsafe { self.qp.post_recv(&mut rwr) } {
+            tracing::warn!(
+                slot = slot_idx,
+                error = %e,
+                "Failed to re-post receive buffer to RDMA RQ"
+            );
+        }
 
         // Step 4: Track consumed receive slot and determine if credit update should be granted.
         if let Some(credits_to_grant) = self.flow_control.on_recv_consumed() {
@@ -254,34 +297,41 @@ impl HardwareChannel {
             });
         }
 
-        // Step 2: Copy payload into pinned buffer and dispatch One-Sided RDMA Write with rkey.
-        {
-            unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), self.raw_buf, data.len());
-            }
+        // Step 2: Copy payload into designated pinned send slot and dispatch One-Sided RDMA Write with rkey.
+        let slot_idx = (self.send_slot_seq.fetch_add(1, Ordering::Relaxed) as usize)
+            % (self.max_send_wr as usize);
+        let send_offset = slot_idx * self.send_slot_size;
+        let lkey = self.mr.as_ref().map(|m| m.lkey()).unwrap_or(0);
+
+        unsafe {
+            let send_ptr = self.raw_buf.add(send_offset);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), send_ptr, data.len());
 
             let sge = [ibv_sge {
-                addr: self.raw_buf as u64,
+                addr: send_ptr as u64,
                 length: data.len() as u32,
-                lkey: self.mr.lkey(),
+                lkey,
             }];
 
             let mut builder =
-                SendWrBuilder::rdma_write(WR_ID_RDMA_WRITE, &sge, remote_addr, rkey, true);
-            unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
+                SendWrBuilder::rdma_write(slot_idx as u64, &sge, remote_addr, rkey, true);
+            self.qp.post_send(builder.as_raw_mut())?;
         }
 
-        // Step 3: Await local write completion from hardware CQ.
-        self.poller.poll_one(self.timeout).await?;
+        // Step 3: Await local write completion from dedicated Send CQ.
+        self.send_poller.poll_one(self.timeout).await?;
         Ok(())
     }
 }
 
 impl Drop for HardwareChannel {
     fn drop(&mut self) {
+        // Step 1: Explicitly drop MemoryRegion first to deregister from HCA before freeing memory
+        self.mr.take();
+
+        // Step 2: Return pinned host memory buffer to OS allocator
         if !self.raw_buf.is_null() {
             unsafe {
-                // Reconstruct host vector so its memory is cleanly deallocated after dereg_mr
                 let _ = Vec::from_raw_parts(self.raw_buf, self.buf_len, self.buf_len);
             }
         }
@@ -343,7 +393,7 @@ impl RdmaChannel {
     /// Receives a payload from the RDMA channel.
     pub async fn recv(&self, timeout: Duration) -> Result<Bytes, RdmaError> {
         match self {
-            Self::Hardware(hw) => hw.recv().await,
+            Self::Hardware(hw) => hw.recv(timeout).await,
             Self::Mock(mock) => {
                 let mut guard = mock.lock().await;
                 let msg = guard.recv(timeout).await?;

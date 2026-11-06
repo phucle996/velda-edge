@@ -52,7 +52,8 @@ pub struct QueuePair {
     raw: *mut ibv_qp,
     qp_num: u32,
     _pd: Arc<ProtectionDomain>,
-    _cq: Arc<CompletionQueue>,
+    _send_cq: Arc<CompletionQueue>,
+    _recv_cq: Arc<CompletionQueue>,
     lib: &'static IbvLib,
 }
 
@@ -60,10 +61,16 @@ unsafe impl Send for QueuePair {}
 unsafe impl Sync for QueuePair {}
 
 impl QueuePair {
-    /// Creates a new Reliable Connected (RC) Queue Pair tied to the given Protection Domain and CQ.
+    /// Creates a new Reliable Connected (RC) Queue Pair with dedicated Send and Receive Completion Queues.
+    ///
+    /// # Production Safety & Hardware Full-Duplex
+    /// Splitting Send CQ and Receive CQ is mandatory for bidirectional full-duplex traffic.
+    /// A single shared CQ causes race conditions where Send completion pollers consume Receive CQEs,
+    /// dropping incoming packets and corrupting payload lengths.
     pub fn new(
         pd: Arc<ProtectionDomain>,
-        cq: Arc<CompletionQueue>,
+        send_cq: Arc<CompletionQueue>,
+        recv_cq: Arc<CompletionQueue>,
         max_send_wr: u32,
         max_recv_wr: u32,
         max_sge: u32,
@@ -73,8 +80,8 @@ impl QueuePair {
 
         let mut init_attr = ibv_qp_init_attr {
             qp_context: std::ptr::null_mut(),
-            send_cq: cq.raw(),
-            recv_cq: cq.raw(),
+            send_cq: send_cq.raw(),
+            recv_cq: recv_cq.raw(),
             srq: std::ptr::null_mut(),
             cap: ibv_qp_cap {
                 max_send_wr,
@@ -101,9 +108,21 @@ impl QueuePair {
             raw: qp_ptr,
             qp_num,
             _pd: pd,
-            _cq: cq,
+            _send_cq: send_cq,
+            _recv_cq: recv_cq,
             lib,
         }))
+    }
+
+    /// Convenience constructor creating a QP with a single shared CQ for backwards compatibility in tests.
+    pub fn new_single_cq(
+        pd: Arc<ProtectionDomain>,
+        cq: Arc<CompletionQueue>,
+        max_send_wr: u32,
+        max_recv_wr: u32,
+        max_sge: u32,
+    ) -> Result<Arc<Self>, RdmaError> {
+        Self::new(pd, cq.clone(), cq, max_send_wr, max_recv_wr, max_sge)
     }
 
     /// Queue Pair Number assigned by the local HCA.

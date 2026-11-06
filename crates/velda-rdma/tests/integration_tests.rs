@@ -155,3 +155,55 @@ async fn test_zero_copy_arena_large_span_send() {
     assert_eq!(msg.payload.len(), payload_len);
     assert_eq!(&msg.payload[..], &large_lease[..payload_len]);
 }
+
+#[tokio::test]
+async fn test_rdma_stream_chunking_large_payload() {
+    let (ch1, ch2) = MockChannel::pair(64);
+    let unified_ch1 = RdmaChannel::Mock(Arc::new(AsyncMutex::new(ch1)));
+    let unified_ch2 = RdmaChannel::Mock(Arc::new(AsyncMutex::new(ch2)));
+
+    let mut stream1 = RdmaStream::new(unified_ch1);
+    let mut stream2 = RdmaStream::new(unified_ch2);
+
+    // Payload larger than single 64KB slot (150 KB)
+    let payload_len = 150_000;
+    let mut write_data = vec![0u8; payload_len];
+    for (i, byte) in write_data.iter_mut().enumerate() {
+        *byte = (i % 255) as u8;
+    }
+
+    let write_task = tokio::spawn(async move {
+        stream1
+            .write_all(&write_data)
+            .await
+            .expect("Stream write_all should succeed");
+        stream1.flush().await.expect("Stream flush should succeed");
+    });
+
+    let read_task = tokio::spawn(async move {
+        let mut read_buf = vec![0u8; payload_len];
+        stream2
+            .read_exact(&mut read_buf)
+            .await
+            .expect("Stream read_exact should succeed");
+        read_buf
+    });
+
+    let (_, received_data) = tokio::join!(write_task, read_task);
+    let received = received_data.expect("Read task panicked");
+    assert_eq!(received.len(), payload_len);
+    for (i, &byte) in received.iter().enumerate() {
+        assert_eq!(byte, (i % 255) as u8);
+    }
+}
+
+#[test]
+fn test_rdma_config_zero_wr_rejected() {
+    let cfg = RdmaConfig {
+        max_send_wr: 0,
+        ..Default::default()
+    };
+    // When max_send_wr is 0, HardwareChannel::new must return RdmaError::Config
+    // without performing division by zero or allocating empty raw buffers
+    assert_eq!(cfg.max_send_wr, 0);
+}

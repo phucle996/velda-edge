@@ -79,11 +79,13 @@ impl RdmaConnector {
 
         let context = device.open()?;
         let pd = ProtectionDomain::new(context.clone())?;
-        let cq = CompletionQueue::new(context.clone(), config.cq_size, true)?;
+        let send_cq = CompletionQueue::new(context.clone(), config.cq_size, true)?;
+        let recv_cq = CompletionQueue::new(context.clone(), config.cq_size, true)?;
 
         let qp = QueuePair::new(
             pd.clone(),
-            cq.clone(),
+            send_cq.clone(),
+            recv_cq.clone(),
             config.max_send_wr,
             config.max_recv_wr,
             config.max_sge,
@@ -122,7 +124,7 @@ impl RdmaConnector {
         qp.to_rts(local_psn, 14, 7, config.rnr_retry)?;
 
         // Step 6: Construct HardwareChannel, pin contiguous buffer slots, and pre-post initial receive buffers.
-        let hw_channel = HardwareChannel::new(qp, cq, pd, config)?;
+        let hw_channel = HardwareChannel::new(qp, send_cq, recv_cq, pd, config)?;
         Ok(RdmaChannel::Hardware(Arc::new(hw_channel)))
     }
 

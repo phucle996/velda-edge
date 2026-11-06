@@ -231,7 +231,18 @@ fn trim_in_place(s: &mut String) {
 
 /// Validates upstream configuration rules strictly without silent fallbacks.
 pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncError> {
+    validate_upstreams_internal(upstreams, velda_core::hardware::probe_rdma)
+}
+
+fn validate_upstreams_internal<F>(
+    upstreams: &mut [UpstreamConfig],
+    rdma_probe: F,
+) -> Result<(), SyncError>
+where
+    F: Fn() -> velda_core::hardware::RdmaProfile,
+{
     let mut seen_ids = HashSet::with_capacity(upstreams.len());
+    let mut host_rdma_profile: Option<velda_core::hardware::RdmaProfile> = None;
 
     for upstream in upstreams {
         trim_in_place(&mut upstream.id);
@@ -454,6 +465,21 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                 }
             }
             _ => unreachable!(),
+        }
+
+        // Fail fast: RDMA host hardware admission. Rejects candidate config upfront
+        // if gateway lacks active physical RDMA/RoCEv2 interfaces.
+        if upstream.protocol.transport == "rdma" {
+            let profile = host_rdma_profile.get_or_insert_with(&rdma_probe);
+            if !profile.is_available {
+                return Err(SyncError::Validation {
+                    domain: "upstreams".into(),
+                    reason: format!(
+                        "Upstream '{}': transport 'rdma' requested, but host gateway lacks active RDMA hardware ({})",
+                        upstream.id, profile.reason
+                    ),
+                });
+            }
         }
 
         // Fail fast: strict timeouts validation (zero silent fallbacks)
@@ -1456,6 +1482,120 @@ mod tests {
         assert_eq!(
             unpacked[0].tls.as_ref().unwrap().sni,
             vec!["insecure.internal".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_upstream_rdma_rejected_when_host_lacks_hardware() {
+        let mut u = mock_upstream_config("rdma-raw-upstream");
+        u.protocol.transport = "rdma".into();
+        u.protocol.application = "raw".into();
+
+        let err = validate_upstreams(&mut [u]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lacks active RDMA hardware"),
+            "Expected failure due to missing host RDMA hardware, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_upstream_rdma_rejected_via_injected_probe() {
+        let mut u = mock_upstream_config("rdma-grpc-upstream");
+        u.protocol.transport = "rdma".into();
+        u.protocol.application = "grpc".into();
+
+        let err = validate_upstreams_internal(&mut [u], || {
+            velda_core::hardware::RdmaProfile::none("simulated unequipped hardware")
+        })
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("simulated unequipped hardware"));
+        assert!(msg.contains("lacks active RDMA hardware"));
+    }
+
+    #[test]
+    fn test_upstream_rdma_accepted_via_injected_active_probe() {
+        let mut u_raw = mock_upstream_config("rdma-raw-ok");
+        u_raw.protocol.transport = "rdma".into();
+        u_raw.protocol.application = "raw".into();
+
+        let mut u_grpc = mock_upstream_config("rdma-grpc-ok");
+        u_grpc.protocol.transport = "rdma".into();
+        u_grpc.protocol.application = "grpc".into();
+
+        let active_profile = velda_core::hardware::RdmaProfile {
+            is_available: true,
+            transport: velda_core::hardware::RdmaTransportType::RoceV2,
+            vendor: velda_core::hardware::RdmaVendor::Mellanox,
+            device_count: 1,
+            active_ports: 1,
+            numa_node: 0,
+            max_rate_gbps: 100,
+            reason: "RoCE v2 active",
+        };
+
+        let res = validate_upstreams_internal(&mut [u_raw, u_grpc], || active_profile);
+        assert!(
+            res.is_ok(),
+            "Validation should succeed with active RDMA hardware"
+        );
+    }
+
+    #[test]
+    fn test_upstream_rdma_accepted_with_mock_sysfs_path() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let dev_dir = test_dir.path().join("mlx5_0");
+        let port_dir = dev_dir.join("ports/1");
+        let gid_dir = port_dir.join("gid_attrs/types");
+
+        std::fs::create_dir_all(&gid_dir).unwrap();
+        std::fs::create_dir_all(dev_dir.join("device")).unwrap();
+
+        std::fs::write(dev_dir.join("device/vendor"), "0x15b3\n").unwrap();
+        std::fs::write(dev_dir.join("device/numa_node"), "0\n").unwrap();
+        std::fs::write(dev_dir.join("node_type"), "1: CA\n").unwrap();
+        std::fs::write(port_dir.join("state"), "4: ACTIVE\n").unwrap();
+        std::fs::write(port_dir.join("link_layer"), "Ethernet\n").unwrap();
+        std::fs::write(port_dir.join("rate"), "100 Gb/sec (4X EDR)\n").unwrap();
+        std::fs::write(gid_dir.join("0"), "RoCE v2\n").unwrap();
+
+        let mut u = mock_upstream_config("rdma-mock-sysfs");
+        u.protocol.transport = "rdma".into();
+        u.protocol.application = "raw".into();
+
+        let res = validate_upstreams_internal(&mut [u], || {
+            velda_core::hardware::rdma::probe_rdma_from(test_dir.path())
+        });
+        assert!(
+            res.is_ok(),
+            "Validation should succeed when sysfs mock has active RDMA link"
+        );
+    }
+
+    #[test]
+    fn test_upstream_rdma_rejected_for_incompatible_application() {
+        let mut u = mock_upstream_config("rdma-http-invalid");
+        u.protocol.transport = "rdma".into();
+        u.protocol.application = "http1".into();
+
+        let active_profile = velda_core::hardware::RdmaProfile {
+            is_available: true,
+            transport: velda_core::hardware::RdmaTransportType::RoceV2,
+            vendor: velda_core::hardware::RdmaVendor::Mellanox,
+            device_count: 1,
+            active_ports: 1,
+            numa_node: 0,
+            max_rate_gbps: 100,
+            reason: "RoCE v2 active",
+        };
+
+        let err = validate_upstreams_internal(&mut [u], || active_profile).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'http1' requires 'tcp' transport, found 'rdma'"),
+            "Expected application compatibility failure, got: {msg}"
         );
     }
 }

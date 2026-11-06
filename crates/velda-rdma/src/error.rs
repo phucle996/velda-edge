@@ -74,6 +74,10 @@ pub enum RdmaError {
     #[error("RDMA buffer too small (capacity: {capacity}, needed: {needed})")]
     BufferTooSmall { capacity: usize, needed: usize },
 
+    /// Configuration validation error.
+    #[error("RDMA invalid configuration: {0}")]
+    Config(String),
+
     /// Software mock simulation error.
     #[error("RDMA mock error: {0}")]
     Mock(String),

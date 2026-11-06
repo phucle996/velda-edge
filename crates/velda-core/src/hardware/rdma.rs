@@ -164,13 +164,17 @@ impl RdmaProfile {
     }
 }
 
-/// Probes the host RDMA subsystem via Linux sysfs `/sys/class/infiniband`.
+/// Probes the host RDMA subsystem via Linux sysfs `/sys/class/infiniband`
+/// (or custom path via `VELDA_RDMA_SYSFS` for testing and custom mounts).
 pub fn probe_rdma() -> RdmaProfile {
     if let Ok(val) = std::env::var("VELDA_RDMA") {
         let v = val.trim().to_ascii_lowercase();
         if v == "disabled" || v == "0" || v == "false" || v == "off" || v == "none" {
             return RdmaProfile::none("disabled via VELDA_RDMA environment variable");
         }
+    }
+    if let Ok(sysfs_path) = std::env::var("VELDA_RDMA_SYSFS") {
+        return probe_rdma_from(Path::new(&sysfs_path));
     }
     probe_rdma_from(Path::new("/sys/class/infiniband"))
 }

@@ -148,6 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(unix)]
     auto_elevate_nofile_limit();
+    #[cfg(unix)]
+    auto_elevate_memlock_limit();
 
     tracing::info!(
         cores = hardware.available_cores,
@@ -244,6 +246,47 @@ fn auto_elevate_nofile_limit() {
                         to_cur = rlim.rlim_cur,
                         max = initial_max,
                         "Elevated soft file descriptor limit to hard limit (RLIMIT_NOFILE)"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Automatically elevates the process locked memory limit (`RLIMIT_MEMLOCK`).
+///
+/// Ensures zero-copy RDMA memory regions (`ibv_reg_mr`) can pin physical host memory
+/// without triggering `ENOMEM` or `EPERM` kernel mlock rejections on bare-metal hardware.
+#[cfg(unix)]
+fn auto_elevate_memlock_limit() {
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim) == 0 {
+            let initial_cur = rlim.rlim_cur;
+            let initial_max = rlim.rlim_max;
+
+            // 1. Try to elevate to RLIM_INFINITY for datacenter-scale RDMA pinned buffers
+            rlim.rlim_cur = libc::RLIM_INFINITY;
+            rlim.rlim_max = libc::RLIM_INFINITY;
+            if libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) == 0 {
+                tracing::info!(
+                    from_cur = initial_cur,
+                    "Elevated locked memory limit (RLIMIT_MEMLOCK) to unlimited for hardware RDMA pinning"
+                );
+            } else {
+                // 2. Unprivileged fallback: raise soft limit to match existing hard limit
+                rlim.rlim_cur = initial_max;
+                rlim.rlim_max = initial_max;
+                if rlim.rlim_cur > initial_cur && libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) == 0
+                {
+                    tracing::info!(
+                        from_cur = initial_cur,
+                        to_cur = rlim.rlim_cur,
+                        max = initial_max,
+                        "Elevated soft locked memory limit to hard limit (RLIMIT_MEMLOCK)"
                     );
                 }
             }
