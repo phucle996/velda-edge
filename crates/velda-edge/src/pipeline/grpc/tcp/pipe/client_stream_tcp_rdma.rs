@@ -1,7 +1,20 @@
-//! Layer 7 gRPC over TCP downstream to RDMA upstream Client Streaming Pipeline.
+//! # Canonical Pipeline Classification: Acceleration Pipe (Hardware Kernel-Bypass)
 //!
-//! Handles Client-side streaming RPCs (N request chunks to 1 response) where downstream
-//! requests over TCP are forwarded natively over an upstream RDMA kernel-bypass connection.
+//! Unlike **Standard Pipes** (`*_tcp_tcp`) that route outbound traffic through the Linux kernel
+//! network stack (incurring syscall context switches, socket buffer copies, and OS interrupt overhead),
+//! this is an **Acceleration Pipe** utilizing `velda-rdma` to bypass the OS kernel entirely.
+//! Data is DMA-transferred directly between host user-space RAM and backend hardware via RoCEv2 / InfiniBand.
+//!
+//! ### Activation Conditions (Điều kiện kích hoạt)
+//! 1. **Upstream Configuration**: Route resolves to an upstream backend configured with `protocol.transport = "rdma"`.
+//! 2. **Hardware & Driver Availability**: Host possesses an RDMA-capable NIC (e.g. NVIDIA/Mellanox ConnectX
+//!    with RoCEv2/IB fabric via `libibverbs.so.1`) or runs with verified software mock simulation fallback.
+//! 3. **Backend Target Protocol**: Target physical endpoint responds to Out-of-Band (OOB) QP handshakes and
+//!    supports HTTP/2 binary framing directly over established RDMA Queue Pairs.
+//! 4. **Pre-warmed Core Lane State**: Frontline Traffic Worker (`velda-worker-{id}`) leases an established
+//!    ready connection in `< 10ns` from the local core lane shard pre-populated by the core-local
+//!    Shadow Logistics Worker (`velda-shadow-{id}`, `SCHED_IDLE`).
+//! 5. **Pipe Pattern Match**: Upstream strategy explicitly configured as `ClientStream` (N request chunks to 1 response).
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 

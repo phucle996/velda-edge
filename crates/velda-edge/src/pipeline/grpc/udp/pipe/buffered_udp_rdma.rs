@@ -1,8 +1,15 @@
-//! Layer 7 gRPC over UDP downstream to RDMA upstream Buffered Bridge Pipeline.
+//! # Canonical Pipeline Classification: Acceleration Pipe (Hardware Kernel-Bypass)
 //!
-//! Handles standard Unary request-response RPCs where downstream gRPC requests
-//! over UDP / QUIC datagrams are bridged and forwarded natively over upstream
-//! gRPC RDMA kernel-bypass connections with transparent 1-shot self-healing.
+//! Unlike **Standard Bridge Pipes** (`*_udp_tcp`) that bridge downstream UDP datagrams to the Linux kernel
+//! TCP stack, this is an **Acceleration Bridge Pipe** forwarding requests natively over `velda-rdma`
+//! hardware Verbs (RoCEv2 / InfiniBand), bypassing the OS kernel entirely on the upstream leg.
+//!
+//! ### Activation Conditions (Điều kiện kích hoạt)
+//! 1. **Upstream Configuration**: Route resolves to an upstream backend with `protocol.transport = "rdma"`.
+//! 2. **Hardware & Driver Availability**: Host possesses an RDMA-capable NIC (`libibverbs.so.1`) or runs in mock simulation mode.
+//! 3. **Backend Target Protocol**: Target physical endpoint responds to OOB QP handshakes and speaks HTTP/2 over RDMA.
+//! 4. **Pre-warmed Core Lane State**: Ready connection leased in `< 10ns` from the local core lane shard pre-populated by Shadow Worker.
+//! 5. **Pipe Pattern Match**: Upstream strategy explicitly configured as `Buffered` (Unary 1-to-1 RPC).
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 

@@ -1,6 +1,14 @@
-//! Layer 7 gRPC over TCP to TCP Duplex Pipeline.
+//! # Canonical Pipeline Classification: Standard Pipe (Kernel Network Stack)
 //!
-//! Handles full-duplex bidirectional streaming RPCs forwarded natively over upstream HTTP/2 binary framing connections.
+//! Unlike **Acceleration Pipes** (`*_tcp_rdma`) that bypass the OS kernel via hardware RDMA Verbs,
+//! this is a **Standard Pipe** routing outbound traffic through the Linux kernel TCP network stack
+//! using pre-compiled socket acceleration flags (`TcpAccelerationPath` / `GrpcAccelerationPath`:
+//! `TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`, `TCP_NOTSENT_LOWAT`, `SO_BUSY_POLL`, `TCP_QUICKACK`, `BBR`).
+//!
+//! ### Activation Conditions (Điều kiện kích hoạt)
+//! 1. **Upstream Configuration**: Route resolves to an upstream backend with `protocol.transport = "tcp"`.
+//! 2. **Transport & Framing**: Standard OS TCP sockets over IPv4/IPv6 with HTTP/2 binary framing.
+//! 3. **Pipe Pattern Match**: Upstream strategy explicitly configured as `Duplex` (Bidirectional streaming).
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
