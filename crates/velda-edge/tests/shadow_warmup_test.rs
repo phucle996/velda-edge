@@ -9,6 +9,8 @@ use velda_core::{Endpoint, StreamingMode};
 use velda_discovery::Discovery;
 use velda_edge::upstream::http::{Http1Upstream, Http2Upstream};
 use velda_edge::upstream::lb::{EdgeUpstream, LbAlgorithm};
+use velda_edge::upstream::rdma::RdmaUpstream;
+use velda_rdma::RdmaConfig;
 use velda_upstream::UpstreamTimeouts;
 
 #[tokio::test]
@@ -186,4 +188,68 @@ async fn test_http2_shadow_worker_warmup_end_to_end() {
     drop(ready_client);
     drop(lease);
     server_task.abort();
+}
+
+#[tokio::test]
+async fn test_rdma_shadow_worker_warmup_end_to_end() {
+    // 1. Set current thread lane to Worker 0
+    velda_connection_pool::set_current_thread_lane(0);
+
+    let mock_addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+    let endpoint = Endpoint::new("mock-rdma-ep", mock_addr, 1);
+    let discovery = Discovery::new_explicit(vec![endpoint]);
+    let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(2), Duration::from_secs(30));
+
+    let edge_upstream = EdgeUpstream::new(
+        "test-rdma-upstream",
+        "rdma",
+        discovery,
+        LbAlgorithm::RoundRobin(velda_lb::RoundRobin::new()),
+        timeouts,
+    );
+
+    let rdma_upstream = RdmaUpstream::new(edge_upstream, RdmaConfig::mock(), PoolConfig::default());
+
+    // Initial state: lane 0 has 0 idle RDMA connections
+    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 0);
+
+    // 2. Shadow Worker (Logistics) pre-warms 2 RDMA connections for Lane 0
+    rdma_upstream.prewarm_lane(0, 2).await;
+    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 2);
+
+    // 3. Traffic Worker (Frontline) acquires connection on the hot path -> instant reuse!
+    let lease1 = rdma_upstream
+        .acquire()
+        .await
+        .expect("First acquire must succeed");
+    assert!(
+        lease1.is_reused,
+        "Frontline acquire must hit pre-warmed RDMA connection placed by Shadow Worker!"
+    );
+    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 1);
+
+    // Second acquire: also an instant hit!
+    let lease2 = rdma_upstream
+        .acquire()
+        .await
+        .expect("Second acquire must succeed");
+    assert!(
+        lease2.is_reused,
+        "Second acquire must hit second pre-warmed RDMA connection!"
+    );
+    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 0);
+
+    // Third acquire: cold fallback (connects fresh on demand)
+    let lease3 = rdma_upstream
+        .acquire()
+        .await
+        .expect("Third acquire must succeed");
+    assert!(
+        !lease3.is_reused,
+        "Third acquire connects on demand when pre-warmed buffer is depleted!"
+    );
+
+    drop(lease1);
+    drop(lease2);
+    drop(lease3);
 }

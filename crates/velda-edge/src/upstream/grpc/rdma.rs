@@ -67,6 +67,12 @@ impl GrpcRdmaUpstream {
         self.inner.id()
     }
 
+    /// Returns the number of multiplexed connections currently cached in a specific core lane.
+    #[inline(always)]
+    pub fn connection_count_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+        self.pool.connection_count_for_lane(endpoint, lane)
+    }
+
     /// Acquires an active, ready multiplexed gRPC client connector over an RDMA stream.
     pub async fn acquire(&self, config: &GrpcConfig) -> Result<GrpcUpstreamConnector, EdgeError> {
         let max_streams = self.max_concurrent_streams;

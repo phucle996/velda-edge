@@ -64,6 +64,7 @@ pub struct RdmaLease {
     endpoint: SocketAddr,
     pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
     reusable: bool,
+    pub is_reused: bool,
     created_at: Instant,
 }
 
@@ -157,21 +158,21 @@ impl RdmaUpstream {
         let config = self.config.clone();
         let idle_timeout = self.inner.timeouts().idle;
 
-        let (channel, endpoint, created_at) = self
+        let (channel, endpoint, created_at, is_reused) = self
             .inner
             .execute(move |endpoint| {
                 let pool = Arc::clone(&pool);
                 let config = config.clone();
                 async move {
                     if let Some(res) = pool.acquire_with_lifetime(&endpoint, idle_timeout, None) {
-                        return Ok::<_, String>((res.channel, endpoint, res.created_at));
+                        return Ok::<_, String>((res.channel, endpoint, res.created_at, true));
                     }
 
                     let fresh_channel = RdmaConnector::connect(endpoint, &config)
                         .await
                         .map_err(|e| e.to_string())?;
 
-                    Ok::<_, String>((fresh_channel, endpoint, Instant::now()))
+                    Ok::<_, String>((fresh_channel, endpoint, Instant::now(), false))
                 }
             })
             .await
@@ -182,8 +183,15 @@ impl RdmaUpstream {
             endpoint,
             pool: Arc::clone(&self.pool),
             reusable: true,
+            is_reused,
             created_at,
         })
+    }
+
+    /// Returns the number of idle RDMA connections currently cached in a specific core lane.
+    #[inline(always)]
+    pub fn idle_conns_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+        self.pool.idle_conns_for_lane(endpoint, lane)
     }
 
     /// Acquires a fresh, non-pooled RDMA channel for transparent 1-shot self-healing.
