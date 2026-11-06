@@ -27,7 +27,8 @@ pub fn format_startup_banner(
         "dev"
     };
 
-    let ram_display = hardware.memory.format_summary();
+    let ram_gb = hardware.memory.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let ram_display = format!("{ram_gb:.1} GB");
     let cpu_branding = read_cpu_branding(hardware.available_cores);
     let (nic_name, nic_caps) = read_nic_summary(hardware);
     let accel_str = hardware.kernel.acceleration.as_str();
@@ -96,21 +97,13 @@ pub fn format_startup_banner(
                 "{c_gray}Version      :{c_reset} {c_green}v{}-{}{c_reset} {c_gray}({}){c_reset}",
                 prov.version, build_type, prov.git_hash
             ),
+            format!("{c_gray}CPU Detect   :{c_reset} {c_white}{cpu_branding}{c_reset}"),
+            format!("{c_gray}RAM Detect   :{c_reset} {c_white}{ram_display}{c_reset}"),
             format!(
-                "{c_gray}CPU Detect   :{c_reset} {c_white}{cpu_branding}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Workers{c_reset} {c_gray}(Pinning: {}){c_reset}",
-                worker_threads, pin_str
+                "{c_gray}Kernel       :{c_reset} {c_white}Linux {kernel_ver_str}{c_reset} {c_gray}({accel_str}){c_reset}"
             ),
             format!(
-                "{c_gray}RAM Detect   :{c_reset} {c_white}{ram_display}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{} Shards, {} Max Sockets{c_reset}",
-                hardware.concurrency_shards,
-                (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
-            ),
-            format!(
-                "{c_gray}Kernel       :{c_reset} {c_white}Linux {}{c_reset} {c_gray}=>{c_reset} {c_bcyan}Accel: {}{c_reset}",
-                kernel_ver_str, accel_str
-            ),
-            format!(
-                "{c_gray}NIC Detect   :{c_reset} {c_white}{nic_name}{c_reset} {c_gray}=>{c_reset} {c_bcyan}{nic_caps}{c_reset}"
+                "{c_gray}NIC Detect   :{c_reset} {c_white}{nic_name}:{c_reset} {c_bcyan}{nic_caps}{c_reset}"
             ),
             format!(
                 "{c_gray}Runtime Dir  :{c_reset} {c_white}{}{c_reset}",
@@ -120,7 +113,10 @@ pub fn format_startup_banner(
                 "{c_gray}Listeners    :{c_reset} {c_green}{}{c_reset}",
                 listeners_display
             ),
-            format!("{c_gray}Data Plane   :{c_reset} {c_green}Initializing Supervisor...{c_reset}"),
+            format!(
+                "{c_gray}Data Plane   :{c_reset} {c_green}{} Workers{c_reset} {c_gray}(Pinning: {}){c_reset}",
+                worker_threads, pin_str
+            ),
         ];
 
         let mut out = String::new();
@@ -165,23 +161,13 @@ pub fn format_startup_banner(
                 "Version      : v{}-{} ({})",
                 prov.version, build_type, prov.git_hash
             ),
-            format!(
-                "CPU Detect   : {cpu_branding} => {} Workers (Pinning: {})",
-                worker_threads, pin_str
-            ),
-            format!(
-                "RAM Detect   : {ram_display} => {} Shards, {} Max Sockets",
-                hardware.concurrency_shards,
-                (hardware.memory_bytes / 32768).clamp(10_000, 2_000_000)
-            ),
-            format!(
-                "Kernel       : Linux {} => Accel: {}",
-                kernel_ver_str, accel_str
-            ),
-            format!("NIC Detect   : {nic_name} => {nic_caps}"),
+            format!("CPU Detect   : {cpu_branding}"),
+            format!("RAM Detect   : {ram_display}"),
+            format!("Kernel       : Linux {kernel_ver_str} ({accel_str})"),
+            format!("NIC Detect   : {nic_name}: {nic_caps}"),
             format!("Runtime Dir  : {runtime_dir_display}"),
             format!("Listeners    : {listeners_display}"),
-            "Data Plane   : Initializing Supervisor...".to_string(),
+            format!("Data Plane   : {worker_threads} Workers (Pinning: {pin_str})"),
         ];
 
         let mut out = String::new();
@@ -288,45 +274,15 @@ fn read_nic_summary(hardware: &HardwareTopology) -> (String, String) {
         caps.push(hardware.rdma.display_summary());
         (name, caps.join(", "))
     } else {
-        let iface = find_active_physical_interface().unwrap_or_else(|| "eth0".to_string());
-        let name = format!("Standard NIC ({iface})");
+        let name = "Standard NIC".to_string();
         let caps =
             if hardware.nic.authority == velda_core::hardware::IngressHashAuthority::HardwareRss {
                 format!("Hardware RSS ({} Queues)", hardware.nic.rx_queues)
             } else {
-                "Software Hash (Standard Socket Path)".to_string()
+                "Software Hashing (Standard Socket Path)".to_string()
             };
         (name, caps)
     }
-}
-
-fn find_active_physical_interface() -> Option<String> {
-    let entries = std::fs::read_dir("/sys/class/net").ok()?;
-    let mut fallback = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "lo"
-            || name.starts_with("docker")
-            || name.starts_with("br-")
-            || name.starts_with("virbr")
-            || name.starts_with("lxcbr")
-        {
-            continue;
-        }
-        if !entry.path().join("device").exists() {
-            continue;
-        }
-        let operstate = std::fs::read_to_string(entry.path().join("operstate"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if operstate == "up" {
-            return Some(name);
-        }
-        if fallback.is_none() {
-            fallback = Some(name);
-        }
-    }
-    fallback
 }
 
 #[cfg(test)]
@@ -385,7 +341,7 @@ mod tests {
             &listeners,
             false,
         );
-        assert!(plain_rdma.contains("NIC Detect   : NVIDIA/Mellanox =>"));
+        assert!(plain_rdma.contains("NIC Detect   : NVIDIA/Mellanox:"));
         assert!(plain_rdma.contains("RoCE v2 (100 Gbps, NUMA 0, NVIDIA/Mellanox)"));
     }
 
