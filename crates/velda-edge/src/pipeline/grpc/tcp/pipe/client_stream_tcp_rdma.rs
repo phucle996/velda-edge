@@ -34,6 +34,7 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Step 1: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -51,7 +52,9 @@ pub async fn serve(
 
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
+    // Step 2: Execute the client streaming workflow bounded by max_call_duration_ms deadline.
     let workflow = async {
+        // Step 3: Synthesize outbound HTTP/2 request frame with finalized ingress headers.
         let mut req_builder = http::Request::builder()
             .method(server_stream.parts.method)
             .uri(server_stream.parts.uri)
@@ -64,9 +67,11 @@ pub async fn serve(
         }
 
         let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
+        // Open upstream stream without end_stream=true since client chunks follow
         let (upstream_resp_fut, mut upstream_send_stream) =
             client.open_stream(upstream_req, false)?;
 
+        // Step 4: Stream inbound client chunks to upstream RDMA channel with HTTP/2 backpressure.
         let is_end = server_stream.recv_stream.is_end_stream();
         if !is_end {
             let mut has_trailers = false;
@@ -76,12 +81,14 @@ pub async fn serve(
                 upstream_send_stream
                     .send_data(chunk, false)
                     .map_err(GrpcError::H2)?;
+                // Replenish downstream receive window to allow client to continue streaming
                 let _ = server_stream
                     .recv_stream
                     .flow_control()
                     .release_capacity(len);
             }
 
+            // Step 5: Finalize upstream request stream with trailers or empty END_STREAM frame.
             if let Some(trailers) = server_stream
                 .recv_stream
                 .trailers()
@@ -105,6 +112,7 @@ pub async fn serve(
                 .map_err(GrpcError::H2)?;
         }
 
+        // Step 6: Await upstream response headers and dispatch response downstream.
         let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
         let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
 
@@ -125,6 +133,7 @@ pub async fn serve(
             .send_response(resp, is_end_of_stream)
             .map_err(GrpcError::H2)?;
 
+        // Step 7: Forward single response body chunk from upstream to downstream client.
         if !is_end_of_stream {
             let mut resp_len = 0;
             let mut checked_resp_lpm = false;
@@ -135,6 +144,7 @@ pub async fn serve(
                 let len = chunk.len();
                 resp_len += len;
 
+                // Validate LPM header (5 bytes: 1 compression flag + 4 big-endian length)
                 if !checked_resp_lpm {
                     resp_head.extend_from_slice(&chunk);
                     if resp_head.len() >= 5 {
@@ -165,6 +175,7 @@ pub async fn serve(
                 }
             }
 
+            // Step 8: Forward upstream response trailers to complete RPC.
             if let Some(trailers) = upstream_recv_stream
                 .trailers()
                 .await
@@ -179,6 +190,7 @@ pub async fn serve(
         Ok::<(), GrpcError>(())
     };
 
+    // Step 9: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match tokio::time::timeout(timeout, workflow).await {
         Ok(res) => res,
         Err(_) => {

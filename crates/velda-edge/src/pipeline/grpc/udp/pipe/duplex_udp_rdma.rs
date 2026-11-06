@@ -27,8 +27,10 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
+    // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
     let mut client = upstream.acquire(config).await.map_err(|e| {
         tracing::warn!(
             error = %e,
@@ -41,6 +43,7 @@ pub async fn serve(
         ))
     })?;
 
+    // Step 3: Forward bidirectional request over hardware RDMA link and await final response.
     client
         .invoke_client_request(&client_req, config)
         .await

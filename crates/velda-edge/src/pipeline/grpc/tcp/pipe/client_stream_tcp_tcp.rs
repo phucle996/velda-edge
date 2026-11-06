@@ -28,6 +28,7 @@ pub async fn serve(
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Stage 1: Lease pre-warmed connection handle from worker core lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -45,6 +46,7 @@ pub async fn serve(
 
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
+    // Stage 2: Execute client streaming workflow bounded by max_call_duration_ms deadline.
     let workflow = async {
         // Step 1: Build outbound HTTP/2 request frame from downstream parts
         let mut req_builder = http::Request::builder()

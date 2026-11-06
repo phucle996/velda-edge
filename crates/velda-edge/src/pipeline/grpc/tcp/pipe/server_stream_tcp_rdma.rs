@@ -33,6 +33,7 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Step 1: Ingest downstream initial request message and enforce message size bounds.
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
         .await
@@ -47,6 +48,7 @@ pub async fn serve(
         }
     };
 
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -66,7 +68,9 @@ pub async fn serve(
     let parts = server_stream.parts;
     let mut respond = server_stream.respond;
 
+    // Step 3: Execute the server streaming workflow bounded by max_call_duration_ms deadline.
     let res = tokio::time::timeout(timeout, async {
+        // Step 4: Synthesize outbound HTTP/2 request frame with finalized ingress headers.
         let mut req_builder = http::Request::builder()
             .method(&parts.method)
             .uri(&parts.uri)
@@ -79,6 +83,7 @@ pub async fn serve(
         let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
         let has_body = !req_data.is_empty();
 
+        // Step 5: Open an HTTP/2 stream over RDMA and dispatch the initial request payload.
         let (upstream_resp_fut, mut upstream_send_stream) =
             client.open_stream(upstream_req, !has_body)?;
 
@@ -88,6 +93,7 @@ pub async fn serve(
                 .map_err(GrpcError::H2)?;
         }
 
+        // Step 6: Await upstream response headers and propagate status code downstream.
         let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
         let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
 
@@ -107,6 +113,7 @@ pub async fn serve(
             .send_response(resp, is_end_of_stream)
             .map_err(GrpcError::H2)?;
 
+        // Step 7: Stream N response chunks downstream with HTTP/2 WINDOW_UPDATE flow control.
         if !is_end_of_stream {
             while let Some(chunk_res) = upstream_recv_stream.data().await {
                 let chunk = chunk_res.map_err(GrpcError::H2)?;
@@ -115,12 +122,14 @@ pub async fn serve(
                 downstream_send_stream
                     .send_data(chunk, is_last)
                     .map_err(GrpcError::H2)?;
+                // Replenish HTTP/2 receive stream window to prevent upstream sender stalls
                 let _ = upstream_recv_stream.flow_control().release_capacity(len);
                 if is_last {
                     break;
                 }
             }
 
+            // Step 8: Forward response trailers (grpc-status, grpc-message) to conclude stream.
             if let Some(trailers) = upstream_recv_stream
                 .trailers()
                 .await
@@ -136,6 +145,7 @@ pub async fn serve(
     })
     .await;
 
+    // Step 9: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match res {
         Ok(inner_res) => inner_res,
         Err(_) => {

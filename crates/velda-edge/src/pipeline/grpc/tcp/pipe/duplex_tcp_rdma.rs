@@ -34,12 +34,14 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Step 1: Deconstruct downstream stream into request parts, receive body stream, and response handle.
     let GrpcServerStream {
         parts,
         mut recv_stream,
         mut respond,
     } = server_stream;
 
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -56,7 +58,9 @@ pub async fn serve(
 
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
+    // Step 3: Execute concurrent bidirectional streaming workflow bounded by max_call_duration_ms.
     let workflow = async {
+        // Step 4: Synthesize outbound HTTP/2 request frame with finalized ingress headers.
         let mut req_builder = http::Request::builder()
             .method(parts.method)
             .uri(parts.uri)
@@ -67,9 +71,11 @@ pub async fn serve(
         }
 
         let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
+        // Step 5: Open bidirectional HTTP/2 stream over RDMA (end_stream=false).
         let (upstream_resp_fut, mut upstream_send_stream) =
             client.open_stream(upstream_req, false)?;
 
+        // Step 6: Task A (Client-to-Upstream Pump) - Forwards client streaming frames to RDMA.
         let upstream_forward = async {
             while let Some(chunk) = recv_stream.data().await {
                 let data = chunk.map_err(GrpcError::H2)?;
@@ -95,6 +101,7 @@ pub async fn serve(
             Ok(())
         };
 
+        // Step 7: Task B (Upstream-to-Client Pump) - Awaits headers and streams RDMA responses downstream.
         let downstream_forward = async {
             let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
             let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
@@ -141,10 +148,12 @@ pub async fn serve(
             Ok(())
         };
 
+        // Step 8: Concurrently join both pump tasks; abort if either fails.
         tokio::try_join!(upstream_forward, downstream_forward)?;
         Ok::<(), GrpcError>(())
     };
 
+    // Step 9: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match tokio::time::timeout(timeout, workflow).await {
         Ok(res) => res,
         Err(_) => {

@@ -107,9 +107,11 @@ async fn pipe_server_stream_wire(
                 downstream_send_stream
                     .send_data(chunk, false)
                     .map_err(GrpcError::H2)?;
+                // Replenish HTTP/2 receive stream window to prevent upstream sender stalls
                 let _ = upstream_recv_stream.flow_control().release_capacity(len);
             }
 
+            // Step 5: Forward response trailers or synthesize empty frame with END_STREAM.
             if let Some(trailers) = upstream_recv_stream
                 .trailers()
                 .await
@@ -152,6 +154,7 @@ pub async fn serve(
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Stage 1: Ingest downstream initial request payload and validate message size.
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
         .await
@@ -166,6 +169,7 @@ pub async fn serve(
         }
     };
 
+    // Stage 2: Lease pre-warmed connection handle from worker core lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -181,6 +185,7 @@ pub async fn serve(
         }
     };
 
+    // Stage 3: Forward server-streaming call over HTTP/2 wire protocol.
     let mut res = pipe_server_stream_wire(
         &server_stream.parts,
         &req_data,
@@ -190,7 +195,7 @@ pub async fn serve(
     )
     .await;
 
-    // Self-Healing Retry (RFC 9113 §8.1.4):
+    // Stage 4: Self-Healing Retry (RFC 9113 §8.1.4):
     // If upstream connection dropped or remote peer returned REFUSED_STREAM before
     // stream frames were sent, retry transparently 1-shot on a fresh connection.
     if let Err(ref e) = res

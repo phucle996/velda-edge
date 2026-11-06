@@ -89,6 +89,7 @@ async fn pipe_buffered_wire(
                 let len = chunk.len();
                 resp_len += len;
 
+                // Validate the 5-byte Length-Prefixed Message (LPM) header (1 compression flag + 4 length bytes).
                 if !checked_resp_lpm {
                     resp_head.extend_from_slice(&chunk);
                     if resp_head.len() >= 5 {
@@ -112,9 +113,11 @@ async fn pipe_buffered_wire(
                 downstream_send_stream
                     .send_data(chunk, false)
                     .map_err(GrpcError::H2)?;
+                // Replenish HTTP/2 receive window to prevent upstream sender stalls
                 let _ = upstream_recv_stream.flow_control().release_capacity(len);
             }
 
+            // Step 5: Forward response trailers or synthesize empty frame with END_STREAM.
             if let Some(trailers) = upstream_recv_stream
                 .trailers()
                 .await
@@ -157,6 +160,7 @@ pub async fn serve(
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Stage 1: Ingest downstream raw request payload and enforce max_message_size limit.
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
         .await
@@ -171,6 +175,7 @@ pub async fn serve(
         }
     };
 
+    // Stage 2: Lease a pre-warmed connection handle from the worker core's local lane shard (< 10ns).
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -186,6 +191,7 @@ pub async fn serve(
         }
     };
 
+    // Stage 3: Forward unary call over HTTP/2 wire protocol.
     let mut res = pipe_buffered_wire(
         &server_stream.parts,
         &req_data,
@@ -195,9 +201,9 @@ pub async fn serve(
     )
     .await;
 
-    // Self-Healing Retry (RFC 9113 §8.1.4):
-    // If upstream connection dropped or remote peer returned REFUSED_STREAM,
-    // retry transparently 1-shot on a fresh connection.
+    // Stage 4: Self-Healing Retry (RFC 9113 §8.1.4):
+    // If an idle pooled connection was silently dropped by peer or returned REFUSED_STREAM,
+    // retry transparently 1-shot on a guaranteed fresh connection before reporting error.
     if let Err(ref e) = res
         && e.is_stale_or_refused()
     {

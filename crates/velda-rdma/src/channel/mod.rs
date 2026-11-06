@@ -82,7 +82,8 @@ impl HardwareChannel {
         let poller = AdaptiveCqPoller::new(cq.clone(), config.poll_spin_count)?;
         let flow_control = CreditFlowControl::new(config.initial_credits);
 
-        // Pre-allocate contiguous pinned buffer for send/recv slots (64KB slots default)
+        // 1. Pre-allocate contiguous pinned buffer for send/recv slots (64KB slots default).
+        // Sending and receiving operate out of symmetric slots within this single registered region.
         let slot_size = 65536;
         let total_slots = (config.max_send_wr + config.max_recv_wr) as usize;
         let total_bytes = total_slots * slot_size;
@@ -91,6 +92,7 @@ impl HardwareChannel {
         let raw_buf = host_buf.as_mut_ptr();
         let buf_len = host_buf.len();
 
+        // 2. Pin memory via kernel mlock and register translation table (MTT) in HCA hardware.
         let mr = MemoryRegion::register_slice(pd, &mut host_buf)?;
         std::mem::forget(host_buf); // Memory is now managed by MemoryRegion and pinned
         let lkey = mr.lkey();
@@ -109,7 +111,8 @@ impl HardwareChannel {
             _guard: SyncMutex::new(()),
         };
 
-        // Pre-post initial Receive Work Requests into RQ to prevent RNR
+        // 3. Pre-post initial Receive Work Requests into RQ before traffic arrives.
+        // This ensures the HCA hardware can immediately DMA incoming frames without triggering RNR NAKs.
         for i in 0..config.initial_credits as usize {
             let offset = (config.max_send_wr as usize + i) * slot_size;
             let recv_ptr = unsafe { raw_buf.add(offset) };
@@ -128,6 +131,7 @@ impl HardwareChannel {
 
     /// Sends data over the RDMA Queue Pair using Send WR.
     pub async fn send(&self, data: &[u8]) -> Result<(), RdmaError> {
+        // Step 1: Validate payload does not exceed the pinned send slot size.
         if data.len() > self.send_slot_size {
             return Err(RdmaError::BufferTooSmall {
                 capacity: self.send_slot_size,
@@ -135,9 +139,10 @@ impl HardwareChannel {
             });
         }
 
+        // Step 2: Acquire flow-control credit; blocks or errors if remote RQ buffer is exhausted.
         self.flow_control.try_acquire_send_credit()?;
 
-        // Copy into pinned send slot 0 and post WR
+        // Step 3: Copy data into pinned send slot 0 and dispatch Two-Sided Send WR to HCA.
         {
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), self.raw_buf, data.len());
@@ -153,22 +158,23 @@ impl HardwareChannel {
             unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
         }
 
-        // Await send completion
+        // Step 4: Await send completion from hardware CQ via adaptive poller.
         self.poller.poll_one(self.timeout).await?;
         Ok(())
     }
 
     /// Receives data from the RDMA Queue Pair.
     pub async fn recv(&self) -> Result<Bytes, RdmaError> {
+        // Step 1: Await inbound Work Completion from hardware CQ.
         let wc = self.poller.poll_one(self.timeout).await?;
         let byte_len = wc.byte_len as usize;
 
-        // The received payload is in the receive slot
+        // Step 2: Extract received bytes from the pinned receive slot.
         let rx_offset = (self.buf_len / 2).min(self.buf_len - byte_len);
         let rx_slice = unsafe { std::slice::from_raw_parts(self.raw_buf.add(rx_offset), byte_len) };
         let payload = Bytes::copy_from_slice(rx_slice);
 
-        // Re-post receive buffer to replenish RQ
+        // Step 3: Immediately re-post receive buffer to replenish RQ capacity.
         let sge = [ibv_sge {
             addr: unsafe { self.raw_buf.add(rx_offset) } as u64,
             length: self.recv_slot_size as u32,
@@ -177,7 +183,7 @@ impl HardwareChannel {
         let mut rwr = build_recv_wr(wc.wr_id, &sge);
         let _ = unsafe { self.qp.post_recv(&mut rwr) };
 
-        // Track credits
+        // Step 4: Track consumed receive slot and determine if credit update should be granted.
         if let Some(credits_to_grant) = self.flow_control.on_recv_consumed() {
             tracing::trace!(
                 credits = credits_to_grant,
@@ -195,6 +201,7 @@ impl HardwareChannel {
         rkey: u32,
         data: &[u8],
     ) -> Result<(), RdmaError> {
+        // Step 1: Validate payload bounds.
         if data.len() > self.send_slot_size {
             return Err(RdmaError::BufferTooSmall {
                 capacity: self.send_slot_size,
@@ -202,6 +209,7 @@ impl HardwareChannel {
             });
         }
 
+        // Step 2: Copy payload into pinned buffer and dispatch One-Sided RDMA Write with rkey.
         {
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), self.raw_buf, data.len());
@@ -217,6 +225,7 @@ impl HardwareChannel {
             unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
         }
 
+        // Step 3: Await local write completion from hardware CQ.
         self.poller.poll_one(self.timeout).await?;
         Ok(())
     }

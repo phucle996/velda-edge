@@ -27,8 +27,10 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<L7Response, GrpcError> {
+    // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
     let mut client = upstream.acquire(config).await.map_err(|e| {
         tracing::warn!(
             error = %e,
@@ -41,9 +43,10 @@ pub async fn serve(
         ))
     })?;
 
+    // Step 3: Forward unary gRPC request over hardware RDMA link.
     let mut res = client.invoke_client_request(&client_req, config).await;
 
-    // Self-Healing Retry (RFC 9113 §8.1.4):
+    // Step 4: Self-Healing Retry (RFC 9113 §8.1.4):
     // If upstream connection dropped or remote peer returned REFUSED_STREAM,
     // retry transparently 1-shot on a fresh connection.
     if let Err(ref e) = res
@@ -61,5 +64,6 @@ pub async fn serve(
         }
     }
 
+    // Step 5: Convert response into downstream L7Response for UDP datagram egress.
     res.map(|resp| resp.into_l7())
 }

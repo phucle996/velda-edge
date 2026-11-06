@@ -89,10 +89,10 @@ impl RdmaConnector {
             config.max_sge,
         )?;
 
-        // 1. Transition local QP to INIT
+        // Step 1: Transition local QP into INIT state (configures HCA port number and access flags).
         qp.to_init(config.port)?;
 
-        // 2. Query local address parameters (LID, GID)
+        // Step 2: Query local HCA port attributes (LID, RoCEv2 GID) and generate local 24-bit PSN.
         let port_attr = context.query_port(config.port)?;
         let local_gid = context
             .query_gid(config.port, config.gid_index as i32)
@@ -106,7 +106,8 @@ impl RdmaConnector {
             gid: local_gid,
         };
 
-        // 3. Out-of-Band (OOB) TCP handshake to exchange QpAddress with remote peer
+        // Step 3: Out-of-Band (OOB) TCP handshake to exchange binary QpAddress with remote peer.
+        // Resolves the chicken-and-egg bootstrap since RDMA cannot communicate prior to RTS.
         let remote_addr = exchange_oob(
             target,
             &local_addr,
@@ -114,13 +115,13 @@ impl RdmaConnector {
         )
         .await?;
 
-        // 4. Transition local QP: INIT -> RTR
+        // Step 4: Transition local QP from INIT -> RTR (Ready to Receive) with remote peer's attributes.
         qp.to_rtr(&remote_addr, config.port, config.gid_index, None)?;
 
-        // 5. Transition local QP: RTR -> RTS
+        // Step 5: Transition local QP from RTR -> RTS (Ready to Send) enabling outbound transmissions.
         qp.to_rts(local_psn, 14, 7, config.rnr_retry)?;
 
-        // 6. Wrap in HardwareChannel and pre-post initial receive buffers
+        // Step 6: Construct HardwareChannel, pin contiguous buffer slots, and pre-post initial receive buffers.
         let hw_channel = HardwareChannel::new(qp, cq, pd, config)?;
         Ok(RdmaChannel::Hardware(Arc::new(hw_channel)))
     }

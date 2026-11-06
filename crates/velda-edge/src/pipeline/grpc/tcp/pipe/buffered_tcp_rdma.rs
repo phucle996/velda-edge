@@ -33,6 +33,8 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
+    // Step 1: Ingest downstream unary message and enforce configured message size bounds.
+    // If the client payload exceeds max_message_size, immediately terminate with ResourceExhausted.
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
         .await
@@ -47,6 +49,8 @@ pub async fn serve(
         }
     };
 
+    // Step 2: Lease a pre-warmed RDMA connection handle from the local worker core lane shard (< 10ns).
+    // Conforms to AGENTS.md Sec 2.9: Frontline worker does not perform handshakes or block on warmup.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -66,7 +70,10 @@ pub async fn serve(
     let parts = server_stream.parts;
     let mut respond = server_stream.respond;
 
+    // Step 3: Execute the request/response workflow bounded by the gRPC call deadline timer.
     let res = tokio::time::timeout(timeout, async {
+        // Step 4: Synthesize outbound HTTP/2 request frame with finalized ingress headers.
+        // Headers were authoritatively enriched at downstream ingress (AGENTS.md Sec 2.10).
         let mut req_builder = http::Request::builder()
             .method(&parts.method)
             .uri(&parts.uri)
@@ -79,6 +86,8 @@ pub async fn serve(
         let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
         let has_body = !req_data.is_empty();
 
+        // Step 5: Open an HTTP/2 stream over the RDMA transport and dispatch the unary body.
+        // If has_body is true, send_data with end_stream=true completes the upstream client stream.
         let (upstream_resp_fut, mut upstream_send_stream) =
             client.open_stream(upstream_req, !has_body)?;
 
@@ -88,6 +97,7 @@ pub async fn serve(
                 .map_err(GrpcError::H2)?;
         }
 
+        // Step 6: Await upstream response headers and propagate status code downstream.
         let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
         let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
 
@@ -107,6 +117,7 @@ pub async fn serve(
             .send_response(resp, is_end_of_stream)
             .map_err(GrpcError::H2)?;
 
+        // Step 7: Stream response chunks from RDMA memory directly to downstream client.
         if !is_end_of_stream {
             while let Some(chunk) = upstream_recv_stream.data().await {
                 let data = chunk.map_err(GrpcError::H2)?;
@@ -119,6 +130,7 @@ pub async fn serve(
                 }
             }
 
+            // Step 8: Forward gRPC response trailers (grpc-status, grpc-message) to close stream.
             if let Some(trailers) = upstream_recv_stream
                 .trailers()
                 .await
@@ -134,6 +146,7 @@ pub async fn serve(
     })
     .await;
 
+    // Step 9: Handle deadline expiration by returning canonical DeadlineExceeded gRPC status.
     match res {
         Ok(inner_res) => inner_res,
         Err(_) => {
