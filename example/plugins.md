@@ -200,7 +200,14 @@ Appends defensive HTTP security headers to responses before downstream delivery.
     },
     "frame_options": "DENY",
     "content_type_nosniff": true,
-    "referrer_policy": "strict-origin-when-cross-origin"
+    "referrer_policy": "strict-origin-when-cross-origin",
+    "content_security_policy": null,
+    "permissions_policy": null,
+    "cross_origin_opener_policy": "same-origin",
+    "cross_origin_embedder_policy": "require-corp",
+    "cross_origin_resource_policy": "same-origin",
+    "cross_domain_policies": "none",
+    "xss_protection": "0"
   }
 }
 ```
@@ -209,9 +216,16 @@ Appends defensive HTTP security headers to responses before downstream delivery.
 - `hsts.max_age_secs`: Cache lifetime in seconds (e.g., 1 year = `31536000`).
 - `hsts.include_subdomains`: Appends `includeSubDomains` directive.
 - `hsts.preload`: Appends `preload` directive.
-- `frame_options`: `X-Frame-Options` value (`"DENY"`, `"SAMEORIGIN"`).
+- `frame_options`: `X-Frame-Options` value (`"DENY"`, `"SAMEORIGIN"`, or `"none"`).
 - `content_type_nosniff`: Emits `X-Content-Type-Options: nosniff`.
 - `referrer_policy`: `Referrer-Policy` header value.
+- `content_security_policy`: `Content-Security-Policy` directive string or `null` / `"none"`.
+- `permissions_policy`: `Permissions-Policy` directive string or `null` / `"none"`.
+- `cross_origin_opener_policy`: `Cross-Origin-Opener-Policy` (`"same-origin"`, `"same-origin-allow-popups"`, `"unsafe-none"`, or `null`).
+- `cross_origin_embedder_policy`: `Cross-Origin-Embedder-Policy` (`"require-corp"`, `"credentialless"`, `"unsafe-none"`, or `null`).
+- `cross_origin_resource_policy`: `Cross-Origin-Resource-Policy` (`"same-origin"`, `"same-site"`, `"cross-origin"`, or `null`).
+- `cross_domain_policies`: `X-Permitted-Cross-Domain-Policies` (`"none"`, `"master-only"`, or `null`).
+- `xss_protection`: `X-XSS-Protection` (`"0"` or `null`).
 
 ---
 

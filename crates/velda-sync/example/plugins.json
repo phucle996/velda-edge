@@ -114,7 +114,12 @@
         "content_type_nosniff": true,
         "referrer_policy": "strict-origin-when-cross-origin",
         "content_security_policy": null,
-        "permissions_policy": null
+        "permissions_policy": null,
+        "cross_origin_opener_policy": "same-origin",
+        "cross_origin_embedder_policy": "require-corp",
+        "cross_origin_resource_policy": "same-origin",
+        "cross_domain_policies": "none",
+        "xss_protection": "0"
       }
     },
     {
