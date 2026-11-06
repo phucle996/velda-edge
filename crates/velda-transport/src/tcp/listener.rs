@@ -175,7 +175,7 @@ impl TcpListener {
         // not spread flows would funnel all connections into one worker.
         if config.incoming_cpu
             && !addr.ip().is_loopback()
-            && let Some(core) = velda_core::ingress_steering_cpu(worker_id)
+            && let Some(core) = velda_core::hardware::ingress_steering_cpu(worker_id)
         {
             listener.apply_incoming_cpu(core);
         }

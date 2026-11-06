@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 use tokio::sync::watch;
-use velda_core::hardware::{CorePartition, HardwareTopology};
-use velda_core::{get_allowed_cores, set_current_thread_idle_priority};
+use velda_core::hardware::{CorePartition, HardwareTopology, set_current_thread_idle_priority};
+use velda_core::worker::get_allowed_cores;
 use velda_transport::TrafficEngine;
 
 use crate::config::EdgeConfig;

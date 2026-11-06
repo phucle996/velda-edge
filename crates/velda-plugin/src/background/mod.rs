@@ -67,7 +67,7 @@ pub fn spawn_background_plugins(
         let p = Arc::clone(plugin);
         let shutdown_rx = shutdown.clone();
         let handle = tokio::spawn(async move {
-            velda_core::set_current_thread_idle_priority();
+            velda_core::hardware::set_current_thread_idle_priority();
             let id = p.id().to_string();
             tracing::info!(plugin_id = %id, "Background plugin starting");
             if let Err(e) = p.run(shutdown_rx).await {

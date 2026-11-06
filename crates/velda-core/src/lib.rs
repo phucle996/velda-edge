@@ -42,14 +42,11 @@ pub mod worker;
 pub use buffer::{
     AdaptiveBufferDimensions, AdaptivePoolConfig, AdaptiveSlabLimits, CoreBufferPool, HeaderPool,
     HeaderWorkspace, HeaderWorkspaceLease, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS,
-    MAX_NUMERIC_HEADERS, NumericFmt, NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease,
-    PayloadSlabPool, ShardedBufferPool, SlabClass, X_REQUEST_ID, header_key,
+    MAX_NUMERIC_HEADERS, MAX_WIRE_HEADERS, NumericFmt, NumericHeaderEntry, NumericOp, PayloadSlab,
+    PayloadSlabLease, PayloadSlabPool, ShardedBufferPool, SlabClass, X_REQUEST_ID, header_key,
     resolve_u64_header_value,
 };
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
-
-/// Maximum physical wire headers allowed across all ingress protocols (Anti-OOM DoS ceiling).
-pub const MAX_WIRE_HEADERS: usize = 1024;
 
 // -----------------------------------------------------------------------------
 // Protocol Family
@@ -97,22 +94,11 @@ pub use lifecycle::{Action, CachedResponseDirective, Hook, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
-    AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, CpuRegisterCapabilities,
-    DeadPeerTeardownTier, HardwareTopology, IngressHashAuthority, KernelAccelerationLadder,
-    KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier, MultiplexPacingTier,
-    NicProfile, OutboundPortScalingTier, OverloadConfig, OverloadLevel, OverloadTracker,
-    RegisterWidth, UdpEgressTier, UdpOffloadTier, compute_optimal_pool_concurrency,
-    concurrency_shards, copy_bulk_payload, global_hardware_topology, ingress_steering_cpu,
-    init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
-    probe_memory_usage, probe_nic, set_current_thread_idle_priority,
+    HardwareTopology, OverloadConfig, OverloadLevel, OverloadTracker, global_hardware_topology,
+    init_hardware_topology,
 };
 pub use provenance::Provenance;
-pub use request_id::{ID_POOL_CAPACITY, ID_POOL_LOW_WATERMARK, RequestIdPool, next_request_id};
-pub use socket::{
-    SocketClaim, SocketError, SocketManager, SocketProtocol, SocketRole, global_socket_manager,
-};
+pub use request_id::{RequestIdPool, next_request_id};
+pub use socket::{SocketManager, global_socket_manager};
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
-pub use worker::{
-    CorePartition, WorkerDescriptor, WorkerId, WorkerRegistry, WorkerRole, WorkerState,
-    get_allowed_cores, global_worker_registry, pin_current_thread_to_core,
-};
+pub use worker::{CorePartition, WorkerId, WorkerRegistry, global_worker_registry};

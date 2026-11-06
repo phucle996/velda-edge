@@ -16,11 +16,11 @@ static HARDWARE_CRYPTO_PROVIDER: LazyLock<Arc<CryptoProvider>> = LazyLock::new(|
     #[cfg(target_arch = "x86_64")]
     let has_hw_aes = std::arch::is_x86_feature_detected!("aes")
         && std::arch::is_x86_feature_detected!("pclmulqdq")
-        && reg_caps.is_supported(velda_core::RegisterWidth::Bits128);
+        && reg_caps.is_supported(velda_core::hardware::RegisterWidth::Bits128);
 
     #[cfg(target_arch = "aarch64")]
     let has_hw_aes = std::arch::is_aarch64_feature_detected!("aes")
-        && reg_caps.is_supported(velda_core::RegisterWidth::Bits128);
+        && reg_caps.is_supported(velda_core::hardware::RegisterWidth::Bits128);
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let has_hw_aes = false;

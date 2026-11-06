@@ -27,8 +27,22 @@ pub const KEY_X_REQUEST_ID: u64 = header_key(b"x-request-id");
 /// Maximum number of Bit-1 (Bypass on Reject) headers tracked on the stack.
 pub const MAX_BYPASS_HEADERS: usize = 8;
 
-/// Maximum number of deferred 16-byte register header mutations buffered before batch rendering.
+/// Capacity of the L1-resident hardware register staging buffer for deferred 16-byte numeric mutations.
+///
+/// # Dual-Representation Architecture Note
+/// This does **NOT** limit total HTTP/gRPC request headers (the physical wire ceiling is [`MAX_WIRE_HEADERS`] = 1024).
+///
+/// Rather, this defines a 16-entry (512 bytes, exactly 8x 64-byte L1D CPU cache lines) fast-path register
+/// staging array (`numeric_entries`) storing short `u128` values (U64 counters, IPv4/IPv6 addresses, 128-bit trace IDs,
+/// short ASCII tokens).
+///
+/// If more than 16 numeric header mutations occur in a single request, [`HeaderWorkspace::render`] is automatically
+/// triggered to flush all pending entries into the underlying [`HeaderMap`] and reset the register array, ensuring
+/// that no header is ever dropped or rejected due to this staging limit.
 pub const MAX_NUMERIC_HEADERS: usize = 16;
+
+/// Maximum physical wire headers allowed across all ingress protocols (Anti-OOM DoS ceiling).
+pub const MAX_WIRE_HEADERS: usize = 1024;
 
 /// Computes a case-insensitive 64-bit FNV-1a integer key for an HTTP header name at compile time or runtime.
 #[inline(always)]

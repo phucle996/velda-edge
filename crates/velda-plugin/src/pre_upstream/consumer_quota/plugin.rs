@@ -199,7 +199,7 @@ fn maybe_spawn_shadow_quota_sync(state: Arc<ShardedQuotaState>, config: &Consume
     let _ = std::thread::Builder::new()
         .name("velda-quota-sync".to_string())
         .spawn(move || {
-            velda_core::set_current_thread_idle_priority();
+            velda_core::hardware::set_current_thread_idle_priority();
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

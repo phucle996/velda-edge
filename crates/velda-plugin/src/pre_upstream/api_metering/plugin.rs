@@ -440,7 +440,7 @@ fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &A
     let _ = std::thread::Builder::new()
         .name("velda-metering-sync".to_string())
         .spawn(move || {
-            velda_core::set_current_thread_idle_priority();
+            velda_core::hardware::set_current_thread_idle_priority();
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

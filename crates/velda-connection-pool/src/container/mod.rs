@@ -52,13 +52,13 @@ pub fn probed_max_concurrent_streams() -> u32 {
 #[inline]
 pub fn optimal_max_idle_per_key(workers: usize) -> usize {
     let hw = velda_core::global_hardware_topology();
-    velda_core::compute_optimal_pool_concurrency(workers, hw.memory_bytes).0
+    velda_core::hardware::compute_optimal_pool_concurrency(workers, hw.memory_bytes).0
 }
 
 /// Reads the optimal maximum idle connections per key pre-computed during cold-start bootstrap.
 #[inline]
 pub fn probed_max_idle_per_key() -> usize {
-    velda_core::optimal_max_idle_per_key()
+    velda_core::hardware::optimal_max_idle_per_key()
 }
 
 /// Computes the optimal shard count dynamically scaled to the number of worker threads.
@@ -75,7 +75,7 @@ pub fn optimal_shard_count(workers: usize) -> usize {
 /// Reads the optimal shard count pre-computed during cold-start bootstrap.
 #[inline]
 pub fn probed_shard_count() -> usize {
-    velda_core::concurrency_shards()
+    velda_core::hardware::concurrency_shards()
 }
 
 #[cfg(test)]

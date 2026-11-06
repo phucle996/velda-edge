@@ -113,16 +113,16 @@ impl UdpSocketConfig {
             ..Self::default()
         };
         let ladder = topo.acceleration_ladder();
-        if ladder.udp_offload == velda_core::UdpOffloadTier::GenericReceiveOffload {
+        if ladder.udp_offload == velda_core::hardware::UdpOffloadTier::GenericReceiveOffload {
             cfg.gro = true;
             cfg.rxq_ovfl = true;
-        } else if ladder.udp_offload == velda_core::UdpOffloadTier::QueueMonitored {
+        } else if ladder.udp_offload == velda_core::hardware::UdpOffloadTier::QueueMonitored {
             cfg.rxq_ovfl = true;
         }
-        if ladder.udp_egress >= velda_core::UdpEgressTier::GenericSegmentationOffload {
+        if ladder.udp_egress >= velda_core::hardware::UdpEgressTier::GenericSegmentationOffload {
             cfg.gso = true;
         }
-        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll {
+        if ladder.busy_poll >= velda_core::hardware::BusyPollTier::PreferBusyPoll {
             cfg.prefer_busy_poll = true;
         }
         cfg

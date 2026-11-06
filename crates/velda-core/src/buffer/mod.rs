@@ -10,8 +10,8 @@ pub mod slab;
 
 pub use adaptive::AdaptiveBufferDimensions;
 pub use header::{
-    HeaderWorkspace, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, NumericFmt,
-    NumericHeaderEntry, NumericOp, X_REQUEST_ID, header_key, resolve_u64_header_value,
+    HeaderWorkspace, KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, MAX_WIRE_HEADERS,
+    NumericFmt, NumericHeaderEntry, NumericOp, X_REQUEST_ID, header_key, resolve_u64_header_value,
 };
 pub use pool::{
     AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderWorkspaceLease, ShardedBufferPool,

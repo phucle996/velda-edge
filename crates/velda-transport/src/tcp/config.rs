@@ -230,21 +230,22 @@ impl TcpListenerConfig {
             cfg.busy_poll_us = Some(50);
         }
         let ladder = topo.acceleration_ladder();
-        if ladder.core_steering >= velda_core::CoreSteeringTier::IncomingCpu {
+        if ladder.core_steering >= velda_core::hardware::CoreSteeringTier::IncomingCpu {
             cfg.incoming_cpu = true;
         }
-        if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
+        if ladder.multiplex_pacing >= velda_core::hardware::MultiplexPacingTier::NotsentLowat {
             let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
             cfg.notsent_lowat = Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32);
         }
-        if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::UserTimeout {
+        if ladder.dead_peer_teardown >= velda_core::hardware::DeadPeerTeardownTier::UserTimeout {
             cfg.user_timeout = Some(Duration::from_secs(30));
         }
-        if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
+        if ladder.dead_peer_teardown >= velda_core::hardware::DeadPeerTeardownTier::MicrosecondPaced
+        {
             cfg.rto_min_us = Some(5_000);
             cfg.delack_max_us = Some(2_000);
         }
-        if ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll {
+        if ladder.busy_poll >= velda_core::hardware::BusyPollTier::PreferBusyPoll {
             cfg.prefer_busy_poll = true;
         }
         if topo.kernel.supports_bbr() {

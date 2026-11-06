@@ -6,7 +6,8 @@
 
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use velda_core::{RegisterWidth, global_hardware_topology};
+use velda_core::global_hardware_topology;
+use velda_core::hardware::RegisterWidth;
 
 /// Global atomic sequence counter for generating unique 64-bit span IDs.
 static SPAN_COUNTER: AtomicU64 = AtomicU64::new(1);

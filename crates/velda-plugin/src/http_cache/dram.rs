@@ -15,7 +15,8 @@
 use std::sync::OnceLock;
 
 use bytes::Bytes;
-use velda_core::{RegisterWidth, global_hardware_topology};
+use velda_core::global_hardware_topology;
+use velda_core::hardware::RegisterWidth;
 
 /// Function signature for streaming payload memory transfer to DRAM.
 type StreamDramFn = unsafe fn(*mut u8, *const u8, usize);

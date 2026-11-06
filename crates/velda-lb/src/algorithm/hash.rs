@@ -12,12 +12,12 @@ static HASH_BYTES_FN: std::sync::LazyLock<HashBytesFn> = std::sync::LazyLock::ne
     let width = velda_core::global_hardware_topology()
         .cpu
         .register_capabilities
-        .select_for_workload(velda_core::RegisterWidth::Bits64);
+        .select_for_workload(velda_core::hardware::RegisterWidth::Bits64);
     match width {
-        velda_core::RegisterWidth::Bits64
-        | velda_core::RegisterWidth::Bits128
-        | velda_core::RegisterWidth::Bits256 => hash_bytes_64,
-        velda_core::RegisterWidth::Bits32 => hash_bytes_32,
+        velda_core::hardware::RegisterWidth::Bits64
+        | velda_core::hardware::RegisterWidth::Bits128
+        | velda_core::hardware::RegisterWidth::Bits256 => hash_bytes_64,
+        velda_core::hardware::RegisterWidth::Bits32 => hash_bytes_32,
     }
 });
 

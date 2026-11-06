@@ -121,17 +121,19 @@ impl Http2AccelerationPath {
 
         let ladder = topo.acceleration_ladder();
         let tx_rehash =
-            ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
+            ladder.multipath_resilience >= velda_core::hardware::MultipathResilienceTier::TxRehash;
 
-        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+        let prefer_busy_poll = ladder.busy_poll
+            >= velda_core::hardware::BusyPollTier::PreferBusyPoll
             && topo.available_cores >= 8;
 
-        let (rto_min_us, delack_max_us, rto_max_ms) =
-            if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
-                (Some(5_000), Some(2_000), Some(1_000))
-            } else {
-                (None, None, None)
-            };
+        let (rto_min_us, delack_max_us, rto_max_ms) = if ladder.dead_peer_teardown
+            >= velda_core::hardware::DeadPeerTeardownTier::MicrosecondPaced
+        {
+            (Some(5_000), Some(2_000), Some(1_000))
+        } else {
+            (None, None, None)
+        };
 
         let socket_buffer_size = if topo.memory_bytes < 1024 * 1024 * 1024 {
             None
@@ -141,8 +143,8 @@ impl Http2AccelerationPath {
         };
 
         let bbr = topo.kernel.supports_bbr();
-        let bind_address_no_port =
-            ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
+        let bind_address_no_port = ladder.outbound_port_scaling
+            >= velda_core::hardware::OutboundPortScalingTier::BindAddressNoPort;
         let quickack = true;
 
         Self {

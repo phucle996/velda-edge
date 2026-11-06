@@ -206,7 +206,7 @@ impl UdpSocket {
         // See `TcpListener::bind_shard`: hardware RSS authority is applied only when proven;
         // otherwise the kernel software hash owns flow distribution.
         if !addr.ip().is_loopback()
-            && let Some(core) = velda_core::ingress_steering_cpu(worker_id)
+            && let Some(core) = velda_core::hardware::ingress_steering_cpu(worker_id)
         {
             socket.apply_incoming_cpu(core);
         }

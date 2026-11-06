@@ -63,7 +63,7 @@ pub fn init_coarse_clock() {
         let _ = std::thread::Builder::new()
             .name("velda-coarse-clock".to_string())
             .spawn(|| {
-                crate::set_current_thread_idle_priority();
+                crate::hardware::set_current_thread_idle_priority();
                 loop {
                     let sec = SystemTime::now()
                         .duration_since(UNIX_EPOCH)

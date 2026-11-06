@@ -35,7 +35,7 @@ pub use profile as runtime_profile;
 pub use profile::{RuntimeProfile, resolve_runtime_profile};
 pub use reload::{ReloadOutcome, apply_reload, load_initial_runtime};
 pub use runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};
-pub use velda_core::hardware::{HardwareTopology, global_hardware_topology};
-pub use velda_core::{
-    get_allowed_cores, pin_current_thread_to_core, set_current_thread_idle_priority,
+pub use velda_core::hardware::{
+    HardwareTopology, global_hardware_topology, set_current_thread_idle_priority,
 };
+pub use velda_core::worker::{get_allowed_cores, pin_current_thread_to_core};

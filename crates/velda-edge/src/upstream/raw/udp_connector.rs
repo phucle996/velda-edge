@@ -39,20 +39,22 @@ impl UdpAccelerationPath {
     pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
         let ladder = topo.acceleration_ladder();
 
-        let bind_address_no_port =
-            ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
+        let bind_address_no_port = ladder.outbound_port_scaling
+            >= velda_core::hardware::OutboundPortScalingTier::BindAddressNoPort;
 
-        let gro = ladder.udp_offload >= velda_core::UdpOffloadTier::GenericReceiveOffload;
-        let rxq_ovfl = ladder.udp_offload >= velda_core::UdpOffloadTier::QueueMonitored;
+        let gro = ladder.udp_offload >= velda_core::hardware::UdpOffloadTier::GenericReceiveOffload;
+        let rxq_ovfl = ladder.udp_offload >= velda_core::hardware::UdpOffloadTier::QueueMonitored;
 
-        let gso_segment =
-            if ladder.udp_egress >= velda_core::UdpEgressTier::GenericSegmentationOffload {
-                Some(1472)
-            } else {
-                None
-            };
+        let gso_segment = if ladder.udp_egress
+            >= velda_core::hardware::UdpEgressTier::GenericSegmentationOffload
+        {
+            Some(1472)
+        } else {
+            None
+        };
 
-        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+        let prefer_busy_poll = ladder.busy_poll
+            >= velda_core::hardware::BusyPollTier::PreferBusyPoll
             && topo.available_cores >= 8;
 
         let busy_poll_us = if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {

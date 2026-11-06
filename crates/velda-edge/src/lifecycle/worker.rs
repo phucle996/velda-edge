@@ -17,9 +17,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
-use velda_core::{
+use velda_core::hardware::set_current_thread_idle_priority;
+use velda_core::worker::{
     CorePartition, WorkerId, WorkerRole, WorkerState, global_worker_registry,
-    pin_current_thread_to_core, set_current_thread_idle_priority,
+    pin_current_thread_to_core,
 };
 use velda_plugin::ShadowTask;
 use velda_transport::{IngressBinding, WorkerEngine};

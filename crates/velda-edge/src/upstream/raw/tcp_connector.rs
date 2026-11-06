@@ -92,7 +92,7 @@ impl TcpAccelerationPath {
         let ladder = topo.acceleration_ladder();
 
         let notsent_lowat =
-            if ladder.multiplex_pacing >= velda_core::MultiplexPacingTier::NotsentLowat {
+            if ladder.multiplex_pacing >= velda_core::hardware::MultiplexPacingTier::NotsentLowat {
                 let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
                 Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32)
             } else {
@@ -125,19 +125,21 @@ impl TcpAccelerationPath {
             Some(3)
         };
 
-        let bind_address_no_port =
-            ladder.outbound_port_scaling >= velda_core::OutboundPortScalingTier::BindAddressNoPort;
+        let bind_address_no_port = ladder.outbound_port_scaling
+            >= velda_core::hardware::OutboundPortScalingTier::BindAddressNoPort;
         let tx_rehash =
-            ladder.multipath_resilience >= velda_core::MultipathResilienceTier::TxRehash;
-        let prefer_busy_poll = ladder.busy_poll >= velda_core::BusyPollTier::PreferBusyPoll
+            ladder.multipath_resilience >= velda_core::hardware::MultipathResilienceTier::TxRehash;
+        let prefer_busy_poll = ladder.busy_poll
+            >= velda_core::hardware::BusyPollTier::PreferBusyPoll
             && topo.available_cores >= 8;
 
-        let (rto_min_us, delack_max_us, rto_max_ms) =
-            if ladder.dead_peer_teardown >= velda_core::DeadPeerTeardownTier::MicrosecondPaced {
-                (Some(5_000), Some(2_000), Some(1_000))
-            } else {
-                (None, None, None)
-            };
+        let (rto_min_us, delack_max_us, rto_max_ms) = if ladder.dead_peer_teardown
+            >= velda_core::hardware::DeadPeerTeardownTier::MicrosecondPaced
+        {
+            (Some(5_000), Some(2_000), Some(1_000))
+        } else {
+            (None, None, None)
+        };
 
         Self {
             nodelay: true,

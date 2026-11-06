@@ -271,12 +271,12 @@ static ENCODE_HUFFMAN_FN: std::sync::LazyLock<EncodeHuffmanFn> = std::sync::Lazy
     let width = velda_core::global_hardware_topology()
         .cpu
         .register_capabilities
-        .select_for_workload(velda_core::RegisterWidth::Bits64);
+        .select_for_workload(velda_core::hardware::RegisterWidth::Bits64);
     match width {
-        velda_core::RegisterWidth::Bits64
-        | velda_core::RegisterWidth::Bits128
-        | velda_core::RegisterWidth::Bits256 => encode_huffman_64,
-        velda_core::RegisterWidth::Bits32 => encode_huffman_32,
+        velda_core::hardware::RegisterWidth::Bits64
+        | velda_core::hardware::RegisterWidth::Bits128
+        | velda_core::hardware::RegisterWidth::Bits256 => encode_huffman_64,
+        velda_core::hardware::RegisterWidth::Bits32 => encode_huffman_32,
     }
 });
 

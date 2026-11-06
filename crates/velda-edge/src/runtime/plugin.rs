@@ -84,8 +84,8 @@ pub fn build_plugin_table(
     for l in listeners {
         if let Ok(addr) = l.address.parse::<std::net::SocketAddr>() {
             let proto = match l.transport.protocol.to_ascii_lowercase().as_str() {
-                "udp" => velda_core::SocketProtocol::Udp,
-                _ => velda_core::SocketProtocol::Tcp,
+                "udp" => velda_core::socket::SocketProtocol::Udp,
+                _ => velda_core::socket::SocketProtocol::Tcp,
             };
             socket_manager
                 .register_traffic_socket(addr, proto, &l.id)
