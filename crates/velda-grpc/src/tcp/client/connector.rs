@@ -7,6 +7,7 @@ use bytes::Bytes;
 use h2::SendStream;
 use h2::client::{ResponseFuture, SendRequest};
 use std::net::SocketAddr;
+use std::time::Duration;
 use velda_core::{L7Request, L7Response};
 use velda_tls::TlsClientEngine;
 
@@ -471,6 +472,41 @@ impl GrpcUpstreamConnector {
             });
             send_request
         };
+
+        Ok(Self { send_request })
+    }
+
+    /// Performs the gRPC HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. RDMA stream).
+    pub async fn handshake_stream<S>(
+        stream: S,
+        config: &GrpcConfig,
+        timeout: Option<Duration>,
+    ) -> Result<Self, GrpcError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut builder = h2::client::Builder::default();
+        builder.max_header_list_size(config.max_header_size as u32);
+        builder.enable_push(false);
+
+        let h2_fut = builder.handshake::<_, Bytes>(stream);
+        let (send_request, connection) = if let Some(to) = timeout {
+            tokio::time::timeout(to, h2_fut)
+                .await
+                .map_err(|_| {
+                    GrpcError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Upstream gRPC stream handshake timed out",
+                    ))
+                })?
+                .map_err(GrpcError::H2)?
+        } else {
+            h2_fut.await.map_err(GrpcError::H2)?
+        };
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
 
         Ok(Self { send_request })
     }

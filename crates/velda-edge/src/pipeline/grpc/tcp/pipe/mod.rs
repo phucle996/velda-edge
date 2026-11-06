@@ -10,5 +10,6 @@ pub mod client_stream_tcp_tcp;
 pub mod client_stream_tcp_udp;
 pub mod duplex_tcp_tcp;
 pub mod duplex_tcp_udp;
+pub mod rdma;
 pub mod server_stream_tcp_tcp;
 pub mod server_stream_tcp_udp;

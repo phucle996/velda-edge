@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::grpc::{GrpcTcpUpstream, GrpcUdpUpstream};
+use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
 use super::raw::{TcpUpstream, UdpUpstream};
+use super::rdma::RdmaUpstream;
 
 /// Pre-compiled single-protocol lookup table providing lock-free O(1) reads.
 ///
@@ -150,11 +151,12 @@ impl HttpUpstream {
     }
 }
 
-/// Upstream variant in the Layer 7 gRPC family (gRPC over TCP / gRPC over UDP).
+/// Upstream variant in the Layer 7 gRPC family (gRPC over TCP / gRPC over UDP / gRPC over RDMA).
 #[derive(Clone, Debug)]
 pub enum GrpcUpstream {
     Tcp(Arc<GrpcTcpUpstream>),
     Udp(Arc<GrpcUdpUpstream>),
+    Rdma(Arc<GrpcRdmaUpstream>),
 }
 
 impl GrpcUpstream {
@@ -173,6 +175,14 @@ impl GrpcUpstream {
             _ => None,
         }
     }
+
+    #[inline]
+    pub fn as_rdma(&self) -> Option<&Arc<GrpcRdmaUpstream>> {
+        match self {
+            Self::Rdma(u) => Some(u),
+            _ => None,
+        }
+    }
 }
 
 /// Pre-compiled upstream table grouped strictly by ProtocolFamily.
@@ -186,13 +196,15 @@ pub struct UpstreamTable {
     pub http: Arc<SubUpstreamTable<HttpUpstream>>,
     /// [PRE-COMPILED]: Protocol table for L7 gRPC RPC endpoints (ProtocolFamily::Grpc).
     pub grpc: Arc<SubUpstreamTable<GrpcUpstream>>,
+    /// [PRE-COMPILED]: Protocol table for kernel-bypass RDMA channels (ProtocolFamily::Rdma).
+    pub rdma: Arc<SubUpstreamTable<RdmaUpstream>>,
 }
 
 impl UpstreamTable {
     /// Returns total number of upstreams across all protocol families.
     #[inline]
     pub fn len(&self) -> usize {
-        self.raw.len() + self.http.len() + self.grpc.len()
+        self.raw.len() + self.http.len() + self.grpc.len() + self.rdma.len()
     }
 
     /// Returns true if all protocol tables are empty.
@@ -219,7 +231,13 @@ impl UpstreamTable {
         self.grpc.get(id)
     }
 
-    /// Autonomous pre-warming across all HTTP and gRPC upstreams for a specific worker lane.
+    /// Retrieves an upstream processor in the RDMA family.
+    #[inline]
+    pub fn get_rdma(&self, id: &str) -> Option<&Arc<RdmaUpstream>> {
+        self.rdma.get(id)
+    }
+
+    /// Autonomous pre-warming across all HTTP, gRPC, and RDMA upstreams for a specific worker lane.
     ///
     /// Invoked periodically and on bootstrap/reload by the core-local Shadow Worker (`SCHED_IDLE`)
     /// to maintain warm connection pools in RAM without hot-path coordination overhead.
@@ -247,7 +265,14 @@ impl UpstreamTable {
                     let cfg = velda_grpc::GrpcConfig::default();
                     u.prewarm_lane(lane, &cfg).await;
                 }
+                GrpcUpstream::Rdma(u) => {
+                    let cfg = velda_grpc::GrpcConfig::default();
+                    u.prewarm_lane(lane, &cfg).await;
+                }
             }
+        }
+        for rdma_up in self.rdma.values() {
+            rdma_up.prewarm_lane(lane, 1).await;
         }
     }
 }

@@ -13,10 +13,11 @@ use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::TlsClientEngine;
 use velda_upstream::{Upstream, UpstreamTimeouts};
 
-use super::grpc::{GrpcTcpUpstream, GrpcUdpUpstream};
+use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
 use super::lb::LbAlgorithm;
 use super::raw::{TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream};
+use super::rdma::RdmaUpstream;
 use super::table::{GrpcUpstream, HttpUpstream, RawUpstream, SubUpstreamTable, UpstreamTable};
 
 /// Compiles declarative UpstreamConfig entries into protocol-family partitioned [`UpstreamTable`].
@@ -34,6 +35,7 @@ pub fn build_upstreams(
     let mut raw_map = FxHashMap::default();
     let mut http_map = FxHashMap::default();
     let mut grpc_map = FxHashMap::default();
+    let mut rdma_map = FxHashMap::default();
 
     let shared_tls_client = tls_client.map(|c| Arc::new(c.clone()));
 
@@ -276,9 +278,38 @@ pub fn build_upstreams(
             _ => None,
         };
 
+        if transport == "rdma" && app != "grpc" {
+            let rdma_config = velda_rdma::RdmaConfig {
+                device_name: None,
+                timeout_ms: timeouts.connect.as_millis().max(1000) as u64,
+                ..Default::default()
+            };
+            rdma_map.insert(
+                config.id.clone(),
+                Arc::new(RdmaUpstream::new(inner, rdma_config, pool_config)),
+            );
+            continue;
+        }
+
         match app.as_str() {
             "grpc" => {
-                if transport == "udp" {
+                if transport == "rdma" {
+                    let rdma_config = velda_rdma::RdmaConfig {
+                        device_name: None,
+                        timeout_ms: timeouts.connect.as_millis().max(1000) as u64,
+                        ..Default::default()
+                    };
+                    grpc_map.insert(
+                        config.id.clone(),
+                        Arc::new(GrpcUpstream::Rdma(Arc::new(GrpcRdmaUpstream::new(
+                            inner,
+                            rdma_config,
+                            config.protocol.streaming,
+                            shard_count,
+                            max_streams,
+                        )))),
+                    );
+                } else if transport == "udp" {
                     let Some(sni) = target_sni else { continue };
                     let quic_client_config = match compile_quic_config(
                         config,
@@ -430,6 +461,7 @@ pub fn build_upstreams(
         raw: Arc::new(SubUpstreamTable::new(raw_map)),
         http: Arc::new(SubUpstreamTable::new(http_map)),
         grpc: Arc::new(SubUpstreamTable::new(grpc_map)),
+        rdma: Arc::new(SubUpstreamTable::new(rdma_map)),
     }
 }
 
@@ -565,13 +597,19 @@ mod tests {
                 u.tls = test_tls(&["example.com"]);
                 u
             },
+            {
+                let mut u = make_test_upstream("u-rdma", "raw", "static");
+                u.protocol.transport = "rdma".to_string();
+                u
+            },
         ];
 
         let table = build_upstreams_default(&configs, None);
         assert_eq!(table.raw.len(), 2);
         assert_eq!(table.http.len(), 3);
         assert_eq!(table.grpc.len(), 2);
-        assert_eq!(table.len(), 7);
+        assert_eq!(table.rdma.len(), 1);
+        assert_eq!(table.len(), 8);
 
         assert!(table.get_raw("u-tcp").is_some());
         assert!(table.get_raw("u-udp").is_some());
@@ -580,6 +618,7 @@ mod tests {
         assert!(table.get_http("u-http3").is_some());
         assert!(table.get_grpc("u-grpc-tcp").is_some());
         assert!(table.get_grpc("u-grpc-udp").is_some());
+        assert!(table.get_rdma("u-rdma").is_some());
     }
 
     #[test]

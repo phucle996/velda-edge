@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod http;
 pub mod lb;
 pub mod raw;
+pub mod rdma;
 pub mod table;
 
 // Core public re-exports (zero breaking changes across monorepo):
@@ -23,5 +24,6 @@ pub use http::{
 };
 pub use lb::{EdgeUpstream, LbAlgorithm};
 pub use raw::{TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream};
+pub use rdma::{RdmaClientResource, RdmaLease, RdmaUpstream};
 pub use table::{GrpcUpstream, HttpUpstream, RawUpstream, SubUpstreamTable, UpstreamTable};
 pub use velda_upstream::AdaptiveConcurrencyGate;

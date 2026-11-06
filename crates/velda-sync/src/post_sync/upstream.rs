@@ -360,13 +360,15 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
         upstream.protocol.transport.make_ascii_lowercase();
         upstream.protocol.application.make_ascii_lowercase();
 
-        let is_valid_transport =
-            matches!(upstream.protocol.transport.as_str(), "tcp" | "udp" | "quic");
+        let is_valid_transport = matches!(
+            upstream.protocol.transport.as_str(),
+            "tcp" | "udp" | "quic" | "rdma"
+        );
         if !is_valid_transport {
             return Err(SyncError::Validation {
                 domain: "upstreams".into(),
                 reason: format!(
-                    "Upstream '{}': unsupported protocol transport '{}'; must be 'tcp', 'udp', or 'quic'",
+                    "Upstream '{}': unsupported protocol transport '{}'; must be 'tcp', 'udp', 'quic', or 'rdma'",
                     upstream.id, upstream.protocol.transport
                 ),
             });
@@ -424,22 +426,28 @@ pub fn validate_upstreams(upstreams: &mut [UpstreamConfig]) -> Result<(), SyncEr
                 }
             }
             "grpc" => {
-                if upstream.protocol.transport != "tcp" && upstream.protocol.transport != "quic" {
+                if upstream.protocol.transport != "tcp"
+                    && upstream.protocol.transport != "quic"
+                    && upstream.protocol.transport != "rdma"
+                {
                     return Err(SyncError::Validation {
                         domain: "upstreams".into(),
                         reason: format!(
-                            "Upstream '{}': gRPC requires 'tcp' or 'quic' transport, found '{}'",
+                            "Upstream '{}': gRPC requires 'tcp', 'quic', or 'rdma' transport, found '{}'",
                             upstream.id, upstream.protocol.transport
                         ),
                     });
                 }
             }
             "raw" => {
-                if upstream.protocol.transport != "tcp" && upstream.protocol.transport != "udp" {
+                if upstream.protocol.transport != "tcp"
+                    && upstream.protocol.transport != "udp"
+                    && upstream.protocol.transport != "rdma"
+                {
                     return Err(SyncError::Validation {
                         domain: "upstreams".into(),
                         reason: format!(
-                            "Upstream '{}': raw application requires 'tcp' or 'udp' transport, found '{}'",
+                            "Upstream '{}': raw application requires 'tcp', 'udp', or 'rdma' transport, found '{}'",
                             upstream.id, upstream.protocol.transport
                         ),
                     });
