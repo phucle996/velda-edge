@@ -5,7 +5,7 @@
 //! using pre-compiled socket acceleration flags (`TcpAccelerationPath` / `GrpcAccelerationPath`:
 //! `TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`, `TCP_NOTSENT_LOWAT`, `SO_BUSY_POLL`, `TCP_QUICKACK`, `BBR`).
 //!
-//! ### Activation Conditions (Điều kiện kích hoạt)
+//! ### Activation Conditions
 //! 1. **Upstream Configuration**: Route resolves to an upstream backend with `protocol.transport = "tcp"`.
 //! 2. **Transport & Framing**: Standard OS TCP sockets over IPv4/IPv6 with HTTP/2 binary framing.
 //! 3. **Pipe Pattern Match**: Upstream strategy explicitly configured as `ServerStream` (1 request to N response chunks).

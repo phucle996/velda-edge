@@ -1,4 +1,25 @@
-//! Configuration for RDMA device, queue pairs, and transport pipes.
+//! # RDMA Subsystem & Queue Pair Hardware Configuration
+//!
+//! ## Architectural Invariants & Parameter Tuning
+//!
+//! High-performance kernel-bypass networking requires careful coordination between hardware HCA
+//! parameters, operating system resource limits (`RLIMIT_MEMLOCK`), and runtime serving topology.
+//!
+//! ### Core Configuration Dimensions:
+//! 1. **Topology & Physical Addressing (`device_name`, `port`, `gid_index`)**:
+//!    - Specifies the physical Mellanox ConnectX or InfiniBand HCA interface in `/sys/class/infiniband`.
+//!    - RoCEv2 encapsulation relies on the correct GID index to map packets to the corresponding IPv4/IPv6
+//!      VLAN or overlay interface on the host network adapter.
+//! 2. **Ring Buffer Depths (`max_send_wr`, `max_recv_wr`, `cq_size`)**:
+//!    - Controls hardware Work Queue and Completion Queue capacities. Sized appropriately to absorb
+//!      inbound edge traffic bursts without queue overflow while preserving hardware L2/L3 cache locality.
+//! 3. **Latency vs. CPU Trade-off (`poll_spin_count`)**:
+//!    - Sets the threshold for `AdaptiveCqPoller`. Setting this to `0` enables pure interrupt-driven
+//!      Tokio `AsyncFd` polling (0% CPU when idle). Values between `50` and `2000` provide sub-microsecond
+//!      completion harvesting during active bursts.
+//! 4. **Reliability & Flow Control (`initial_credits`, `rnr_retry`)**:
+//!    - Configures credit allowances for `CreditFlowControl` to eliminate hardware Receiver Not Ready (RNR)
+//!      events. Sets the hardware HCA RNR retry limit (`0–7`, where `7` represents infinite hardware retries).
 
 /// Configuration parameters for RDMA subsystem and endpoints.
 #[derive(Debug, Clone)]

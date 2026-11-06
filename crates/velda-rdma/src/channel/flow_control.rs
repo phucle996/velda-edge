@@ -1,4 +1,25 @@
-//! Credit-Based Flow Control to eliminate Receiver Not Ready (RNR) hardware drops.
+//! Credit-Based Flow Control — Eliminating Receiver Not Ready (RNR) Hardware Drops.
+//!
+//! ### The Hardware RNR Problem in RDMA
+//! Unlike TCP which buffers incoming packets in arbitrary OS kernel queues when user-space is slow,
+//! RDMA two-sided Send/Receive semantics require that a matching Receive Buffer (`ibv_recv_wr`) is
+//! **ALREADY posted into the receiver's hardware Receive Queue (RQ) BEFORE the packet arrives on the wire**.
+//!
+//! If an inbound packet hits an HCA with an empty RQ, the receiver's NIC generates a hardware NACK:
+//! **Receiver Not Ready (RNR)**. After exhausting `rnr_retry` attempts, the hardware permanently aborts
+//! the Queue Pair (`IBV_WC_RNR_RETRY_EXC_ERR`), breaking the connection.
+//!
+//! ### Credit-Based Flow Control Mechanism
+//! 1. **Initial Credit Grant**: Both peers agree on an initial credit allotment (e.g. 64 credits).
+//!    The local receiver pre-posts 64 Receive Buffers into its hardware RQ via `ibv_post_recv`.
+//! 2. **Sender Credit Check**: Before submitting any Send WR, the local sender acquires a credit via
+//!    `remote_send_credits.fetch_sub(1)`. If credits reach 0, transmission blocks cooperatively rather
+//!    than risking an RNR hardware drop.
+//! 3. **Batch Credit Replenishment**: As the local receiver consumes incoming messages and reaches the
+//!    replenishment threshold (`credits / 2`), it posts fresh Receive Buffers back into the RQ and
+//!    piggybacks a credit update grant to the remote peer (via `imm_data` in SendWithImm).
+//! 4. **Lock-Free Atomic Tracking**: All credit operations execute via `AtomicU32` with relaxed/acquire/release
+//!    semantics, ensuring zero mutex contention on the hot path.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

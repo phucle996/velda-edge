@@ -5,7 +5,7 @@
 //! this is an **Acceleration Pipe** utilizing `velda-rdma` to bypass the OS kernel entirely.
 //! Data is DMA-transferred directly between host user-space RAM and backend hardware via RoCEv2 / InfiniBand.
 //!
-//! ### Activation Conditions (Điều kiện kích hoạt)
+//! ### Activation Conditions
 //! 1. **Upstream Configuration**: Route resolves to an upstream backend configured with `protocol.transport = "rdma"`.
 //! 2. **Hardware & Driver Availability**: Host possesses an RDMA-capable NIC (e.g. NVIDIA/Mellanox ConnectX
 //!    with RoCEv2/IB fabric via `libibverbs.so.1`) or runs with verified software mock simulation fallback.

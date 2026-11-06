@@ -1,7 +1,29 @@
-//! Asynchronous RDMA Connector and Out-of-Band (OOB) QP handshake.
+//! # Asynchronous RDMA Connector and Out-of-Band (OOB) QP Handshake
 //!
-//! Conforms to `AGENTS.md` Section 2.8:
-//! Upstream decides WHEN and WHO; this protocol connector owns HOW.
+//! ## Architectural Invariants & Subsystem Boundaries (`AGENTS.md` Sec 2.8)
+//!
+//! In Velda Edge's architecture:
+//! - **Upstream Subsystem (`velda-upstream`)**: Owns "WHEN & WHO" — endpoint target selection, load
+//!   balancing, passive health monitoring, connection pooling, and lane sharding. It never invokes
+//!   raw socket or Verbs syscalls directly.
+//! - **RDMA Connector (`RdmaConnector`)**: Owns "HOW" — physical hardware device discovery, Queue Pair
+//!   instantiation, Out-of-Band (OOB) bootstrap handshake, and hardware state transitions (`INIT -> RTR -> RTS`).
+//!
+//! ## The Chicken-and-Egg Bootstrap Mechanism
+//! In RDMA Reliable Connected (RC) mode, two HCAs cannot exchange data or state until both local and remote
+//! Queue Pairs have transitioned into the Ready to Send (`RTS`) state. However, configuring the hardware QP
+//! into `RTR` and `RTS` requires the remote peer's Queue Pair Number (`qpn`), Packet Sequence Number (`psn`),
+//! Local Identifier (`lid`), and RoCEv2 Global Identifier (`gid`).
+//!
+//! Because an uninitialized RDMA link cannot transmit these parameters, `RdmaConnector` performs an Out-of-Band
+//! (OOB) TCP handshake:
+//! 1. **OOB TCP Connection**: Connects to the upstream target's TCP management port (or dedicated listener).
+//! 2. **Framing & Address Exchange**: Transmits the magic header `b"VRDM"` followed by the 28-byte binary
+//!    `QpAddress` structure in network byte order.
+//! 3. **Hardware State Transition**: Reads the peer's `QpAddress` from the stream, programs the local QP
+//!    hardware into `RTR` with the peer's attributes, and finally transitions to `RTS`.
+//! 4. **Handoff**: The OOB TCP stream is cleanly closed or detached; the active, verified `RdmaChannel` is
+//!    returned to the upstream pool for hot-path leasing.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

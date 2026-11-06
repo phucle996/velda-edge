@@ -1,8 +1,18 @@
-//! Foreign Function Interface (FFI) bindings for Linux `libibverbs.so.1`.
+//! Foreign Function Interface (FFI) bindings for Linux Verbs API (`libibverbs.so.1`).
 //!
-//! Provides dynamic runtime loading of `libibverbs.so.1` or `libibverbs.so` via `dlopen`.
-//! This avoids build-time linking failures on machines without `libibverbs-dev` installed
-//! and enables seamless fallback to pure-Rust software mock implementations.
+//! ### Zero-Linker-Failure Mechanism (Dynamic Runtime dlopen)
+//! 1. **Traditional Linker Fragility**: Linking `-libverbs` statically or directly at build time causes
+//!    instant linker failures (`cannot find -libverbs`) on developer machines, Docker containers, and CI
+//!    runners lacking `libibverbs-dev` headers or packages.
+//! 2. **Dynamic Runtime Resolution (`dlopen`)**:
+//!    - On startup, the module dynamically probes `libibverbs.so.1` followed by `libibverbs.so`.
+//!    - If found, function symbols (`ibv_open_device`, `ibv_alloc_pd`, `ibv_reg_mr`, `ibv_create_cq`,
+//!      `ibv_create_qp`, `ibv_poll_cq`) are resolved and bound into the static [`IbvLib`] dispatch table.
+//!    - If absent or if physical RDMA devices do not exist, the transport engine transparently falls
+//!      back to pure-Rust software simulation ([`crate::mock::MockChannel`]), allowing the entire monorepo
+//!      workspace to build, compile, and test cleanly anywhere without hardware constraints.
+//! 3. **Memory Safety**: Raw C pointers (`*mut ibv_*`) are strictly encapsulated within RAII wrappers
+//!    inside the `verbs/` subsystem, guaranteeing safe deallocation on drop.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};

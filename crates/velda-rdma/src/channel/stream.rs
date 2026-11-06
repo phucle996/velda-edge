@@ -1,7 +1,32 @@
-//! Tokio `AsyncRead` and `AsyncWrite` stream adapter for `RdmaChannel`.
+//! # Tokio `AsyncRead` and `AsyncWrite` Stream Adapter for RDMA Channels
 //!
-//! Enables any Velda Edge L7 protocol pipeline (HTTP/1.1, HTTP/2, HTTP/3, gRPC)
-//! to run on top of RDMA kernel-bypass channels without changing protocol logic.
+//! ## Architectural Invariants & Stream Adaptation
+//!
+//! RDMA hardware natively exchanges discrete, message-oriented buffers bounded by Memory Region (MR)
+//! slot allocations (typically 64 KB per slot). Conversely, higher-level streaming protocol engines
+//! (HTTP/1.1 chunked bodies, HTTP/2 multiplexed streams, gRPC length-prefixed protocol buffers, and
+//! bidirectional TCP byte streams) expect continuous, stream-oriented I/O interfaces characterized by
+//! `tokio::io::AsyncRead` and `tokio::io::AsyncWrite`.
+//!
+//! `RdmaStream` bridges this gap, providing a seamless abstraction that adapts discrete RDMA message
+//! transfers into a standard asynchronous stream:
+//!
+//! ### 1. Zero-Copy Inbound Chunk Draining
+//! When incoming data arrives via an RDMA Receive completion, the resulting `Bytes` buffer is stored
+//! in `read_buf`. Sequential `poll_read` calls consume this slice via `Buf::advance()` without copying
+//! bytes across intermediate buffers. When the current message chunk is completely drained, the adapter
+//! initiates another RDMA receive operation on the underlying `RdmaChannel`.
+//!
+//! ### 2. Coalesced Outbound Staging & Direct Post
+//! Outbound writes via `poll_write` are accumulated into an internal `write_buf: BytesMut`. When the
+//! buffer exceeds configured thresholds or when `poll_flush` is invoked, the staged buffer is posted
+//! as an RDMA Send Work Request. This coalesces small application-level writes (e.g. gRPC frame headers)
+//! into contiguous RDMA payloads, maximizing PCIe bus throughput.
+//!
+//! ### 3. Uniform Protocol Pipeline Interoperability
+//! Because `RdmaStream` implements `AsyncRead + AsyncWrite + Send + Unpin`, all Velda Edge protocol
+//! forwarding strategies (`buffered`, `server_stream`, `client_stream`, `duplex`, and raw L4 proxying)
+//! can execute over hardware RDMA links without modifying upper-layer protocol state machines.
 
 use bytes::{Buf, Bytes, BytesMut};
 use std::future::Future;

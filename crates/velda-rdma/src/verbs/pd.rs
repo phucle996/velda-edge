@@ -1,4 +1,17 @@
-//! RDMA Protection Domain (PD) memory safety boundary.
+//! RDMA Protection Domain (PD) — Hardware Memory Isolation Boundary.
+//!
+//! ### Hardware Memory Isolation Mechanism
+//! 1. **Hardware Security Container**: In RoCEv2/InfiniBand architecture, a Protection Domain (PD)
+//!    allocated via `ibv_alloc_pd` acts as an in-hardware anchor binding **Memory Regions (MR)**
+//!    and **Queue Pairs (QP)** together into an isolated security namespace.
+//! 2. **Wire-Speed Access Enforcement**: A Queue Pair associated with PD `A` cannot read, write,
+//!    or DMA into/out of a Memory Region registered under PD `B`. The hardware NIC enforces this
+//!    boundary at line rate without consulting host OS page tables or burning CPU cycles.
+//! 3. **Velda Edge Integration**: A single Protection Domain is allocated per device context, anchoring
+//!    all pre-allocated slab buffers (`PayloadSlab`) and per-core Queue Pairs, guaranteeing that rogue
+//!    or corrupt remote keys (`rkey`) are blocked directly by the NIC's onboard MMU.
+//! 4. **Strict RAII Lifecycle**: On drop, `ibv_dealloc_pd` safely frees the domain context only after all
+//!    referencing QPs and MRs have been deallocated, preventing kernel memory leaks.
 
 use std::sync::Arc;
 

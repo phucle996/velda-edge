@@ -4,7 +4,7 @@
 //! TCP stack, this is an **Acceleration Bridge Pipe** forwarding requests natively over `velda-rdma`
 //! hardware Verbs (RoCEv2 / InfiniBand), bypassing the OS kernel entirely on the upstream leg.
 //!
-//! ### Activation Conditions (Điều kiện kích hoạt)
+//! ### Activation Conditions
 //! 1. **Upstream Configuration**: Route resolves to an upstream backend with `protocol.transport = "rdma"`.
 //! 2. **Hardware & Driver Availability**: Host possesses an RDMA-capable NIC (`libibverbs.so.1`) or runs in mock simulation mode.
 //! 3. **Backend Target Protocol**: Target physical endpoint responds to OOB QP handshakes and speaks HTTP/2 over RDMA.

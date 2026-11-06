@@ -1,4 +1,36 @@
-//! Adaptive Hybrid Completion Queue Poller (Fast-path busy poll + Slow-path AsyncFd sleep).
+//! # Adaptive Hybrid Completion Queue Poller (Fast-Path Busy-Spin + Slow-Path AsyncFd Sleep)
+//!
+//! ## Architectural Invariants & Hardware Mechanism
+//!
+//! Completion Queue (CQ) polling is the single most critical performance junction in kernel-bypass
+//! RDMA architectures. Traditional network stacks incur 5–15 µs of kernel interrupt processing,
+//! context switching, and socket buffer copies. While raw RDMA polling can achieve sub-microsecond
+//! round-trip latency (< 1.5 µs), a pure busy-poll loop burns 100% CPU on worker cores even during
+//! idle traffic periods.
+//!
+//! To resolve this latency-versus-efficiency tension, `AdaptiveCqPoller` implements a two-stage
+//! hybrid completion harvesting mechanism:
+//!
+//! 1. **Fast-Path Busy-Spin (< 1 µs latency)**:
+//!    - Upon dispatch, the poller immediately interrogates the hardware CQ ring buffer up to
+//!      `spin_count` iterations using `ibv_poll_cq`.
+//!    - Under sustained or bursty edge traffic, completions are harvested instantly on the first
+//!      few spins without yielding the CPU thread or invoking kernel syscalls.
+//!
+//! 2. **Slow-Path Event-Driven Asynchronous Sleep (0% idle CPU burn)**:
+//!    - When the spin count is exhausted without harvesting a completion, the poller arms the
+//!      hardware completion channel via `ibv_req_notify_cq(cq, 0)`.
+//!    - It then registers the completion channel's file descriptor (`ibv_comp_channel.fd`) with
+//!      Tokio's reactor via `tokio::io::unix::AsyncFd`.
+//!    - The worker task yields execution back to the Tokio runtime. When incoming packets arrive,
+//!      the HCA fires an MSI-X hardware interrupt, waking Tokio's epoll driver.
+//!    - The poller acknowledges the event via `ibv_get_cq_event` and `ibv_ack_cq_events`, re-arms
+//!      the channel, and retrieves the Work Completion (`ibv_wc`).
+//!
+//! ## Core Sharding & Thread Affinity
+//! In accordance with `AGENTS.md` Section 2.9, Completion Queues are sharded 1:1 per worker core
+//! (`lane = worker_id`). Because each worker thread polls its own dedicated hardware CQ, there is
+//! zero cross-core cache line bouncing or lock contention.
 
 use std::sync::Arc;
 use std::time::Duration;

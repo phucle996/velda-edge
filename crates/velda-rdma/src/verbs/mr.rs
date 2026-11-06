@@ -1,4 +1,21 @@
-//! RDMA Memory Region (MR) pinned memory registration.
+//! RDMA Memory Region (MR) — Pinned RAM Registration & Zero-Copy DMA.
+//!
+//! ### Pinned Memory Registration & Direct Memory Access Mechanism
+//! 1. **Why Standard OS Sockets Incur Copies**: Under normal OS networking, user-space buffers can be
+//!    swapped, migrated, or paged out by the Linux kernel MMU at any moment. The kernel is therefore
+//!    forced to copy data into intermediate kernel socket buffers (`sk_buff`) before wire transmission.
+//! 2. **Memory Registration Mechanism (`ibv_reg_mr`)**:
+//!    - **Physical Page Pinning (`mlock`)**: Pins virtual memory pages into physical RAM frames,
+//!      completely preventing OS paging and page faults while hardware DMA transfers are in flight.
+//!    - **Memory Translation Table (MTT)**: Programs the virtual-to-physical address mapping directly into
+//!      the NIC's internal translation hardware, enabling the NIC DMA engine to navigate host RAM.
+//!    - **Access Key Pair**:
+//!      - `lkey` (Local Key): Authorizes the local CPU to submit Work Requests referencing this buffer.
+//!      - `rkey` (Remote Key): Shared out-of-band with the remote backend, allowing one-sided RDMA Read/Write
+//!        operations directly into this host memory slice without remote CPU involvement.
+//! 3. **Synergy with `velda-core::PayloadSlab`**: Pre-allocated 4KB RAM slabs are registered once during
+//!    warmup. Downstream request payloads are populated directly into these slabs, and the NIC DMAs them
+//!    straight into backend memory with zero intermediate `memcpy` operations.
 
 use std::os::raw::c_void;
 use std::sync::Arc;

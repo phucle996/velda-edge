@@ -1,4 +1,23 @@
-//! Error types for RDMA subsystem.
+//! # Strongly-Typed Error Taxonomy for RDMA Subsystem
+//!
+//! ## Architectural Invariants & Failure Domains
+//!
+//! Kernel-bypass RDMA introduces failure modes that do not exist in conventional socket-based
+//! network stacks: physical page locking failures (`ENOMEM` / `EPERM` from `mlock`), hardware state
+//! machine rejections (`RESET -> INIT -> RTR -> RTS`), out-of-buffer Receiver Not Ready (RNR) drops,
+//! and unannounced peer disconnection without TCP FIN packets.
+//!
+//! `RdmaError` partitions these failures into explicit, actionable error categories:
+//! - **FFI & Driver Errors (`Library`)**: Dynamic library discovery failures for `libibverbs.so.1`
+//!   or missing symbols.
+//! - **Hardware Verbs Errors (`Verbs`)**: Low-level operational failures directly returned by the
+//!   verbs provider driver, preserving the original OS `errno` for diagnostic triage.
+//! - **Lifecycle & State Machine Errors (`StateTransition`)**: Detailed transition failures during
+//!   Queue Pair modification.
+//! - **Flow Control Failures (`RnrExhausted`, `InsufficientCredits`)**: Credit exhaustion or
+//!   unresponsive receiver buffer allocation.
+//! - **Stream Adaptation Errors (`BufferTooSmall`, `Timeout`, `Disconnected`)**: Failures surfaced
+//!   during `AsyncRead` and `AsyncWrite` streaming bridging.
 
 use thiserror::Error;
 

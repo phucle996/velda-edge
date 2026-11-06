@@ -1,4 +1,23 @@
-//! RDMA Queue Pair (QP) state machine, creation, and work request posting.
+//! RDMA Queue Pair (QP) — Reliable Connected (RC) State Machine & Work Request Engine.
+//!
+//! ### Hardware Queue Pair Architecture & State Machine
+//! 1. **Dual Queue Mechanics**: A Queue Pair is the fundamental bi-directional communication endpoint
+//!    in RDMA, consisting of two hardware-managed circular rings:
+//!    - **Send Queue (SQ)**: Houses outbound Work Requests (Send, SendWithImm, RDMA Write, RDMA Read).
+//!    - **Receive Queue (RQ)**: Houses pre-posted Receive Buffers (`ibv_post_recv`) waiting to catch inbound DMA.
+//! 2. **Hardware State Transitions**:
+//!    - `RESET`: Uninitialized hardware state.
+//!    - `INIT`: Configures local port, PKey index, and access flags (`IBV_ACCESS_LOCAL_WRITE`). RQ is now ready.
+//!    - `RTR` (Ready to Receive): Binds to remote endpoint parameters (`remote_qpn`, `rq_psn`, MTU, GID/LID).
+//!      The NIC can now accept inbound packets on the wire.
+//!    - `RTS` (Ready to Send): Sets local Send Queue packet sequence number (`sq_psn`), retry counters (`RETRY_CNT`),
+//!      timeout, and Receiver-Not-Ready retry limits (`RNR_RETRY`). Both sending and receiving are fully active.
+//! 3. **Out-of-Band (OOB) Addressing ([`QpAddress`])**:
+//!    Queue Pairs cannot discover each other autonomously. Endpoints exchange their 32-byte `QpAddress`
+//!    (QPN, PSN, LID, GID) over an initial TCP channel to execute the state transition before cutting over
+//!    to direct hardware communication.
+//! 4. **Strict RAII Lifecycle**: On drop, `ibv_destroy_qp` flushes all pending work queues and frees
+//!    hardware descriptors in the HCA driver.
 
 use std::os::raw::c_int;
 use std::sync::Arc;

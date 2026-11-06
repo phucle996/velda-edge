@@ -1,7 +1,19 @@
-//! Pure-Rust Software Mock for RDMA Queue Pairs and Streams.
+//! # Pure-Rust Software Mock for RDMA Queue Pairs and Streams
 //!
-//! Enables running `cargo test --workspace` and CI/CD pipelines without physical
-//! RoCEv2/InfiniBand hardware or `libibverbs.so` dependencies.
+//! ## Architectural Invariants & Test Portability
+//!
+//! Production edge environments running Velda Edge utilize Mellanox ConnectX or compatible RoCEv2/InfiniBand
+//! Host Channel Adapters (HCAs) driven by `libibverbs.so`. However, local developer workstations, standard
+//! cloud continuous integration (CI) runners, and containerized test harnesses rarely have access to physical
+//! RDMA hardware or kernel InfiniBand modules (`ib_uverbs`, `rdma_rxe`).
+//!
+//! To ensure deterministic quality verification (`cargo test --workspace`) without hardware dependencies:
+//! - `MockChannel` provides an in-memory simulation of a connected RDMA Queue Pair.
+//! - Uses bounded Tokio `mpsc` channels to simulate Send and Receive Work Request ring buffers.
+//! - Simulates immediate data payloads (`imm_data`), work request IDs (`wr_id`), and atomic credit accounting.
+//! - Accurately replicates hardware flow-control backpressure and credit starvation errors.
+//! - Integrates seamlessly into `RdmaStream` and `RdmaConnector` whenever hardware is unavailable or when
+//!   `RdmaConfig::force_mock` is enabled.
 
 use bytes::Bytes;
 use std::sync::Arc;

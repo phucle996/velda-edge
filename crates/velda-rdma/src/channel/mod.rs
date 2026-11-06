@@ -1,4 +1,30 @@
-//! RDMA Transport Channels, Stream Adapters, and Flow Control.
+//! # RDMA Transport Channels, Stream Adapters, and Flow Control
+//!
+//! ## Architectural Invariants & Subsystem Structure
+//!
+//! The channel subsystem coordinates the hardware resources required to conduct bidirectional,
+//! zero-copy communication over InfiniBand or RoCEv2 networks. It ties together the underlying
+//! Verbs primitives (Protection Domain, Memory Region, Queue Pair, Completion Queue) into an active,
+//! credit-governed transport channel.
+//!
+//! ### Hardware Channel Architecture (`HardwareChannel`)
+//! A `HardwareChannel` manages the lifecycle of a dedicated connection to an upstream node:
+//! 1. **Contiguous Pinned Buffer Ring**: Pre-allocates and registers a contiguous chunk of memory
+//!    partitioned into discrete Send and Receive slots (default 64 KB per slot). The memory is pinned
+//!    into physical RAM (`mlock`), eliminating MMU page faults during PCIe DMA transactions.
+//! 2. **Pre-Posted Receive Ring**: At initialization, receive slots are registered as `ibv_recv_wr`
+//!    work requests on the QP's Receive Queue. This ensures the NIC hardware always has memory destinations
+//!    available when incoming packets arrive from the network wire.
+//! 3. **Credit-Based Flow Control**: Integrates `CreditFlowControl` to prevent buffer overflow and
+//!    eliminate hardware Receiver Not Ready (RNR) state transitions.
+//! 4. **Adaptive Polling**: Uses `AdaptiveCqPoller` to achieve sub-microsecond latency on hot bursts
+//!    while dropping CPU utilization to 0% during idle traffic periods.
+//!
+//! ### Dual Transport Abstraction (`RdmaChannel`)
+//! `RdmaChannel` is an explicit enum representing either:
+//! - `Hardware`: Real hardware HCA channel backed by Mellanox/NVIDIA OFED or InfiniBand drivers.
+//! - `Mock`: High-fidelity, pure-Rust in-memory simulation channel allowing end-to-end tests to pass
+//!   on standard development machines and CI/CD pipelines without physical RDMA hardware.
 
 pub mod flow_control;
 pub mod poller;

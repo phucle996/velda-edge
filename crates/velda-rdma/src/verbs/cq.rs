@@ -1,4 +1,19 @@
-//! RDMA Completion Queue (CQ) event notification and hardware polling.
+//! RDMA Completion Queue (CQ) — Hardware Event Queue & Per-Core CQ Sharding.
+//!
+//! ### Hardware Work Completion Mechanism
+//! 1. **Completion Ring Buffer**: When an asynchronous Send, Receive, or RDMA Write/Read operation
+//!    finishes traversing the wire, the HCA hardware automatically writes a Work Completion (`ibv_wc`)
+//!    entry into the associated Completion Queue (CQ).
+//! 2. **Dual-Mode Completion Harvesting**:
+//!    - **Fast-path Busy-Polling (`ibv_poll_cq`)**: Directly inspects the mapped memory ring buffer
+//!      without entering the kernel, delivering sub-microsecond latency (`< 1µs`).
+//!    - **Slow-path Event Notification (`ibv_req_notify_cq` + `ibv_comp_channel`)**: When idle,
+//!      the channel arms hardware MSI-X interrupts on an event file descriptor (`RawFd`), waking up
+//!      the Tokio event loop via `AsyncFd` and saving 100% CPU when no traffic is present.
+//! 3. **Per-Core CQ Sharding Invariant**:
+//!    Each Frontline Worker Core (`lane = worker_id`) creates and owns its dedicated Completion Queue
+//!    (`ibv_create_cq`). CQs are never shared across cores, eliminating cross-core cache invalidation
+//!    (false sharing) and avoiding all mutex contention during hot-path polling.
 
 use std::os::fd::RawFd;
 use std::os::raw::c_int;

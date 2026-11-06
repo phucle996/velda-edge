@@ -1,4 +1,15 @@
-//! RDMA Device and Context discovery and lifecycle management.
+//! RDMA Device & Context Discovery — HCA Probing & Link Attributes.
+//!
+//! ### Device Discovery & Context Mechanism
+//! 1. **Sysfs & Verbs Enumeration (`ibv_get_device_list`)**: Scans kernel InfiniBand sysfs entries
+//!    (`/sys/class/infiniband/*`) to discover physical Host Channel Adapters (e.g. Mellanox/NVIDIA ConnectX).
+//! 2. **Device Context Instantiation (`ibv_open_device`)**: Opens an unbuffered user-space file descriptor
+//!    (`/dev/infiniband/uverbsX`), creating an [`RdmaContext`] that serves as the root capability anchor
+//!    for all Protection Domains, Completion Queues, and Queue Pairs.
+//! 3. **Port & GID Attribute Probing (`ibv_query_port`, `ibv_query_gid`)**: Queries link layer status
+//!    (`IBV_PORT_ACTIVE`), maximum transmission unit (MTU), and GID table entries to determine whether the
+//!    link is running over native InfiniBand or RoCEv2 (RDMA over Converged Ethernet) over IPv4/IPv6.
+//! 4. **Strict RAII Cleanup**: `ibv_close_device` safely releases driver handles on drop.
 
 use std::sync::Arc;
 
