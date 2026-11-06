@@ -19,6 +19,7 @@ pub mod kernel;
 pub mod memory;
 pub mod nic;
 pub mod overload;
+pub mod rdma;
 
 use std::sync::OnceLock;
 
@@ -32,6 +33,7 @@ pub use kernel::{
 pub use memory::{MemoryProfile, probe_memory};
 pub use nic::{IngressHashAuthority, NicProfile, ingress_steering_cpu, probe_nic};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
+pub use rdma::{RdmaProfile, RdmaTransportType, RdmaVendor, probe_rdma};
 
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub struct HardwareTopology {
     pub kernel: KernelProfile,
     /// NIC ingress distribution profile (hardware RSS vs kernel software hash).
     pub nic: NicProfile,
+    /// Host RDMA hardware and subsystem profile (InfiniBand, RoCE v2, iWARP, EFA).
+    pub rdma: RdmaProfile,
     /// Number of logical CPU cores available to the process (respects container cgroups limits).
     pub available_cores: usize,
     /// Number of worker threads allocated for traffic processing.
@@ -130,6 +134,7 @@ impl HardwareTopology {
         let memory = probe_memory();
         let kernel = probe_kernel();
         let nic = probe_nic();
+        let rdma = rdma::probe_rdma();
         let (optimal_max_idle_per_key, concurrency_shards) =
             compute_optimal_pool_concurrency(cpu.available_cores, memory.total_bytes);
 
@@ -138,6 +143,7 @@ impl HardwareTopology {
             memory,
             kernel,
             nic,
+            rdma,
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
@@ -157,6 +163,7 @@ impl HardwareTopology {
             memory,
             kernel,
             nic: NicProfile::software("explicit topology: RSS not probed"),
+            rdma: RdmaProfile::none("explicit topology: RDMA not probed"),
             available_cores: cpu.available_cores,
             worker_threads: cpu.available_cores,
             memory_bytes: memory.total_bytes,
@@ -176,6 +183,13 @@ impl HardwareTopology {
     #[inline]
     pub fn with_nic(mut self, nic: NicProfile) -> Self {
         self.nic = nic;
+        self
+    }
+
+    /// Attaches an explicit [`RdmaProfile`] (useful for testing).
+    #[inline]
+    pub fn with_rdma(mut self, rdma: RdmaProfile) -> Self {
+        self.rdma = rdma;
         self
     }
 
@@ -318,6 +332,7 @@ mod tests {
         assert!(topo.memory_bytes() >= 1024 * 1024);
         assert!(topo.concurrency_shards() >= 8);
         assert!(topo.optimal_max_idle_per_key() >= 128);
+        assert!(!topo.rdma.display_summary().is_empty());
     }
 
     #[test]

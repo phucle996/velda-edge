@@ -95,9 +95,6 @@ pub fn format_startup_banner(
                 prov.version, build_type, prov.git_hash
             ),
             format!(
-                "{c_gray}Platforms    :{c_reset} {c_white}Linux x86_64, aarch64 (ARM64), armv7 (ARM32){c_reset}"
-            ),
-            format!(
                 "{c_gray}CPU Detect   :{c_reset} {c_white}{} Cores{c_reset} {c_gray}({} Workers, Pinning: {}){c_reset}",
                 hardware.available_cores, worker_threads, pin_str
             ),
@@ -110,6 +107,14 @@ pub fn format_startup_banner(
             format!(
                 "{c_gray}Kernel       :{c_reset} {c_white}Linux {}{c_reset} {c_gray}=>{c_reset} {c_bcyan}Accel: {}{c_reset}",
                 kernel_ver_str, accel_str
+            ),
+            format!(
+                "{c_gray}RDMA Detect  :{c_reset} {}{c_reset}",
+                if hardware.rdma.is_available {
+                    format!("{c_green}{}{c_reset}", hardware.rdma.display_summary())
+                } else {
+                    format!("{c_white}None{c_reset} {c_gray}(Standard Socket Path){c_reset}")
+                }
             ),
             format!(
                 "{c_gray}Runtime Dir  :{c_reset} {c_white}{}{c_reset}",
@@ -164,7 +169,6 @@ pub fn format_startup_banner(
                 "Version      : v{}-{} ({})",
                 prov.version, build_type, prov.git_hash
             ),
-            "Platforms    : Linux x86_64, aarch64 (ARM64), armv7 (ARM32)".to_string(),
             format!(
                 "CPU Detect   : {} Cores ({} Workers, Pinning: {})",
                 hardware.available_cores, worker_threads, pin_str
@@ -178,6 +182,14 @@ pub fn format_startup_banner(
             format!(
                 "Kernel       : Linux {} => Accel: {}",
                 kernel_ver_str, accel_str
+            ),
+            format!(
+                "RDMA Detect  : {}",
+                if hardware.rdma.is_available {
+                    hardware.rdma.display_summary()
+                } else {
+                    "None (Standard Socket Path)".to_string()
+                }
             ),
             format!("Runtime Dir  : {runtime_dir_display}"),
             format!("Listeners    : {listeners_display}"),
@@ -251,6 +263,7 @@ mod tests {
         assert!(plain.contains("CPU Detect   :"));
         assert!(plain.contains("RAM Detect   :"));
         assert!(plain.contains("Kernel       :"));
+        assert!(plain.contains("RDMA Detect  :"));
         assert!(plain.contains("Listeners    :"));
         assert!(plain.contains("0.0.0.0:80 (HTTP1)"));
         assert!(plain.contains("┌─────────────────┐"));
@@ -261,7 +274,31 @@ mod tests {
 
         let colored = format_startup_banner(&prov, &hardware, 8, true, &path, &listeners, true);
         assert!(colored.contains("VELDA EDGE"));
+        assert!(colored.contains("RDMA Detect  :"));
         assert!(colored.contains("\x1b["));
+
+        // Test with active mock RDMA hardware attached
+        let mut hardware_with_rdma = hardware;
+        hardware_with_rdma.rdma = velda_core::hardware::RdmaProfile {
+            is_available: true,
+            transport: velda_core::hardware::RdmaTransportType::RoceV2,
+            vendor: velda_core::hardware::RdmaVendor::Mellanox,
+            device_count: 1,
+            active_ports: 1,
+            numa_node: 0,
+            max_rate_gbps: 100,
+            reason: "mock",
+        };
+        let plain_rdma = format_startup_banner(
+            &prov,
+            &hardware_with_rdma,
+            8,
+            true,
+            &path,
+            &listeners,
+            false,
+        );
+        assert!(plain_rdma.contains("RDMA Detect  : RoCE v2 (100 Gbps, NUMA 0, NVIDIA/Mellanox)"));
     }
 
     #[test]
