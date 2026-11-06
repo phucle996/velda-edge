@@ -72,11 +72,12 @@ impl<T> SubUpstreamTable<T> {
     }
 }
 
-/// Upstream variant in the Layer 4 Raw family (TCP byte stream / UDP datagram).
+/// Upstream variant in the Layer 4 Raw family (TCP byte stream / UDP datagram / RDMA byte stream).
 #[derive(Clone, Debug)]
 pub enum RawUpstream {
     Tcp(Arc<TcpUpstream>),
     Udp(Arc<UdpUpstream>),
+    Rdma(Arc<RdmaUpstream>),
 }
 
 impl RawUpstream {
@@ -92,6 +93,14 @@ impl RawUpstream {
     pub fn as_udp(&self) -> Option<&Arc<UdpUpstream>> {
         match self {
             Self::Udp(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_rdma(&self) -> Option<&Arc<RdmaUpstream>> {
+        match self {
+            Self::Rdma(u) => Some(u),
             _ => None,
         }
     }

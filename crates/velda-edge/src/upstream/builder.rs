@@ -284,10 +284,9 @@ pub fn build_upstreams(
                 timeout_ms: timeouts.connect.as_millis().max(1000) as u64,
                 ..Default::default()
             };
-            rdma_map.insert(
-                config.id.clone(),
-                Arc::new(RdmaUpstream::new(inner, rdma_config, pool_config)),
-            );
+            let u = Arc::new(RdmaUpstream::new(inner, rdma_config, pool_config));
+            rdma_map.insert(config.id.clone(), Arc::clone(&u));
+            raw_map.insert(config.id.clone(), Arc::new(RawUpstream::Rdma(u)));
             continue;
         }
 
@@ -605,14 +604,15 @@ mod tests {
         ];
 
         let table = build_upstreams_default(&configs, None);
-        assert_eq!(table.raw.len(), 2);
+        assert_eq!(table.raw.len(), 3);
         assert_eq!(table.http.len(), 3);
         assert_eq!(table.grpc.len(), 2);
         assert_eq!(table.rdma.len(), 1);
-        assert_eq!(table.len(), 8);
+        assert_eq!(table.len(), 9);
 
         assert!(table.get_raw("u-tcp").is_some());
         assert!(table.get_raw("u-udp").is_some());
+        assert!(table.get_raw("u-rdma").is_some());
         assert!(table.get_http("u-http1").is_some());
         assert!(table.get_http("u-http2").is_some());
         assert!(table.get_http("u-http3").is_some());

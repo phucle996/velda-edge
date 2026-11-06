@@ -372,7 +372,20 @@ async fn dispatch_grpc_tcp_request_stream(
                 pipe::duplex_tcp_udp::serve(server_stream, upstream, config).await
             }
         },
-        GrpcUpstream::Rdma(upstream) => pipe::rdma::serve(server_stream, upstream, config).await,
+        GrpcUpstream::Rdma(upstream) => match upstream.strategy {
+            GrpcPipeStrategy::Buffered => {
+                pipe::buffered_tcp_rdma::serve(server_stream, upstream, config).await
+            }
+            GrpcPipeStrategy::ServerStream => {
+                pipe::server_stream_tcp_rdma::serve(server_stream, upstream, config).await
+            }
+            GrpcPipeStrategy::ClientStream => {
+                pipe::client_stream_tcp_rdma::serve(server_stream, upstream, config).await
+            }
+            GrpcPipeStrategy::Duplex => {
+                pipe::duplex_tcp_rdma::serve(server_stream, upstream, config).await
+            }
+        },
     };
 
     if let Err(e) = pipe_res {

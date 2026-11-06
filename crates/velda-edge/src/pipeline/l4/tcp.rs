@@ -10,6 +10,7 @@ use velda_transport::Connection;
 
 use crate::runtime::Runtime;
 use crate::runtime::pipeline::L4TcpConfig;
+use crate::upstream::RawUpstream;
 
 static ACTIVE_L4_TCP_CONNS: AtomicUsize = AtomicUsize::new(0);
 
@@ -65,56 +66,104 @@ pub async fn handle_l4_tcp(
         return;
     };
 
-    let Some(upstream) = rt
-        .upstreams
-        .raw
-        .get(&route.upstream_name)
-        .and_then(|u| u.as_tcp())
-    else {
+    let Some(raw_upstream) = rt.upstreams.raw.get(&route.upstream_name) else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %peer,
-            "No backend upstream available in Raw TCP upstream table; dropping connection"
+            "No backend upstream available in Raw upstream table; dropping connection"
         );
         return;
     };
 
-    tracing::debug!(
-        listener = %listener_id,
-        route = %route.id,
-        upstream = %route.upstream_name,
-        peer = %peer,
-        "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
-    );
-
-    // Resolve idle timeout from pre-compiled listener configuration or upstream fallback
-    let idle_timeout = config.idle_timeout.or(Some(upstream.timeouts().idle));
-
-    let buffer_size = config.copy_buffer_size;
-
-    match upstream
-        .dispatch_stream(|stream| {
-            velda_transport::forward_connection(conn, stream, buffer_size, idle_timeout)
-        })
-        .await
-    {
-        Ok(stats) => {
+    match raw_upstream.as_ref() {
+        RawUpstream::Tcp(upstream) => {
             tracing::debug!(
+                listener = %listener_id,
+                route = %route.id,
                 upstream = %route.upstream_name,
                 peer = %peer,
-                client_to_server = stats.client_to_server_bytes,
-                server_to_client = stats.server_to_client_bytes,
-                "L4 TCP stream forwarding completed"
+                "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
             );
+
+            let idle_timeout = config.idle_timeout.or(Some(upstream.timeouts().idle));
+            let buffer_size = config.copy_buffer_size;
+
+            match upstream
+                .dispatch_stream(|stream| {
+                    velda_transport::forward_connection(conn, stream, buffer_size, idle_timeout)
+                })
+                .await
+            {
+                Ok(stats) => {
+                    tracing::debug!(
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        client_to_server = stats.client_to_server_bytes,
+                        server_to_client = stats.server_to_client_bytes,
+                        "L4 TCP stream forwarding completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        "L4 TCP stream forwarding terminated with error"
+                    );
+                }
+            }
         }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
+        RawUpstream::Rdma(upstream) => {
+            tracing::debug!(
+                listener = %listener_id,
+                route = %route.id,
                 upstream = %route.upstream_name,
                 peer = %peer,
-                "L4 TCP stream forwarding terminated with error"
+                "Proxying L4 TCP stream to RDMA kernel-bypass upstream"
+            );
+
+            let mut rdma_stream = match upstream.acquire_stream().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        "Failed to acquire RDMA stream for L4 raw forwarding"
+                    );
+                    return;
+                }
+            };
+
+            let mut client_stream = conn.stream;
+            match tokio::io::copy_bidirectional(&mut client_stream, &mut rdma_stream).await {
+                Ok((c2s, s2c)) => {
+                    tracing::debug!(
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        client_to_server = c2s,
+                        server_to_client = s2c,
+                        "L4 TCP to RDMA stream forwarding completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        upstream = %route.upstream_name,
+                        peer = %peer,
+                        "L4 TCP to RDMA stream forwarding terminated with error"
+                    );
+                }
+            }
+        }
+        RawUpstream::Udp(_) => {
+            tracing::error!(
+                listener = %listener_id,
+                route = %route.id,
+                upstream = %route.upstream_name,
+                "Cannot forward TCP connection to UDP raw upstream"
             );
         }
     }
