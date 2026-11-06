@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use velda_core::{Action, L7Request, L7Response};
 use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::tcp::client::request::GrpcClientRequest;
 use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
 use velda_grpc::{GrpcConfig, GrpcStatus};
@@ -259,18 +258,17 @@ pub async fn process_grpc_udp_request(
             }
             GrpcPipeStrategy::Duplex => pipe::duplex_udp_tcp::serve(&req, upstream, config).await,
         },
-        GrpcUpstream::Rdma(upstream) => match upstream.acquire(config).await {
-            Ok(mut client) => {
-                let client_req = GrpcClientRequest::from_l7(&req);
-                client
-                    .invoke_client_request(&client_req, config)
-                    .await
-                    .map(|resp| resp.into_l7())
+        GrpcUpstream::Rdma(upstream) => match upstream.strategy {
+            GrpcPipeStrategy::Buffered => {
+                pipe::buffered_udp_rdma::serve(&req, upstream, config).await
             }
-            Err(e) => Err(velda_grpc::GrpcError::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                e.to_string(),
-            ))),
+            GrpcPipeStrategy::ServerStream => {
+                pipe::server_stream_udp_rdma::serve(&req, upstream, config).await
+            }
+            GrpcPipeStrategy::ClientStream => {
+                pipe::client_stream_udp_rdma::serve(&req, upstream, config).await
+            }
+            GrpcPipeStrategy::Duplex => pipe::duplex_udp_rdma::serve(&req, upstream, config).await,
         },
     };
 
