@@ -2229,6 +2229,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "velda-rdma"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "parking_lot",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
 name = "velda-router"
 version = "0.1.0"
 dependencies = [
