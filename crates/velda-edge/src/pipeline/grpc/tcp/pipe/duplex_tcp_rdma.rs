@@ -12,7 +12,7 @@
 //! 3. **Backend Target Protocol**: Target physical endpoint responds to Out-of-Band (OOB) QP handshakes and
 //!    supports HTTP/2 binary framing directly over established RDMA Queue Pairs.
 //! 4. **Pre-warmed Core Lane State**: Frontline Traffic Worker (`velda-worker-{id}`) leases an established
-//!    ready connection in `< 10ns` from the local core lane shard pre-populated by the core-local
+//!    ready connection from the local core lane shard pre-populated by the core-local
 //!    Shadow Logistics Worker (`velda-shadow-{id}`, `SCHED_IDLE`).
 //! 5. **Pipe Pattern Match**: Upstream strategy explicitly configured as `Duplex` (Bidirectional streaming).
 //!
@@ -41,7 +41,7 @@ pub async fn serve(
         mut respond,
     } = server_stream;
 
-    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard without cross-thread lock contention.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {

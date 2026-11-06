@@ -81,3 +81,77 @@ async fn test_rdma_config_presets() {
     let mock_cfg = RdmaConfig::mock();
     assert!(mock_cfg.force_mock);
 }
+
+#[tokio::test]
+async fn test_zero_copy_arena_send_lease() {
+    use velda_rdma::{RdmaSlabArena, RdmaSlabClass, RdmaSlabConfig};
+
+    let arena =
+        RdmaSlabArena::new_mock(RdmaSlabConfig::default()).expect("Mock slab arena initialization");
+
+    let (ch1, mut ch2) = MockChannel::pair(16);
+    let unified_ch1 = RdmaChannel::Mock(Arc::new(AsyncMutex::new(ch1)));
+
+    // 1. Lease a Standard2K slot
+    let mut lease = arena
+        .acquire(RdmaSlabClass::Standard2K)
+        .expect("Standard2K slot lease");
+    let test_payload = b"GET /v1/telemetry HTTP/1.1\r\nHost: edge.velda.internal\r\n\r\n";
+    lease[..test_payload.len()].copy_from_slice(test_payload);
+
+    // 2. Send directly from lease without intermediate copy
+    unified_ch1
+        .send_lease(&lease, test_payload.len())
+        .await
+        .expect("Send lease should succeed");
+
+    // 3. Verify received message on peer channel
+    let msg = ch2
+        .recv(Duration::from_millis(500))
+        .await
+        .expect("Recv should succeed");
+    assert_eq!(&msg.payload[..], test_payload);
+
+    // 4. Drop lease and verify recycling
+    drop(lease);
+    assert_eq!(
+        arena.available_slots(RdmaSlabClass::Standard2K),
+        arena.total_slots(RdmaSlabClass::Standard2K)
+    );
+}
+
+#[tokio::test]
+async fn test_zero_copy_arena_large_span_send() {
+    use velda_rdma::{RdmaSlabArena, RdmaSlabClass, RdmaSlabConfig};
+
+    let arena =
+        RdmaSlabArena::new_mock(RdmaSlabConfig::default()).expect("Mock slab arena initialization");
+
+    let (ch1, mut ch2) = MockChannel::pair(16);
+    let unified_ch1 = RdmaChannel::Mock(Arc::new(AsyncMutex::new(ch1)));
+
+    // 1. Lease a Large64K slot (contiguous span for GRO/TCP)
+    let mut large_lease = arena
+        .acquire(RdmaSlabClass::Large64K)
+        .expect("Large64K slot lease");
+
+    // Fill large payload (e.g. 32KB coalesced GRO datagram)
+    let payload_len = 32768;
+    for i in 0..payload_len {
+        large_lease[i] = (i % 251) as u8;
+    }
+
+    // 2. Dispatch via send_lease (simulating single-SGE burst post)
+    unified_ch1
+        .send_lease(&large_lease, payload_len)
+        .await
+        .expect("Send large lease should succeed");
+
+    // 3. Receive on peer
+    let msg = ch2
+        .recv(Duration::from_millis(500))
+        .await
+        .expect("Recv large payload should succeed");
+    assert_eq!(msg.payload.len(), payload_len);
+    assert_eq!(&msg.payload[..], &large_lease[..payload_len]);
+}

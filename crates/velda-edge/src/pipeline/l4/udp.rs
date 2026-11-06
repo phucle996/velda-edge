@@ -1,166 +1,22 @@
 //! Layer 4 (L4) raw UDP datagram proxying.
 //!
 //! Supports:
-//! - **Unidirectional proxying (1 chiều)**: Direct fire-and-forget datagram forwarding.
-//! - **Bidirectional proxying (2 chiều)**: Stateful flow/session tracking via [`UdpSessionTable`]
+//! - **Unidirectional proxying**: Direct fire-and-forget datagram forwarding.
+//! - **Bidirectional proxying**: Stateful flow/session tracking via [`UdpSessionTable`]
 //!   with ephemeral upstream sockets, automatic response routing back to client, and two-tier idle eviction.
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 use velda_transport::{Datagram, UdpSocket};
 
 use crate::runtime::Runtime;
 use crate::runtime::pipeline::L4UdpConfig;
-
-thread_local! {
-    /// 64KB thread-local scratch buffer per CPU core for kernel GRO demuxing.
-    ///
-    /// Allocated on heap once per worker thread, keeping it permanently warm in L1/L2 cache.
-    /// Eliminates buffer allocations inside individual session tasks (0 bytes buffer per session).
-    static GRO_SCRATCH: std::cell::RefCell<Box<[u8; 65536]>> =
-        std::cell::RefCell::new(vec![0u8; 65536].into_boxed_slice().try_into().unwrap());
-}
-
-/// Non-blocking datagram receipt with Linux UDP_GRO demuxing.
-///
-/// Returns `Ok(Some((bytes_read, gso_size)))` when data is available.
-/// If kernel coalesced multiple packets via `UDP_GRO`, `gso_size` contains the original packet length.
-fn try_recv_gro(
-    socket: &tokio::net::UdpSocket,
-    buf: &mut [u8],
-) -> std::io::Result<Option<(usize, Option<u16>)>> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let fd = socket.as_raw_fd();
-
-        socket
-            .try_io(tokio::io::Interest::READABLE, || {
-                let mut iov = libc::iovec {
-                    iov_base: buf.as_mut_ptr() as *mut libc::c_void,
-                    iov_len: buf.len(),
-                };
-                let mut cmsg_buf = [0u8; 128];
-                let mut msg = unsafe { std::mem::zeroed::<libc::msghdr>() };
-                msg.msg_iov = &mut iov;
-                msg.msg_iovlen = 1;
-                msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-                msg.msg_controllen = cmsg_buf.len() as _;
-
-                let ret = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
-                if ret < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                // Drop truncated datagrams exceeding buffer size (64KB)
-                if msg.msg_flags & libc::MSG_TRUNC != 0 {
-                    return Ok((0, None));
-                }
-
-                let bytes_read = ret as usize;
-                let mut gso_size: Option<u16> = None;
-
-                const UDP_GRO: libc::c_int = 104;
-                let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-                while !cmsg.is_null() {
-                    unsafe {
-                        if (*cmsg).cmsg_level == libc::IPPROTO_UDP && (*cmsg).cmsg_type == UDP_GRO {
-                            let data_ptr = libc::CMSG_DATA(cmsg) as *const u16;
-                            let val = std::ptr::read_unaligned(data_ptr);
-                            if val > 0 {
-                                gso_size = Some(val);
-                            }
-                            break;
-                        }
-                        cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-                    }
-                }
-
-                Ok((bytes_read, gso_size))
-            })
-            .map(Some)
-            .or_else(|e| {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        match socket.try_recv(buf) {
-            Ok(n) => Ok(Some((n, None))),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-/// Sends a batch of datagrams to an upstream connected UDP socket using `sendmmsg` (Linux).
-///
-/// Batches up to 32 datagrams in a single system call to cut syscall overhead under bursts,
-/// while strictly preserving individual datagram framing on the wire.
-async fn send_batch_to_socket(socket: &tokio::net::UdpSocket, batch: &[bytes::Bytes]) {
-    if batch.is_empty() {
-        return;
-    }
-    if batch.len() == 1 {
-        let _ = socket.send(&batch[0]).await;
-        return;
-    }
-
-    #[cfg(target_os = "linux")]
-    let sent = {
-        use std::os::fd::AsRawFd;
-        let fd = socket.as_raw_fd();
-        let batch_len = batch.len().min(32);
-
-        let mut iovecs = [libc::iovec {
-            iov_base: std::ptr::null_mut(),
-            iov_len: 0,
-        }; 32];
-        let mut msgs = unsafe { std::mem::zeroed::<[libc::mmsghdr; 32]>() };
-
-        for i in 0..batch_len {
-            iovecs[i].iov_base = batch[i].as_ptr() as *mut libc::c_void;
-            iovecs[i].iov_len = batch[i].len();
-            msgs[i].msg_hdr.msg_iov = &mut iovecs[i];
-            msgs[i].msg_hdr.msg_iovlen = 1;
-        }
-
-        let ret =
-            unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), batch_len as u32, libc::MSG_DONTWAIT) };
-        if ret > 0 { ret as usize } else { 0 }
-    };
-
-    #[cfg(target_os = "linux")]
-    {
-        let batch_len = batch.len().min(32);
-        for data in &batch[sent..batch_len] {
-            if let Err(e) = socket.send(data).await {
-                tracing::warn!(error = %e, "Failed forwarding UDP datagram to upstream");
-                break;
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        for data in batch {
-            if let Err(e) = socket.send(data).await {
-                tracing::warn!(error = %e, "Failed forwarding UDP datagram to upstream");
-                break;
-            }
-        }
-    }
-}
+use crate::upstream::RawUpstream;
 
 /// Unique identifier for an active client flow in the L4 UDP session table.
 #[derive(Debug, Clone)]
@@ -273,6 +129,19 @@ pub enum SessionAcquisition {
     CapacityExceeded,
 }
 
+/// Per-session bounded mpsc channel capacity for queuing datagrams to the session task.
+pub const UDP_SESSION_CHANNEL_CAPACITY: usize = 128;
+/// Minimum number of hash shards in the UDP session table.
+pub const MIN_SESSION_SHARDS: usize = 4;
+/// Maximum number of hash shards in the UDP session table.
+pub const MAX_SESSION_SHARDS: usize = 64;
+/// Baseline concurrent UDP session allowance scaled per worker thread.
+pub const SESSIONS_PER_WORKER: usize = 16_384;
+/// Global minimum bound for total allowable active UDP sessions.
+pub const MIN_GLOBAL_SESSIONS: usize = 16_384;
+/// Global maximum bound for total allowable active UDP sessions.
+pub const MAX_GLOBAL_SESSIONS: usize = 131_072;
+
 pub type UdpSessionShard = RwLock<FxHashMap<UdpSessionKey, UdpSessionEntry>>;
 
 /// In-memory sharded session table tracking active bidirectional L4 UDP flows with zero cross-client contention.
@@ -295,14 +164,14 @@ impl UdpSessionTable {
     pub fn new() -> Self {
         let count = velda_core::global_hardware_topology()
             .worker_threads
-            .max(4)
-            .clamp(4, 64)
+            .max(MIN_SESSION_SHARDS)
+            .clamp(MIN_SESSION_SHARDS, MAX_SESSION_SHARDS)
             .next_power_of_two();
         let max_sessions = velda_core::global_hardware_topology()
             .worker_threads
-            .max(4)
-            .saturating_mul(16_384)
-            .clamp(16_384, 131_072);
+            .max(MIN_SESSION_SHARDS)
+            .saturating_mul(SESSIONS_PER_WORKER)
+            .clamp(MIN_GLOBAL_SESSIONS, MAX_GLOBAL_SESSIONS);
 
         Self::with_capacity(count, max_sessions)
     }
@@ -372,7 +241,7 @@ impl UdpSessionTable {
             self.active_sessions.fetch_add(1, Ordering::Release);
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (tx, rx) = tokio::sync::mpsc::channel(UDP_SESSION_CHANNEL_CAPACITY);
         let entry = UdpSessionEntry::new(tx.clone(), key.client_addr);
         guard.insert(key.clone(), entry);
         SessionAcquisition::Created { sender: tx, rx }
@@ -576,247 +445,35 @@ pub async fn handle_l4_udp(
         Err(recovered) => recovered,
     };
 
-    // 6. Upstream Backend Resolution
-    let Some(up) = rt
-        .upstreams
-        .raw
-        .get(&route.upstream_name)
-        .and_then(|u| u.as_udp())
-    else {
+    // 6. Upstream Backend Resolution (Lock-free in-memory lookup)
+    let Some(raw_upstream) = rt.upstreams.raw.get(&route.upstream_name) else {
         tracing::error!(
             listener = %key.listener_id,
             route = %route.id,
             upstream = %route.upstream_name,
             peer = %client_addr,
-            "No backend upstream available in Raw UDP upstream table; dropping datagram"
+            "No backend upstream available in Raw upstream table; dropping datagram"
         );
         return;
     };
 
-    // 7. Upstream Physical Endpoint Selection with LB Affinity Context
-    let selection_ctx = match token {
-        Some(tok) => velda_lb::SelectionContext::with_hash(tok),
-        None => velda_lb::SelectionContext::with_client_ip(client_addr),
-    };
-
-    let Some(target_addr) = up.select_target_with_context(&selection_ctx) else {
-        tracing::error!(
-            listener = %key.listener_id,
-            route = %route.id,
-            upstream = %route.upstream_name,
-            peer = %client_addr,
-            "No backend endpoints available for L4 UDP upstream; dropping datagram"
-        );
-        return;
-    };
-
-    // 8. Unidirectional Mode (1 chiều): fire-and-forget datagram forwarding
-    if route.is_unidirectional() {
-        tracing::debug!(
-            listener = %key.listener_id,
-            target = %target_addr,
-            peer = %client_addr,
-            "Forwarding UDP datagram unidirectionally"
-        );
-        if let Err(e) = socket.send_to(&initial_data, target_addr).await {
-            tracing::trace!(
-                error = %e,
+    // 7. Dispatch to dedicated L4 UDP pipe strategy
+    match raw_upstream.as_ref() {
+        RawUpstream::Udp(upstream) => {
+            super::pipe::udp_udp::serve(socket, upstream, key, initial_data, route, &config).await;
+        }
+        RawUpstream::Rdma(upstream) => {
+            super::pipe::udp_rdma::serve(socket, upstream, key, initial_data, route, &config).await;
+        }
+        RawUpstream::Tcp(_) => {
+            tracing::error!(
                 listener = %key.listener_id,
-                target = %target_addr,
-                peer = %client_addr,
-                "Failed to forward UDP datagram (unidirectional)"
+                route = %route.id,
+                upstream = %route.upstream_name,
+                "Cannot forward UDP datagram to TCP raw upstream"
             );
         }
-        return;
     }
-
-    // 9. Bidirectional Flow: Allocate or retrieve conntrack session slot
-    let (mut rx, initial_bytes) = match session_table.get_or_create(&key, config.max_sessions) {
-        SessionAcquisition::Existing(sender) => {
-            // Concurrent race: another worker created the session in parallel
-            let _ = sender.try_send(initial_data);
-            return;
-        }
-        SessionAcquisition::Created { sender: _, rx } => (rx, initial_data),
-        SessionAcquisition::CapacityExceeded => {
-            tracing::trace!(
-                listener = %key.listener_id,
-                peer = %client_addr,
-                max = config.max_sessions,
-                "L4 UDP session table capacity exceeded; dropping datagram"
-            );
-            return;
-        }
-    };
-
-    let session_peer = session_table
-        .get_peer(&key)
-        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(client_addr)));
-    let downstream_socket = socket.clone();
-    let session_key = key;
-
-    tracing::debug!(
-        listener = %session_key.listener_id,
-        target = %target_addr,
-        client = %client_addr,
-        token = ?token,
-        "Established new bidirectional L4 UDP session"
-    );
-
-    let up_clone = Arc::clone(up);
-    let unassured_timeout = config.unassured_timeout;
-    let idle_timeout = route.udp_idle_timeout.unwrap_or(Duration::from_secs(30));
-
-    tokio::spawn(async move {
-        let upstream_socket = match up_clone.connect_socket(target_addr) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    listener = %session_key.listener_id,
-                    target = %target_addr,
-                    "Failed to connect accelerated upstream UDP socket for L4 session"
-                );
-                get_udp_session_table().remove(&session_key);
-                return;
-            }
-        };
-
-        // Send the initial datagram to upstream
-        if let Err(e) = upstream_socket.send(&initial_bytes).await {
-            tracing::warn!(
-                error = %e,
-                listener = %session_key.listener_id,
-                target = %target_addr,
-                "Failed to send initial UDP datagram to upstream"
-            );
-            get_udp_session_table().remove(&session_key);
-            return;
-        }
-
-        let has_activity = AtomicBool::new(false);
-        let mut assured = false;
-        let mut unassured_elapsed = Duration::ZERO;
-        let mut idle_elapsed = Duration::ZERO;
-
-        let mut watchdog_interval = tokio::time::interval(Duration::from_millis(500));
-        watchdog_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                // Client -> Gateway -> Upstream Backend (Drains batch of up to 32 datagrams via sendmmsg)
-                maybe_data = rx.recv() => {
-                    match maybe_data {
-                        Some(first_data) => {
-                            let mut batch: [bytes::Bytes; 32] = Default::default();
-                            batch[0] = first_data;
-                            let mut batch_count = 1;
-                            while batch_count < 32 {
-                                match rx.try_recv() {
-                                    Ok(d) => {
-                                        batch[batch_count] = d;
-                                        batch_count += 1;
-                                    }
-                                    Err(_) => break,
-                                }
-                            }
-
-                            send_batch_to_socket(&upstream_socket, &batch[..batch_count]).await;
-                            has_activity.store(true, Ordering::Relaxed);
-                        }
-                        None => break,
-                    }
-                }
-                // Upstream Backend -> Gateway -> Client (Zero task buffer; uses Thread-Local 64KB GRO slab)
-                ready_res = upstream_socket.readable() => {
-                    if ready_res.is_err() {
-                        break;
-                    }
-
-                    let mut drained_any = false;
-                    let mut fallback_packet: Option<(bytes::Bytes, Option<u16>)> = None;
-                    let current_peer = *session_peer.read();
-
-                    GRO_SCRATCH.with(|cell| {
-                        let mut buf = cell.borrow_mut();
-                        while let Ok(Some((n, gso_size))) = try_recv_gro(&upstream_socket, &mut buf[..]) {
-                            if n == 0 {
-                                continue;
-                            }
-                            drained_any = true;
-                            // Fast path: non-blocking GSO / batch send directly to downstream socket
-                            match downstream_socket.try_send_gso_aware(&buf[..n], gso_size, current_peer) {
-                                Some(Ok(_)) => {}
-                                Some(Err(e)) => {
-                                    tracing::trace!(
-                                        error = %e,
-                                        client = %current_peer,
-                                        "Failed forwarding UDP reply back to client"
-                                    );
-                                    break;
-                                }
-                                None => {
-                                    // Send buffer temporarily full: copy packet and exit TLS borrow to await backpressure
-                                    fallback_packet = Some((bytes::Bytes::copy_from_slice(&buf[..n]), gso_size));
-                                    break;
-                                }
-                            }
-                        }
-                    });
-
-                    if let Some((pkt, gso_size)) = fallback_packet
-                        && let Err(e) = downstream_socket
-                            .send_gso_aware(&pkt, gso_size, current_peer)
-                            .await
-                    {
-                        tracing::trace!(
-                            error = %e,
-                            client = %current_peer,
-                            "Failed forwarding UDP reply back to client with backpressure"
-                        );
-                        break;
-                    }
-
-                    if drained_any {
-                        assured = true;
-                        has_activity.store(true, Ordering::Relaxed);
-                    }
-                }
-                // Periodic Watchdog: Two-tier conntrack timeout using low-cost AtomicBool
-                _ = watchdog_interval.tick() => {
-                    let active = has_activity.swap(false, Ordering::Relaxed);
-                    if assured && active {
-                        idle_elapsed = Duration::ZERO;
-                        continue;
-                    }
-
-                    let (elapsed, limit) = match assured {
-                        true => {
-                            idle_elapsed += Duration::from_millis(500);
-                            (idle_elapsed, idle_timeout)
-                        }
-                        false => {
-                            unassured_elapsed += Duration::from_millis(500);
-                            (unassured_elapsed, unassured_timeout)
-                        }
-                    };
-
-                    if elapsed >= limit {
-                        let current_peer = *session_peer.read();
-                        tracing::debug!(
-                            client = %current_peer,
-                            target = %target_addr,
-                            assured,
-                            "UDP L4 session timeout elapsed ({limit:?}); closing session"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-
-        get_udp_session_table().remove(&session_key);
-    });
 }
 
 #[cfg(test)]

@@ -3,15 +3,15 @@
 //! ## Architectural Invariants & Hardware Mechanism
 //!
 //! Completion Queue (CQ) polling is the single most critical performance junction in kernel-bypass
-//! RDMA architectures. Traditional network stacks incur 5–15 µs of kernel interrupt processing,
-//! context switching, and socket buffer copies. While raw RDMA polling can achieve sub-microsecond
-//! round-trip latency (< 1.5 µs), a pure busy-poll loop burns 100% CPU on worker cores even during
+//! RDMA architectures. Traditional network stacks incur substantial kernel interrupt processing,
+//! context switching, and socket buffer copies. While direct RDMA polling interrogates the HCA completion
+//! ring buffer without kernel context switches, a pure busy-poll loop burns 100% CPU on worker cores even during
 //! idle traffic periods.
 //!
 //! To resolve this latency-versus-efficiency tension, `AdaptiveCqPoller` implements a two-stage
 //! hybrid completion harvesting mechanism:
 //!
-//! 1. **Fast-Path Busy-Spin (< 1 µs latency)**:
+//! 1. **Fast-Path Busy-Spin (Direct HCA Interrogation)**:
 //!    - Upon dispatch, the poller immediately interrogates the hardware CQ ring buffer up to
 //!      `spin_count` iterations using `ibv_poll_cq`.
 //!    - Under sustained or bursty edge traffic, completions are harvested instantly on the first
@@ -40,7 +40,7 @@ use crate::error::RdmaError;
 use crate::ffi::{IBV_WC_SUCCESS, ibv_wc};
 use crate::verbs::cq::CompletionQueue;
 
-/// Adaptive hybrid poller that balances sub-microsecond latency against zero CPU burn when idle.
+/// Adaptive hybrid poller that balances direct completion harvesting under load against zero CPU burn when idle.
 pub struct AdaptiveCqPoller {
     cq: Arc<CompletionQueue>,
     spin_count: u32,
@@ -71,13 +71,13 @@ impl AdaptiveCqPoller {
     /// Polls for at least one completed Work Completion matching the given timeout.
     ///
     /// 1. Fast-Path: Spins up to `spin_count` iterations directly querying hardware CQ.
-    ///    If a completion is found, returns immediately in sub-microsecond time.
+    ///    If a completion is found, returns immediately without entering kernel sleep or yielding the thread.
     /// 2. Slow-Path: Arms CQ notification (`ibv_req_notify_cq`) and awaits Tokio `AsyncFd`.
     ///    Wakes up on kernel hardware interrupt, acknowledges the event, and retrieves the completion.
     pub async fn poll_one(&self, timeout: Duration) -> Result<ibv_wc, RdmaError> {
         let mut wc_buf = [ibv_wc::default(); 1];
 
-        // 1. Fast-Path: Busy-poll for microsecond responsiveness
+        // 1. Fast-Path: Direct hardware poll without syscalls
         for _ in 0..self.spin_count {
             let count = self.cq.poll(&mut wc_buf)?;
             if count > 0 {

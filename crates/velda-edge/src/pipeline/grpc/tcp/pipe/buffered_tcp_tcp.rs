@@ -175,7 +175,7 @@ pub async fn serve(
         }
     };
 
-    // Stage 2: Lease a pre-warmed connection handle from the worker core's local lane shard (< 10ns).
+    // Stage 2: Lease a pre-warmed connection handle from the worker core's local lane shard without cross-thread lock contention.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {

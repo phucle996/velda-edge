@@ -17,8 +17,8 @@
 //!    available when incoming packets arrive from the network wire.
 //! 3. **Credit-Based Flow Control**: Integrates `CreditFlowControl` to prevent buffer overflow and
 //!    eliminate hardware Receiver Not Ready (RNR) state transitions.
-//! 4. **Adaptive Polling**: Uses `AdaptiveCqPoller` to achieve sub-microsecond latency on hot bursts
-//!    while dropping CPU utilization to 0% during idle traffic periods.
+//! 4. **Adaptive Polling**: Uses `AdaptiveCqPoller` to achieve minimal completion harvesting latency
+//!    on hot bursts without context-switch overhead, while dropping CPU utilization to 0% during idle traffic periods.
 //!
 //! ### Dual Transport Abstraction (`RdmaChannel`)
 //! `RdmaChannel` is an explicit enum representing either:
@@ -37,8 +37,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::channel::flow_control::CreditFlowControl;
-use crate::channel::poller::AdaptiveCqPoller;
+pub use flow_control::CreditFlowControl;
+pub use poller::AdaptiveCqPoller;
+pub use stream::RdmaStream;
+
 use crate::channel::wr::{SendWrBuilder, build_recv_wr};
 use crate::config::RdmaConfig;
 use crate::error::RdmaError;
@@ -49,9 +51,12 @@ use crate::verbs::mr::MemoryRegion;
 use crate::verbs::pd::ProtectionDomain;
 use crate::verbs::qp::QueuePair;
 
-pub use flow_control::CreditFlowControl as FlowControl;
-pub use poller::AdaptiveCqPoller as CqPoller;
-pub use stream::RdmaStream;
+/// Default send/recv slot size (64KB) for pre-allocated pinned hardware channel buffers.
+pub const DEFAULT_CHANNEL_SLOT_SIZE: usize = 65536;
+/// Work Request ID for standard Send WR operations.
+const WR_ID_SEND: u64 = 100;
+/// Work Request ID for One-Sided RDMA Write operations.
+const WR_ID_RDMA_WRITE: u64 = 101;
 
 /// Hardware-backed RDMA channel holding registered memory buffers and QP.
 pub struct HardwareChannel {
@@ -84,7 +89,7 @@ impl HardwareChannel {
 
         // 1. Pre-allocate contiguous pinned buffer for send/recv slots (64KB slots default).
         // Sending and receiving operate out of symmetric slots within this single registered region.
-        let slot_size = 65536;
+        let slot_size = DEFAULT_CHANNEL_SLOT_SIZE;
         let total_slots = (config.max_send_wr + config.max_recv_wr) as usize;
         let total_bytes = total_slots * slot_size;
 
@@ -154,13 +159,53 @@ impl HardwareChannel {
                 lkey: self.mr.lkey(),
             }];
 
-            let mut builder = SendWrBuilder::send(100, &sge, true);
+            let mut builder = SendWrBuilder::send(WR_ID_SEND, &sge, true);
             unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
         }
 
         // Step 4: Await send completion from hardware CQ via adaptive poller.
         self.poller.poll_one(self.timeout).await?;
         Ok(())
+    }
+
+    /// Posts a Send WR directly referencing a pre-registered virtual memory address and lkey
+    /// with a single SGE (`num_sge = 1`), eliminating intermediate user-space `memcpy`.
+    pub async fn send_registered(
+        &self,
+        addr: u64,
+        length: u32,
+        lkey: u32,
+    ) -> Result<(), RdmaError> {
+        // Step 1: Acquire flow-control credit to prevent remote RNR drops.
+        self.flow_control.try_acquire_send_credit()?;
+
+        // Step 2: Dispatch Two-Sided Send WR referencing the pre-registered memory address.
+        {
+            let sge = [ibv_sge { addr, length, lkey }];
+
+            let mut builder = SendWrBuilder::send(WR_ID_SEND, &sge, true);
+            unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
+        }
+
+        // Step 3: Await send completion from hardware CQ via adaptive poller.
+        self.poller.poll_one(self.timeout).await?;
+        Ok(())
+    }
+
+    /// Posts a Send WR directly from an `RdmaSlabLease` zero-copy buffer.
+    pub async fn send_lease(
+        &self,
+        lease: &crate::pool::RdmaSlabLease,
+        length: usize,
+    ) -> Result<(), RdmaError> {
+        if length > lease.capacity() {
+            return Err(RdmaError::BufferTooSmall {
+                capacity: lease.capacity(),
+                needed: length,
+            });
+        }
+        self.send_registered(lease.addr(), length as u32, lease.lkey())
+            .await
     }
 
     /// Receives data from the RDMA Queue Pair.
@@ -221,7 +266,8 @@ impl HardwareChannel {
                 lkey: self.mr.lkey(),
             }];
 
-            let mut builder = SendWrBuilder::rdma_write(101, &sge, remote_addr, rkey, true);
+            let mut builder =
+                SendWrBuilder::rdma_write(WR_ID_RDMA_WRITE, &sge, remote_addr, rkey, true);
             unsafe { self.qp.post_send(builder.as_raw_mut()) }?;
         }
 
@@ -259,6 +305,37 @@ impl RdmaChannel {
             Self::Mock(mock) => {
                 let guard = mock.lock().await;
                 guard.send(Bytes::copy_from_slice(data), None).await
+            }
+        }
+    }
+
+    /// Sends registered memory directly over the RDMA channel without intermediate memcpy.
+    pub async fn send_registered(
+        &self,
+        addr: u64,
+        length: u32,
+        lkey: u32,
+    ) -> Result<(), RdmaError> {
+        match self {
+            Self::Hardware(hw) => hw.send_registered(addr, length, lkey).await,
+            Self::Mock(mock) => {
+                let guard = mock.lock().await;
+                guard.send_registered(addr, length, lkey).await
+            }
+        }
+    }
+
+    /// Sends directly from an `RdmaSlabLease` zero-copy buffer.
+    pub async fn send_lease(
+        &self,
+        lease: &crate::pool::RdmaSlabLease,
+        length: usize,
+    ) -> Result<(), RdmaError> {
+        match self {
+            Self::Hardware(hw) => hw.send_lease(lease, length).await,
+            Self::Mock(mock) => {
+                let guard = mock.lock().await;
+                guard.send_lease(lease, length).await
             }
         }
     }

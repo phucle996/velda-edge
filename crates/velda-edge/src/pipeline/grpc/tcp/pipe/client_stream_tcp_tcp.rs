@@ -28,7 +28,7 @@ pub async fn serve(
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
 ) -> Result<(), GrpcError> {
-    // Stage 1: Lease pre-warmed connection handle from worker core lane shard (< 10ns).
+    // Stage 1: Lease pre-warmed connection handle from worker core lane shard without cross-thread lock contention.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {

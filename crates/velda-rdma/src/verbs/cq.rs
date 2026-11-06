@@ -6,7 +6,7 @@
 //!    entry into the associated Completion Queue (CQ).
 //! 2. **Dual-Mode Completion Harvesting**:
 //!    - **Fast-path Busy-Polling (`ibv_poll_cq`)**: Directly inspects the mapped memory ring buffer
-//!      without entering the kernel, delivering sub-microsecond latency (`< 1µs`).
+//!      without entering the kernel or incurring context switch overhead.
 //!    - **Slow-path Event Notification (`ibv_req_notify_cq` + `ibv_comp_channel`)**: When idle,
 //!      the channel arms hardware MSI-X interrupts on an event file descriptor (`RawFd`), waking up
 //!      the Tokio event loop via `AsyncFd` and saving 100% CPU when no traffic is present.

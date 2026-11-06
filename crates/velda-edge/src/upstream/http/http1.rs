@@ -24,12 +24,15 @@ pub struct Http1ClientResource {
     pub last_used_at: Instant,
 }
 
+/// Idle age threshold below which a recently used socket is considered healthy without probing syscalls.
+const RECENT_USAGE_HEALTHY_THRESHOLD: Duration = Duration::from_millis(500);
+
 impl PoolableResource for Http1ClientResource {
     fn is_healthy(&self) -> bool {
         // Fast-path: Sockets utilized within the last 500ms are actively hot in the kernel TCP stack.
-        // Bypasses the try_read() syscall completely (0 syscalls, pure RAM < 10ns).
+        // Bypasses the try_read() syscall completely (0 syscalls, pure RAM lookup).
         // Only probes sockets that have sat idle for >= 500ms.
-        if self.last_used_at.elapsed() < Duration::from_millis(500) {
+        if self.last_used_at.elapsed() < RECENT_USAGE_HEALTHY_THRESHOLD {
             return true;
         }
         self.stream.is_healthy()

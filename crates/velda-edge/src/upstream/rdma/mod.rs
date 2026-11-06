@@ -8,10 +8,14 @@
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use velda_connection_pool::{PoolConfig, PoolManager, PoolableResource};
-use velda_rdma::{RdmaChannel, RdmaConfig, RdmaConnector, RdmaStream};
+use velda_rdma::{
+    RdmaChannel, RdmaConfig, RdmaConnector, RdmaError, RdmaSlabArena, RdmaSlabClass,
+    RdmaSlabConfig, RdmaSlabLease, RdmaStream,
+};
 
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;
@@ -63,7 +67,7 @@ pub struct RdmaLease {
     channel: Option<RdmaChannel>,
     endpoint: SocketAddr,
     pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
-    reusable: bool,
+    reusable: AtomicBool,
     pub is_reused: bool,
     created_at: Instant,
 }
@@ -86,7 +90,7 @@ impl DerefMut for RdmaLease {
 
 impl Drop for RdmaLease {
     fn drop(&mut self) {
-        if self.reusable
+        if self.reusable.load(Ordering::Acquire)
             && let Some(channel) = self.channel.take()
         {
             self.pool.release(
@@ -105,14 +109,14 @@ impl Drop for RdmaLease {
 
 impl RdmaLease {
     /// Marks this channel as non-reusable (e.g. on fatal hardware error).
-    pub fn mark_broken(&mut self) {
-        self.reusable = false;
+    pub fn mark_broken(&self) {
+        self.reusable.store(false, Ordering::Release);
     }
 
     /// Converts this lease into a streaming adapter implementing `AsyncRead + AsyncWrite`.
     pub fn into_stream(mut self) -> RdmaStream {
         let channel = self.channel.take().expect("RdmaLease channel missing");
-        self.reusable = false; // Owned by stream
+        self.reusable.store(false, Ordering::Release); // Owned by stream
         RdmaStream::new(channel)
     }
 }
@@ -125,6 +129,8 @@ pub struct RdmaUpstream {
     pub config: RdmaConfig,
     /// Core-lane sharded connection pool.
     pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
+    /// Pre-registered zero-copy slab memory arena.
+    arena: Arc<RdmaSlabArena>,
 }
 
 impl std::fmt::Debug for RdmaUpstream {
@@ -139,11 +145,52 @@ impl RdmaUpstream {
     /// Constructs a new pre-compiled RDMA upstream processor.
     pub fn new(inner: EdgeUpstream, config: RdmaConfig, pool_config: PoolConfig) -> Self {
         let pool = Arc::new(PoolManager::with_config(pool_config));
+        let arena = Arc::new(
+            RdmaSlabArena::new_auto(&config, RdmaSlabConfig::default()).unwrap_or_else(|_| {
+                RdmaSlabArena::new_mock(RdmaSlabConfig::default())
+                    .expect("Failed to initialize mock RDMA slab arena")
+            }),
+        );
         Self {
             inner,
             config,
             pool,
+            arena,
         }
+    }
+
+    /// Constructs an RDMA upstream with an explicitly configured slab arena.
+    pub fn with_arena(
+        inner: EdgeUpstream,
+        config: RdmaConfig,
+        pool_config: PoolConfig,
+        arena: Arc<RdmaSlabArena>,
+    ) -> Self {
+        let pool = Arc::new(PoolManager::with_config(pool_config));
+        Self {
+            inner,
+            config,
+            pool,
+            arena,
+        }
+    }
+
+    /// Access to the pre-registered zero-copy RDMA slab memory arena.
+    #[inline(always)]
+    pub fn arena(&self) -> &Arc<RdmaSlabArena> {
+        &self.arena
+    }
+
+    /// Leases a zero-copy slot directly from the upstream RDMA slab arena.
+    #[inline(always)]
+    pub fn lease_slab(&self, class: RdmaSlabClass) -> Result<RdmaSlabLease, RdmaError> {
+        self.arena.acquire(class)
+    }
+
+    /// Leases a zero-copy slot sized for `size` bytes from the upstream RDMA slab arena.
+    #[inline(always)]
+    pub fn lease_slab_for_size(&self, size: usize) -> Result<RdmaSlabLease, RdmaError> {
+        self.arena.acquire_for_size(size)
     }
 
     /// Upstream unique identifier.
@@ -152,7 +199,7 @@ impl RdmaUpstream {
         self.inner.id()
     }
 
-    /// Hot-Path: Acquires an RDMA channel lease with O(1) local core lane reuse (< 10 ns).
+    /// Hot-Path: Acquires an RDMA channel lease with O(1) local core lane reuse without cross-thread synchronization.
     pub async fn acquire(&self) -> Result<RdmaLease, EdgeError> {
         let pool = Arc::clone(&self.pool);
         let config = self.config.clone();
@@ -182,7 +229,7 @@ impl RdmaUpstream {
             channel: Some(channel),
             endpoint,
             pool: Arc::clone(&self.pool),
-            reusable: true,
+            reusable: AtomicBool::new(true),
             is_reused,
             created_at,
         })

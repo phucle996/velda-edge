@@ -6,38 +6,47 @@
 //!      [`crate::buffer::adaptive::AdaptiveBufferDimensions`].
 //!    - Prevents Out-Of-Memory (OOM) crashes by strictly enforcing `max_burst_cap`
 //!      (Dual-Constraint formula: $\le 3\times$ baseline and $\le 20\%$ headroom RAM).
-//! 2. **Eager Physical Page Commit (Anti-Page-Fault)**:
+//! 2. **Tier 1 (Permanent Contiguous Baseline Floor)**:
+//!    - Slabs across all four canonical classes (`Small4K`, `Medium16K`, `Standard32K`, `Large64K`)
+//!      in Tier 1 are carved out of **ONE single contiguous memory arena** per pool
+//!      ([`ContiguousArena`]).
+//!    - These baseline slabs never get evicted or freed throughout the lifetime of the gateway process.
+//!    - Memory slices are offset-based, page-aligned (4096 bytes), and cache-line aligned.
+//! 3. **Eager Physical Page Commit (Anti-Page-Fault)**:
 //!    - During cold-start initialization and proactive shadow replenishment, every 4096-byte memory
-//!      page in the slabs is touched (written to) to force the Linux Kernel to establish MMU PTE
-//!      mappings upfront, eliminating runtime minor page faults.
-//! 3. **Two-Tier Adaptive Memory Management**:
-//!    - **Tier 1 (Hot Baseline Floor)**: Permanent pre-warmed physical slabs, never evicted.
-//!    - **Tier 2 (Burst Standby Queue with 15s TTL)**: Spills over dynamically during traffic spikes.
-//!      Excess slabs are stored with a return timestamp and reused across multi-wave micro-bursts,
-//!      eliminating libc/jemalloc heap churn (`malloc`/`free` thrashing).
-//! 4. **Strict Core-Jailing & Shadow Maintenance**:
+//!      page in the slabs is touched with volatile writes to force the Linux Kernel MMU to establish
+//!      page table entries (PTEs) upfront, eliminating runtime minor page faults.
+//! 4. **Tier 2 (Transient Burst Standby Queue with 15s TTL)**:
+//!    - Dynamic heap allocations (`Box<[u8]>`) created dynamically during traffic spikes exceeding
+//!      the baseline floor.
+//!    - Excess slabs are stored with a return timestamp from [`crate::coarse_now_sec`] and reused
+//!      across multi-wave micro-bursts, eliminating allocator heap churn (`malloc`/`free` thrashing).
+//!    - When burst traffic subsides, `sweep_expired()` drops these excess slabs so jemalloc and the
+//!      operating system can reclaim dirty pages across the process RSS decay window.
+//! 5. **Strict Core-Jailing & Shadow Maintenance**:
 //!    - Slabs are partitioned per CPU core into [`crate::buffer::CoreBufferPool`].
-//!    - Traffic Workers exclusively acquire from and recycle into their own core's pool (0 cross-core contention).
+//!    - Traffic Workers exclusively acquire from and recycle into their own core's pool (zero cross-core contention).
 //!    - Companion Shadow Logistics Worker (`velda-shadow-{id}`) maintains its core's pool inline
 //!      under `SCHED_IDLE` using non-blocking `try_lock()`:
 //!      - **Low-Watermark Proactive Replenishment**: When available pooled slabs drop $\le 25\%$ of baseline,
 //!        the shadow worker proactively commits a batch of physical slabs into the burst queue (15s TTL).
 //!      - **15s TTL Eviction**: Unused burst slabs idle $> 15s$ are dropped back to `jemalloc` RSS.
-//! 5. **Linux RSS Memory Retention**:
-//!    - When burst slabs are evicted after 15s of inactivity, they are returned to `jemalloc`.
-//!      Because jemalloc retains dirty pages in process Resident Set Size (RSS) across its decay
-//!      window, subsequent traffic bursts reacquire warm physical pages without kernel faults.
 //! 6. **Four Canonical Slab Classes with Contiguous Slicing**:
 //!    - `Small4K` (4 KB): small JSON payloads, auth tokens, small RPC.
 //!    - `Medium16K` (16 KB): standard REST payloads, chunks.
-//!    - `Standard32K` (32 KB): medium payloads (e.g. 18 KB - 32 KB), preventing 64KB over-allocation
+//!    - `Standard32K` (32 KB): medium payloads (e.g. 18 KB - 32 KB), bridging the gap to 64 KB
 //!      while preserving a single contiguous memory slice `&[u8]` required for zero-copy SIMD WAF / JSON parsing.
 //!    - `Large64K` (64 KB): large uploads and full-frame buffering.
 
+use std::alloc::Layout;
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Physical page alignment boundary for edge buffer allocations.
+const PAGE_SIZE: usize = 4096;
 
 /// Canonical slab size classes for payload processing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,40 +86,179 @@ impl SlabClass {
     }
 }
 
+/// A single contiguous memory arena holding the Tier 1 permanent baseline floor for a pool.
+///
+/// Allocated once during [`PayloadSlabPool`] initialization with 4096-byte page alignment.
+/// All physical pages are eagerly committed via volatile memory writes during initialization
+/// to force the Linux kernel MMU to map physical frames upfront, eliminating runtime minor page faults.
+pub struct ContiguousArena {
+    ptr: NonNull<u8>,
+    layout: Option<Layout>,
+    total_bytes: usize,
+}
+
+unsafe impl Send for ContiguousArena {}
+unsafe impl Sync for ContiguousArena {}
+
+impl ContiguousArena {
+    /// Allocates and eagerly warms up a contiguous memory arena of `total_bytes` length.
+    ///
+    /// Every 4096-byte page is eagerly touched via volatile writes to commit physical memory
+    /// in the OS page tables upfront.
+    pub fn new(total_bytes: usize) -> Self {
+        if total_bytes == 0 {
+            return Self {
+                ptr: NonNull::dangling(),
+                layout: None,
+                total_bytes: 0,
+            };
+        }
+
+        let layout = Layout::from_size_align(total_bytes, PAGE_SIZE)
+            .expect("invalid memory layout for contiguous baseline arena");
+        let raw_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        let ptr = match NonNull::new(raw_ptr) {
+            Some(p) => p,
+            None => std::alloc::handle_alloc_error(layout),
+        };
+
+        // Eagerly commit physical pages: touch every 4096-byte page during arena initialization
+        // to force the Linux kernel MMU to map physical frames and eliminate runtime minor page faults.
+        // Volatile writes guarantee that LLVM does not optimize out writes to zero-initialized pages.
+        let mut page_offset = 0;
+        while page_offset < total_bytes {
+            unsafe {
+                std::ptr::write_volatile(raw_ptr.add(page_offset), 0);
+            }
+            page_offset += PAGE_SIZE;
+        }
+
+        Self {
+            ptr,
+            layout: Some(layout),
+            total_bytes,
+        }
+    }
+
+    /// Returns the total size in bytes of the contiguous arena.
+    #[inline(always)]
+    pub const fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Returns a raw immutable pointer to the base of the arena memory.
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+
+    /// Returns a raw mutable pointer to the base of the arena memory.
+    #[inline(always)]
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for ContiguousArena {
+    fn drop(&mut self) {
+        if let Some(layout) = self.layout {
+            unsafe {
+                std::alloc::dealloc(self.ptr.as_ptr(), layout);
+            }
+        }
+    }
+}
+
+/// Internal backing memory for a [`PayloadSlab`].
+enum SlabStorage {
+    /// Tier 1 permanent baseline slab carved from the contiguous arena.
+    Arena {
+        ptr: NonNull<u8>,
+        _arena: Arc<ContiguousArena>,
+    },
+    /// Tier 2 transient dynamic burst slab allocated on the heap with 15s TTL.
+    Dynamic(Box<[u8]>),
+}
+
 /// A contiguous pre-allocated byte buffer slab.
 pub struct PayloadSlab {
-    buffer: Box<[u8]>,
+    storage: SlabStorage,
     class: SlabClass,
 }
 
+unsafe impl Send for PayloadSlab {}
+unsafe impl Sync for PayloadSlab {}
+
+impl std::fmt::Debug for PayloadSlab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PayloadSlab")
+            .field("class", &self.class)
+            .field("is_arena", &self.is_arena())
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
 impl PayloadSlab {
-    /// Allocates and eagerly warms up a payload slab, touching every 4KB page.
+    /// Allocates and eagerly warms up a dynamic payload slab, touching every 4KB page.
     pub fn new(class: SlabClass) -> Self {
         let size = class.byte_size();
         let mut buf = vec![0u8; size].into_boxed_slice();
 
         // Eagerly commit physical pages: write 1 byte per 4096-byte Linux memory page
         // to force kernel page allocation and eliminate Minor Page Faults during traffic spikes.
-        let page_size = 4096;
+        let page_size = PAGE_SIZE;
         let mut offset = 0;
+        let raw_ptr = buf.as_mut_ptr();
         while offset < size {
-            buf[offset] = 0;
+            unsafe {
+                std::ptr::write_volatile(raw_ptr.add(offset), 0);
+            }
             offset += page_size;
         }
 
-        Self { buffer: buf, class }
+        Self {
+            storage: SlabStorage::Dynamic(buf),
+            class,
+        }
+    }
+
+    /// Creates a slab backed by a contiguous slice of the Tier 1 baseline arena.
+    ///
+    /// # Safety
+    /// The caller must ensure that `ptr` points to a valid, exclusive memory region of at least
+    /// `class.byte_size()` bytes within `arena`, and that no other slab shares this address range.
+    pub(crate) unsafe fn from_arena(
+        arena: Arc<ContiguousArena>,
+        ptr: NonNull<u8>,
+        class: SlabClass,
+    ) -> Self {
+        Self {
+            storage: SlabStorage::Arena { ptr, _arena: arena },
+            class,
+        }
     }
 
     /// Borrows the slab as an immutable byte slice.
     #[inline(always)]
     pub fn as_slice(&self) -> &[u8] {
-        &self.buffer
+        match &self.storage {
+            SlabStorage::Arena { ptr, .. } => unsafe {
+                std::slice::from_raw_parts(ptr.as_ptr(), self.class.byte_size())
+            },
+            SlabStorage::Dynamic(buf) => buf.as_ref(),
+        }
     }
 
     /// Borrows the slab as a mutable byte slice.
     #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.buffer
+        match &mut self.storage {
+            SlabStorage::Arena { ptr, .. } => unsafe {
+                std::slice::from_raw_parts_mut(ptr.as_ptr(), self.class.byte_size())
+            },
+            SlabStorage::Dynamic(buf) => buf.as_mut(),
+        }
     }
 
     /// Returns the slab class.
@@ -130,11 +278,41 @@ impl PayloadSlab {
     pub const fn is_empty(&self) -> bool {
         false
     }
+
+    /// Returns `true` if this slab is carved from the Tier 1 permanent contiguous arena.
+    #[inline(always)]
+    pub fn is_arena(&self) -> bool {
+        matches!(self.storage, SlabStorage::Arena { .. })
+    }
+
+    /// Returns `true` if this slab is a Tier 2 transient dynamic heap allocation.
+    #[inline(always)]
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self.storage, SlabStorage::Dynamic(_))
+    }
+
+    /// Returns a raw immutable pointer to the underlying buffer memory.
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const u8 {
+        match &self.storage {
+            SlabStorage::Arena { ptr, .. } => ptr.as_ptr(),
+            SlabStorage::Dynamic(buf) => buf.as_ptr(),
+        }
+    }
+
+    /// Returns a raw mutable pointer to the underlying buffer memory.
+    #[inline(always)]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        match &mut self.storage {
+            SlabStorage::Arena { ptr, .. } => ptr.as_ptr(),
+            SlabStorage::Dynamic(buf) => buf.as_mut_ptr(),
+        }
+    }
 }
 
 /// Internal bucket segregating permanent baseline slabs from transient burst slabs.
 struct SlabBucket {
-    /// Baseline pre-warmed physical slabs. Permanent, never evicted.
+    /// Baseline pre-warmed physical slabs carved from the contiguous arena. Permanent, never evicted.
     baseline: Vec<PayloadSlab>,
     /// Burst standby slabs paired with their return timestamp in coarse seconds.
     /// Ordered chronologically: oldest at front, newest at back.
@@ -147,6 +325,7 @@ struct SlabBucket {
 
 /// Pre-warmed two-tier adaptive slab pool managing Small (4KB), Medium (16KB), Standard (32KB), and Large (64KB) slabs.
 pub struct PayloadSlabPool {
+    arena: Arc<ContiguousArena>,
     small_bucket: Mutex<SlabBucket>,
     medium_bucket: Mutex<SlabBucket>,
     standard_bucket: Mutex<SlabBucket>,
@@ -161,6 +340,7 @@ pub struct PayloadSlabPool {
 impl std::fmt::Debug for PayloadSlabPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PayloadSlabPool")
+            .field("arena_total_bytes", &self.arena.total_bytes())
             .field("active_small", &self.active_small.load(Ordering::Relaxed))
             .field("active_medium", &self.active_medium.load(Ordering::Relaxed))
             .field(
@@ -211,27 +391,72 @@ impl PayloadSlabPool {
 
     /// Creates an adaptive slab pool with explicit baselines, max burst ceilings, and idle TTL in seconds.
     pub fn with_adaptive_limits(limits: AdaptiveSlabLimits) -> Arc<Self> {
+        let small_size = SlabClass::Small4K.byte_size();
+        let medium_size = SlabClass::Medium16K.byte_size();
+        let standard_size = SlabClass::Standard32K.byte_size();
+        let large_size = SlabClass::Large64K.byte_size();
+
+        let small_bytes = limits.small_baseline.saturating_mul(small_size);
+        let medium_bytes = limits.medium_baseline.saturating_mul(medium_size);
+        let standard_bytes = limits.standard_baseline.saturating_mul(standard_size);
+        let large_bytes = limits.large_baseline.saturating_mul(large_size);
+
+        let total_arena_bytes = small_bytes
+            .saturating_add(medium_bytes)
+            .saturating_add(standard_bytes)
+            .saturating_add(large_bytes);
+
+        // Allocate ONE single contiguous memory arena for the entire Tier 1 baseline per pool.
+        // Touch every 4096-byte page upfront to commit physical frames and eliminate minor page faults.
+        let arena = Arc::new(ContiguousArena::new(total_arena_bytes));
+        let base_ptr = arena.as_mut_ptr();
+
+        let mut current_offset = 0;
+
+        // Carve Small4K baseline slabs
         let mut small_vec = Vec::with_capacity(limits.small_baseline);
         for _ in 0..limits.small_baseline {
-            small_vec.push(PayloadSlab::new(SlabClass::Small4K));
+            let slab_ptr = unsafe { NonNull::new_unchecked(base_ptr.add(current_offset)) };
+            small_vec.push(unsafe {
+                PayloadSlab::from_arena(Arc::clone(&arena), slab_ptr, SlabClass::Small4K)
+            });
+            current_offset += small_size;
         }
 
+        // Carve Medium16K baseline slabs
         let mut medium_vec = Vec::with_capacity(limits.medium_baseline);
         for _ in 0..limits.medium_baseline {
-            medium_vec.push(PayloadSlab::new(SlabClass::Medium16K));
+            let slab_ptr = unsafe { NonNull::new_unchecked(base_ptr.add(current_offset)) };
+            medium_vec.push(unsafe {
+                PayloadSlab::from_arena(Arc::clone(&arena), slab_ptr, SlabClass::Medium16K)
+            });
+            current_offset += medium_size;
         }
 
+        // Carve Standard32K baseline slabs
         let mut standard_vec = Vec::with_capacity(limits.standard_baseline);
         for _ in 0..limits.standard_baseline {
-            standard_vec.push(PayloadSlab::new(SlabClass::Standard32K));
+            let slab_ptr = unsafe { NonNull::new_unchecked(base_ptr.add(current_offset)) };
+            standard_vec.push(unsafe {
+                PayloadSlab::from_arena(Arc::clone(&arena), slab_ptr, SlabClass::Standard32K)
+            });
+            current_offset += standard_size;
         }
 
+        // Carve Large64K baseline slabs
         let mut large_vec = Vec::with_capacity(limits.large_baseline);
         for _ in 0..limits.large_baseline {
-            large_vec.push(PayloadSlab::new(SlabClass::Large64K));
+            let slab_ptr = unsafe { NonNull::new_unchecked(base_ptr.add(current_offset)) };
+            large_vec.push(unsafe {
+                PayloadSlab::from_arena(Arc::clone(&arena), slab_ptr, SlabClass::Large64K)
+            });
+            current_offset += large_size;
         }
 
+        debug_assert_eq!(current_offset, total_arena_bytes);
+
         Arc::new(Self {
+            arena,
             small_bucket: Mutex::new(SlabBucket {
                 baseline: small_vec,
                 burst: VecDeque::new(),
@@ -264,6 +489,18 @@ impl PayloadSlabPool {
         })
     }
 
+    /// Returns the total bytes allocated for the Tier 1 contiguous baseline arena.
+    #[inline(always)]
+    pub fn arena_total_bytes(&self) -> usize {
+        self.arena.total_bytes()
+    }
+
+    /// Returns the raw pointer to the base of the Tier 1 contiguous baseline arena.
+    #[inline(always)]
+    pub fn arena_ptr(&self) -> *const u8 {
+        self.arena.as_ptr()
+    }
+
     /// Returns references to the bucket mutex and active counter for a class.
     #[inline(always)]
     fn bucket_and_counter(&self, class: SlabClass) -> (&Mutex<SlabBucket>, &AtomicUsize) {
@@ -278,15 +515,17 @@ impl PayloadSlabPool {
     /// Borrows a slab of the requested class wrapped in an RAII lease.
     ///
     /// Resolution Order:
-    /// 1. **Tier 1 (Hot Baseline)**: Pops from pre-warmed physical slabs (0 alloc, 0 page fault).
+    /// 1. **Tier 1 (Hot Baseline)**: Pops from pre-warmed contiguous arena slabs (0 alloc, 0 page fault).
     /// 2. **Tier 2 (Burst Standby Queue)**: Pops from warm user-space burst queue (0 alloc).
     /// 3. **Spillover Dynamic Allocation**: Dynamically allocates if below `max_burst_cap`.
     /// 4. **Anti-OOM Protection**: Returns `None` if `max_burst_cap` has been reached.
     pub fn acquire(self: &Arc<Self>, class: SlabClass) -> Option<PayloadSlabLease> {
         let (bucket_mutex, active_counter) = self.bucket_and_counter(class);
-        let mut guard = bucket_mutex.lock().unwrap();
+        let mut guard = bucket_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // 1. Try baseline (fastest path, hot pre-warmed)
+        // 1. Try baseline (fastest path, hot pre-warmed contiguous arena)
         let slab = if let Some(slab) = guard.baseline.pop() {
             slab
         } else if let Some((_, slab)) = guard.burst.pop_front() {
@@ -328,34 +567,46 @@ impl PayloadSlabPool {
     #[inline(always)]
     pub fn baseline_slots(&self, class: SlabClass) -> usize {
         let (bucket, _) = self.bucket_and_counter(class);
-        bucket.lock().unwrap().baseline_limit
+        bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .baseline_limit
     }
 
     /// Returns the absolute max burst ceiling for a class.
     #[inline(always)]
     pub fn max_burst_cap(&self, class: SlabClass) -> usize {
         let (bucket, _) = self.bucket_and_counter(class);
-        bucket.lock().unwrap().max_burst_limit
+        bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .max_burst_limit
     }
 
     /// Returns the count of burst slabs currently held in standby for a class.
     #[inline(always)]
     pub fn burst_standby_count(&self, class: SlabClass) -> usize {
         let (bucket, _) = self.bucket_and_counter(class);
-        bucket.lock().unwrap().burst.len()
+        bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .burst
+            .len()
     }
 
     /// Returns the total number of slabs currently sitting in the pool for a class (baseline + burst).
     #[inline(always)]
     pub fn total_pooled(&self, class: SlabClass) -> usize {
         let (bucket, _) = self.bucket_and_counter(class);
-        let guard = bucket.lock().unwrap();
+        let guard = bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.baseline.len() + guard.burst.len()
     }
 
     /// Performs non-blocking maintenance on this core's slab pool using [`crate::coarse_now_sec`].
     ///
-    /// # Strict Core-Jailing & 1-ALU Cycle Coarse Clock Invariant
+    /// # Strict Core-Jailing & Coarse Clock Invariant
     /// Executed exclusively by `velda-shadow-{core_id}` companion worker pinned to the same CPU core.
     /// Uses non-blocking `try_lock()`: if the Traffic Worker on this core is currently acquiring
     /// or recycling a slab, this cycle is immediately skipped with zero lock contention.
@@ -368,7 +619,7 @@ impl PayloadSlabPool {
     ///    incurring kernel minor page faults.
     /// 2. **Low-Watermark Proactive Replenishment**:
     ///    When available pooled slabs drop $\le 25\%$ of baseline capacity (due to traffic spike),
-    ///    the shadow worker proactively pre-warms a batch of slabs, eagerly touching each 4KB page
+    ///    the shadow worker proactively pre-warms a batch of dynamic slabs, eagerly touching each 4KB page
     ///    (physical commit) and placing them into the burst standby queue with a 15s expiration timestamp.
     ///    This guarantees that the frontline traffic worker never has to perform cold page allocations
     ///    on the hot path.
@@ -456,16 +707,27 @@ impl PayloadSlabPool {
         let (bucket_mutex, active_counter) = self.bucket_and_counter(slab.class);
         active_counter.fetch_sub(1, Ordering::Relaxed);
 
-        let mut guard = bucket_mutex.lock().unwrap();
-        // Priority 1: Refill permanent baseline floor (Zero clock overhead)
-        if guard.baseline.len() < guard.baseline_limit {
+        let mut guard = bucket_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slab.is_arena() {
+            // Priority 1: Permanent Tier 1 baseline floor.
+            // Slabs carved from the contiguous arena never get evicted or freed throughout process lifetime.
             guard.baseline.push(slab);
+            // Invariant defense: If returning an arena slab pushes total pooled beyond max_burst_limit
+            // (e.g. Due to dynamic slabs held in burst standby), trim the oldest burst standby slab.
+            while guard.baseline.len() + guard.burst.len() > guard.max_burst_limit {
+                if guard.burst.pop_front().is_none() {
+                    break;
+                }
+            }
         } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
-            // Priority 2: Retain in burst standby queue with timestamp from coarse clock (~0.5ns L1 load)
+            // Priority 2: Retain dynamic slab in Tier 2 burst standby queue.
+            // Stamped with coarse integer clock (relaxed atomic load without syscall overhead).
             let now_sec = crate::coarse_now_sec();
             guard.burst.push_back((now_sec, slab));
         }
-        // Priority 3: Above max_burst_limit -> slab drops and frees back to allocator
+        // Priority 3: Above max_burst_limit -> slab drops and frees its Box<[u8]> back to jemalloc RSS arena
     }
 }
 
@@ -493,6 +755,51 @@ impl PayloadSlabPool {
 pub struct PayloadSlabLease {
     slab: Option<PayloadSlab>,
     pool: Arc<PayloadSlabPool>,
+}
+
+impl std::fmt::Debug for PayloadSlabLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PayloadSlabLease")
+            .field("class", &self.class())
+            .field("is_arena", &self.is_arena())
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl PayloadSlabLease {
+    /// Returns the slab class of this lease.
+    #[inline(always)]
+    pub fn class(&self) -> SlabClass {
+        self.slab
+            .as_ref()
+            .expect("PayloadSlabLease held invalid state")
+            .class()
+    }
+
+    /// Returns `true` if this lease holds a Tier 1 contiguous arena slab.
+    #[inline(always)]
+    pub fn is_arena(&self) -> bool {
+        self.slab.as_ref().is_some_and(|s| s.is_arena())
+    }
+
+    /// Returns `true` if this lease holds a Tier 2 dynamic burst slab.
+    #[inline(always)]
+    pub fn is_dynamic(&self) -> bool {
+        self.slab.as_ref().is_some_and(|s| s.is_dynamic())
+    }
+
+    /// Borrows the slab as an immutable byte slice.
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[u8] {
+        self.deref()
+    }
+
+    /// Borrows the slab as a mutable byte slice.
+    #[inline(always)]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.deref_mut()
+    }
 }
 
 impl Deref for PayloadSlabLease {
@@ -525,6 +832,14 @@ impl Drop for PayloadSlabLease {
     }
 }
 
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    let _ = assert_send_sync::<PayloadSlab>;
+    let _ = assert_send_sync::<PayloadSlabLease>;
+    let _ = assert_send_sync::<PayloadSlabPool>;
+    let _ = assert_send_sync::<ContiguousArena>;
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +849,8 @@ mod tests {
         let small = PayloadSlab::new(SlabClass::Small4K);
         assert_eq!(small.len(), 4096);
         assert_eq!(small.class(), SlabClass::Small4K);
+        assert!(small.is_dynamic());
+        assert!(!small.is_arena());
 
         let med = PayloadSlab::new(SlabClass::Medium16K);
         assert_eq!(med.len(), 16384);
@@ -574,6 +891,8 @@ mod tests {
                 .expect("acquire small slab");
             assert_eq!(pool.active_leases(SlabClass::Small4K), 1);
             assert_eq!(lease.len(), 4096);
+            assert!(lease.is_arena());
+            assert!(!lease.is_dynamic());
 
             lease[0] = 0xAA;
             lease[4095] = 0xBB;
@@ -590,6 +909,7 @@ mod tests {
             .expect("acquire small slab 2");
         assert_eq!(pool.active_leases(SlabClass::Small4K), 1);
         assert_eq!(lease2.len(), 4096);
+        assert!(lease2.is_arena());
     }
 
     #[test]
@@ -617,11 +937,15 @@ mod tests {
             .acquire(SlabClass::Medium16K)
             .expect("lease 2 (baseline)");
         assert_eq!(pool.active_leases(SlabClass::Medium16K), 2);
+        assert!(l1.is_arena());
+        assert!(l2.is_arena());
 
         // 2. Acquire burst (2 slots spillover)
         let l3 = pool.acquire(SlabClass::Medium16K).expect("lease 3 (burst)");
         let l4 = pool.acquire(SlabClass::Medium16K).expect("lease 4 (burst)");
         assert_eq!(pool.active_leases(SlabClass::Medium16K), 4);
+        assert!(l3.is_dynamic());
+        assert!(l4.is_dynamic());
 
         // 3. Attempt 5th acquire -> Anti-OOM cap reached -> returns None!
         assert!(pool.acquire(SlabClass::Medium16K).is_none());
@@ -691,6 +1015,7 @@ mod tests {
         // Frontline traffic worker acquires next slab instantly from warm burst queue (0 alloc)!
         let l5 = pool.acquire(SlabClass::Standard32K).unwrap();
         assert_eq!(l5.len(), 32768);
+        assert!(l5.is_dynamic());
 
         drop(l1);
         drop(l2);
@@ -709,5 +1034,316 @@ mod tests {
         assert!(evicted_after > 0);
         // Pool cleanly returns to baseline floor without resource leak
         assert_eq!(pool.burst_standby_count(SlabClass::Standard32K), 0);
+    }
+
+    #[test]
+    fn test_contiguous_baseline_arena_slicing_and_validity() {
+        let limits = AdaptiveSlabLimits {
+            small_baseline: 4,
+            small_max_cap: 8,
+            medium_baseline: 2,
+            medium_max_cap: 4,
+            standard_baseline: 2,
+            standard_max_cap: 4,
+            large_baseline: 1,
+            large_max_cap: 2,
+            idle_ttl_secs: 15,
+        };
+
+        // Expected arena size: 4 * 4KB + 2 * 16KB + 2 * 32KB + 1 * 64KB = 16K + 32K + 64K + 64K = 176 KB = 180224 bytes
+        let expected_total_bytes = 4 * 4096 + 2 * 16384 + 2 * 32768 + 65536;
+        assert_eq!(expected_total_bytes, 180224);
+
+        let pool = PayloadSlabPool::with_adaptive_limits(limits);
+        assert_eq!(pool.arena_total_bytes(), expected_total_bytes);
+
+        let arena_start = pool.arena_ptr() as usize;
+        let arena_end = arena_start + expected_total_bytes;
+
+        // Verify base pointer is 4096-byte page-aligned
+        assert_eq!(
+            arena_start % PAGE_SIZE,
+            0,
+            "Arena base pointer must be 4096-byte page-aligned"
+        );
+
+        // Acquire all baseline slabs
+        let mut leases = Vec::new();
+        for _ in 0..4 {
+            leases.push(pool.acquire(SlabClass::Small4K).expect("small slab"));
+        }
+        for _ in 0..2 {
+            leases.push(pool.acquire(SlabClass::Medium16K).expect("medium slab"));
+        }
+        for _ in 0..2 {
+            leases.push(pool.acquire(SlabClass::Standard32K).expect("standard slab"));
+        }
+        leases.push(pool.acquire(SlabClass::Large64K).expect("large slab"));
+
+        assert_eq!(leases.len(), 9);
+
+        // Collect slab ranges (start, end, len)
+        let mut ranges: Vec<(usize, usize, usize)> = leases
+            .iter()
+            .map(|l| {
+                let start = l.as_ptr() as usize;
+                let len = l.len();
+                let end = start + len;
+                (start, end, len)
+            })
+            .collect();
+
+        // Sort by start address
+        ranges.sort_by_key(|r| r.0);
+
+        // Verify that the first slab begins at the arena start
+        assert_eq!(ranges[0].0, arena_start);
+
+        // Verify each slab is page-aligned (multiple of 4096)
+        for (i, &(start, _, _)) in ranges.iter().enumerate() {
+            assert_eq!(
+                start % PAGE_SIZE,
+                0,
+                "Slab {} at address {:#x} must be 4096-byte page-aligned",
+                i,
+                start
+            );
+        }
+
+        // Verify strict contiguity: slab[i].end == slab[i+1].start with 0 wasted gaps
+        for i in 0..ranges.len() - 1 {
+            assert_eq!(
+                ranges[i].1,
+                ranges[i + 1].0,
+                "Slab {} end ({:#x}) must match slab {} start ({:#x}) without gaps",
+                i,
+                ranges[i].1,
+                i + 1,
+                ranges[i + 1].0
+            );
+        }
+
+        // Verify that the last slab ends exactly at arena_end
+        assert_eq!(ranges.last().unwrap().1, arena_end);
+
+        // Verify memory independence: write unique pattern to each slab and assert no corruption
+        for (idx, lease) in leases.iter_mut().enumerate() {
+            assert!(lease.is_arena());
+            assert!(!lease.is_dynamic());
+            let fill_byte = (idx as u8) + 1;
+            lease[0] = fill_byte;
+            let len = lease.len();
+            lease[len - 1] = 0xAA ^ fill_byte;
+        }
+
+        // Read back and verify all patterns are intact (disjoint memory ranges)
+        for (idx, lease) in leases.iter().enumerate() {
+            let fill_byte = (idx as u8) + 1;
+            assert_eq!(lease[0], fill_byte);
+            let len = lease.len();
+            assert_eq!(lease[len - 1], 0xAA ^ fill_byte);
+        }
+
+        // Drop all leases
+        drop(leases);
+
+        // Verify all baseline pools are refilled and 0 active leases remain
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Medium16K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Standard32K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Large64K), 0);
+        assert_eq!(pool.total_pooled(SlabClass::Small4K), 4);
+        assert_eq!(pool.total_pooled(SlabClass::Medium16K), 2);
+        assert_eq!(pool.total_pooled(SlabClass::Standard32K), 2);
+        assert_eq!(pool.total_pooled(SlabClass::Large64K), 1);
+    }
+
+    #[test]
+    fn test_burst_spillover_and_ttl_expiration() {
+        let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
+            small_baseline: 2,
+            small_max_cap: 5,
+            medium_baseline: 1,
+            medium_max_cap: 3,
+            standard_baseline: 1,
+            standard_max_cap: 3,
+            large_baseline: 1,
+            large_max_cap: 3,
+            idle_ttl_secs: 15,
+        });
+
+        // 1. Acquire 2 baseline slabs
+        let l1 = pool.acquire(SlabClass::Small4K).expect("baseline 1");
+        let l2 = pool.acquire(SlabClass::Small4K).expect("baseline 2");
+        assert!(l1.is_arena());
+        assert!(l2.is_arena());
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 2);
+
+        // 2. Spill over into dynamic burst allocations
+        let l3 = pool.acquire(SlabClass::Small4K).expect("burst 1");
+        let l4 = pool.acquire(SlabClass::Small4K).expect("burst 2");
+        let l5 = pool.acquire(SlabClass::Small4K).expect("burst 3");
+        assert!(l3.is_dynamic());
+        assert!(l4.is_dynamic());
+        assert!(l5.is_dynamic());
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 5);
+
+        // 3. Exceeding max_cap returns None (Anti-OOM protection)
+        assert!(pool.acquire(SlabClass::Small4K).is_none());
+
+        // 4. Return dynamic slabs first
+        drop(l3);
+        drop(l4);
+        drop(l5);
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 2);
+        assert_eq!(pool.burst_standby_count(SlabClass::Small4K), 3);
+
+        // Immediate sweep should evict 0 because TTL hasn't expired
+        let evicted = pool.sweep_expired();
+        assert_eq!(evicted, 0);
+
+        // Simulate TTL passage by backdating timestamps
+        {
+            let mut guard = pool.small_bucket.lock().unwrap();
+            for (ts, _) in guard.burst.iter_mut() {
+                *ts = ts.saturating_sub(20);
+            }
+        }
+
+        // Sweep expired drops all 3 transient burst slabs
+        let evicted = pool.sweep_expired();
+        assert_eq!(evicted, 3);
+        assert_eq!(pool.burst_standby_count(SlabClass::Small4K), 0);
+
+        // 5. Return baseline arena slabs
+        drop(l1);
+        drop(l2);
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 0);
+        assert_eq!(pool.total_pooled(SlabClass::Small4K), 2);
+
+        // Subsequent acquire retrieves the permanent arena slab
+        let reacquired = pool.acquire(SlabClass::Small4K).expect("reacquired");
+        assert!(reacquired.is_arena());
+    }
+
+    #[test]
+    fn test_raii_lease_mutation_and_lifecycle() {
+        let pool = PayloadSlabPool::new(1, 1, 1, 1);
+
+        for class in [
+            SlabClass::Small4K,
+            SlabClass::Medium16K,
+            SlabClass::Standard32K,
+            SlabClass::Large64K,
+        ] {
+            let mut lease = pool.acquire(class).expect("acquire lease");
+            assert_eq!(lease.class(), class);
+            assert_eq!(lease.len(), class.byte_size());
+            assert!(!lease.is_empty());
+
+            // Write through DerefMut
+            lease[0] = 0x12;
+            let last_idx = lease.len() - 1;
+            lease[last_idx] = 0x34;
+
+            // Read through Deref
+            assert_eq!(lease[0], 0x12);
+            assert_eq!(lease[last_idx], 0x34);
+
+            // Sub-slice borrowing
+            let slice = &lease[..4];
+            assert_eq!(slice[0], 0x12);
+
+            // Mut slice method
+            lease.as_mut_slice()[1] = 0x56;
+            assert_eq!(lease.as_slice()[1], 0x56);
+
+            drop(lease);
+            assert_eq!(pool.active_leases(class), 0);
+        }
+    }
+
+    #[test]
+    fn test_multithreaded_slab_concurrency() {
+        let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
+            small_baseline: 8,
+            small_max_cap: 32,
+            medium_baseline: 8,
+            medium_max_cap: 32,
+            standard_baseline: 4,
+            standard_max_cap: 16,
+            large_baseline: 4,
+            large_max_cap: 16,
+            idle_ttl_secs: 15,
+        });
+
+        let mut handles = Vec::new();
+        let num_threads = 8;
+        let iterations_per_thread = 100;
+
+        for thread_id in 0..num_threads {
+            let pool_clone = Arc::clone(&pool);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..iterations_per_thread {
+                    let class = match (thread_id + i) % 4 {
+                        0 => SlabClass::Small4K,
+                        1 => SlabClass::Medium16K,
+                        2 => SlabClass::Standard32K,
+                        _ => SlabClass::Large64K,
+                    };
+
+                    let mut lease = pool_clone.acquire(class).expect("thread lease acquisition");
+                    let expected_val = ((thread_id * 17 + i) % 251 + 1) as u8;
+
+                    // Mutate buffer
+                    lease[0] = expected_val;
+                    let last = lease.len() - 1;
+                    lease[last] = expected_val ^ 0xFF;
+
+                    // Verify consistency
+                    assert_eq!(lease[0], expected_val);
+                    assert_eq!(lease[last], expected_val ^ 0xFF);
+
+                    // Drop lease
+                    drop(lease);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread completed successfully");
+        }
+
+        // Verify that after all threads join, all active leases return to 0
+        assert_eq!(pool.active_leases(SlabClass::Small4K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Medium16K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Standard32K), 0);
+        assert_eq!(pool.active_leases(SlabClass::Large64K), 0);
+    }
+
+    #[test]
+    fn test_zero_baseline_pool() {
+        let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
+            small_baseline: 0,
+            small_max_cap: 4,
+            medium_baseline: 0,
+            medium_max_cap: 4,
+            standard_baseline: 0,
+            standard_max_cap: 4,
+            large_baseline: 0,
+            large_max_cap: 4,
+            idle_ttl_secs: 15,
+        });
+
+        assert_eq!(pool.arena_total_bytes(), 0);
+
+        let lease = pool
+            .acquire(SlabClass::Small4K)
+            .expect("dynamic acquire with 0 baseline");
+        assert!(lease.is_dynamic());
+        assert!(!lease.is_arena());
+        drop(lease);
+
+        assert_eq!(pool.burst_standby_count(SlabClass::Small4K), 1);
     }
 }

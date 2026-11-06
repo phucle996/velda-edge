@@ -78,92 +78,29 @@ pub async fn handle_l4_tcp(
     };
 
     match raw_upstream.as_ref() {
-        // [Standard Pipe: Linux Kernel Network Stack via splice / TcpAccelerationPath]
-        // Activation Condition: route upstream configured with `transport = "tcp"`.
         RawUpstream::Tcp(upstream) => {
-            tracing::debug!(
-                listener = %listener_id,
-                route = %route.id,
-                upstream = %route.upstream_name,
-                peer = %peer,
-                "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
-            );
-
-            let idle_timeout = config.idle_timeout.or(Some(upstream.timeouts().idle));
-            let buffer_size = config.copy_buffer_size;
-
-            match upstream
-                .dispatch_stream(|stream| {
-                    velda_transport::forward_connection(conn, stream, buffer_size, idle_timeout)
-                })
-                .await
-            {
-                Ok(stats) => {
-                    tracing::debug!(
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        client_to_server = stats.client_to_server_bytes,
-                        server_to_client = stats.server_to_client_bytes,
-                        "L4 TCP stream forwarding completed"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        "L4 TCP stream forwarding terminated with error"
-                    );
-                }
-            }
+            super::pipe::tcp_tcp::serve(
+                conn,
+                upstream,
+                &config,
+                route.id,
+                &route.upstream_name,
+                peer,
+                &listener_id,
+            )
+            .await;
         }
-        // [Acceleration Pipe: Hardware Kernel-Bypass via velda-rdma Queue Pairs]
-        // Activation Conditions:
-        // 1. Upstream configuration declared with `transport = "rdma"`.
-        // 2. Host possesses an active RDMA NIC (`libibverbs.so.1`) or runs in verified software mock mode.
-        // 3. Pre-warmed RdmaStream leased from core lane in < 10ns without hot-path lock contention.
         RawUpstream::Rdma(upstream) => {
-            tracing::debug!(
-                listener = %listener_id,
-                route = %route.id,
-                upstream = %route.upstream_name,
-                peer = %peer,
-                "Proxying L4 TCP stream to RDMA kernel-bypass upstream"
-            );
-
-            let mut rdma_stream = match upstream.acquire_stream().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        "Failed to acquire RDMA stream for L4 raw forwarding"
-                    );
-                    return;
-                }
-            };
-
-            let mut client_stream = conn.stream;
-            match tokio::io::copy_bidirectional(&mut client_stream, &mut rdma_stream).await {
-                Ok((c2s, s2c)) => {
-                    tracing::debug!(
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        client_to_server = c2s,
-                        server_to_client = s2c,
-                        "L4 TCP to RDMA stream forwarding completed"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        upstream = %route.upstream_name,
-                        peer = %peer,
-                        "L4 TCP to RDMA stream forwarding terminated with error"
-                    );
-                }
-            }
+            super::pipe::tcp_rdma::serve(
+                conn,
+                upstream,
+                &config,
+                route.id,
+                &route.upstream_name,
+                peer,
+                &listener_id,
+            )
+            .await;
         }
         RawUpstream::Udp(_) => {
             tracing::error!(

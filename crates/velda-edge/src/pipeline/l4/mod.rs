@@ -3,6 +3,7 @@
 //! Provides raw stream (TCP) and datagram (UDP) forwarding between downstream
 //! clients and backend targets with zero TLS termination or application parsing.
 
+pub mod pipe;
 pub mod tcp;
 pub mod udp;
 

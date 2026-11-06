@@ -24,6 +24,17 @@ use tokio::sync::mpsc;
 use crate::error::RdmaError;
 use crate::verbs::qp::QpAddress;
 
+/// Mock Work Request ID for standard Send operations.
+const MOCK_WR_ID_SEND: u64 = 1;
+/// Mock Work Request ID for One-Sided RDMA Write operations.
+const MOCK_WR_ID_WRITE: u64 = 2;
+/// Mock baseline QP numbers.
+const MOCK_BASE_QPN_1: u32 = 1001;
+const MOCK_BASE_QPN_2: u32 = 1002;
+/// Mock baseline packet sequence numbers.
+const MOCK_BASE_PSN_1: u32 = 100;
+const MOCK_BASE_PSN_2: u32 = 200;
+
 /// Simulated RDMA message transmitted over memory channels.
 #[derive(Debug, Clone)]
 pub struct MockMessage {
@@ -38,8 +49,10 @@ pub struct MockMessage {
 pub struct MockChannel {
     tx: mpsc::Sender<MockMessage>,
     rx: mpsc::Receiver<MockMessage>,
-    qp_address: QpAddress,
-    remote_address: QpAddress,
+    /// Local Queue Pair address projection.
+    pub qp_address: QpAddress,
+    /// Remote peer Queue Pair address projection.
+    pub remote_address: QpAddress,
     send_credits: Arc<AtomicU32>,
     remote_credits: Arc<AtomicU32>,
 }
@@ -54,15 +67,15 @@ impl MockChannel {
         let credits2 = Arc::new(AtomicU32::new(capacity as u32));
 
         let addr1 = QpAddress {
-            qpn: 1001,
-            psn: 100,
+            qpn: MOCK_BASE_QPN_1,
+            psn: MOCK_BASE_PSN_1,
             lid: 1,
             gid: crate::ffi::ibv_gid { raw: [0; 16] },
         };
 
         let addr2 = QpAddress {
-            qpn: 1002,
-            psn: 200,
+            qpn: MOCK_BASE_QPN_2,
+            psn: MOCK_BASE_PSN_2,
             lid: 2,
             gid: crate::ffi::ibv_gid { raw: [1; 16] },
         };
@@ -110,7 +123,7 @@ impl MockChannel {
         self.send_credits.fetch_sub(1, Ordering::AcqRel);
 
         let msg = MockMessage {
-            wr_id: 1,
+            wr_id: MOCK_WR_ID_SEND,
             payload,
             imm_data,
             remote_addr: None,
@@ -121,6 +134,33 @@ impl MockChannel {
             .send(msg)
             .await
             .map_err(|_| RdmaError::Disconnected("Mock peer disconnected".into()))
+    }
+
+    /// Simulates posting an RDMA Send Work Request referencing a pre-registered memory address.
+    pub async fn send_registered(
+        &self,
+        addr: u64,
+        length: u32,
+        _lkey: u32,
+    ) -> Result<(), RdmaError> {
+        let slice = unsafe { std::slice::from_raw_parts(addr as *const u8, length as usize) };
+        self.send(Bytes::copy_from_slice(slice), None).await
+    }
+
+    /// Simulates posting an RDMA Send Work Request directly from an `RdmaSlabLease`.
+    pub async fn send_lease(
+        &self,
+        lease: &crate::pool::RdmaSlabLease,
+        length: usize,
+    ) -> Result<(), RdmaError> {
+        if length > lease.capacity() {
+            return Err(RdmaError::BufferTooSmall {
+                capacity: lease.capacity(),
+                needed: length,
+            });
+        }
+        let payload = Bytes::copy_from_slice(&lease[..length]);
+        self.send(payload, None).await
     }
 
     /// Simulates receiving an RDMA Send Work Request.
@@ -145,7 +185,7 @@ impl MockChannel {
         imm_data: Option<u32>,
     ) -> Result<(), RdmaError> {
         let msg = MockMessage {
-            wr_id: 2,
+            wr_id: MOCK_WR_ID_WRITE,
             payload,
             imm_data,
             remote_addr: Some(remote_addr),

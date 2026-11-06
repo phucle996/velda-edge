@@ -13,7 +13,7 @@
 //!    with hardware access keys (`lkey`/`rkey`), enabling wire-speed DMA validation.
 //! 3. **Queue Pair & Credit-Based Flow Control**: Bidirectional communication executes over Reliable Connected
 //!    Queue Pairs (RC QP). Atomic credit tracking strictly prevents Receiver Not Ready (RNR) hardware drops.
-//! 4. **Adaptive Hybrid Polling**: Sub-microsecond fast-path busy polling (`< 1µs`) during active traffic bursts
+//! 4. **Adaptive Hybrid Polling**: Direct fast-path busy polling during active traffic bursts
 //!    coupled with slow-path hardware MSI-X interrupt sleep (`tokio::io::unix::AsyncFd` via `ibv_comp_channel`)
 //!    during idle windows, eliminating idle CPU burn.
 //!
@@ -23,7 +23,7 @@
 //!
 //! ### Deterministic Thread Topology (`AGENTS.md` Section 2.9)
 //! - **Frontline Traffic Worker (`velda-worker-{id}`)**: Exclusively serves hot-path traffic by leasing
-//!   pre-warmed Queue Pairs from its core-local lane shard in `< 10ns`. Never spawns threads or blocks.
+//!   pre-warmed Queue Pairs from its core-local lane shard without cross-thread coordination. Never spawns threads or blocks on the hot path.
 //! - **Shadow Logistics Worker (`velda-shadow-{id}`)**: Autonomous background companion thread pinned to the
 //!   same CPU core running under `SCHED_IDLE`, exclusively responsible for Out-of-Band (OOB) handshakes,
 //!   hardware QP initialization, and replenishing warm connections into the lane shard.
@@ -34,6 +34,7 @@ pub mod connector;
 pub mod error;
 pub mod ffi;
 pub mod mock;
+pub mod pool;
 pub mod verbs;
 
 pub use channel::{HardwareChannel, RdmaChannel, RdmaStream};
@@ -41,6 +42,7 @@ pub use config::RdmaConfig;
 pub use connector::RdmaConnector;
 pub use error::RdmaError;
 pub use mock::{MockChannel, MockMessage};
+pub use pool::{RdmaSlabArena, RdmaSlabClass, RdmaSlabConfig, RdmaSlabLease};
 pub use verbs::{
     CompletionQueue, MemoryRegion, ProtectionDomain, QpAddress, QueuePair, RdmaContext, RdmaDevice,
 };

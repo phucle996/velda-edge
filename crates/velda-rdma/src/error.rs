@@ -58,6 +58,10 @@ pub enum RdmaError {
     )]
     InsufficientCredits { available: u32, required: u32 },
 
+    /// RDMA slab arena exhausted for the requested slot class.
+    #[error("RDMA slab arena exhausted for class {class:?}")]
+    ArenaExhausted { class: &'static str },
+
     /// Operation timed out.
     #[error("RDMA operation timed out: {0}")]
     Timeout(String),

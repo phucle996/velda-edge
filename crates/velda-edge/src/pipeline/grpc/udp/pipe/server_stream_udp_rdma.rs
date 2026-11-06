@@ -8,7 +8,7 @@
 //! 1. **Upstream Configuration**: Route resolves to an upstream backend with `protocol.transport = "rdma"`.
 //! 2. **Hardware & Driver Availability**: Host possesses an RDMA-capable NIC (`libibverbs.so.1`) or runs in mock simulation mode.
 //! 3. **Backend Target Protocol**: Target physical endpoint responds to OOB QP handshakes and speaks HTTP/2 over RDMA.
-//! 4. **Pre-warmed Core Lane State**: Ready connection leased in `< 10ns` from the local core lane shard pre-populated by Shadow Worker.
+//! 4. **Pre-warmed Core Lane State**: Ready connection leased directly from the local core lane shard pre-populated by Shadow Worker.
 //! 5. **Pipe Pattern Match**: Upstream strategy explicitly configured as `ServerStream` (1 request to N response chunks).
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
@@ -30,7 +30,7 @@ pub async fn serve(
     // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 
-    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard (< 10ns).
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard without cross-thread lock contention.
     let mut client = upstream.acquire(config).await.map_err(|e| {
         tracing::warn!(
             error = %e,
