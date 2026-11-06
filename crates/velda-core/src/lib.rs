@@ -97,15 +97,14 @@ pub use lifecycle::{Action, CachedResponseDirective, Hook, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use hardware::{
-    AccelerationTier, BusyPollTier, CorePartition, CoreSteeringTier, CpuProfile,
-    CpuRegisterCapabilities, DeadPeerTeardownTier, HardwareSizing, HardwareTopology,
-    IngressHashAuthority, KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile,
-    MultipathResilienceTier, MultiplexPacingTier, NicProfile, OutboundPortScalingTier,
-    OverloadConfig, OverloadLevel, OverloadTracker, RegisterWidth, UdpEgressTier, UdpOffloadTier,
-    compute_optimal_pool_concurrency, concurrency_shards, copy_bulk_payload,
-    global_hardware_topology, ingress_steering_cpu, init_hardware_topology,
-    optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory, probe_memory_usage, probe_nic,
-    set_current_thread_idle_priority,
+    AccelerationTier, BusyPollTier, CoreSteeringTier, CpuProfile, CpuRegisterCapabilities,
+    DeadPeerTeardownTier, HardwareSizing, HardwareTopology, IngressHashAuthority,
+    KernelAccelerationLadder, KernelProfile, KernelVersion, MemoryProfile, MultipathResilienceTier,
+    MultiplexPacingTier, NicProfile, OutboundPortScalingTier, OverloadConfig, OverloadLevel,
+    OverloadTracker, RegisterWidth, UdpEgressTier, UdpOffloadTier, compute_optimal_pool_concurrency,
+    concurrency_shards, copy_bulk_payload, global_hardware_topology, ingress_steering_cpu,
+    init_hardware_topology, optimal_max_idle_per_key, probe_cpu, probe_kernel, probe_memory,
+    probe_memory_usage, probe_nic, set_current_thread_idle_priority,
 };
 pub use provenance::Provenance;
 pub use request_id::{ID_POOL_CAPACITY, ID_POOL_LOW_WATERMARK, RequestIdPool, next_request_id};
@@ -114,6 +113,6 @@ pub use socket::{
 };
 pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
 pub use worker::{
-    WorkerDescriptor, WorkerId, WorkerRegistry, WorkerRole, WorkerState, get_allowed_cores,
-    global_worker_registry, pin_current_thread_to_core,
+    CorePartition, WorkerDescriptor, WorkerId, WorkerRegistry, WorkerRole, WorkerState,
+    get_allowed_cores, global_worker_registry, pin_current_thread_to_core,
 };

@@ -199,9 +199,80 @@ pub fn pin_current_thread_to_core(core_id: usize) -> bool {
     }
 }
 
+/// Core allocation strategy mapping host hardware cores directly to Data Plane traffic workers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePartition {
+    /// Full list of logical CPU core IDs permitted by the host OS and container cgroups.
+    pub allowed_cores: Vec<usize>,
+
+    /// Logical core IDs dedicated strictly to Data Plane traffic workers (100% of allowed cores).
+    ///
+    /// # Invariant
+    /// Every allowed core is assigned a traffic worker thread affined via `sched_setaffinity`.
+    /// Worker threads execute single-threaded Tokio event loops to maximize network I/O throughput.
+    pub traffic_cores: Vec<usize>,
+}
+
+impl CorePartition {
+    /// Derives the zero-waste hardware core partitioning plan from allowed OS/cgroups core IDs.
+    ///
+    /// # Sizing Rules
+    /// - **Empty input**: Defaults safely to `[0]` (1 traffic worker on Core 0).
+    /// - **N Cores**: Allocates all `N` cores to `traffic_cores` (100% edge capacity).
+    ///   Shadow logistics tasks run on companion threads utilizing idle CPU cycles.
+    pub fn plan(allowed: &[usize]) -> Self {
+        let cores = if allowed.is_empty() {
+            vec![0]
+        } else {
+            allowed.to_vec()
+        };
+
+        Self {
+            allowed_cores: cores.clone(),
+            traffic_cores: cores,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_core_partition_empty_fallback() {
+        let p = CorePartition::plan(&[]);
+        assert_eq!(p.allowed_cores, vec![0]);
+        assert_eq!(p.traffic_cores, vec![0]);
+    }
+
+    #[test]
+    fn test_core_partition_single_core() {
+        let p = CorePartition::plan(&[0]);
+        assert_eq!(p.allowed_cores, vec![0]);
+        assert_eq!(p.traffic_cores, vec![0]);
+    }
+
+    #[test]
+    fn test_core_partition_two_cores_all_traffic() {
+        let p = CorePartition::plan(&[0, 1]);
+        assert_eq!(p.allowed_cores, vec![0, 1]);
+        assert_eq!(p.traffic_cores, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_core_partition_four_cores_all_traffic() {
+        let p = CorePartition::plan(&[0, 1, 2, 3]);
+        assert_eq!(p.allowed_cores, vec![0, 1, 2, 3]);
+        assert_eq!(p.traffic_cores, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_core_partition_eight_cores_all_traffic_with_arbitrary_ids() {
+        let allowed = vec![10, 11, 12, 13, 14, 15, 16, 17];
+        let p = CorePartition::plan(&allowed);
+        assert_eq!(p.allowed_cores, allowed);
+        assert_eq!(p.traffic_cores, allowed);
+    }
 
     #[test]
     fn test_worker_registry_lifecycle() {

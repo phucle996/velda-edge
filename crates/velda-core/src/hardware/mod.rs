@@ -19,7 +19,6 @@ pub mod kernel;
 pub mod memory;
 pub mod nic;
 pub mod overload;
-pub mod partition;
 pub mod sizing;
 
 use std::sync::OnceLock;
@@ -33,8 +32,8 @@ pub use kernel::{
 pub use memory::{MemoryProfile, probe_memory};
 pub use nic::{IngressHashAuthority, NicProfile, ingress_steering_cpu, probe_nic};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
-pub use partition::CorePartition;
 pub use sizing::{AdaptiveBufferDimensions, HardwareSizing};
+pub use crate::worker::CorePartition;
 
 /// Hardware topology profile probed once and cached in RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
