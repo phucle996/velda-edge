@@ -736,6 +736,20 @@ impl HeaderWorkspace {
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
+        // ---------------------------------------------------------------------
+        // Anti-Memory Bloat & Zero-Syscall Jemalloc Recycling Mechanism:
+        //
+        // 1. Capacity <= 4x baseline (<= 128 headers):
+        //    Calls `headers.clear()` (O(1)). Retains the existing heap capacity
+        //    so subsequent requests with 40-100 headers run with ZERO allocations.
+        //
+        // 2. Capacity > 4x baseline (> 128 headers):
+        //    Anomalous/spike request. Re-instantiates `HeaderMap::with_capacity(32)`.
+        //    The oversized vector is dropped back to `jemalloc`'s user-space thread
+        //    free-list (pure user-space dealloc, ZERO kernel syscalls `munmap`).
+        //    This allows jemalloc's dirty page decay (`madvise(MADV_DONTNEED)`) to reclaim
+        //    physical RSS RAM if the surge subsides, eliminating unbounded memory bloat.
+        // ---------------------------------------------------------------------
         if self.headers.capacity() > self.initial_capacity * 4 {
             self.headers = HeaderMap::with_capacity(self.initial_capacity);
         } else {
