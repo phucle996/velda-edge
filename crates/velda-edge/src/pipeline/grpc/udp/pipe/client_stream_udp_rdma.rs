@@ -44,8 +44,26 @@ pub async fn serve(
     })?;
 
     // Step 3: Forward client stream over hardware RDMA link and await final response.
-    client
-        .invoke_client_request(&client_req, config)
-        .await
-        .map(|resp| resp.into_l7())
+    let mut res = client.invoke_client_request(&client_req, config).await;
+
+    // Step 4: Self-Healing Retry (RFC 9113 §8.1.4):
+    // If upstream connection dropped or remote peer returned REFUSED_STREAM,
+    // retry transparently 1-shot on a fresh connection.
+    if let Err(ref e) = res
+        && e.is_stale_or_refused()
+    {
+        tracing::debug!(
+            upstream = %upstream.id(),
+            error = %e,
+            "gRPC RDMA upstream connection dropped; self-healing with fresh connection"
+        );
+        if let Ok(mut fresh_client) = upstream.acquire_fresh(config).await {
+            res = fresh_client
+                .invoke_client_request(&client_req, config)
+                .await;
+        }
+    }
+
+    // Step 5: Convert response into downstream L7Response for UDP datagram egress.
+    res.map(|resp| resp.into_l7())
 }
