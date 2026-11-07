@@ -1,6 +1,7 @@
 //! In-memory dynamic SNI resolver.
 //!
-//! Enforces strict No-SNI and Unknown-SNI rejection policies.
+//! Enforces strict No-SNI and Unknown-SNI rejection policies with
+//! hardware-adaptive multi-versioning (AVX2 / SSE4.2 / NEON / Dual-64 SWAR / Quad-32 SWAR).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -12,6 +13,74 @@ use rustls::sign::CertifiedKey;
 
 use crate::error::TlsError;
 
+/// Pre-resolved function pointer for hardware-accelerated SNI dot search (RFC 6125 wildcard prefix extraction).
+pub type FindDotFn = fn(bytes: &[u8]) -> Option<usize>;
+
+/// Pre-resolved function pointer for hardware-accelerated domain byte comparison.
+pub type DomainEqFn = fn(a: &[u8], b: &[u8]) -> bool;
+
+/// Ultra-fast non-cryptographic hasher for in-memory SNI hash tables.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FastBuildHasher;
+
+impl std::hash::BuildHasher for FastBuildHasher {
+    type Hasher = FastHasher;
+    #[inline(always)]
+    fn build_hasher(&self) -> Self::Hasher {
+        FastHasher {
+            state: 0xcbf29ce484222325,
+        }
+    }
+}
+
+/// Hardware-friendly fast 64-bit hasher.
+#[derive(Debug, Clone, Copy)]
+pub struct FastHasher {
+    state: u64,
+}
+
+impl std::hash::Hasher for FastHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        let mut z = self.state.wrapping_add(0x9e3779b97f4a7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.state = (self.state ^ (byte as u64)).wrapping_mul(0x100000001b3);
+        }
+    }
+
+    #[inline(always)]
+    fn write_u8(&mut self, i: u8) {
+        self.state = (self.state ^ (i as u64)).wrapping_mul(0x100000001b3);
+    }
+
+    #[inline(always)]
+    fn write_u16(&mut self, i: u16) {
+        self.state = (self.state ^ (i as u64)).wrapping_mul(0x100000001b3);
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, i: u32) {
+        self.state = (self.state ^ (i as u64)).wrapping_mul(0x100000001b3);
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, i: u64) {
+        self.state = (self.state ^ i).wrapping_mul(0x100000001b3);
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.state = (self.state ^ (i as u64)).wrapping_mul(0x100000001b3);
+    }
+}
+
 /// In-memory SNI certificate resolver.
 ///
 /// Matches incoming TLS `ClientHello` against pre-compiled certificates.
@@ -21,9 +90,11 @@ use crate::error::TlsError;
 /// - If ClientHello does not specify an SNI, returns `None` (handshake aborted).
 /// - If ClientHello SNI is not found, returns `None` (handshake aborted).
 pub struct SniResolver {
-    exact_matches: HashMap<String, Arc<CertifiedKey>>,
-    wildcard_matches: HashMap<String, Arc<CertifiedKey>>,
+    exact_matches: HashMap<String, Arc<CertifiedKey>, FastBuildHasher>,
+    wildcard_matches: HashMap<String, Arc<CertifiedKey>, FastBuildHasher>,
     default_key: Option<Arc<CertifiedKey>>,
+    find_dot_fn: FindDotFn,
+    domain_eq_fn: DomainEqFn,
 }
 
 impl fmt::Debug for SniResolver {
@@ -46,12 +117,15 @@ impl Default for SniResolver {
 pub const WILDCARD_PREFIX: &str = "*.";
 
 impl SniResolver {
-    /// Creates a new empty `SniResolver`.
+    /// Creates a new empty `SniResolver` resolving optimal hardware register dispatch at bootstrap.
     pub fn new() -> Self {
+        let (find_dot_fn, domain_eq_fn) = resolve_hardware_dispatch();
         Self {
-            exact_matches: HashMap::new(),
-            wildcard_matches: HashMap::new(),
+            exact_matches: HashMap::with_hasher(FastBuildHasher),
+            wildcard_matches: HashMap::with_hasher(FastBuildHasher),
             default_key: None,
+            find_dot_fn,
+            domain_eq_fn,
         }
     }
 
@@ -93,6 +167,8 @@ impl SniResolver {
     ///
     /// Performs strictly case-sensitive matching on the exact target domain name,
     /// falling back to single-label wildcard subdomain match (RFC 6125 Section 6.4.3).
+    ///
+    /// Executes directly through pre-resolved hardware function pointers on the hot path.
     pub fn lookup(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
         let trimmed = sni.trim();
 
@@ -102,7 +178,8 @@ impl SniResolver {
         }
 
         // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only)
-        if let Some(idx) = trimmed.find('.') {
+        // Direct execution via pre-resolved function pointer (0 runtime branching ladder)
+        if let Some(idx) = (self.find_dot_fn)(trimmed.as_bytes()) {
             let parent_domain = &trimmed[idx + 1..];
             if let Some(key) = self.wildcard_matches.get(parent_domain) {
                 return Some(key.clone());
@@ -110,6 +187,18 @@ impl SniResolver {
         }
 
         None
+    }
+
+    /// Scans for the first dot '.' using the hardware-accelerated register tier.
+    #[inline(always)]
+    pub fn find_dot(&self, bytes: &[u8]) -> Option<usize> {
+        (self.find_dot_fn)(bytes)
+    }
+
+    /// Evaluates domain byte equality using the hardware-accelerated register tier.
+    #[inline(always)]
+    pub fn domain_eq(&self, a: &[u8], b: &[u8]) -> bool {
+        (self.domain_eq_fn)(a, b)
     }
 
     /// Returns the number of unique exact SNI mappings.
@@ -135,18 +224,23 @@ impl ResolvesServerCert for SniResolver {
 /// In-memory SNI server configuration resolver for domain-level TLS & ALPN isolation.
 #[derive(Clone, Debug)]
 pub struct SniConfigResolver {
-    exact_configs: HashMap<String, Arc<rustls::ServerConfig>>,
-    wildcard_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+    exact_configs: HashMap<String, Arc<rustls::ServerConfig>, FastBuildHasher>,
+    wildcard_configs: HashMap<String, Arc<rustls::ServerConfig>, FastBuildHasher>,
     pub default_config: Arc<rustls::ServerConfig>,
+    find_dot_fn: FindDotFn,
+    domain_eq_fn: DomainEqFn,
 }
 
 impl SniConfigResolver {
     /// Creates a new `SniConfigResolver` with a fallback default configuration.
     pub fn new(default_config: Arc<rustls::ServerConfig>) -> Self {
+        let (find_dot_fn, domain_eq_fn) = resolve_hardware_dispatch();
         Self {
-            exact_configs: HashMap::new(),
-            wildcard_configs: HashMap::new(),
+            exact_configs: HashMap::with_hasher(FastBuildHasher),
+            wildcard_configs: HashMap::with_hasher(FastBuildHasher),
             default_config,
+            find_dot_fn,
+            domain_eq_fn,
         }
     }
 
@@ -175,7 +269,7 @@ impl SniConfigResolver {
         if let Some(cfg) = self.exact_configs.get(trimmed) {
             return Some(cfg);
         }
-        if let Some(idx) = trimmed.find('.') {
+        if let Some(idx) = (self.find_dot_fn)(trimmed.as_bytes()) {
             let parent = &trimmed[idx + 1..];
             if let Some(cfg) = self.wildcard_configs.get(parent) {
                 return Some(cfg);
@@ -191,6 +285,18 @@ impl SniConfigResolver {
             .clone()
     }
 
+    /// Scans for the first dot '.' using the hardware-accelerated register tier.
+    #[inline(always)]
+    pub fn find_dot(&self, bytes: &[u8]) -> Option<usize> {
+        (self.find_dot_fn)(bytes)
+    }
+
+    /// Evaluates domain byte equality using the hardware-accelerated register tier.
+    #[inline(always)]
+    pub fn domain_eq(&self, a: &[u8], b: &[u8]) -> bool {
+        (self.domain_eq_fn)(a, b)
+    }
+
     /// Returns the number of exact configurations.
     pub fn exact_len(&self) -> usize {
         self.exact_configs.len()
@@ -200,6 +306,436 @@ impl SniConfigResolver {
     pub fn wildcard_len(&self) -> usize {
         self.wildcard_configs.len()
     }
+}
+
+// ============================================================================
+// Multi-Version Hardware Vector & SWAR Core
+// ============================================================================
+
+/// Resolves pre-compiled multi-version function pointers once during bootstrap.
+///
+/// Avoids dynamic branch ladders on the serving hot path.
+fn resolve_hardware_dispatch() -> (FindDotFn, DomainEqFn) {
+    let caps = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities;
+
+    match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
+        velda_core::hardware::RegisterWidth::Bits256 => (find_dot_256, domain_eq_256),
+        velda_core::hardware::RegisterWidth::Bits128 => (find_dot_128, domain_eq_128),
+        velda_core::hardware::RegisterWidth::Bits64 => (find_dot_dual_64, domain_eq_dual_64),
+        velda_core::hardware::RegisterWidth::Bits32 => (find_dot_quad_32, domain_eq_quad_32),
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tier 1: 256-bit Vector (AVX2)
+// ----------------------------------------------------------------------------
+
+#[inline]
+pub fn find_dot_256(bytes: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_dot_256_impl(bytes) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        find_dot_128(bytes)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_dot_256_impl(bytes: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = bytes.len();
+    let target = _mm256_set1_epi8(b'.' as i8);
+    let mut i = 0;
+
+    while i + 32 <= len {
+        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i) };
+        let cmp = _mm256_cmpeq_epi8(chunk, target);
+        let mask = _mm256_movemask_epi8(cmp) as u32;
+        if mask != 0 {
+            return Some(i + mask.trailing_zeros() as usize);
+        }
+        i += 32;
+    }
+
+    while i < len {
+        if unsafe { *bytes.get_unchecked(i) } == b'.' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[inline]
+pub fn domain_eq_256(a: &[u8], b: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { domain_eq_256_impl(a, b) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        domain_eq_128(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn domain_eq_256_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 32 <= len {
+        let (va, vb) = unsafe {
+            (
+                _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i),
+                _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i),
+            )
+        };
+        let cmp = _mm256_cmpeq_epi8(va, vb);
+        if _mm256_movemask_epi8(cmp) as u32 != 0xFFFF_FFFF {
+            return false;
+        }
+        i += 32;
+    }
+    while i < len {
+        if unsafe { *a.get_unchecked(i) != *b.get_unchecked(i) } {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// ----------------------------------------------------------------------------
+// Tier 2: 128-bit Vector (SSE4.2 / NEON)
+// ----------------------------------------------------------------------------
+
+#[inline]
+pub fn find_dot_128(bytes: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_dot_128_x86_impl(bytes) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { find_dot_128_neon_impl(bytes) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        find_dot_dual_64(bytes)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn find_dot_128_x86_impl(bytes: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = bytes.len();
+    let target = _mm_set1_epi8(b'.' as i8);
+    let mut i = 0;
+
+    while i + 16 <= len {
+        let chunk = unsafe { _mm_loadu_si128(bytes.as_ptr().add(i) as *const __m128i) };
+        let cmp = _mm_cmpeq_epi8(chunk, target);
+        let mask = _mm_movemask_epi8(cmp) as u32;
+        if mask != 0 {
+            return Some(i + mask.trailing_zeros() as usize);
+        }
+        i += 16;
+    }
+
+    while i < len {
+        if unsafe { *bytes.get_unchecked(i) } == b'.' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn find_dot_128_neon_impl(bytes: &[u8]) -> Option<usize> {
+    use std::arch::aarch64::*;
+    let len = bytes.len();
+    let target = vdupq_n_u8(b'.');
+    let mut i = 0;
+
+    while i + 16 <= len {
+        let chunk = unsafe { vld1q_u8(bytes.as_ptr().add(i)) };
+        let cmp = vceqq_u8(chunk, target);
+        if vmaxvq_u8(cmp) != 0 {
+            let mut buf = [0u8; 16];
+            unsafe { vst1q_u8(buf.as_mut_ptr(), cmp) };
+            for j in 0..16 {
+                if buf[j] != 0 {
+                    return Some(i + j);
+                }
+            }
+        }
+        i += 16;
+    }
+
+    while i < len {
+        if unsafe { *bytes.get_unchecked(i) } == b'.' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[inline]
+pub fn domain_eq_128(a: &[u8], b: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { domain_eq_128_x86_impl(a, b) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { domain_eq_128_neon_impl(a, b) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        domain_eq_dual_64(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn domain_eq_128_x86_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 16 <= len {
+        let (va, vb) = unsafe {
+            (
+                _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i),
+            )
+        };
+        let cmp = _mm_cmpeq_epi8(va, vb);
+        if (_mm_movemask_epi8(cmp) as u32) != 0xFFFF {
+            return false;
+        }
+        i += 16;
+    }
+    while i < len {
+        if unsafe { *a.get_unchecked(i) != *b.get_unchecked(i) } {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn domain_eq_128_neon_impl(a: &[u8], b: &[u8]) -> bool {
+    use std::arch::aarch64::*;
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 16 <= len {
+        let (va, vb) = unsafe { (vld1q_u8(a.as_ptr().add(i)), vld1q_u8(b.as_ptr().add(i))) };
+        let cmp = vceqq_u8(va, vb);
+        if vminvq_u8(cmp) != 0xFF {
+            return false;
+        }
+        i += 16;
+    }
+    while i < len {
+        if unsafe { *a.get_unchecked(i) != *b.get_unchecked(i) } {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// ----------------------------------------------------------------------------
+// Tier 3: Dual 64-bit SWAR (2x u64 parallel evaluation on superscalar ALU)
+// ----------------------------------------------------------------------------
+
+const DOT_64: u64 = 0x2e2e2e2e2e2e2e2e;
+const LOB_64: u64 = 0x0101010101010101;
+const HIB_64: u64 = 0x8080808080808080;
+
+/// Evaluates 16 bytes per cycle across two 64-bit general-purpose registers simultaneously.
+pub fn find_dot_dual_64(bytes: &[u8]) -> Option<usize> {
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i + 16 <= len {
+        let w0 = unsafe {
+            (bytes.as_ptr().add(i) as *const u64)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_64;
+        let w1 = unsafe {
+            (bytes.as_ptr().add(i + 8) as *const u64)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_64;
+
+        // Two independent SWAR zero-detection formulas executed concurrently across 2 CPU ALU ports:
+        let has_zero_0 = (w0.wrapping_sub(LOB_64)) & (!w0) & HIB_64;
+        let has_zero_1 = (w1.wrapping_sub(LOB_64)) & (!w1) & HIB_64;
+
+        if (has_zero_0 | has_zero_1) != 0 {
+            for j in 0..16 {
+                if bytes[i + j] == b'.' {
+                    return Some(i + j);
+                }
+            }
+        }
+        i += 16;
+    }
+
+    while i < len {
+        if bytes[i] == b'.' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Evaluates domain equality 16 bytes per cycle across two 64-bit registers in parallel.
+pub fn domain_eq_dual_64(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 16 <= len {
+        let a0 = unsafe { (a.as_ptr().add(i) as *const u64).read_unaligned() };
+        let b0 = unsafe { (b.as_ptr().add(i) as *const u64).read_unaligned() };
+        let a1 = unsafe { (a.as_ptr().add(i + 8) as *const u64).read_unaligned() };
+        let b1 = unsafe { (b.as_ptr().add(i + 8) as *const u64).read_unaligned() };
+
+        let diff0 = a0 ^ b0;
+        let diff1 = a1 ^ b1;
+        if (diff0 | diff1) != 0 {
+            return false;
+        }
+        i += 16;
+    }
+    while i < len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// ----------------------------------------------------------------------------
+// Tier 4: Quad 32-bit SWAR (4x u32 parallel evaluation on 4 superscalar ALU ports)
+// ----------------------------------------------------------------------------
+
+const DOT_32: u32 = 0x2e2e2e2e;
+const LOB_32: u32 = 0x01010101;
+const HIB_32: u32 = 0x80808080;
+
+/// Evaluates 16 bytes per cycle across four 32-bit general-purpose registers concurrently.
+pub fn find_dot_quad_32(bytes: &[u8]) -> Option<usize> {
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i + 16 <= len {
+        let w0 = unsafe {
+            (bytes.as_ptr().add(i) as *const u32)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_32;
+        let w1 = unsafe {
+            (bytes.as_ptr().add(i + 4) as *const u32)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_32;
+        let w2 = unsafe {
+            (bytes.as_ptr().add(i + 8) as *const u32)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_32;
+        let w3 = unsafe {
+            (bytes.as_ptr().add(i + 12) as *const u32)
+                .read_unaligned()
+                .to_le()
+        } ^ DOT_32;
+
+        // Four independent 32-bit ALU channels computed concurrently:
+        let z0 = (w0.wrapping_sub(LOB_32)) & (!w0) & HIB_32;
+        let z1 = (w1.wrapping_sub(LOB_32)) & (!w1) & HIB_32;
+        let z2 = (w2.wrapping_sub(LOB_32)) & (!w2) & HIB_32;
+        let z3 = (w3.wrapping_sub(LOB_32)) & (!w3) & HIB_32;
+
+        if (z0 | z1 | z2 | z3) != 0 {
+            for j in 0..16 {
+                if bytes[i + j] == b'.' {
+                    return Some(i + j);
+                }
+            }
+        }
+        i += 16;
+    }
+
+    while i < len {
+        if bytes[i] == b'.' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Evaluates domain equality 16 bytes per cycle across four 32-bit registers concurrently.
+pub fn domain_eq_quad_32(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + 16 <= len {
+        let a0 = unsafe { (a.as_ptr().add(i) as *const u32).read_unaligned() };
+        let b0 = unsafe { (b.as_ptr().add(i) as *const u32).read_unaligned() };
+        let a1 = unsafe { (a.as_ptr().add(i + 4) as *const u32).read_unaligned() };
+        let b1 = unsafe { (b.as_ptr().add(i + 4) as *const u32).read_unaligned() };
+        let a2 = unsafe { (a.as_ptr().add(i + 8) as *const u32).read_unaligned() };
+        let b2 = unsafe { (b.as_ptr().add(i + 8) as *const u32).read_unaligned() };
+        let a3 = unsafe { (a.as_ptr().add(i + 12) as *const u32).read_unaligned() };
+        let b3 = unsafe { (b.as_ptr().add(i + 12) as *const u32).read_unaligned() };
+
+        let d0 = a0 ^ b0;
+        let d1 = a1 ^ b1;
+        let d2 = a2 ^ b2;
+        let d3 = a3 ^ b3;
+        if (d0 | d1 | d2 | d3) != 0 {
+            return false;
+        }
+        i += 16;
+    }
+    while i < len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -243,5 +779,63 @@ mod tests {
             &resolver.resolve(Some("api.example.com")),
             &default_cfg
         ));
+    }
+
+    #[test]
+    fn test_multi_version_find_dot_all_tiers() {
+        let samples = [
+            ("api.example.com", Some(3)),
+            ("cluster_0050.domain.internal.net", Some(12)),
+            ("a.b", Some(1)),
+            (".hidden.com", Some(0)),
+            ("nodotsinthisdomain", None),
+            ("exact16chars..ok", Some(12)),
+            ("longdomainnamewithoutdotsuntilltheveryend.", Some(41)),
+        ];
+
+        for (domain, expected) in samples {
+            let bytes = domain.as_bytes();
+            assert_eq!(
+                find_dot_256(bytes),
+                expected,
+                "find_dot_256 failed on '{domain}'"
+            );
+            assert_eq!(
+                find_dot_128(bytes),
+                expected,
+                "find_dot_128 failed on '{domain}'"
+            );
+            assert_eq!(
+                find_dot_dual_64(bytes),
+                expected,
+                "find_dot_dual_64 failed on '{domain}'"
+            );
+            assert_eq!(
+                find_dot_quad_32(bytes),
+                expected,
+                "find_dot_quad_32 failed on '{domain}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_version_domain_eq_all_tiers() {
+        let d1 = b"api.velda-edge.internal.service.cluster.local";
+        let d2 = b"api.velda-edge.internal.service.cluster.local";
+        let d3 = b"api.velda-edge.internal.service.cluster.other";
+        let d4 = b"short.com";
+
+        for (a, b, expected) in [
+            (d1.as_slice(), d2.as_slice(), true),
+            (d1.as_slice(), d3.as_slice(), false),
+            (d1.as_slice(), d4.as_slice(), false),
+            (b"equal".as_slice(), b"equal".as_slice(), true),
+            (b"equal".as_slice(), b"equaL".as_slice(), false),
+        ] {
+            assert_eq!(domain_eq_256(a, b), expected);
+            assert_eq!(domain_eq_128(a, b), expected);
+            assert_eq!(domain_eq_dual_64(a, b), expected);
+            assert_eq!(domain_eq_quad_32(a, b), expected);
+        }
     }
 }

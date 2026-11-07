@@ -21,7 +21,7 @@ In high-performance edge gateways, **TLS is computationally the most expensive a
 `velda-tls` sits between the transport coordination layer (`velda-composer`) and the application protocols (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`):
 
 ```text
-[ Client ] ──────────────( TCP / TLS )──────────────> [ velda-transport ]
+[ Client ] ──────────────( TCP / TLS )──────────────> [ velda-ingress ]
                                                              │
                                                              ▼ (Connection)
                                                        [ velda-composer ]
