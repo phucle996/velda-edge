@@ -12,7 +12,7 @@ use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
 use velda_grpc::{GrpcConfig, GrpcStatus};
 use velda_router::GrpcRouteRequest;
-use velda_transport::{Datagram, UdpSocket};
+use velda_sock::{Datagram, UdpSocket};
 
 use super::engine::get_or_init_grpc_udp_engine_for_peer;
 use super::pipe;

@@ -43,9 +43,12 @@ Velda Edge is engineered as a unified polyglot monorepo:
 
 ```text
 velda-edge/
-├── crates/             # High-Performance Rust 2024 Data Plane (16 bounded crates)
+├── crates/             # High-Performance Rust 2024 Data Plane (19 bounded crates)
 │   ├── velda-core      # Primitive vocabulary (Endpoint, L7Request, L7Response)
-│   ├── velda-transport # Edge Traffic Engine, accept loops, L4 byte pump
+│   ├── velda-ingress   # Top-cone Edge Traffic Ingress Engine & declarative reconciliation
+│   ├── velda-sock      # Linux OS kernel socket mechanics (SO_REUSEPORT, TCP BBR, UDP GRO/GSO)
+│   ├── velda-xdp       # Kernel-bypass eBPF / XDP / AF_XDP ingress driver & UMEM ring arena
+│   ├── velda-rdma      # Kernel-bypass RoCEv2 / InfiniBand RDMA transport engine
 │   ├── velda-tls       # TLS termination & client engine (rustls, zero unsafe)
 │   ├── velda-http1     # RFC 9112 zero-copy HTTP/1.1 streaming engine
 │   ├── velda-http2     # RFC 9113 multiplexed HTTP/2 binary framing
@@ -75,8 +78,8 @@ velda-edge/
 Downstream Wire
       │
       ▼
-1. Transport Layer (velda-transport)
-   └── Accept connection, terminate downstream TLS (ALPN validation)
+1. Ingress Layer (velda-ingress, velda-sock, velda-xdp)
+   └── Multi-shard accept loops, kernel-bypass XDP filters, terminate downstream TLS (ALPN validation)
       │
       ▼
 2. Pipeline Layer (Handoff & Frame Decode)

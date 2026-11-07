@@ -13,8 +13,8 @@ use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::{GrpcConfig, GrpcStatus};
 use velda_router::GrpcRouteRequest;
+use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
-use velda_transport::Connection;
 
 use super::pipe;
 use crate::pipeline::DownstreamMeta;

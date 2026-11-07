@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::watch;
 
+use velda_ingress::{EngineHandle, IngressHandle};
 use velda_sync::ipc::SyncNotification;
-use velda_transport::EngineHandle;
 
 use crate::error::EdgeError;
 use crate::reload::apply_reload;
@@ -25,7 +25,7 @@ pub async fn run_ipc_server(
     socket_path: PathBuf,
     runtime_dir: PathBuf,
     shared_runtime: SharedRuntime,
-    engine_handle: Option<EngineHandle>,
+    engine_handle: Option<IngressHandle>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EdgeError> {
     // Ensure parent directory exists

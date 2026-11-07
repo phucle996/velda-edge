@@ -1,6 +1,6 @@
 //! Packet-driven Layer 7 gRPC server state machine over UDP (RFC 9000 QUIC transport).
 //!
-//! Operates in a pure packet-in / packet-out model matching `velda-transport`'s
+//! Operates in a pure packet-in / packet-out model matching `velda-ingress`'s
 //! `(listener_id, socket, Datagram)` pipeline with zero OS syscalls on the serving path.
 
 use std::collections::{HashMap, HashSet};

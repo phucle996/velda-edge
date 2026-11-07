@@ -13,7 +13,7 @@
 `velda-core` sits at the very bottom of the Data Plane dependency graph, completely decoupled from all other internal Velda crates:
 
 ```text
-       velda-transport   velda-router   velda-upstream   velda-plugin
+       velda-ingress     velda-router   velda-upstream   velda-plugin
               │                │               │               │
               └────────────────┴───────┬───────┴───────────────┘
                                        │ (shares common contracts)
@@ -24,8 +24,8 @@
 Within the runtime request pipeline, `velda-core` **is not a processing phase**. It is the concrete set of data types and contracts passed between execution stages:
 
 ```text
-L4: Client ──► velda-transport ──► Router ──► Upstream
-L7: Client ──► velda-transport ──► TLS ──► HTTP ──► Router ──► Plugin ──► Upstream
+L4: Client ──► velda-ingress (velda-sock) ──► Router ──► Upstream
+L7: Client ──► velda-ingress (velda-sock/xdp) ──► TLS ──► HTTP ──► Router ──► Plugin ──► Upstream
 ```
 
 ---
@@ -198,7 +198,7 @@ Proactively defends the Data Plane against Linux Kernel OOMKill (`SIGKILL 9`) du
 
 To maintain absolute zero-allocation efficiency and avoid business logic coupling, `velda-core` **NEVER**:
 
-- ❌ Opens TCP/UDP sockets or executes network I/O *(owned by `velda-transport`)*.
+- ❌ Opens TCP/UDP sockets or executes network I/O *(owned by `velda-sock` and `velda-ingress`)*.
 - ❌ Executes TLS handshakes or manages certificates *(owned by `velda-tls`)*.
 - ❌ Parses wire-level HTTP protocol frames *(owned by `velda-http1`, `velda-http2`, `velda-http3`)*.
 - ❌ Matches routes or executes path regexes *(owned by `velda-router`)*.

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
-use velda_transport::{Datagram, UdpSocket};
+use velda_sock::{Datagram, UdpSocket};
 
 use crate::runtime::Runtime;
 use crate::runtime::pipeline::L4UdpConfig;

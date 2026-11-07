@@ -87,7 +87,7 @@ pub struct TcpRuntimeConfig {
 /// Hardware and kernel acceleration paths—including GRO (`UDP_GRO`), GSO (`UDP_SEGMENT`),
 /// queue overflow monitoring (`SO_RXQ_OVFL`), busy polling (`SO_PREFER_BUSY_POLL`),
 /// multi-worker sharding (`SO_REUSEPORT`), and topology-aware buffer sizing—are dynamically
-/// probed and applied at runtime via [`velda_transport::UdpSocketConfig::for_topology`].
+/// probed and applied at runtime via [`velda_sock::UdpSocketConfig::for_topology`].
 ///
 /// Fields here represent purely optional operator overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

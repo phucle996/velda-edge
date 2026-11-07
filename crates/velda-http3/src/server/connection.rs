@@ -2,7 +2,7 @@
 //!
 //! # Architecture & Boundary Rationale
 //! Operates in a pure packet-in / packet-out manner without owning OS sockets,
-//! matching `velda-transport`'s `(listener_id, socket, Datagram)` handler model with zero I/O on hot paths.
+//! matching `velda-ingress`'s `(listener_id, socket, Datagram)` handler model with zero I/O on hot paths.
 //!
 //! Unlike connection-oriented HTTP/1.1 and HTTP/2 which have separate `request.rs` modules
 //! for linear byte stream parsing, HTTP/3 stream lifecycle is bound to the underlying QUIC

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use velda_router::UdpRoute;
-use velda_transport::UdpSocket;
+use velda_sock::UdpSocket;
 
 use super::super::udp::{SessionAcquisition, UdpSessionKey, get_udp_session_table};
 use crate::runtime::pipeline::L4UdpConfig;

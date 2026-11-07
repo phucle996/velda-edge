@@ -42,7 +42,7 @@ flowchart LR
 
 ### 1.1 The Pump (Máy Bơm)
 - **Role**: Continuous, high-velocity movement of raw network bytes across hardware interfaces and wire protocols.
-- **Components**: The protocol engines (`velda-transport`, `velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`).
+- **Components**: The protocol engines (`velda-ingress`, `velda-sock`, `velda-xdp`, `velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`).
 - **Mechanics**:
   - Direct socket event loops running on core-pinned frontline worker threads (`velda-worker-{k}`).
   - Low-level kernel acceleration (`TCP_NODELAY`, `TCP_QUICKACK`, socket buffer sizing).

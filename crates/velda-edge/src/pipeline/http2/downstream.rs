@@ -24,8 +24,8 @@ use velda_observability::{
 };
 use velda_plugin::RoutePluginPlan;
 use velda_router::Http2RouteRequest;
+use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
-use velda_transport::Connection;
 
 use super::pipe;
 use crate::pipeline::DownstreamMeta;

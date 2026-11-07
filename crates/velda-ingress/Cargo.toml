@@ -1,0 +1,35 @@
+[package]
+name = "velda-ingress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+velda-core = { path = "../velda-core" }
+velda-sock = { path = "../velda-sock" }
+velda-xdp = { path = "../velda-xdp" }
+tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros", "time", "rt"] }
+bytes = "1.10"
+thiserror = "2.0"
+tracing = "0.1"
+socket2 = "0.6"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full", "test-util"] }
+
+[[bench]]
+name = "single_thread_bench"
+harness = false
+
+[[bench]]
+name = "multi_thread_bench"
+harness = false
+
+[[bench]]
+name = "adversarial_bench"
+harness = false
+
+[[bench]]
+name = "memory_leak_bench"
+harness = false

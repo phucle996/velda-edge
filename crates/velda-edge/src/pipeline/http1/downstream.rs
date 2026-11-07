@@ -15,8 +15,8 @@ use velda_http1::{
     Http1ServerResponse,
 };
 use velda_router::Http1RouteRequest;
+use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
-use velda_transport::Connection;
 
 use super::pipe;
 use crate::pipeline::DownstreamMeta;

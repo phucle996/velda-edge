@@ -42,11 +42,13 @@ Upon process startup, `velda-edge` operates autonomously without requiring the G
               ↓
   5. Convert Listeners to IngressBindings
               ↓
-  6. TrafficEngine::bind() (velda-transport)
+  6. IngressEngine::split_shards() (velda-ingress)
               ↓
-  7. Spawn UDS IPC Listener (uds.rs)
+  7. Spawn Symmetrical Worker Pool & run_ingress_shard()
               ↓
-  8. Serve Ingress Traffic
+  8. Spawn UDS IPC Listener (lifecycle/ipc.rs)
+              ↓
+  9. Serve Ingress Traffic
 ```
 
 ### Hardware Adaptive Sizing (`runtime.json`)

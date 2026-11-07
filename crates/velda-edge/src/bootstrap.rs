@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use tokio::sync::watch;
 use velda_core::hardware::{HardwareTopology, init_hardware_topology};
-use velda_transport::TrafficEngine;
+use velda_ingress::IngressEngine;
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
@@ -23,7 +23,7 @@ pub struct EdgeSupervisor {
     pub hardware: HardwareTopology,
     pub runtime_profile: RuntimeProfile,
     pub shared_runtime: SharedRuntime,
-    pub engine: TrafficEngine,
+    pub engine: IngressEngine,
     pub metrics: Arc<velda_observability::MetricsStore>,
 }
 
@@ -94,8 +94,8 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
 
     let shared_runtime = new_shared_runtime(initial_runtime);
 
-    // Populate TrafficEngine with declared ingress bindings tuned to runtime profile
-    let mut engine = TrafficEngine::new();
+    // Populate IngressEngine with declared ingress bindings tuned to runtime profile
+    let mut engine = IngressEngine::new();
     let tcp_cfg = runtime_profile.to_tcp_listener_config();
     let udp_cfg = runtime_profile.to_udp_socket_config();
     let bindings = shared_runtime

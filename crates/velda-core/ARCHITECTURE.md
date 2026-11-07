@@ -12,7 +12,7 @@ Within the Velda Edge Data Plane, `velda-core` occupies the absolute bottom of t
        ┌────────────────────────────────────────────────────────┐
        │             TOP CONE: INGRESS PROTOCOLS                │
        │       [ velda-http1 | velda-http2 | velda-http3 ]      │
-       │       [        velda-grpc | velda-transport     ]      │
+       │       [        velda-grpc | velda-ingress       ]      │
        └───────────────────────────┬────────────────────────────┘
                                    │
                                    ▼

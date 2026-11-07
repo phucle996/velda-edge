@@ -42,7 +42,7 @@
 //!      - The NIC performs direct DMA transmission onto the wire. Core Slabs are never touched.
 //!    - **Bit 0 (Standard Socket Pipe - `tcp_tcp` / `udp_udp`)**:
 //!      - The acquired connection is a standard kernel socket (`TcpStream`).
-//!      - The pipeline invokes Linux [`velda_transport::splice_bidirectional`], transferring byte pages
+//!      - The pipeline invokes Linux [`velda_sock::splice_bidirectional`], transferring byte pages
 //!        directly between the client socket file descriptor and backend socket file descriptor inside
 //!        the Linux kernel pipe buffer cache.
 //!      - Data never touches user-space memory, and RDMA Slabs are never touched.

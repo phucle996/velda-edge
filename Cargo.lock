@@ -2096,15 +2096,17 @@ dependencies = [
  "velda-http1",
  "velda-http2",
  "velda-http3",
+ "velda-ingress",
  "velda-lb",
  "velda-observability",
  "velda-plugin",
  "velda-rdma",
  "velda-router",
+ "velda-sock",
  "velda-sync",
  "velda-tls",
- "velda-transport",
  "velda-upstream",
+ "velda-xdp",
 ]
 
 [[package]]
@@ -2175,6 +2177,21 @@ dependencies = [
  "tracing",
  "velda-core",
  "velda-tls",
+]
+
+[[package]]
+name = "velda-ingress"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "socket2 0.6.5",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+ "velda-sock",
+ "velda-xdp",
 ]
 
 [[package]]
@@ -2261,6 +2278,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "velda-sock"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "socket2 0.6.5",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
+]
+
+[[package]]
 name = "velda-sync"
 version = "0.1.0"
 dependencies = [
@@ -2299,19 +2329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "velda-transport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "libc",
- "socket2 0.6.5",
- "thiserror",
- "tokio",
- "tracing",
- "velda-core",
-]
-
-[[package]]
 name = "velda-upstream"
 version = "0.1.0"
 dependencies = [
@@ -2324,6 +2341,19 @@ dependencies = [
  "velda-discovery",
  "velda-lb",
  "velda-upstream",
+]
+
+[[package]]
+name = "velda-xdp"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "parking_lot",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "velda-core",
 ]
 
 [[package]]

@@ -13,7 +13,7 @@ use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 use velda_http3::server::connection::OutgoingDatagram;
 use velda_router::Http3RouteRequest;
-use velda_transport::{Datagram, UdpSocket};
+use velda_sock::{Datagram, UdpSocket};
 
 use super::engine::{Http3WorkerPool, get_or_init_h3_workers};
 use super::pipe;

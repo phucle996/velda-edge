@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use velda_core::hardware::HardwareTopology;
 use velda_discovery::DnsResolverConfig;
-use velda_transport::{EngineConfig, TcpListenerConfig, UdpSocketConfig};
+use velda_ingress::EngineConfig;
+use velda_sock::{TcpListenerConfig, UdpSocketConfig};
 
 use super::schema::*;
 

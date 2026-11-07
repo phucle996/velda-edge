@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_core::RouteId;
-use velda_transport::Connection;
+use velda_sock::Connection;
 
 use crate::runtime::pipeline::L4TcpConfig;
 use crate::upstream::raw::TcpUpstream;
@@ -51,7 +51,7 @@ pub async fn serve(
     // Utilizes Linux splice(2) kernel zero-copy where available, falling back to chunked user-space copy.
     match upstream
         .dispatch_stream(|stream| {
-            velda_transport::forward_connection(conn, stream, buffer_size, idle_timeout)
+            velda_sock::forward_connection(conn, stream, buffer_size, idle_timeout)
         })
         .await
     {

@@ -23,7 +23,7 @@ use velda_edge::upstream::{
 };
 use velda_lb::SelectionContext;
 use velda_router::UdpSessionAffinity;
-use velda_transport::{Connection, Datagram};
+use velda_sock::{Connection, Datagram};
 use velda_upstream::{Upstream, UpstreamTimeouts};
 
 // ============================================================================
@@ -99,7 +99,7 @@ async fn bench_l4_tcp_splicing_throughput() {
                 tokio::spawn(async move {
                     let _ = up
                         .dispatch_stream(|stream| {
-                            velda_transport::forward_connection(
+                            velda_sock::forward_connection(
                                 conn,
                                 stream,
                                 65536,
@@ -217,9 +217,9 @@ async fn bench_l4_udp_game_telemetry_rtt() {
 
     // 2. Velda Edge UDP Ingress
     let gateway_sock = Arc::new(
-        velda_transport::UdpSocket::bind(
+        velda_sock::UdpSocket::bind(
             "127.0.0.1:0".parse().unwrap(),
-            velda_transport::UdpSocketConfig::default(),
+            velda_sock::UdpSocketConfig::default(),
         )
         .unwrap(),
     );
@@ -847,9 +847,9 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
 
     // 2. Velda Edge UDP Ingress Gateway with Hash / Maglev Balancer
     let gateway_sock = Arc::new(
-        velda_transport::UdpSocket::bind(
+        velda_sock::UdpSocket::bind(
             "127.0.0.1:0".parse().unwrap(),
-            velda_transport::UdpSocketConfig::default(),
+            velda_sock::UdpSocketConfig::default(),
         )
         .unwrap(),
     );

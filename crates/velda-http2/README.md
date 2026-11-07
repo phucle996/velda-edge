@@ -28,7 +28,7 @@ When a client communicates with Velda Edge over HTTP/2, frames arrive asynchrono
 Client TCP / TLS bytes
   │
   ▼
-velda-transport          accept loop, path classification, TLS ALPN ("h2")
+velda-ingress            accept loop, path classification, TLS ALPN ("h2")
   │
   ▼
 velda-edge pipeline      spawns per-connection task (pipeline/l7/http2.rs)

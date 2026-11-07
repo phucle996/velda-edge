@@ -18,8 +18,14 @@ pub enum EdgeError {
         reason: String,
     },
 
-    #[error("Transport error: {0}")]
-    Transport(#[from] velda_transport::TransportError),
+    #[error("Ingress error: {0}")]
+    Ingress(#[from] velda_ingress::IngressError),
+
+    #[error("Socket error: {0}")]
+    Sock(#[from] velda_sock::SockError),
+
+    #[error("XDP error: {0}")]
+    Xdp(#[from] velda_xdp::XdpError),
 
     #[error("Upstream error: {0}")]
     Upstream(#[from] velda_upstream::UpstreamError),

@@ -24,7 +24,7 @@ That's it. This crate intentionally has no knowledge of routing, TLS, load balan
 Client TCP bytes
   │
   ▼
-velda-transport          accept loop, path classification
+velda-ingress            accept loop, path classification
   │
   ▼
 velda-edge pipeline      spawns per-connection task (pipeline/l7/http1.rs)

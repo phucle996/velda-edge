@@ -1,12 +1,12 @@
 //! Layer 4 (L4) raw TCP connection forwarding.
 //!
 //! Direct byte-level proxying between downstream client and upstream backend
-//! via `velda_transport::forward_connection`. Pure raw TCP with zero TLS termination.
+//! via `velda_sock::forward_connection`. Pure raw TCP with zero TLS termination.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use velda_transport::Connection;
+use velda_sock::Connection;
 
 use crate::runtime::Runtime;
 use crate::runtime::pipeline::L4TcpConfig;

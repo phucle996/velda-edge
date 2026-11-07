@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use velda_core::hardware::{CorePartition, HardwareTopology, set_current_thread_idle_priority};
 use velda_core::worker::get_allowed_cores;
-use velda_transport::TrafficEngine;
+use velda_ingress::IngressEngine;
 
 use crate::config::EdgeConfig;
 use crate::error::EdgeError;
@@ -24,7 +24,7 @@ use crate::runtime::SharedRuntime;
 ///    owning its dedicated shard of all TCP and UDP listener sockets with SO_REUSEPORT + SO_INCOMING_CPU.
 /// 5. Awaits graceful termination when shutdown is signaled.
 pub async fn run_gateway(
-    engine: TrafficEngine,
+    engine: IngressEngine,
     shared_runtime: SharedRuntime,
     config: EdgeConfig,
     _hardware: HardwareTopology,
@@ -61,8 +61,8 @@ pub async fn run_gateway(
         tracing::warn!(error = %e, "Gateway IPC UDS socket claim collision");
     }
 
-    // 2. Partition TrafficEngine into N dedicated WorkerEngines
-    let (workers, initial_bindings, engine_handle) = engine.into_workers(worker_count);
+    // 2. Split IngressEngine into per-shard execution contexts
+    let (initial_bindings, engine_handle, shard_contexts) = engine.split_shards(worker_count);
 
     // 3. Spawn background UDS IPC server task (runs on idle cycles via SCHED_IDLE)
     let ipc_shutdown = shutdown.clone();
@@ -86,7 +86,7 @@ pub async fn run_gateway(
     // 4. Spawn Symmetrical Worker Pool (1 Primary Traffic Worker + 1 Shadow Worker per Core)
     // Primary Shadow Worker (Worker 0) automatically hosts all process-wide shadow background services
     let worker_pool = RunningWorkerPool::spawn(
-        workers,
+        shard_contexts,
         &partition,
         initial_bindings,
         shared_runtime.clone(),

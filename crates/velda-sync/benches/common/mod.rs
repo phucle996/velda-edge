@@ -190,8 +190,12 @@ pub fn load_example_routes() -> RoutesFile {
     let path = example_dir().join("routes.json");
     let content =
         std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-    serde_json::from_slice(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
+    let routes = velda_sync::post_sync::route::parse_routes(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
+    RoutesFile {
+        schema_version: 1,
+        routes,
+    }
 }
 
 pub fn load_example_upstreams() -> UpstreamsFile {

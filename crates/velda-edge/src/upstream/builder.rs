@@ -293,11 +293,9 @@ pub fn build_upstreams(
         match app.as_str() {
             "grpc" => {
                 if transport == "rdma" {
-                    let rdma_config = velda_rdma::RdmaConfig {
-                        device_name: None,
-                        timeout_ms: timeouts.connect.as_millis().max(1000) as u64,
-                        ..Default::default()
-                    };
+                    let mut rdma_config =
+                        velda_rdma::RdmaConfig::for_streaming(config.protocol.streaming, None);
+                    rdma_config.timeout_ms = timeouts.connect.as_millis().max(1000) as u64;
                     grpc_map.insert(
                         config.id.clone(),
                         Arc::new(GrpcUpstream::Rdma(Arc::new(GrpcRdmaUpstream::new(

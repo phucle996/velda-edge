@@ -15,8 +15,8 @@ use rustc_hash::FxHashMap;
 use velda_core::L7Response;
 use velda_http3::Http3Engine;
 use velda_http3::quinn_proto::{ConnectionHandle, StreamId};
+use velda_sock::UdpSocket;
 use velda_tls::TlsServerEngine;
-use velda_transport::UdpSocket;
 
 use crate::error::EdgeError;
 use crate::runtime::SharedRuntime;

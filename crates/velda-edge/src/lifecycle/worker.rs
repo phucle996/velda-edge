@@ -12,8 +12,6 @@
 //!   channel. Plugins and background services register tasks directly into this Hook
 //!   without arbitrary detached background task spawning.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -22,8 +20,8 @@ use velda_core::worker::{
     CorePartition, WorkerId, WorkerRole, WorkerState, global_worker_registry,
     pin_current_thread_to_core,
 };
+use velda_ingress::{IngressBinding, ShardContext, run_ingress_shard};
 use velda_plugin::ShadowTask;
-use velda_transport::{IngressBinding, WorkerEngine};
 
 use crate::error::EdgeError;
 use crate::lifecycle::overload::DEFAULT_OVERLOAD_SAMPLE_INTERVAL;
@@ -38,26 +36,21 @@ pub struct RunningWorkerPool {
 impl RunningWorkerPool {
     /// Spawns the complete symmetrical worker pool (1 Primary Worker + 1 Shadow Worker per Core).
     pub fn spawn(
-        workers: Vec<WorkerEngine>,
+        mut shard_contexts: Vec<ShardContext>,
         partition: &CorePartition,
         initial_bindings: Vec<IngressBinding>,
         shared_runtime: SharedRuntime,
         cpu_pinning: bool,
         shutdown: watch::Receiver<bool>,
     ) -> Result<Self, EdgeError> {
-        let (resolved_tx, resolved_rx) =
-            watch::channel::<Option<HashMap<String, SocketAddr>>>(None);
-        let resolved_publisher = Arc::new(resolved_tx);
-
-        let worker_count = workers.len();
+        let worker_count = shard_contexts.len();
         let mut worker_threads = Vec::with_capacity(worker_count * 2);
         let registry = global_worker_registry();
 
         // Register every traffic worker's real core BEFORE any worker thread starts binding
         // sockets: `ingress_steering_cpu` needs the complete worker->core map to prove that NIC
         // hardware RSS covers all workers.
-        for worker in &workers {
-            let wid = worker.worker_id();
+        for wid in 0..worker_count {
             let core = partition.traffic_cores[wid % partition.traffic_cores.len()];
             registry.register(
                 WorkerId(wid as u32),
@@ -67,14 +60,12 @@ impl RunningWorkerPool {
             );
         }
 
-        for worker in workers {
-            let worker_id = worker.worker_id();
+        for worker_id in 0..worker_count {
+            let shard_ctx = shard_contexts.remove(0);
             let core_id = partition.traffic_cores[worker_id % partition.traffic_cores.len()];
             let worker_shutdown = shutdown.clone();
             let bindings = initial_bindings.clone();
             let rt_shared = shared_runtime.clone();
-            let resolved_pub = Arc::clone(&resolved_publisher);
-            let resolved_sub = resolved_rx.clone();
             let w_id = WorkerId(worker_id as u32);
 
             let traffic_thread_name = format!("velda-worker-{worker_id}");
@@ -148,21 +139,19 @@ impl RunningWorkerPool {
                             move |id, sock, dgram| runner(id, sock, dgram)
                         };
 
-                        if let Err(e) = worker
-                            .run(
-                                bindings,
-                                resolved_pub,
-                                resolved_sub,
-                                worker_shutdown,
-                                tcp_dispatcher,
-                                udp_dispatcher,
-                            )
-                            .await
+                        if let Err(e) = run_ingress_shard(
+                            shard_ctx,
+                            bindings,
+                            worker_shutdown,
+                            tcp_dispatcher,
+                            udp_dispatcher,
+                        )
+                        .await
                         {
                             tracing::error!(
                                 worker = worker_id,
                                 error = %e,
-                                "Worker engine encountered error"
+                                "Ingress shard encountered error"
                             );
                         }
                     });

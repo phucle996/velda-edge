@@ -129,7 +129,9 @@ Across **ALL protocol pipelines** (HTTP/1.1, HTTP/2, HTTP/3, gRPC):
 
 ### 3.1 Rust Data Plane (`crates/`)
 - `velda-core`: Shared vocabulary and primitive contracts only (`RequestContext`, `RequestState`, `L4Request`/`Response`, `L7Request`/`Response`, `Action`, `Error`, strongly typed IDs, and canonical `Endpoint`). No business logic, no routing, no upstream logic.
-- `velda-transport`: Edge Traffic Ingress Engine (Traffic ingress, L4 connection lifecycle, TCP/UDP sockets, accept loop, L4 bidirectional byte forwarding, path classification, and L7 protocol handoff). Strictly ingress-oriented.
+- `velda-ingress`: Top-cone Edge Traffic Ingress Engine (Declarative `IngressBinding`, `IngressEngine`, multi-shard listener intake `run_ingress_shard`, and atomic LKG listener reconciliation orchestrating `velda-sock` and `velda-xdp`). Strictly ingress-oriented.
+- `velda-sock`: Linux OS Kernel Network Stack Mechanics (`sk_buff` path, `SO_REUSEPORT`, `TCP_FASTOPEN`, `BBR`, `UDP_GRO`/`GSO`, `splice`).
+- `velda-xdp`: eBPF / XDP / `AF_XDP` Kernel-Bypass Ingress Mechanics (UMEM Slab Arena, SPSC Rings, userspace RFC 793 TCP / RFC 768 UDP state machine).
 - `velda-tls`: Owns TLS termination, handshake, ALPN negotiation, and certificate state.
 - `velda-http1`: Owns L7 HTTP/1.1 protocol lifecycle (RFC 9112: text streaming, keep-alive, zero-copy parsing, and downstream connection handling).
 - `velda-http2`: Owns L7 HTTP/2 protocol engine (RFC 9113: binary framing, flow control, multiplexed stream lifecycle, and responder).
@@ -143,7 +145,7 @@ Across **ALL protocol pipelines** (HTTP/1.1, HTTP/2, HTTP/3, gRPC):
 - `velda-connection-pool`: [Stage 4] Generic, protocol-agnostic connection reuse, sharded containers, idle eviction, and RAII leases. Zero connection establishment logic.
 - `velda-observability`: Owns metrics, tracing, and access logging.
 - `velda-sync`: Connects to Go Control Plane, stages candidate configs, and compiles domain-isolated binary artifacts into LKG.
-- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, pre-computes protocol-specialized upstreams in `src/upstream/`, and starts `velda-transport` engine).
+- `velda-edge`: Bootstrap, composition root, and binary entrypoint (loads `config.bin`, pre-computes protocol-specialized upstreams in `src/upstream/`, and starts `velda-ingress` engine).
 
 ### 3.2 Go Control Plane (`control-plane/`)
 - Follows **Clean Architecture / DDD**:

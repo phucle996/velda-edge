@@ -48,7 +48,7 @@ The top cone represents client-facing diversity. Clients connect using various t
 **Architectural Invariants:**
 - **Pre-Bound Execution**: Every listener (`ListenerId`) is bound at cold-start / reconcile time to a specialized runner closure (`DedicatedTcpRunner` or `DedicatedUdpRunner`).
 - **Zero Dynamic Sniffing**: When a TCP socket accepts or a UDP datagram arrives, bytes enter their dedicated pipeline directly. There is **no inspection of payload bytes**, **no checking of `Content-Type: application/grpc`**, and **no runtime enum branching** to guess the protocol.
-- **Protocol-Specific Framing**: Downstream codecs operate exclusively within their dedicated crates (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`, `velda-transport`), handling TLS handshakes, ALPN verification, and framing without cross-subsystem leakage.
+- **Protocol-Specific Framing**: Downstream codecs operate exclusively within their dedicated crates (`velda-http1`, `velda-http2`, `velda-http3`, `velda-grpc`, `velda-ingress`, `velda-sock`, `velda-xdp`), handling TLS handshakes, ALPN verification, and framing without cross-subsystem leakage.
 
 ### 2.2 The Narrow Waist: The Router (Razor-Thin & Pure RAM)
 Like the IP (Internet Protocol) layer in the Internet Architecture, the Router is the narrowest point of Velda Edge. Everything from the top cone converges to it, and everything to the bottom cone diverges from it.
@@ -138,7 +138,7 @@ The Hourglass model achieves its full potential only when combined with **Flat W
 Before writing or modifying any code in `crates/`, ask these five questions:
 
 1. **Which Cone does this logic belong to?**
-   - Ingress mechanics (framing, decoding) $\to$ Top Cone (`velda-http1`, `velda-http2`, `velda-grpc`, `velda-transport`).
+   - Ingress mechanics (framing, decoding) $\to$ Top Cone (`velda-http1`, `velda-http2`, `velda-grpc`, `velda-ingress`, `velda-sock`, `velda-xdp`).
    - Routing decision $\to$ Narrow Waist (`velda-router`).
    - Upstream leasing & forwarding $\to$ Bottom Cone (`velda-upstream`, `crates/velda-edge/src/upstream/`).
 2. **Does this change make the Waist "fat"?**

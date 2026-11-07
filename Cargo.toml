@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "crates/velda-core",
     "crates/velda-sync",
-    "crates/velda-transport",
+    "crates/velda-ingress",
+    "crates/velda-sock",
     "crates/velda-tls",
     "crates/velda-http1",
     "crates/velda-http2",
@@ -18,6 +19,7 @@ members = [
     "crates/velda-observability",
     "crates/velda-edge",
     "crates/velda-rdma",
+    "crates/velda-xdp",
     "crates/velda-bench-backend",
 ]
 

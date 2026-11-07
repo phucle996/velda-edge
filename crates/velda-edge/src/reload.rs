@@ -10,8 +10,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use velda_ingress::IngressHandle;
 use velda_sync::ipc::SyncNotification;
-use velda_transport::EngineHandle;
 
 use crate::config::{load_listeners, load_plugins, load_routes, load_tls, load_upstreams};
 use crate::error::EdgeError;
@@ -161,13 +161,13 @@ pub fn load_initial_runtime(
 
 /// Applies a reload notification from `velda-sync` against the active shared runtime.
 ///
-/// If listener definitions changed and an [`EngineHandle`] is provided, submits the new
-/// desired ingress bindings to `velda-transport` for dynamic declarative reconciliation.
+/// If listener definitions changed and an [`IngressHandle`] is provided, submits the new
+/// desired ingress bindings to `velda-ingress` for dynamic declarative reconciliation.
 pub async fn apply_reload(
     shared_runtime: &SharedRuntime,
     runtime_dir: &Path,
     notif: &SyncNotification,
-    engine_handle: Option<&EngineHandle>,
+    engine_handle: Option<&IngressHandle>,
 ) -> Result<ReloadOutcome, EdgeError> {
     let current = shared_runtime.load();
     let new_revision = notif.manifest_revision.unwrap_or(current.revision + 1);
@@ -310,7 +310,7 @@ pub async fn apply_reload(
         engine
             .reconcile(bindings)
             .await
-            .map_err(EdgeError::Transport)?;
+            .map_err(EdgeError::Ingress)?;
     }
 
     // Lock-free atomic swap of active runtime snapshot

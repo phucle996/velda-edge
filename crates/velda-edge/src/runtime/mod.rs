@@ -5,11 +5,11 @@
 //! Wrapped in [`ArcSwap`] to enable zero-overhead, lock-free $O(1)$ reads on the
 //! request serving hot path, and atomic swaps upon configuration reloads.
 
+mod ingress;
 pub mod pipeline;
 pub mod plugin;
 pub mod router;
 pub mod tls;
-mod transport;
 
 pub use pipeline::{PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol};
 pub use plugin::{PluginTable, build_plugin_table};
@@ -22,21 +22,22 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use velda_core::OverloadTracker;
+use velda_ingress::IngressBinding;
 use velda_router::Router;
+use velda_sock::{TcpListenerConfig, UdpSocketConfig};
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
 use velda_sync::post_sync::tls::TlsConfig;
 use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::{TlsClientEngine, TlsServerEngine};
-use velda_transport::IngressBinding;
 
 use crate::error::EdgeError;
 
 /// Read-only snapshot of declarative domain configurations loaded into RAM.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeConfig {
-    /// Active listener declarations (drives IngressBinding on TrafficEngine).
+    /// Active listener declarations (drives IngressBinding on IngressEngine).
     pub listeners: Vec<ListenerConfig>,
     /// Active routing rules for request dispatching.
     pub routes: Vec<RouteConfig>,
@@ -49,19 +50,19 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s.
+    /// Converts active listener configurations into `velda-ingress` [`IngressBinding`]s.
     pub fn active_bindings(&self) -> Result<Vec<IngressBinding>, EdgeError> {
         self.active_bindings_with_configs(None, None)
     }
 
-    /// Converts active listener configurations into `velda-transport` [`IngressBinding`]s
+    /// Converts active listener configurations into `velda-ingress` [`IngressBinding`]s
     /// with explicit TCP/UDP configurations.
     pub fn active_bindings_with_configs(
         &self,
-        tcp_config: Option<&velda_transport::TcpListenerConfig>,
-        udp_config: Option<&velda_transport::UdpSocketConfig>,
+        tcp_config: Option<&TcpListenerConfig>,
+        udp_config: Option<&UdpSocketConfig>,
     ) -> Result<Vec<IngressBinding>, EdgeError> {
-        transport::active_bindings_with_configs(&self.listeners, tcp_config, udp_config)
+        ingress::active_bindings_with_configs(&self.listeners, tcp_config, udp_config)
     }
 }
 

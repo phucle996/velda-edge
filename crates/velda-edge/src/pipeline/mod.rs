@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use velda_transport::{Connection, Datagram, UdpSocket};
+use velda_sock::{Connection, Datagram, UdpSocket};
 
 use crate::runtime::SharedRuntime;
 use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};

@@ -13,7 +13,7 @@
 //! - [`upstream`]: Upstream dispatchers, connection reuse pools, and load balancing table.
 //!
 //! `velda-edge` does NOT process network requests directly; request handling
-//! is owned by `velda-transport` and downstream protocol crates.
+//! is owned by `velda-ingress`, `velda-sock`, and downstream protocol crates.
 
 pub mod banner;
 pub mod bootstrap;
