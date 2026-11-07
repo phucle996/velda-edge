@@ -12,16 +12,16 @@ Tests were executed using the custom counting allocator and timing suite in:
 
 | Metric | Target Requirement | Measured Result | Status |
 | :--- | :--- | :--- | :--- |
-| **RoundRobin Latency** | < 20 ns, 0 allocs | **9.49 ns**, **0.00 allocs** | **Exceeded** (105.3M ops/s) |
-| **Random Latency** | < 10 ns, 0 allocs | **2.46 ns**, **0.00 allocs** | **Exceeded** (406.5M ops/s) |
-| **Weighted Random** | < 30 ns, 0 allocs | **13.94 ns**, **0.00 allocs** | **Exceeded** (71.7M ops/s) |
-| **Power of Two Choices (P2C)** | < 60 ns, 0 allocs | **20.46 ns**, **0.00 allocs** | **Exceeded** (48.8M ops/s, **3.2x speedup**) |
-| **LeastConnections** | < 100 ns, 0 allocs | **42.61 ns**, **0.00 allocs** | **Exceeded** (23.5M ops/s, **5.8x speedup**) |
-| **Peak EWMA Latency** | < 60 ns, 0 allocs | **15.29 ns**, **0.00 allocs** | **Exceeded** (65.4M ops/s, **3.7x speedup**) |
-| **Maglev Consistent Hash Lookup** | < 50 ns, 0 allocs | **14.92 ns**, **0.00 allocs** | **Exceeded** (67.0M ops/s, **1.9x speedup**) |
-| **RingHash Lookup** | < 60 ns, 0 allocs | **19.94 ns**, **0.00 allocs** | **Exceeded** (50.1M ops/s, **2.1x speedup**) |
-| **Multicore Scalability (256 Workers)** | Lock-free scaling | **438.6M ops/s** (2.28 ns) | **Exceeded (3.6x increase)** |
-| **Multicore Peak Throughput (Random)** | Linear core scale | **1.72 Billion ops/s** (0.58 ns) | **Exceeded** |
+| **RoundRobin Latency** | < 20 ns, 0 allocs | **9.79 ns**, **0.00 allocs** | **Exceeded** (102.1M ops/s) |
+| **Random Latency** | < 10 ns, 0 allocs | **2.28 ns**, **0.00 allocs** | **Exceeded** (439.4M ops/s) |
+| **Weighted Random** | < 30 ns, 0 allocs | **15.03 ns**, **0.00 allocs** | **Exceeded** (66.5M ops/s) |
+| **Power of Two Choices (P2C)** | < 60 ns, 0 allocs | **19.94 ns**, **0.00 allocs** | **Exceeded** (50.1M ops/s) |
+| **LeastConnections** | < 100 ns, 0 allocs | **43.97 ns**, **0.00 allocs** | **Exceeded** (22.7M ops/s) |
+| **Peak EWMA Latency** | < 60 ns, 0 allocs | **14.37 ns**, **0.00 allocs** | **Exceeded** (69.6M ops/s) |
+| **Maglev Consistent Hash Lookup** | < 50 ns, 0 allocs | **15.12 ns**, **0.00 allocs** | **Exceeded** (66.1M ops/s) |
+| **RingHash Lookup** | < 60 ns, 0 allocs | **18.74 ns**, **0.00 allocs** | **Exceeded** (53.4M ops/s) |
+| **Multicore Scalability (256 Workers)** | Lock-free scaling | **436.9M ops/s** (2.29 ns) | **Exceeded** (7.20x speedup over 1T) |
+| **Multicore Peak Throughput (Random)** | Linear core scale | **1.49 Billion ops/s** (0.67 ns) | **Exceeded** (12-thread saturation) |
 
 ---
 
@@ -29,33 +29,33 @@ Tests were executed using the custom counting allocator and timing suite in:
 
 Measures 1,000,000 iterations per algorithm over a slice of 10 backend destinations:
 
-| Algorithm | Iterations | Total Time | Latency / op | Allocs / op | Throughput | Optimization Impact |
+| Algorithm | Iterations | Total Time | Latency / op | Allocs / op | Throughput | Optimization Mechanism |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **RoundRobin** | 1,000,000 | 9.49 ms | **9.49 ns** | **0.00** | **105,338,624 ops/s** | Const TLS + bitmask shards |
-| **Random** | 1,000,000 | 2.46 ms | **2.46 ns** | **0.00** | **406,548,851 ops/s** | Const TLS + Lemire reduce |
-| **WeightedRandom** | 1,000,000 | 13.94 ms | **13.94 ns** | **0.00** | **71,745,064 ops/s** | Const TLS + Lemire reduce |
-| **WeightedRoundRobin (SWRR)** | 1,000,000 | 19.04 ms | **19.04 ns** | **0.00** | **52,523,063 ops/s** | 64-byte cache line alignment |
-| **PowerOfTwoChoices (P2C)** | 1,000,000 | 20.46 ms | **20.46 ns** | **0.00** | **48,864,405 ops/s** | **3.2x faster** (Single-step pair + total_load) |
-| **LeastConnections** | 1,000,000 | 42.61 ms | **42.61 ns** | **0.00** | **23,470,646 ops/s** | **5.8x faster** (Decoupled local writes) |
-| **PeakEwma** | 1,000,000 | 15.29 ms | **15.29 ns** | **0.00** | **65,422,907 ops/s** | **3.7x faster** (Single-step pair + cross-mult) |
-| **Maglev (65,537 slots)** | 1,000,000 | 14.92 ms | **14.92 ns** | **0.00** | **67,034,318 ops/s** | **1.9x faster** (Pointer/len cached fast-path) |
-| **RingHash** | 1,000,000 | 19.94 ms | **19.94 ns** | **0.00** | **50,152,083 ops/s** | **2.1x faster** (Pointer/len cached fast-path) |
+| **RoundRobin** | 1,000,000 | 9.79 ms | **9.79 ns** | **0.00** | **102,134,290 ops/s** | Atomic contiguous index wrapping |
+| **Random** | 1,000,000 | 2.28 ms | **2.28 ns** | **0.00** | **439,376,963 ops/s** | Stateless TLS PRNG fast-path |
+| **WeightedRandom** | 1,000,000 | 15.03 ms | **15.03 ns** | **0.00** | **66,554,677 ops/s** | Single-pass cumulative weight binary scan |
+| **WeightedRoundRobin (SWRR)** | 1,000,000 | 19.65 ms | **19.65 ns** | **0.00** | **50,888,940 ops/s** | Smooth weighted deficit round-robin |
+| **PowerOfTwoChoices (P2C)** | 1,000,000 | 19.94 ms | **19.94 ns** | **0.00** | **50,154,827 ops/s** | Two-choice PRNG sample comparison |
+| **LeastConnections** | 1,000,000 | 43.97 ms | **43.97 ns** | **0.00** | **22,743,189 ops/s** | Active connection minimum search |
+| **PeakEwma** | 1,000,000 | 14.37 ms | **14.37 ns** | **0.00** | **69,588,003 ops/s** | Atomic EWMA score comparison |
+| **Maglev (65,537 slots)** | 1,000,000 | 15.12 ms | **15.12 ns** | **0.00** | **66,134,333 ops/s** | Lock-free lookup table indexing |
+| **RingHash** | 1,000,000 | 18.74 ms | **18.74 ns** | **0.00** | **53,363,518 ops/s** | Binary search along hash ring |
 
 ---
 
-## 3. Maglev Constant-Time $O(1)$ Lookup Verification across $N$ Backends
+## 3. Maglev Constant-Time $\mathcal{O}(1)$ Lookup Verification across $N$ Backends
 
 Measures 500,000 iterations per configuration scaling from 5 to 100 backends:
 
-| Backends ($N$) | Total Time | Latency / op | Allocs / op | Complexity | Speedup vs Baseline |
+| Backends ($N$) | Total Time | Latency / op | Allocs / op | Complexity | Verification |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **$N = 5$** | 7.62 ms | **15.23 ns** | **0.00** | **$O(1)$** | **1.3x faster** |
-| **$N = 10$** | 7.69 ms | **15.37 ns** | **0.00** | **$O(1)$** | **1.8x faster** |
-| **$N = 25$** | 7.58 ms | **15.15 ns** | **0.00** | **$O(1)$** | **3.7x faster** |
-| **$N = 50$** | 7.61 ms | **15.22 ns** | **0.00** | **$O(1)$** | **6.2x faster** |
-| **$N = 100$** | 7.58 ms | **15.15 ns** | **0.00** | **$O(1)$** | **11.2x faster (Completely Flat O(1))** |
+| **$N = 5$** | 7.46 ms | **14.92 ns** | **0.00** | **$\mathcal{O}(1)$** | Flat constant indexing |
+| **$N = 10$** | 7.54 ms | **15.07 ns** | **0.00** | **$\mathcal{O}(1)$** | Flat constant indexing |
+| **$N = 25$** | 7.39 ms | **14.78 ns** | **0.00** | **$\mathcal{O}(1)$** | Flat constant indexing |
+| **$N = 50$** | 7.69 ms | **15.39 ns** | **0.00** | **$\mathcal{O}(1)$** | Flat constant indexing |
+| **$N = 100$** | 7.48 ms | **14.96 ns** | **0.00** | **$\mathcal{O}(1)$** | Flat constant indexing |
 
-Observed Algorithmic Complexity: **$O(1)$ flat 15.15 ns lookup table indexing regardless of backend count**.
+Observed Algorithmic Complexity: **$\mathcal{O}(1)$ flat 14.8 - 15.4 ns lookup table indexing regardless of backend count**.
 
 ---
 
@@ -65,16 +65,16 @@ Measures Maglev lock-free atomic pointer reads (`ArcSwap`) under massive worker 
 
 | Workers | Total Operations | Total Time | Aggregate Throughput | Avg Latency / op | Scaling Factor |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | 100,000 | 1.67 ms | **59,714,968 ops/s** | **16.75 ns** | **1.00x** |
-| **2** | 200,000 | 1.68 ms | **119,159,259 ops/s** | **8.39 ns** | **2.00x** |
-| **4** | 400,000 | 1.96 ms | **204,131,415 ops/s** | **4.90 ns** | **3.42x** |
-| **8** | 800,000 | 4.87 ms | **164,273,374 ops/s** | **6.09 ns** | **2.75x** |
-| **12** | 1,200,000 | 5.93 ms | **202,348,695 ops/s** | **4.94 ns** | **3.39x** |
-| **16** | 1,600,000 | 5.14 ms | **311,102,529 ops/s** | **3.21 ns** | **5.21x** |
-| **32** | 3,200,000 | 8.45 ms | **378,586,261 ops/s** | **2.64 ns** | **6.34x** |
-| **64** | 6,400,000 | 16.92 ms | **378,211,987 ops/s** | **2.64 ns** | **6.33x** |
-| **128** | 12,800,000 | 34.79 ms | **367,931,419 ops/s** | **2.72 ns** | **6.16x** |
-| **256** | 25,600,000 | 58.37 ms | **438,590,630 ops/s** | **2.28 ns** | **7.34x** |
+| **1** | 100,000 | 1.65 ms | **60,658,484 ops/s** | **16.49 ns** | **1.00x** |
+| **2** | 200,000 | 1.70 ms | **117,808,733 ops/s** | **8.49 ns** | **1.94x** |
+| **4** | 400,000 | 1.84 ms | **217,415,763 ops/s** | **4.60 ns** | **3.58x** |
+| **8** | 800,000 | 2.27 ms | **352,999,213 ops/s** | **2.83 ns** | **5.82x** |
+| **12** | 1,200,000 | 4.35 ms | **275,910,210 ops/s** | **3.62 ns** | **4.55x** |
+| **16** | 1,600,000 | 6.00 ms | **266,659,644 ops/s** | **3.75 ns** | **4.40x** |
+| **32** | 3,200,000 | 8.40 ms | **381,010,575 ops/s** | **2.62 ns** | **6.28x** |
+| **64** | 6,400,000 | 15.77 ms | **405,795,289 ops/s** | **2.46 ns** | **6.69x** |
+| **128** | 12,800,000 | 33.69 ms | **379,977,738 ops/s** | **2.63 ns** | **6.26x** |
+| **256** | 25,600,000 | 58.58 ms | **436,999,930 ops/s** | **2.29 ns** | **7.20x** |
 
 ---
 
@@ -84,47 +84,57 @@ Measures Maglev lock-free atomic pointer reads (`ArcSwap`) under massive worker 
 
 | Algorithm | Total Operations | Workers | Aggregate Throughput | Avg Latency / op | Concurrency Model |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Random** | 1,200,000 | 12 | **1,150,553,799 ops/s** | **0.87 ns** | Stateless / Zero Locks |
-| **RoundRobin (Sharded)** | 1,200,000 | 12 | **468,998,972 ops/s** | **2.13 ns** | Power-of-two bitmask shards |
-| **Maglev** | 1,200,000 | 12 | **277,046,106 ops/s** | **3.61 ns** | Lock-Free ArcSwap (**1.7x speedup**) |
-| **PeakEwma** | 1,200,000 | 12 | **243,084,302 ops/s** | **4.11 ns** | PRNG + Fast Pair (**2.2x speedup**) |
-| **RingHash** | 1,200,000 | 12 | **164,746,115 ops/s** | **6.07 ns** | Lock-Free ArcSwap (**2.0x speedup**) |
-| **PowerOfTwoChoices** | 1,200,000 | 12 | **161,612,221 ops/s** | **6.19 ns** | PRNG + Fast Pair (**1.7x speedup**) |
-| **WeightedRoundRobin (Sharded)** | 1,200,000 | 12 | **142,943,112 ops/s** | **7.00 ns** | Cache-aligned shards (**2.8x speedup**) |
+| **Random** | 1,200,000 | 12 | **1,495,334,556 ops/s** | **0.67 ns** | Stateless / Zero Locks |
+| **RoundRobin** | 1,200,000 | 12 | **487,651,049 ops/s** | **2.05 ns** | Atomic fetch_add |
+| **Maglev** | 1,200,000 | 12 | **333,029,721 ops/s** | **3.00 ns** | Lock-Free ArcSwap |
+| **PeakEwma** | 1,200,000 | 12 | **207,331,124 ops/s** | **4.82 ns** | PRNG + Atomic Read |
+| **WeightedRoundRobin** | 1,200,000 | 12 | **207,359,033 ops/s** | **4.82 ns** | Mutex Contended |
+| **PowerOfTwoChoices** | 1,200,000 | 12 | **174,549,719 ops/s** | **5.73 ns** | PRNG + Atomic Read |
+| **RingHash** | 1,200,000 | 12 | **155,262,727 ops/s** | **6.44 ns** | Lock-Free ArcSwap |
 
 ### 5.2 Tier: 64 Concurrent Workers (High Parallel Load)
 
 | Algorithm | Total Operations | Workers | Aggregate Throughput | Avg Latency / op | Concurrency Model |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Random** | 6,400,000 | 64 | **1,367,971,511 ops/s** | **0.73 ns** | Stateless / Zero Locks |
-| **RoundRobin (Sharded)** | 6,400,000 | 64 | **622,693,237 ops/s** | **1.61 ns** | Power-of-two bitmask shards |
-| **Maglev** | 6,400,000 | 64 | **379,547,400 ops/s** | **2.63 ns** | Lock-Free ArcSwap (**1.8x speedup**) |
-| **PeakEwma** | 6,400,000 | 64 | **355,769,392 ops/s** | **2.81 ns** | PRNG + Fast Pair (**2.6x speedup**) |
-| **RingHash** | 6,400,000 | 64 | **280,671,803 ops/s** | **3.56 ns** | Lock-Free ArcSwap (**1.9x speedup**) |
-| **PowerOfTwoChoices** | 6,400,000 | 64 | **256,794,800 ops/s** | **3.89 ns** | PRNG + Fast Pair (**1.8x speedup**) |
-| **WeightedRoundRobin (Sharded)** | 6,400,000 | 64 | **108,462,312 ops/s** | **9.22 ns** | Cache-aligned shards (**2.1x speedup**) |
+| **Random** | 6,400,000 | 64 | **1,467,315,770 ops/s** | **0.68 ns** | Stateless / Zero Locks |
+| **RoundRobin** | 6,400,000 | 64 | **568,823,410 ops/s** | **1.76 ns** | Atomic fetch_add |
+| **Maglev** | 6,400,000 | 64 | **291,793,902 ops/s** | **3.43 ns** | Lock-Free ArcSwap |
+| **PeakEwma** | 6,400,000 | 64 | **285,446,781 ops/s** | **3.50 ns** | PRNG + Atomic Read |
+| **PowerOfTwoChoices** | 6,400,000 | 64 | **247,671,529 ops/s** | **4.04 ns** | PRNG + Atomic Read |
+| **RingHash** | 6,400,000 | 64 | **220,848,826 ops/s** | **4.53 ns** | Lock-Free ArcSwap |
+| **WeightedRoundRobin** | 6,400,000 | 64 | **100,464,371 ops/s** | **9.95 ns** | Mutex Contended |
 
-### 5.3 Tier: 128 Concurrent Workers (Massive Oversubscription)
+### 5.3 Tier: 128 Concurrent Workers (Massive Concurrency)
 
 | Algorithm | Total Operations | Workers | Aggregate Throughput | Avg Latency / op | Concurrency Model |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Random** | 12,800,000 | 128 | **1,721,201,409 ops/s** | **0.58 ns** | Stateless / Zero Locks (**1.72 Billion ops/s**) |
-| **RoundRobin (Sharded)** | 12,800,000 | 128 | **595,091,563 ops/s** | **1.68 ns** | Power-of-two bitmask shards |
-| **Maglev** | 12,800,000 | 128 | **391,239,296 ops/s** | **2.56 ns** | Lock-Free ArcSwap (**1.7x speedup**) |
-| **PeakEwma** | 12,800,000 | 128 | **304,309,570 ops/s** | **3.29 ns** | PRNG + Fast Pair (**2.1x speedup**) |
-| **RingHash** | 12,800,000 | 128 | **267,427,933 ops/s** | **3.74 ns** | Lock-Free ArcSwap (**1.6x speedup**) |
-| **PowerOfTwoChoices** | 12,800,000 | 128 | **258,134,472 ops/s** | **3.87 ns** | PRNG + Fast Pair (**1.7x speedup**) |
-| **WeightedRoundRobin (Sharded)** | 12,800,000 | 128 | **90,102,915 ops/s** | **11.10 ns** | Cache-aligned shards |
+| **Random** | 12,800,000 | 128 | **1,353,174,822 ops/s** | **0.74 ns** | Stateless / Zero Locks |
+| **RoundRobin** | 12,800,000 | 128 | **470,559,915 ops/s** | **2.13 ns** | Atomic fetch_add |
+| **Maglev** | 12,800,000 | 128 | **392,789,007 ops/s** | **2.55 ns** | Lock-Free ArcSwap |
+| **PeakEwma** | 12,800,000 | 128 | **314,249,694 ops/s** | **3.18 ns** | PRNG + Atomic Read |
+| **RingHash** | 12,800,000 | 128 | **277,196,807 ops/s** | **3.61 ns** | Lock-Free ArcSwap |
+| **PowerOfTwoChoices** | 12,800,000 | 128 | **227,463,825 ops/s** | **4.40 ns** | PRNG + Atomic Read |
+| **WeightedRoundRobin** | 12,800,000 | 128 | **84,283,039 ops/s** | **11.86 ns** | Mutex Contended |
 
 ---
 
 ## 6. Simulated Hardware & Architecture Profiles (Edge to Hyperscale)
 
-Empirical simulation of four real-world deployment profiles with O(1) topology version fast-path enabled:
-
-| Profile | Simulated Spec | Backends | Workers | RAM Footprint / Upstream | Throughput | Avg Latency | Memory Architecture Analysis |
+| Profile | Simulated Spec | Backends | Active Workers | RAM Footprint / Upstream | Throughput | Avg Latency | Memory Architecture Analysis |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Profile A: Edge Micro-Gateway** | 2 Cores, 2GB RAM (IoT/Branch) | 5 | 2 | **~512 KB** | **130,185,618 ops/s** | **7.68 ns** | Fits in L1/L2 cache; zero swap; ~512 KB RAM per upstream |
-| **Profile B: Standard Edge Ingress** | 8 Cores, 16GB RAM (Cloud VM/K8s) | 25 | 8 | **~512 KB** | **371,788,444 ops/s** | **2.69 ns** | Shared L3 cache; near-linear scaling; zero memory pressure |
-| **Profile C: Large-Scale High-Throughput** | 32 Cores, 64GB RAM (Bare-Metal) | 100 | 32 | **~512 KB** | **477,087,926 ops/s** | **2.10 ns** | Multi-socket L3 cache; high parallel connection reuse |
-| **Profile D: Hyperscale Core Gateway** | 128 Cores, 256GB RAM (Datacenter) | 500 | 128 | **~512 KB** | **432,475,183 ops/s** | **2.31 ns** | Cross-NUMA node atomic reads; ArcSwap avoids bus locking |
+| **Profile A: Edge Micro-Gateway** | 2 Cores, 2GB RAM (IoT/Branch) | 5 | 2 | **~512 KB** | **109,939,673 ops/s** | **9.10 ns** | Fits in L1/L2 cache; zero swap; ~524 KB RAM per upstream |
+| **Profile B: Standard Edge Ingress** | 8 Cores, 16GB RAM (Cloud VM/K8s) | 25 | 8 | **~512 KB** | **195,941,432 ops/s** | **5.10 ns** | Shared L3 cache; near-linear scaling; no memory pressure |
+| **Profile C: Large-Scale High-Throughput** | 32 Cores, 64GB RAM (Bare-Metal) | 100 | 32 | **~512 KB** | **351,015,944 ops/s** | **2.85 ns** | Multi-socket L3 cache; high parallel connection reuse |
+| **Profile D: Hyperscale Core Gateway** | 128 Cores, 256GB RAM (Datacenter) | 500 | 128 | **~512 KB** | **294,843,618 ops/s** | **3.39 ns** | Cross-NUMA node atomic reads; ArcSwap avoids bus locking |
+
+---
+
+## 7. How to Reproduce
+
+```bash
+# 1. Single-thread selection latency & Maglev O(1) scaling
+cargo bench -p velda-lb --bench single_thread_bench
+
+# 2. Multi-thread concurrency scaling & algorithm contention
+cargo bench -p velda-lb --bench multi_thread_bench
+```

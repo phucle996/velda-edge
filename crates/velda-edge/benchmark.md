@@ -11,18 +11,18 @@ Tests were executed using the custom counting allocator and timing suite in:
 
 | Target / Capability | Metric / Target | Measured Result | Status |
 | :--- | :--- | :--- | :--- |
-| **`SharedRuntime::load()` (100 Listeners)** | < 15 ns, 0 allocs | **12.13 ns**, **0.00 allocs** | **Passed** (82.5 M ops/s) |
-| **`SharedRuntime::load()` (1,000 Listeners)** | < 15 ns, 0 allocs | **12.15 ns**, **0.00 allocs** | **Passed** (82.3 M ops/s) |
-| **`SharedRuntime::load()` (5,000 Listeners)** | < 15 ns, 0 allocs | **12.18 ns**, **0.00 allocs** | **Passed** (82.1 M ops/s, Flat $O(1)$) |
-| **`PipelineTable` HTTP/1.1 Cleartext Hit** | < 15 ns, 0 allocs | **8.05 ns**, **0.00 allocs** | **Exceeded** (124.2 M ops/s) |
-| **`PipelineTable` HTTP/2 TLS Hit** | < 15 ns, 0 allocs | **10.21 ns**, **0.00 allocs** | **Passed** (98.0 M ops/s) |
-| **`PipelineTable` gRPC Cleartext Hit** | < 15 ns, 0 allocs | **10.72 ns**, **0.00 allocs** | **Passed** (93.3 M ops/s) |
-| **`PipelineTable` HTTP/3 QUIC Hit** | < 15 ns, 0 allocs | **10.63 ns**, **0.00 allocs** | **Passed** (94.0 M ops/s) |
-| **`PipelineTable` Deterministic Miss** | < 15 ns, 0 allocs | **6.83 ns**, **0.00 allocs** | **Exceeded** (146.4 M ops/s) |
-| **`RuntimeProfile::from_hardware` (RAM)** | < 200 ns | **90.38 ns**, **3.00 allocs** | **Passed** (11.1 M ops/s) |
-| **`to_dns_resolver_config` Conversion** | < 5 ns, 0 allocs | **1.45 ns**, **0.00 allocs** | **Exceeded** (691.6 M ops/s) |
-| **`resolve_runtime_profile` (Cold/Disk)** | Cold bootstrap file I/O | **16.48 µs**, **136 allocs** | **Passed** (Non-hot-path cold start) |
-| **Ingress Active Bindings (N = 5,000)** | Linear 1 alloc / binding | **329.70 µs**, **5,001 allocs** | **Passed** (Bootstrap/Sync path only) |
+| **`SharedRuntime::load()` (100 Listeners)** | < 15 ns, 0 allocs | **13.35 ns**, **0.00 allocs** | **Passed** (74.9 M ops/s) |
+| **`SharedRuntime::load()` (1,000 Listeners)** | < 15 ns, 0 allocs | **12.72 ns**, **0.00 allocs** | **Passed** (78.6 M ops/s) |
+| **`SharedRuntime::load()` (5,000 Listeners)** | < 15 ns, 0 allocs | **13.10 ns**, **0.00 allocs** | **Passed** (76.3 M ops/s, Flat $O(1)$) |
+| **`PipelineTable` HTTP/1.1 Cleartext Hit** | < 15 ns, 0 allocs | **6.15 ns**, **0.00 allocs** | **Exceeded** (162.5 M ops/s) |
+| **`PipelineTable` HTTP/2 TLS Hit** | < 15 ns, 0 allocs | **5.98 ns**, **0.00 allocs** | **Exceeded** (167.1 M ops/s) |
+| **`PipelineTable` gRPC Cleartext Hit** | < 15 ns, 0 allocs | **6.28 ns**, **0.00 allocs** | **Exceeded** (159.3 M ops/s) |
+| **`PipelineTable` HTTP/3 QUIC Hit** | < 15 ns, 0 allocs | **6.05 ns**, **0.00 allocs** | **Exceeded** (165.3 M ops/s) |
+| **`PipelineTable` Deterministic Miss** | < 15 ns, 0 allocs | **4.45 ns**, **0.00 allocs** | **Exceeded** (224.9 M ops/s) |
+| **`RuntimeProfile::from_hardware` (RAM)** | < 200 ns | **34.61 ns**, **0.00 allocs** | **Passed** (28.9 M ops/s) |
+| **`to_dns_resolver_config` Conversion** | < 5 ns, 0 allocs | **1.60 ns**, **0.00 allocs** | **Exceeded** (625.5 M ops/s) |
+| **`resolve_runtime_profile` (Cold/Disk)** | Cold bootstrap file I/O | **59.42 µs**, **103 allocs** | **Passed** (Non-hot-path cold start) |
+| **Ingress Active Bindings (N = 5,000)** | Linear 1 alloc / binding | **461.25 µs**, **5,001 allocs** | **Passed** (Bootstrap/Sync path only) |
 
 ---
 

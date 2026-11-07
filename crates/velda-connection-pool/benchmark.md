@@ -2,24 +2,32 @@
 
 This document records the official performance characteristics, Big-O complexity verifications, and memory allocation profiles for `velda-connection-pool` under the **Container-First / Resource-Lifecycle** model.
 
+Tests were executed using the custom counting allocator and timing suite in:
+- Single-thread suite: [`benches/single_thread_bench.rs`](benches/single_thread_bench.rs)
+- Multi-thread concurrency suite: [`benches/multi_thread_bench.rs`](benches/multi_thread_bench.rs)
+- Adversarial & stress suite: [`benches/adversarial_bench.rs`](benches/adversarial_bench.rs)
+- Profile comparison suite: [`benches/profile_bench.rs`](benches/profile_bench.rs)
+- Memory leak & resource regression suite: [`benches/memory_leak_bench.rs`](benches/memory_leak_bench.rs)
+
 ---
 
 ## 1. Executive Summary
 
 | Dimension | Measured Performance | Invariant Guarantee |
 | :--- | :--- | :--- |
-| **Pool HIT (Reused Conn)** | **92 ns** (10.82M ops/sec) | **0 bytes / 0 allocations** on hot path |
-| **Pool MISS (Zero-Alloc)** | **40 - 50 ns** (24.49M ops/sec) | Zero-alloc, table unpolluted; 0 allocations |
+| **Pool HIT (Reused Conn)** | **92 ns** (10.76M ops/s) | **0 bytes / 0 allocations** on hot path |
+| **Pool MISS (Zero-Alloc)** | **363 ns** (2.75M ops/s) | Zero-alloc fast-fail, table unpolluted; 0 allocations |
 | **Steady-State Reuse Ratio** | **100.0%** (199,999 handshakes saved) | 1 physical socket serves entire request volume |
 | **Connection Multiplier** | **~5,000x per socket** | Maximizes connection recycling, zero socket churn |
-| **Queue Depth Scaling (LIFO)** | **89 - 92 ns** (flat from N=10 to 10,000) | Strictly **$\mathcal{O}(1)$** constant time |
-| **Single-Key Hotspot Throughput**| **61.86M ops/sec** (16 ns avg latency) | Multi-lane worker striping; zero lock contention |
-| **Peak Multicore Concurrency** | **29.23M ops/sec** (128 workers, 34 ns avg latency) | Striped cache-line aligned metrics; zero false sharing |
-| **Realistic Gateway Throughput** | **24.01M ops/sec** (32 workers + background sweeps) | 72.09M checkouts, **100.0% reuse**, 72.09M handshakes saved |
-| **Chaos Resilience Under Draining**| **21.81M ops/sec** (50% endpoints drained every 2ms) | **98.53% reuse ratio**, 64.5M handshakes saved |
-| **Idle Eviction Sweep** | **27 - 53 ns / connection** | Background non-blocking sweep |
-| **Drain Invalidation** | **110 µs** (drains 2,490 connections across shards) | Selective predicate filtering + container pruning |
-| **RAII StreamLease Check** | **110 ns** (HTTP/2 atomic stream lease) | Lock-free release via startup epoch timestamp |
+| **Queue Depth Scaling (LIFO)** | **87 - 91 ns** (flat from N=10 to 10,000) | Strictly **$\mathcal{O}(1)$** constant time |
+| **Single-Key Hotspot Throughput**| **57.47M ops/s** (17 ns avg latency) | Multi-lane worker striping; zero lock contention |
+| **Sequential (HTTP/1.1) Checkout** | **141 - 149 ns** (7.07M ops/s) | RAII `SequentialLease` auto-return on drop |
+| **Multiplexed (HTTP/2) Checkout** | **162 - 163 ns** (6.13M ops/s) | Atomic stream reservation on single physical connection |
+| **Realistic Gateway Throughput** | **3.93M ops/s** (32 workers + background sweeps) | 11.82M checkouts, **100.0% reuse**, 11.82M handshakes saved |
+| **Chaos Resilience Under Draining**| **2.37M ops/s** (50% endpoints drained every 2ms) | **98.84% reuse ratio**, 7.03M handshakes saved |
+| **Idle Eviction Sweep** | **32 - 63 ns / connection** | Background non-blocking linear scan ($\mathcal{O}(N)$) |
+| **Drain Invalidation** | **118 µs** (drains 2,490 connections across shards) | Selective predicate filtering + container pruning |
+| **Steady-State Memory Leak** | 5,000,000 cycles net heap growth | **0 B (Zero Leak)** |
 
 ---
 
@@ -30,7 +38,7 @@ Request
    ↓
 PoolManager.acquire(key)
    │
-   ├── Container not present → Return None (Zero-Alloc cache miss, 40 ns, 0 memory bloat)
+   ├── Container not present → Return None (Zero-Alloc cache miss, 363 ns, 0 memory bloat)
    │
    ├── Container present but empty → Return None (Upstream connects backend)
    │
@@ -40,115 +48,130 @@ PoolManager.acquire(key)
 
 | Operation | Iterations | Latency / Op | Ops / Sec | Reuse Ratio | Handshakes Saved |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pool HIT (State 3: Reused)** | 200,000 | **92 ns** | **10,822,537** | **100.0%** | **199,999 handshakes** |
-| **Pool MISS (Zero-Alloc Fast Path)** | 200,000 | **40 ns** | **24,493,066** | **0.0%** | **0 (Cold start)** |
+| **Pool HIT (State 3: Reused)** | 200,000 | **92 ns** | **10,755,589** | **100.0%** | **199,999 handshakes** |
+| **Pool MISS (Zero-Alloc Fast Path)** | 200,000 | **363 ns** | **2,754,263** | **0.0%** | **0 (Cold start)** |
 
 ---
 
-## 3. Connection Reuse Multiplier & OS Handshake Savings (`single_thread_bench`)
+## 3. ConnectionProfile RAII Leases Overhead & Zero-Alloc Invariant
 
-Measures the recycling efficiency of physical TCP connections across varying traffic volumes on a single endpoint:
-
-| Total Requests | Sockets Created | Reused Checkouts | Reuse Ratio | TCP Handshakes Saved |
+| Profile / Lease Variant | Iterations | Latency / Op | Throughput | Heap Allocs |
 | :--- | :--- | :--- | :--- | :--- |
-| **10** | 1 | 10 | 100.00% | 10 handshakes |
-| **100** | 1 | 100 | 100.00% | 100 handshakes |
-| **1,000** | 1 | 1,000 | 100.00% | 1,000 handshakes |
-| **10,000** | 1 | 10,000 | 100.00% | 10,000 handshakes |
-| **100,000** | 1 | 100,000 | 100.00% | 100,000 handshakes |
-
-> **Key takeaway**: By reusing 1 persistent connection across 100,000 requests, Velda Edge saves 100,000 TCP 3-way handshakes, 100,000 TLS handshakes (if HTTPS), and 100,000 TCP `TIME_WAIT` socket states in the Linux kernel.
+| **SequentialLease (HTTP/1.1 Drop)** | 200,000 | **149 ns** | **6,709,125 ops/s** | **0 B** |
+| **ExclusiveLease (TCP Recycle)** | 200,000 | **143 ns** | **6,976,493 ops/s** | **0 B** |
+| **StreamLease (HTTP/2 Atomic)** | 200,000 | **162 ns** | **6,163,263 ops/s** | **0 B** |
+| **Raw SequentialLease (Baseline)** | 200,000 | **116 ns** | **8,578,344 ops/s** | **0 B** |
 
 ---
 
-## 4. Subpool LIFO Queue Depth Scaling (O(1) Verification)
+## 4. Subpool LIFO Queue Depth Scaling ($\mathcal{O}(1)$ Verification)
 
-| Queue Depth | Latency / Op | Ops / Sec | Heap Allocs | Complexity ($\mathcal{O}$) |
-| :--- | :--- | :--- | :--- | :--- |
-| **10** | 91 ns | 10,935,350 | 0 | **$\mathcal{O}(1)$** |
-| **100** | 92 ns | 10,833,249 | 0 | **$\mathcal{O}(1)$** |
-| **1,000** | 89 ns | 11,125,740 | 0 | **$\mathcal{O}(1)$** |
-| **10,000** | 92 ns | 10,816,249 | 0 | **$\mathcal{O}(1)$** |
-
----
-
-## 5. Multicore Concurrency & Scaling (`multi_thread_bench`)
-
-### 5.1 Worker Thread Scaling (1 .. 256 Threads)
-
-| Workers | Aggregate Ops/s | Avg Latency | Scaling Factor | Reuse Ratio | Handshakes Saved |
+| Queue Depth | Total Time | Latency / Op | Ops / Sec | Heap Allocs | Complexity ($\mathcal{O}$) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | 6.64M ops/s | 150 ns | 1.00x | 100.0% | 100,000 |
-| **2** | 9.52M ops/s | 105 ns | 1.43x | 100.0% | 199,975 |
-| **4** | 11.37M ops/s | 87 ns | 1.71x | 100.0% | 399,925 |
-| **8** | 16.71M ops/s | 59 ns | 2.51x | 100.0% | 799,825 |
-| **12** | 21.44M ops/s | 46 ns | 3.23x | 100.0% | 1,199,725 |
-| **16** | 21.03M ops/s | 47 ns | 3.17x | 100.0% | 1,599,616 |
-| **32** | 26.11M ops/s | 38 ns | 3.93x | 100.0% | 3,199,104 |
-| **64** | 26.85M ops/s | 37 ns | 4.04x | 100.0% | 6,398,080 |
-| **128** | **29.23M ops/s** | **34 ns** | **4.40x** | **100.0%** | **12,796,032** |
-| **256** | 28.55M ops/s | 35 ns | 4.30x | 100.0% | 25,591,936 |
+| **10** | 8.84 ms | **88 ns** | 11,305,920 | 0 | **$\mathcal{O}(1)$** |
+| **100** | 8.73 ms | **87 ns** | 11,459,262 | 0 | **$\mathcal{O}(1)$** |
+| **1,000** | 9.02 ms | **90 ns** | 11,087,118 | 0 | **$\mathcal{O}(1)$** |
+| **10,000** | 9.11 ms | **91 ns** | 10,975,794 | 0 | **$\mathcal{O}(1)$** |
 
-### 5.2 Shard Contention: Distributed Keys vs Single Hotspot
+Observed Complexity: **$\mathcal{O}(1)$ constant 87 - 91 ns regardless of pool depth**.
 
-| Workload Pattern | Aggregate Ops/s | Avg Latency | Reuse Ratio | Handshakes Saved |
+---
+
+## 5. Idle Connection Eviction & Predicate Drain Invalidation
+
+### A. Idle Connection Eviction Sweep Scaling ($\mathcal{O}(N)$ Invariant)
+
+| Connections | Sweep Time | Latency / Conn | Evicted | Complexity |
 | :--- | :--- | :--- | :--- | :--- |
-| **Distributed (128 Keys)** | **24.66M ops/s** | **40 ns** | **99.9%** | **3,198,080** |
-| **Hotspot Contention (1 Key)** | **61.86M ops/s** | **16 ns** | **100.0%** | **3,200,000** |
+| **100** | 5.10 µs | **51 ns** | 50 | $\mathcal{O}(N)$ |
+| **1,000** | 63.08 µs | **63 ns** | 500 | $\mathcal{O}(N)$ |
+| **10,000** | 327.84 µs | **32 ns** | 5,000 | $\mathcal{O}(N)$ |
+| **50,000** | 1.71 ms | **34 ns** | 25,000 | $\mathcal{O}(N)$ |
 
-### 5.3 Realistic Workload: 32 Workers + Periodic Background Sweeping
+### B. Drain Matching Predicate Invalidation Benchmark
 
-- **Throughput**: **24.01 Million ops/s**
-- **Total Operations**: 72,092,380 checkouts in 3.0s
-- **Reuse Ratio**: **100.00%**
-- **Handshakes Saved**: **72,090,588 handshakes**
-- **Maintenance**: 254 background eviction and prune sweeps
-- **Safety Invariant**: **Zero deadlocks, zero lock starvation**
-
----
-
-## 6. Adversarial & Extreme Conditions Benchmark (`adversarial_bench`)
-
-Evaluates pool resilience, throughput, latency, and reuse ratios under hostile operating conditions.
-
-### 6.1 100% Cache Miss Storm (Cold Start & Random Key Churn)
-- **Workload**: 480,000 requests targeting 480,000 distinct, previously unseen endpoints across 32 threads.
-- **Throughput**: **18.41 Million ops/s** under 100% miss rate (zero-allocation fast path).
-- **Miss Fast-Path Latency**: **54 ns** (zero disk I/O, zero JSON parsing, zero empty container allocation).
-- **Reuse Efficiency**: **0.0%** (expected during cold start pod churn).
-- **Zero Memory Bloat**: Leaves **0 empty containers** in RAM, eliminating memory exhaustion risks.
-
-### 6.2 Worker Churn & Restart Storm (Thread Death & Rapid Spawning)
-- **Workload**: 800 short-lived worker threads spawned and joined across 50 generations, executing 4,000,000 checkouts.
-- **Throughput Under Churn**: **18.59 Million ops/s**.
-- **Reuse Ratio**: **25.00%** (across 800 thread terminations).
-- **Lock Poisoning**: **Zero incidents** (poison recovery verified).
-
-### 6.3 Worker Hold-Time Stalls ("Worker ôm connection")
-- **Workload**: 32 concurrent workers holding connections during simulated upstream RPC delays.
-- **Throughput Under Stalls**: **4.84 Million ops/s**.
-- **Pool Reused (Hits)**: **319,504 (99.8%)**.
-- **Connection Multiplier**: **~5,000x per socket** (reused across all checkouts).
-- **Handshakes Saved**: **319,504 handshakes**.
-- **Starvation Protection**: When capacity is temporarily exhausted, the pool non-blockingly returns `None` (MISS) allowing upstream to establish fresh connections without thread starvation.
-
-### 6.4 Chaos Maintenance Storm (High RPS + Violent Invalidation)
-- **Workload**: 32 workers executing non-stop traffic while a rogue background thread executes `drain_matching` wiping 50% of endpoints every 2ms.
-- **Traffic Handled**: **65,506,437 operations** in 3.0s.
-- **Violent Drains Executed**: **477 cycles** (957,091 connections safely retired).
-- **Throughput Under Chaos**: **21.81 Million ops/s**.
-- **Chaos Reuse Ratio**: **98.53%** (**64,546,085 handshakes saved** despite active purging).
-- **Safety Invariant**: **Zero deadlocks, zero lock starvation, zero memory leaks**.
+| Drain Target | Drained Count | Elapsed Time | Remaining |
+| :--- | :--- | :--- | :--- |
+| **Single Endpoint (0.1%)** | 10 | **3.77 µs** | 9,990 |
+| **Port Range < 8250 (25%)** | 2,490 | **118.03 µs** | 7,500 |
+| **All Remaining (100%)** | 7,500 | **301.58 µs** | 0 |
 
 ---
 
-## 7. Production Readiness Safety Guards
+## 6. Multicore Concurrency & Scaling (`multi_thread_bench`)
 
-1. **FD Leak Protection (`max_idle_per_key`)**:
-   - Caps the number of idle connections per container.
-   - Any excess connection returned to the pool is immediately closed, preventing OS `EMFILE`.
-2. **Backend RST Protection (`max_lifetime`)**:
-   - Connections older than `max_lifetime` (default: 1 hour) are retired to prevent race conditions with backend server keepalive deadlines.
-3. **Memory Bloat Protection (`prune_empty_pools` & `drain_matching`)**:
-   - `drain_matching` removes containers when endpoints are decommissioned.
-   - `prune_empty_pools` cleans up empty containers left by ephemeral Pod churn.
+### A. Multi-Core Concurrency Scaling (1 .. 256 Worker Threads)
+
+| Workers | Total Requests | Elapsed Time | Aggregate Ops/s | Avg Latency | Reuse Ratio | Handshakes Saved |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | 100,000 | 15.26 ms | **6.56M ops/s** | 152 ns | 100.0% | 100,000 |
+| **2** | 200,000 | 35.68 ms | **5.61M ops/s** | 178 ns | 100.0% | 199,980 |
+| **4** | 400,000 | 63.63 ms | **6.29M ops/s** | 159 ns | 100.0% | 399,951 |
+| **8** | 800,000 | 120.66 ms | **6.63M ops/s** | 150 ns | 100.0% | 799,906 |
+| **12** | 1,200,000 | 206.59 ms | **5.81M ops/s** | 172 ns | 100.0% | 1,199,882 |
+| **16** | 1,600,000 | 230.22 ms | **6.95M ops/s** | 143 ns | 100.0% | 1,599,826 |
+| **32** | 3,200,000 | 616.32 ms | **5.19M ops/s** | 192 ns | 100.0% | 3,199,755 |
+| **64** | 6,400,000 | 1.69 s | **3.78M ops/s** | 264 ns | 100.0% | 6,399,620 |
+| **128** | 12,800,000 | 4.49 s | **2.85M ops/s** | 350 ns | 100.0% | 12,799,438 |
+
+### B. Shard Lock Contention: Single-Key Hotspot vs Distributed Keys
+
+| Workload Pattern | Total Requests | Elapsed Time | Aggregate Ops/s | Avg Latency | Reuse Ratio | Handshakes Saved |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Distributed (128 Keys)** | 3,200,000 | 1.09 s | **2.94M ops/s** | 340 ns | 100.0% | 3,199,639 |
+| **Hotspot Contention (1 Key)** | 3,200,000 | 55.68 ms | **57.47M ops/s** | 17 ns | 100.0% | 3,200,000 |
+
+### C. Realistic Workload: Concurrent Traffic + Periodic Background Sweeping
+
+| Workers | Duration | Total Operations | Throughput | Reuse Ratio | Handshakes Saved | Background Sweeps | Lock Contention |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **32** | 3.01 s | 11,823,399 | **3.93M ops/s** | **100.00%** | **11,822,907** | 275 sweeps | **Zero Deadlocks** |
+
+### D. Multiplexed Stream Sharing Concurrency (HTTP/2 1:N Sharing)
+
+| Architecture | Total Streams | Elapsed Time | Aggregate Ops/s | Avg Latency | Physical Sockets |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **HTTP/2 Multiplexed (Atomic Streams)** | 6,400,000 | 2.33 s | **2.75M ops/s** | **363 ns** | 1 connection (Shared) |
+
+---
+
+## 7. Adversarial & Chaos Maintenance Benchmark (`adversarial_bench.rs`)
+
+| Adversarial Scenario | Workload Scale | Key Metric | Measured Result | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **100% Cache Miss Storm** | 480,000 requests | Miss throughput & latency | **1.28M ops/s** (783 ns) | **PASS** (Zero disk I/O) |
+| **Worker Churn & Restarts** | 800 threads, 4.0M ops | Churn throughput & reuse | **4.71M ops/s**, **100.0% reuse** | **PASS** (Zero lock poisoning) |
+| **Worker Hold-Time Stalls** | 32 workers, 320k ops | Throughput under contention | **2.11M ops/s**, **5,000x multiplier** | **PASS** (Zero thread block) |
+| **Chaos Maintenance Drains** | 7.11M ops, 726 drains | Chaos throughput & reuse | **2.37M ops/s**, **98.84% reuse** | **PASS** (Zero deadlocks) |
+
+---
+
+## 8. Memory Leak & Resource Regression Audit (`memory_leak_bench.rs`)
+
+| Audit Stage | Workload Scale | Throughput | Net Lingering Allocations | Net Heap Growth | Result |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **1. Steady-State Checkout & Return** | 5,000,000 cycles | **10.67M ops/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **2. Multiplexed Stream Slot Soak** | 2,000,000 ops | **4.68M streams/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **3. Abrupt RAII Lease Drops** | 100,000 leases | **7.01M drops/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **4. Continuous Idle Eviction Soak** | 10,000 sweeps | **2.89M sweeps/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+
+---
+
+## 9. How to Reproduce
+
+```bash
+# 1. Single-thread acquire latency, RAII leases, & O(1) queue scaling
+cargo bench -p velda-connection-pool --bench single_thread_bench
+
+# 2. Multi-thread concurrency scaling, hotspot contention & HTTP/2 stream sharing
+cargo bench -p velda-connection-pool --bench multi_thread_bench
+
+# 3. Adversarial cache miss storms, worker churn, & chaos drains
+cargo bench -p velda-connection-pool --bench adversarial_bench
+
+# 4. Protocol profile comparison (Exclusive vs Sequential vs Multiplexed)
+cargo bench -p velda-connection-pool --bench profile_bench
+
+# 5. Long-running memory leak and soak audit
+cargo bench -p velda-connection-pool --bench memory_leak_bench
+```

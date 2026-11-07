@@ -1,273 +1,162 @@
 # Velda Sync — Benchmark Report & Performance Registry
 
-> **Last Updated**: 2026-09-25  
-> **Environment**: Rust 1.98 / Edition 2024 / Linux x86_64 (`x86_64-unknown-linux-gnu`)  
-> **Profile**: `release` (`[profile.bench]`, `-O3`, LTO enabled)  
-> **Workload Baseline**: Real production configurations from [`example/`](./example) scaled up to 10,000+ entities and 200,000+ JSON lines.  
-> **Measurement Harness**: High-precision monotonic timer + thread-safe counting global allocator (`CountingAllocator`).
+This document reports empirical performance benchmarks for `velda-sync` (Configuration Compilation, Checksum Invariant & Persistence Subsystem).
+
+Tests were executed using the custom counting allocator and timing suite in:
+- Single-thread suite: [`benches/single_thread_bench.rs`](benches/single_thread_bench.rs)
+- Multi-thread concurrency suite: [`benches/multi_thread_bench.rs`](benches/multi_thread_bench.rs)
+- Adversarial & corruption suite: [`benches/adversarial_bench.rs`](benches/adversarial_bench.rs)
+- Memory leak & resource regression suite: [`benches/memory_leak_bench.rs`](benches/memory_leak_bench.rs)
 
 ---
 
-## Executive Summary & Big-O Complexity Overview
+## 1. Executive Summary & Big-O Complexity Overview
 
-| Subsystem / Stage | Operation / Workload | Latency / Throughput | Heap Allocs | Big-O Complexity | Architectural Invariant |
+| Subsystem / Stage | Operation / Workload | Measured Result | Heap Allocs | Big-O Complexity | Architectural Invariant |
 |---|---|---|---|:---:|---|
-| **Capability Provider** | Metrics: `record_cycle_success` | **12 ns** | 0 allocs | $\mathcal{O}(1)$ | Atomic memory operations, lock-free |
-| **Capability Provider** | Metrics: `snapshot` | **6 ns** | 0 allocs | $\mathcal{O}(1)$ | Atomic load snapshot, zero heap alloc |
-| **Capability Provider** | Logging: Caller thread dispatch | **1.30 µs** (771K logs/s) | 0 blocking | $\mathcal{O}(1)$ | Non-blocking ring buffer via `tracing-appender` |
-| **Stage 1: Pre-Sync** | SHA-256 Checksum Verification | **1.54 GB/s** (3.17 ms / 5 MB) | 0 allocs | $\mathcal{O}(N)$ | Streaming hardware-accelerated SHA-256 |
-| **Stage 1: Pre-Sync** | Gzip Decompression | **2.44 GB/s** (2.00 ms / 5 MB) | Minimal | $\mathcal{O}(N)$ | Flate2 streaming decompress |
-| **Stage 2: Sync** | **Idle Reconcile No-Op Loop** | **3.81 µs** | 15 allocs | $\mathbf{\mathcal{O}(1)}$ | **Fast Short-Circuit on Manifest Checksum** |
-| **Stage 2: Sync** | Delta Reconcile (10K routes) | **44.08 ms** | 373K allocs | $\mathcal{O}(M)$ | Only changed domains are recompiled |
-| **Stage 3: Post-Sync** | Routes Domain Compile (10K routes) | **1.87 ms** | 17 allocs | $\mathcal{O}(N)$ | Zero redundant cloning, streaming binary emit |
-| **Stage 3: Post-Sync** | **Data Plane Boot (Binary Unpack)** | **5.48 ms** vs 9.83 ms JSON | 100K allocs | $\mathbf{\mathcal{O}(N)}$ | **2.0x faster boot, 55.8% smaller payload** |
+| **Capability Provider** | Metrics: `record_cycle_success` | **11 ns** | 0 allocs | $\mathcal{O}(1)$ | Atomic memory operations, lock-free |
+| **Capability Provider** | Metrics: `snapshot` | **1 ns** | 0 allocs | $\mathcal{O}(1)$ | Atomic load snapshot, zero heap alloc |
+| **Stage 1: Pre-Sync** | SHA-256 Checksum Verification | **1.68 GB/s** (2.91 ms / 5 MB) | 0 allocs | $\mathcal{O}(N)$ | Streaming hardware-accelerated SHA-256 (0 allocs) |
+| **Stage 1: Pre-Sync** | Gzip Decompression (5 MB) | **2.93 GB/s** (1.67 ms / 5 MB) | 9 allocs | $\mathcal{O}(N)$ | Flate2 streaming decompress |
+| **Stage 1: Pre-Sync** | Manifest JSON Deserialization (1,000 dom) | **267.81 µs** | 3,009 allocs | $\mathcal{O}(N)$ | Linear schema-checked manifest parse |
+| **Stage 3: Post-Sync** | Routes Binary Compile (5,000 routes) | **661.85 µs** | Bounded | $\mathcal{O}(N)$ | Compact Bincode serialization |
+| **Stage 3: Post-Sync** | Routes Binary Unpack (5,000 routes) | **2.31 ms** | Bounded | $\mathcal{O}(N)$ | Direct in-memory unpack |
+| **Stage 3: Post-Sync** | Upstreams Binary Compile (1,000 upstreams) | **247.45 µs** | Bounded | $\mathcal{O}(N)$ | Sub-millisecond binary emit |
+| **Multithreaded SHA-256** | 16 Worker Threads Fan-out | **9.24 GB/s** (18,484 hashes/s) | 0 allocs | $\mathcal{O}(N)$ | Linear multicore throughput scaling |
+| **Adversarial Tamper Defense**| Bit-flipped SHA-256 Tamper Detection | **637.72 ns** (1.57M ops/s) | 0 allocs | $\mathcal{O}(N)$ | 100% strict rejection, zero heap alloc |
+| **Steady-State Leak Audit** | 10,000 cycles net heap growth | **0 B (Zero Leak)** | 0 allocs | $\mathcal{O}(1)$ | 100% RAII reclamation |
 
 ---
 
-## 1. Stage 1: Pre-Sync (Candidate Acquisition & Staging)
+## 2. Stage 1: Pre-Sync (Candidate Acquisition & Staging)
 
 `PreSyncStage` handles raw configuration acquisition, streaming Gzip decompression, SHA-256 checksum verification, and candidate `manifest.json` decoding.
 
-### 1.1 Gzip Payload Decompression Scaling
+### A. Gzip Payload Decompression Scaling
 
-| Raw Size | Gzip Size | Compression Ratio | Avg Latency | Throughput | Heap Allocs | Allocated Bytes | Big-O Complexity |
-|---|---|---|---|---|---|---|:---:|
-| 10 KB | 161 B | 1.6 % | 6.82 µs | 1.40 GB/s | 12 | 106.2 KB | $\mathcal{O}(N)$ |
-| 100 KB | 566 B | 0.6 % | 18.47 µs | 5.16 GB/s | 15 | 330.2 KB | $\mathcal{O}(N)$ |
-| 1 MB | 4.6 KB | 0.4 % | 299.20 µs | 3.26 GB/s | 19 | 4.07 MB | $\mathcal{O}(N)$ |
-| 5 MB | 22.4 KB | 0.4 % | 2.00 ms | 2.44 GB/s | 21 | 16.07 MB | $\mathcal{O}(N)$ |
-| 10 MB | 44.8 KB | 0.4 % | 4.08 ms | 2.39 GB/s | 22 | 32.07 MB | $\mathcal{O}(N)$ |
-| 20 MB | 89.5 KB | 0.4 % | 15.52 ms | 1.26 GB/s | 23 | 64.07 MB | $\mathcal{O}(N)$ |
-
-#### Gzip Decompression Big-O Linearity Drift
-
-$$\text{Linearity Drift } (\%) = \left( \frac{\text{Growth Ratio}}{\text{Scale Ratio}} - 1 \right) \times 100\%$$
-
-| Transition | Scale Ratio | Observed Growth | Linearity Drift % | Big-O Status |
-|---|---|---|---|:---:|
-| 10 KB $\rightarrow$ 100 KB | 10.0x | 2.71x | -72.9% | Sub-linear $\mathcal{O}(N)$ (Decompress buffer reuse) |
-| 100 KB $\rightarrow$ 1 MB | 10.2x | 16.20x | +58.2% | Buffer expansion transition |
-| 1 MB $\rightarrow$ 5 MB | 5.0x | 6.69x | +33.7% | Near-linear $\mathcal{O}(N)$ |
-| 5 MB $\rightarrow$ 10 MB | 2.0x | 2.04x | **+2.0%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 10 MB $\rightarrow$ 20 MB | 2.0x | 3.80x | +90.1% | L3 cache boundary pressure |
+| Raw Size | Gzip Size | Compression Ratio | Avg Latency | Throughput | Heap Allocs | Big-O Complexity |
+|---|---|---|---|---|---|:---:|
+| **10 KB** | 161 B | 1.6% | **6.36 µs** | **1.50 GB/s** | 7 | $\mathcal{O}(N)$ |
+| **100 KB** | 566 B | 0.6% | **17.95 µs** | **5.31 GB/s** | 9 | $\mathcal{O}(N)$ |
+| **1 MB** | 4.6 KB | 0.4% | **200.10 µs** | **4.88 GB/s** | 9 | $\mathcal{O}(N)$ |
+| **5 MB** | 22.4 KB | 0.4% | **1.67 ms** | **2.93 GB/s** | 9 | $\mathcal{O}(N)$ |
+| **10 MB** | 44.8 KB | 0.4% | **3.42 ms** | **2.86 GB/s** | 9 | $\mathcal{O}(N)$ |
 
 ---
 
-### 1.2 SHA-256 Checksum Verification Scaling
+### B. SHA-256 Checksum Verification Scaling
 
 > [!NOTE]
 > **Zero-Alloc Invariant**: Hasher operates entirely in registers/stack without allocating a single byte on the heap (0 allocs across all payload sizes).
 
 | Payload | Iterations | Avg Latency | Throughput | Heap Allocs | Big-O Complexity |
 |---|---|---|---|---|:---:|
-| 10 KB | 300 | 7.97 µs | 1.20 GB/s | 0 | $\mathcal{O}(N)$ |
-| 100 KB | 300 | 70.38 µs | 1.35 GB/s | 0 | $\mathcal{O}(N)$ |
-| 1 MB | 50 | 612.16 µs | 1.60 GB/s | 0 | $\mathcal{O}(N)$ |
-| 5 MB | 10 | 3.17 ms | 1.54 GB/s | 0 | $\mathcal{O}(N)$ |
-| 10 MB | 10 | 6.24 ms | 1.56 GB/s | 0 | $\mathcal{O}(N)$ |
-| 25 MB | 3 | 15.83 ms | 1.54 GB/s | 0 | $\mathcal{O}(N)$ |
-| 50 MB | 3 | 33.05 ms | 1.48 GB/s | 0 | $\mathcal{O}(N)$ |
-
-#### SHA-256 Big-O Linearity Drift
-
-| Transition | Scale Ratio | Observed Growth | Linearity Drift % | Big-O Status |
-|---|---|---|---|:---:|
-| 10 KB $\rightarrow$ 100 KB | 10.0x | 8.83x | -11.7% | **Strict $\mathcal{O}(N)$ [OK]** |
-| 100 KB $\rightarrow$ 1 MB | 10.2x | 8.70x | -15.1% | **Strict $\mathcal{O}(N)$ [OK]** |
-| 1 MB $\rightarrow$ 5 MB | 5.0x | 5.18x | **+3.6%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 5 MB $\rightarrow$ 10 MB | 2.0x | 1.97x | **-1.6%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 10 MB $\rightarrow$ 25 MB | 2.5x | 2.54x | **+1.4%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 25 MB $\rightarrow$ 50 MB | 2.0x | 2.09x | **+4.4%** | **Strict $\mathcal{O}(N)$ [OK]** |
+| **10 KB** | 200 | **6.01 µs** | **1.59 GB/s** | **0** | $\mathcal{O}(N)$ |
+| **100 KB** | 200 | **56.55 µs** | **1.69 GB/s** | **0** | $\mathcal{O}(N)$ |
+| **1 MB** | 30 | **576.29 µs** | **1.69 GB/s** | **0** | $\mathcal{O}(N)$ |
+| **5 MB** | 5 | **2.91 ms** | **1.68 GB/s** | **0** | $\mathcal{O}(N)$ |
+| **25 MB** | 5 | **14.68 ms** | **1.66 GB/s** | **0** | $\mathcal{O}(N)$ |
 
 ---
 
-### 1.3 Manifest JSON Decoding Scaling
+### C. Manifest JSON Deserialization Scaling
 
 | Domains ($N$) | JSON Size | Avg Parse Time | Heap Allocs | Allocated Bytes | Big-O Complexity |
 |---|---|---|---|---|:---:|
-| 10 | 1.1 KB | 2.61 µs | 33 | 3.0 KB | $\mathcal{O}(N)$ |
-| 50 | 5.2 KB | 13.31 µs | 155 | 13.6 KB | $\mathcal{O}(N)$ |
-| 100 | 10.3 KB | 25.81 µs | 306 | 27.7 KB | $\mathcal{O}(N)$ |
-| 500 | 52.5 KB | 127.87 µs | 1,508 | 117.3 KB | $\mathcal{O}(N)$ |
-| 1,000 | 105.2 KB | 252.41 µs | 3,009 | 235.2 KB | $\mathcal{O}(N)$ |
-| 2,500 | 267.8 KB | 636.18 µs | 7,511 | 881.6 KB | $\mathcal{O}(N)$ |
-
-#### Manifest JSON Big-O Linearity Drift
-
-| Transition | Scale Ratio | Observed Growth | Linearity Drift % | Big-O Status |
-|---|---|---|---|:---:|
-| 10 $\rightarrow$ 50 dom | 5.0x | 5.09x | **+1.9%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 50 $\rightarrow$ 100 dom | 2.0x | 1.94x | **-3.0%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 100 $\rightarrow$ 500 dom | 5.0x | 4.95x | **-0.9%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 500 $\rightarrow$ 1,000 dom | 2.0x | 1.97x | **-1.3%** | **Strict $\mathcal{O}(N)$ [OK]** |
-| 1,000 $\rightarrow$ 2,500 dom | 2.5x | 2.52x | **+0.8%** | **Strict $\mathcal{O}(N)$ [OK]** |
+| **10** | 1.1 KB | **2.71 µs** | 33 | 3.0 KB | $\mathcal{O}(N)$ |
+| **50** | 5.2 KB | **13.36 µs** | 155 | 13.6 KB | $\mathcal{O}(N)$ |
+| **200** | 20.8 KB | **54.59 µs** | 607 | 56.1 KB | $\mathcal{O}(N)$ |
+| **1,000** | 105.2 KB | **267.81 µs** | 3,009 | 235.2 KB | $\mathcal{O}(N)$ |
 
 ---
 
-## 2. Stage 2: Sync (Reconciliation Engine)
+## 3. Stage 3: Post-Sync (Domain Compilers & Binary Serialization / Unpack)
 
-`SyncComposition` executes the 5-phase reconciliation cycle.
+Evaluates domain-specific JSON parsing, semantic validation, compact binary compilation (`.bin`), and data plane unpacking:
 
-### 2.1 Reconciler Execution Times across Workloads
-
-| Workload Weight (Routes, Upstreams, Listeners) | Hot-Path No-Op (Time, Allocs) | Delta Update Routes (Time, Allocs) | Full Update 5 Domains (Time, Allocs) | Idle Big-O | Active Big-O |
-|---|---|---|---|:---:|:---:|
-| 100 R / 20 U / 5 L | **3.81 µs** (15 allocs) | 517.21 µs (4,066 allocs) | 748.17 µs (4,899 allocs) | $\mathbf{\mathcal{O}(1)}$ | $\mathcal{O}(M)$ |
-| 500 R / 50 U / 10 L | **4.01 µs** (15 allocs) | 2.09 ms (18,912 allocs) | 2.45 ms (20,499 allocs) | $\mathbf{\mathcal{O}(1)}$ | $\mathcal{O}(M)$ |
-| 2,000 R / 200 U / 25 L | **3.84 µs** (15 allocs) | 8.41 ms (74,768 allocs) | 9.19 ms (79,941 allocs) | $\mathbf{\mathcal{O}(1)}$ | $\mathcal{O}(M)$ |
-| 5,000 R / 500 U / 50 L | **3.88 µs** (15 allocs) | 21.69 ms (186,656 allocs) | 24.05 ms (199,218 allocs) | $\mathbf{\mathcal{O}(1)}$ | $\mathcal{O}(M)$ |
-| 10,000 R / 1,000 U / 100 L | **3.95 µs** (15 allocs) | 44.08 ms (373,159 allocs) | 47.34 ms (397,777 allocs) | $\mathbf{\mathcal{O}(1)}$ | $\mathcal{O}(M)$ |
-
-> [!IMPORTANT]
-> **Hot-Path Fast Short-Circuit Invariant**:
-> When configuration is unchanged, the daemon checks the Manifest SHA-256 checksum and returns in **3.81 – 3.95 µs** flat, regardless of whether the cluster manages 100 routes or 10,000 routes. **Time complexity is strictly $\mathcal{O}(1)$**.
-
-### 2.2 Reconciler Big-O Growth Linearity Analysis
-
-| Scale Transition | Scale Ratio | No-Op Growth | Delta Update Growth | Full Update Growth | Big-O Status |
-|---|---|---|---|---|:---:|
-| 100 $\rightarrow$ 500 routes | 5.0x | 1.05x | 4.03x (-19.3%) | 3.27x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 500 $\rightarrow$ 2,000 routes | 4.0x | 0.96x | 4.03x (+0.8%) | 3.76x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 2,000 $\rightarrow$ 5,000 routes | 2.5x | 1.01x | 2.58x (+3.1%) | 2.62x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 5,000 $\rightarrow$ 10,000 routes | 2.0x | 1.02x | 2.03x (+1.6%) | 1.97x | **Strict $\mathcal{O}(N)$ [OK]** |
+| Domain Workload | Items ($N$) | Parse Time | Validate Time | Compile (`.bin`) | Unpack (`.bin`) |
+|:---|:---|:---|:---|:---|:---|
+| **Routes** | 100 | **90.28 µs** | 34.35 µs | **12.34 µs** | **45.48 µs** |
+| **Routes** | 1,000 | **883.40 µs** | 335.82 µs | **121.38 µs** | **451.41 µs** |
+| **Routes** | 5,000 | **4.55 ms** | 1.76 ms | **661.85 µs** | **2.31 ms** |
+| **Upstreams** | 100 | **191.08 µs** | 63.14 µs | **23.42 µs** | **65.12 µs** |
+| **Upstreams** | 1,000 | **1.83 ms** | 629.47 µs | **247.45 µs** | **632.43 µs** |
+| **Listeners** | 50 | **64.43 µs** | 2.85 ms | **6.05 µs** | **16.46 µs** |
+| **Listeners** | 500 | **627.18 µs** | 3.09 ms | **50.10 µs** | **157.46 µs** |
 
 ---
 
-## 3. Stage 3: Post-Sync (Domain Compilers & Binary Artifacts)
+## 4. Multi-Thread Concurrency Scaling (`multi_thread_bench`)
 
-Independent domain compilers in [`src/post_sync/`](./src/post_sync) convert declarative JSON into validated, binary snapshots (`*.bin`).
+### A. Parallel Domain Compilation Scaling
 
-### 3.1 Routes Domain Pipeline Scaling (up to 200,000+ JSON lines)
+| Worker Threads | Total Compilations | Elapsed Time | Throughput | Speedup |
+|:---|:---|:---|:---|:---|
+| **1** | 1,600 | 702.23 ms | **2,278 ops/s** | 1.00x |
+| **2** | 1,600 | 410.42 ms | **3,898 ops/s** | 1.71x |
+| **4** | 1,600 | 283.30 ms | **5,647 ops/s** | 2.48x |
+| **8** | 1,600 | 264.22 ms | **6,055 ops/s** | 2.66x |
+| **16** | 1,600 | 276.13 ms | **5,794 ops/s** | 2.54x |
 
-| Routes ($N$) | JSON Lines | JSON Size | Bin Size | JSON Parse Time (Allocs) | Validation Time (Allocs) | Binary Compile Time (Allocs) | Binary Unpack Time (Allocs) | Big-O Complexity |
-|---|---|---|---|---|---|---|---|:---:|
-| 100 | 2,025 | 43.5 KB | 19.3 KB | 109.21 µs (1,026) | 37.83 µs (1,002) | 16.84 µs (10) | 51.49 µs (1,001) | $\mathcal{O}(N)$ |
-| 500 | 10,105 | 217.6 KB | 96.2 KB | 540.36 µs (5,108) | 199.75 µs (5,002) | 84.08 µs (12) | 247.17 µs (5,001) | $\mathcal{O}(N)$ |
-| 1,000 | 20,205 | 435.2 KB | 192.3 KB | 961.74 µs (10,209) | 358.88 µs (10,002) | 151.28 µs (13) | 483.65 µs (10,001) | $\mathcal{O}(N)$ |
-| 2,500 | 50,505 | 1.06 MB | 482.0 KB | 2.57 ms (25,511) | 944.33 µs (25,002) | 438.21 µs (15) | 1.27 ms (25,001) | $\mathcal{O}(N)$ |
-| 5,000 | 101,005 | 2.13 MB | 964.8 KB | 4.98 ms (51,012) | 1.90 ms (50,002) | 933.37 µs (16) | 2.70 ms (50,002) | $\mathcal{O}(N)$ |
-| 10,000 | 202,005 | 4.26 MB | 1.89 MB | 9.83 ms (102,013) | 3.81 ms (100,002) | 1.87 ms (17) | 5.48 ms (100,003) | $\mathcal{O}(N)$ |
+### B. Concurrent SHA-256 Payload Integrity Fan-out
 
-#### Routes Big-O Linearity Drift Analysis
+| Worker Threads | Total Payloads | Elapsed Time | Throughput | Data Rate |
+|:---|:---|:---|:---|:---|
+| **1** | 2,000 | 589.94 ms | **3,390 hashes/s** | 1,695.10 MB/s |
+| **2** | 2,000 | 297.90 ms | **6,713 hashes/s** | 3,356.83 MB/s |
+| **4** | 2,000 | 148.93 ms | **13,428 hashes/s** | 6,714.40 MB/s |
+| **8** | 2,000 | 120.34 ms | **16,619 hashes/s** | 8,309.79 MB/s |
+| **16** | 2,000 | 108.20 ms | **18,484 hashes/s** | **9,242.17 MB/s** |
 
-| Transition | Scale Ratio | JSON Parse Growth | Validation Growth | Compile Growth | Unpack Growth | Big-O Status |
-|---|---|---|---|---|---|:---:|
-| 100 $\rightarrow$ 500 | 5.0x | 4.95x (-1.0%) | 5.28x | 4.99x | 4.80x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 500 $\rightarrow$ 1,000 | 2.0x | 1.78x (-11.0%) | 1.80x | 1.80x | 1.96x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 1,000 $\rightarrow$ 2,500 | 2.5x | 2.67x (+6.8%) | 2.63x | 2.90x | 2.62x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 2,500 $\rightarrow$ 5,000 | 2.0x | 1.94x (-3.1%) | 2.02x | 2.13x | 2.13x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 5,000 $\rightarrow$ 10,000 | 2.0x | 1.98x (-1.2%) | 2.00x | 2.00x | 2.03x | **Strict $\mathcal{O}(N)$ [OK]** |
+### C. Concurrent SyncMetrics In-Memory Contention Stress
 
----
-
-### 3.2 Edge Serving Boot Advantage: Binary Unpack vs JSON Parse
-
-When `velda-edge` boots or hot-reloads, it reads pre-compiled `*.bin` artifacts directly into RAM, bypassing JSON parsing entirely:
-
-| Routes ($N$) | JSON Parse Latency | Binary Unpack Latency | Latency Speedup | JSON Allocations | Binary Allocations | Storage Reduction |
-|---|---|---|---|---|---|:---:|
-| 100 | 109.21 µs | **51.49 µs** | **2.1x** | 1,026 | 1,001 | **55.7 %** |
-| 500 | 540.36 µs | **247.17 µs** | **2.2x** | 5,108 | 5,001 | **55.8 %** |
-| 1,000 | 961.74 µs | **483.65 µs** | **2.0x** | 10,209 | 10,001 | **55.8 %** |
-| 2,500 | 2.57 ms | **1.27 ms** | **2.0x** | 25,511 | 25,001 | **55.8 %** |
-| 5,000 | 4.98 ms | **2.70 ms** | **1.8x** | 51,012 | 50,002 | **55.7 %** |
-| 10,000 | 9.83 ms | **5.48 ms** | **1.8x** | 102,013 | 100,003 | **55.7 %** |
+| Worker Threads | Total Updates | Elapsed Time | Update Throughput |
+|:---|:---|:---|:---|
+| **1** | 2,000,000 | 18.60 ms | **107.50M ops/s** |
+| **2** | 2,000,000 | 79.29 ms | **25.22M ops/s** |
+| **4** | 2,000,000 | 80.39 ms | **24.88M ops/s** |
+| **8** | 2,000,000 | 53.72 ms | **37.23M ops/s** |
+| **16** | 2,000,000 | 56.59 ms | **35.34M ops/s** |
 
 ---
 
-### 3.3 Upstreams Domain Pipeline Scaling
+## 5. Adversarial & Fault-Tolerance Defense (`adversarial_bench`)
 
-| Upstreams ($N$) | JSON Size | Bin Size | JSON Parse | Validate | Compile | Unpack | Big-O Complexity |
-|---|---|---|---|---|---|---|:---:|
-| 100 | 50.4 KB | 16.3 KB | 102.15 µs | 25.16 µs | 13.93 µs | 42.40 µs | $\mathcal{O}(N)$ |
-| 500 | 252.6 KB | 81.6 KB | 509.56 µs | 124.75 µs | 67.36 µs | 185.97 µs | $\mathcal{O}(N)$ |
-| 1,000 | 505.3 KB | 163.1 KB | 973.12 µs | 260.85 µs | 133.38 µs | 361.04 µs | $\mathcal{O}(N)$ |
-| 2,500 | 1.23 MB | 408.3 KB | 2.46 ms | 623.42 µs | 358.28 µs | 910.59 µs | $\mathcal{O}(N)$ |
-| 5,000 | 2.47 MB | 820.3 KB | 4.87 ms | 1.24 ms | 675.74 µs | 1.84 ms | $\mathcal{O}(N)$ |
-
-#### Upstreams Big-O Linearity Drift
-
-| Transition | Scale Ratio | JSON Parse Growth | Validation Growth | Compile Growth | Unpack Growth | Big-O Status |
-|---|---|---|---|---|---|:---:|
-| 100 $\rightarrow$ 500 | 5.0x | 4.99x (-0.2%) | 4.96x | 4.83x | 4.39x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 500 $\rightarrow$ 1,000 | 2.0x | 1.91x (-4.5%) | 2.09x | 1.98x | 1.94x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 1,000 $\rightarrow$ 2,500 | 2.5x | 2.53x (+1.2%) | 2.39x | 2.69x | 2.52x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 2,500 $\rightarrow$ 5,000 | 2.0x | 1.98x (-1.0%) | 1.99x | 1.89x | 2.02x | **Strict $\mathcal{O}(N)$ [OK]** |
+| Adversarial Attack Vector | Workload Scale | Outcome | Latency / op | Throughput | Invariant |
+|:---|:---|:---|:---|:---|:---|
+| **Corrupted Gzip Flooding** | 500,000 ops | 100% Deterministic Rejection | **2181.66 ns** | 458,367 ops/s | Bounded scratch buffer |
+| **Malformed Manifest JSON** | 500,000 ops | 100% Deterministic Rejection | **145.45 ns** | **6.88M ops/s** | Bounded error parser |
+| **SHA-256 Tamper Detection**| 1,000,000 ops | 100% Strict Integrity Catch | **637.72 ns** | **1.57M ops/s** | 0 Allocs (Stack Invariant) |
+| **Corrupted Binary Unpack** | 500,000 ops | 100% Panic-Free Fallback | **45.57 ns** | **21.94M ops/s** | Bounded error returns |
 
 ---
 
-### 3.4 Listeners Domain Pipeline Scaling
+## 6. Memory Leak & Resource Regression Audit (`memory_leak_bench`)
 
-| Listeners ($N$) | JSON Size | Bin Size | JSON Parse | Validate | Compile | Unpack | Big-O Complexity |
-|---|---|---|---|---|---|---|:---:|
-| 50 | 9.6 KB | 3.0 KB | 24.78 µs | 6.73 µs | 2.66 µs | 8.89 µs | $\mathcal{O}(N)$ |
-| 100 | 19.2 KB | 5.9 KB | 37.33 µs | 12.69 µs | 4.79 µs | 16.86 µs | $\mathcal{O}(N)$ |
-| 250 | 48.1 KB | 14.6 KB | 92.44 µs | 32.88 µs | 12.07 µs | 41.06 µs | $\mathcal{O}(N)$ |
-| 500 | 96.1 KB | 29.1 KB | 184.16 µs | 80.72 µs | 24.64 µs | 80.25 µs | $\mathcal{O}(N)$ |
-| 1,000 | 192.1 KB | 58.0 KB | 344.72 µs | 123.29 µs | 48.41 µs | 167.52 µs | $\mathcal{O}(N)$ |
-
-#### Listeners Big-O Linearity Drift
-
-| Transition | Scale Ratio | JSON Parse Growth | Validation Growth | Compile Growth | Unpack Growth | Big-O Status |
-|---|---|---|---|---|---|:---:|
-| 50 $\rightarrow$ 100 | 2.0x | 1.51x (-24.7%) | 1.89x | 1.80x | 1.90x | Near-linear $\mathcal{O}(N)$ |
-| 100 $\rightarrow$ 250 | 2.5x | 2.48x (-0.9%) | 2.59x | 2.52x | 2.43x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 250 $\rightarrow$ 500 | 2.0x | 1.99x (-0.4%) | 2.46x | 2.04x | 1.95x | **Strict $\mathcal{O}(N)$ [OK]** |
-| 500 $\rightarrow$ 1,000 | 2.0x | 1.87x (-6.4%) | 1.53x | 1.96x | 2.09x | **Strict $\mathcal{O}(N)$ [OK]** |
+| Audit Stage | Workload Scale | Throughput | Net Outstanding Allocs | Net Heap Growth | Result |
+|:---|:---|:---|:---|:---|:---|
+| **1. Decompression Soak** | 10,000 cycles | **147.8K ops/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **2. Compilation & Unpack Soak** | 2,000 cycles | **901 ops/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **3. Adversarial Error-Path Soak**| 10,000 ops | **1.24M ops/s** | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
+| **4. SyncMetrics Stability Soak** | 1,000,000 ops | High-freq | **0 allocs** | **0 B** | **ZERO LEAK [PASS]** |
 
 ---
 
-## 4. Capability Providers (Cross-Cutting Providers)
-
-Pure capabilities operating orthogonally from the reconciliation loop.
-
-### 4.1 Metrics Provider (`SyncMetrics` In-Memory Atomics)
-
-Tested under high-pressure burst of **1,000,000 sequential operations**:
-
-| Operation | Total Iterations | Avg Latency | Heap Allocs / Op | Heap Bytes / Op | Big-O Complexity |
-|---|---|---|---|---|:---:|
-| `record_cycle_success()` | 1,000,000 | **12 ns** | 0.0000 | 0 B | $\mathbf{\mathcal{O}(1)}$ |
-| `record_cycle_error()` | 1,000,000 | **11 ns** | 0.0000 | 0 B | $\mathbf{\mathcal{O}(1)}$ |
-| `snapshot()` | 1,000,000 | **6 ns** | 0.0000 | 0 B | $\mathbf{\mathcal{O}(1)}$ |
-| `render_prometheus()` | 50,000 | **180 ns** | 1.00 | 2.3 KB | $\mathcal{O}(1)$ |
-
-> [!TIP]
-> **Zero Hot-Path Overhead**: Calling `record_cycle_success` inside the sync loop costs only **12 nanoseconds** and performs **zero memory allocations**.
-
----
-
-### 4.2 Logging Provider (Non-Blocking Ring Buffer)
-
-Tested with log event burst loads from **1,000 to 100,000 log events**:
-
-| Burst Scale (Events) | Total Elapsed | Avg Caller Dispatch Time | Log Throughput | Queue Stability | Big-O Complexity |
-|---|---|---|---|---|:---:|
-| 1,000 | 1.33 ms | **1.33 µs** | 751,847 logs/s | Flat $\mathcal{O}(1)$ [OK] | $\mathcal{O}(1)$ |
-| 10,000 | 13.10 ms | **1.31 µs** | 763,137 logs/s | Flat $\mathcal{O}(1)$ [OK] | $\mathcal{O}(1)$ |
-| 50,000 | 64.92 ms | **1.30 µs** | 770,194 logs/s | Flat $\mathcal{O}(1)$ [OK] | $\mathcal{O}(1)$ |
-| 100,000 | 129.62 ms | **1.30 µs** | 771,477 logs/s | Flat $\mathcal{O}(1)$ [OK] | $\mathcal{O}(1)$ |
-
-> [!NOTE]
-> **Zero Reconciler Blocking Invariant**:
-> Even during sudden 100,000 log spikes, caller thread latency remains completely flat at **1.30 µs**, ensuring log disk writes can never stall synchronization or health check loops.
-
----
-
-## 5. Benchmark Reproduction Commands
-
-To reproduce or verify these measurements at any time:
+## 7. How to Reproduce
 
 ```bash
-# 1. Run Stage 1 (Pre-Sync: Gzip, SHA-256, Manifest Parse)
-cargo bench -p velda-sync --bench stage1_presync
+# Set PROTOC path if required by tonic-build
+export PROTOC=/home/phucle/.cache/uv/archive-v0/3kT7ylvB58kWDUbK/torch/bin/protoc
 
-# 2. Run Stage 2 (Sync: Reconciler No-Op, Delta, Full Scaling)
-cargo bench -p velda-sync --bench stage2_sync
+# 1. Single-thread decompression, SHA-256, & domain compilation
+cargo bench -p velda-sync --bench single_thread_bench
 
-# 3. Run Stage 3 (Post-Sync: Routes, Upstreams, Listeners Compilers)
-cargo bench -p velda-sync --bench stage3_postsync
+# 2. Multi-thread parallel domain compilation & SHA-256 fan-out
+cargo bench -p velda-sync --bench multi_thread_bench
 
-# 4. Run Capability Providers (Metrics & Non-Blocking Logging)
-cargo bench -p velda-sync --bench stage_providers
+# 3. Adversarial gzip floods, malformed JSON, & tamper detection
+cargo bench -p velda-sync --bench adversarial_bench
+
+# 4. Long-running memory leak and steady-state soak audit
+cargo bench -p velda-sync --bench memory_leak_bench
 ```
