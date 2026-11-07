@@ -71,40 +71,67 @@ pub async fn serve(
         let (upstream_resp_fut, mut upstream_send_stream) =
             client.open_stream(upstream_req, false)?;
 
-        // Step 4: Stream inbound client chunks to upstream RDMA channel with HTTP/2 backpressure.
+        // Step 4: Stream inbound client chunks to upstream RDMA channel with concurrent early-response monitoring.
+        // Concurrently awaits upstream_resp_fut so early errors (e.g. 401/403/ResourceExhausted) immediately abort
+        // upload and upstream receive loop continuously drains transport credit frames (Fixes Scenario 2).
+        tokio::pin!(upstream_resp_fut);
+        let mut early_response = None;
         let is_end = server_stream.recv_stream.is_end_stream();
+
         if !is_end {
+            let mut upload_done = false;
             let mut has_trailers = false;
-            while let Some(chunk_res) = server_stream.recv_stream.data().await {
-                let chunk = chunk_res.map_err(GrpcError::H2)?;
-                let len = chunk.len();
-                upstream_send_stream
-                    .send_data(chunk, false)
-                    .map_err(GrpcError::H2)?;
-                // Replenish downstream receive window to allow client to continue streaming
-                let _ = server_stream
+
+            while !upload_done {
+                tokio::select! {
+                    biased;
+                    // Branch 1: If upstream responds early (e.g. error/trailers), abort upload immediately
+                    resp_res = &mut upstream_resp_fut => {
+                        let response = resp_res.map_err(GrpcError::H2)?;
+                        early_response = Some(response);
+                        upload_done = true;
+                    }
+                    // Branch 2: Stream next client chunk to upstream with flow-control backpressure
+                    maybe_chunk = server_stream.recv_stream.data(), if !upload_done => {
+                        match maybe_chunk {
+                            Some(chunk_res) => {
+                                let chunk = chunk_res.map_err(GrpcError::H2)?;
+                                let len = chunk.len();
+                                upstream_send_stream
+                                    .send_data(chunk, false)
+                                    .map_err(GrpcError::H2)?;
+                                let _ = server_stream
+                                    .recv_stream
+                                    .flow_control()
+                                    .release_capacity(len);
+                            }
+                            None => {
+                                upload_done = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if early_response.is_none() {
+                // Step 5: Finalize upstream request stream with trailers or empty END_STREAM frame.
+                if let Some(trailers) = server_stream
                     .recv_stream
-                    .flow_control()
-                    .release_capacity(len);
-            }
+                    .trailers()
+                    .await
+                    .map_err(GrpcError::H2)?
+                {
+                    upstream_send_stream
+                        .send_trailers(trailers)
+                        .map_err(GrpcError::H2)?;
+                    has_trailers = true;
+                }
 
-            // Step 5: Finalize upstream request stream with trailers or empty END_STREAM frame.
-            if let Some(trailers) = server_stream
-                .recv_stream
-                .trailers()
-                .await
-                .map_err(GrpcError::H2)?
-            {
-                upstream_send_stream
-                    .send_trailers(trailers)
-                    .map_err(GrpcError::H2)?;
-                has_trailers = true;
-            }
-
-            if !has_trailers {
-                upstream_send_stream
-                    .send_data(Bytes::new(), true)
-                    .map_err(GrpcError::H2)?;
+                if !has_trailers {
+                    upstream_send_stream
+                        .send_data(Bytes::new(), true)
+                        .map_err(GrpcError::H2)?;
+                }
             }
         } else {
             upstream_send_stream
@@ -112,8 +139,11 @@ pub async fn serve(
                 .map_err(GrpcError::H2)?;
         }
 
-        // Step 6: Await upstream response headers and dispatch response downstream.
-        let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
+        // Step 6: Await upstream response headers if not already captured via early response.
+        let response = match early_response {
+            Some(resp) => resp,
+            None => (&mut upstream_resp_fut).await.map_err(GrpcError::H2)?,
+        };
         let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
 
         let mut resp_builder = http::Response::builder()

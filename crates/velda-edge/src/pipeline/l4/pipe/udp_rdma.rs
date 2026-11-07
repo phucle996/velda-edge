@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use velda_router::UdpRoute;
-use velda_transport::UdpSocket;
+use velda_sock::UdpSocket;
 
 use super::super::udp::{SessionAcquisition, UdpSessionKey, get_udp_session_table};
 use crate::runtime::pipeline::L4UdpConfig;
@@ -89,12 +89,13 @@ pub async fn serve(
         // Standard packets (<= 2KB) lease Standard2K; large GRO packets lease Large64K with single SGE.
         let send_res = if let Ok(mut slab) = upstream.lease_slab_for_size(initial_bytes.len()) {
             slab[..initial_bytes.len()].copy_from_slice(&initial_bytes);
-            lease.send_lease(&slab, initial_bytes.len()).await
+            lease.sender.send_lease(&slab, initial_bytes.len()).await
         } else {
-            lease.send(&initial_bytes).await
+            lease.sender.send(&initial_bytes).await
         };
 
         if let Err(e) = send_res {
+            lease.mark_broken();
             tracing::warn!(
                 error = %e,
                 upstream = %upstream_name,
@@ -155,12 +156,15 @@ pub async fn serve(
             }
         };
 
+        // Decouple RDMA send and receive halves ("minh bạch và tách biệt 2 luồng")
+        let (rdma_sender, rdma_receiver) = lease.split();
+
         // Step 4b: Send initial datagram over the RDMA channel to prime the session.
         let send_res = if let Ok(mut slab) = up_clone.lease_slab_for_size(initial_bytes.len()) {
             slab[..initial_bytes.len()].copy_from_slice(&initial_bytes);
-            lease.send_lease(&slab, initial_bytes.len()).await
+            rdma_sender.send_lease(&slab, initial_bytes.len()).await
         } else {
-            lease.send(&initial_bytes).await
+            rdma_sender.send(&initial_bytes).await
         };
         if let Err(e) = send_res {
             tracing::warn!(
@@ -192,9 +196,9 @@ pub async fn serve(
                         Some(first_data) => {
                             let send_res = if let Ok(mut slab) = up_clone.lease_slab_for_size(first_data.len()) {
                                 slab[..first_data.len()].copy_from_slice(&first_data);
-                                lease.send_lease(&slab, first_data.len()).await
+                                rdma_sender.send_lease(&slab, first_data.len()).await
                             } else {
-                                lease.send(&first_data).await
+                                rdma_sender.send(&first_data).await
                             };
                             if let Err(e) = send_res {
                                 tracing::warn!(
@@ -214,9 +218,9 @@ pub async fn serve(
                                     Ok(data) => {
                                         let send_res = if let Ok(mut slab) = up_clone.lease_slab_for_size(data.len()) {
                                             slab[..data.len()].copy_from_slice(&data);
-                                            lease.send_lease(&slab, data.len()).await
+                                            rdma_sender.send_lease(&slab, data.len()).await
                                         } else {
-                                            lease.send(&data).await
+                                            rdma_sender.send(&data).await
                                         };
                                         if let Err(e) = send_res {
                                             tracing::warn!(
@@ -241,7 +245,7 @@ pub async fn serve(
                 }
                 // Leg 2: RDMA Upstream -> Gateway -> Downstream Client
                 // Awaits RDMA Receive completion with a poll timeout and transmits back via downstream UDP socket.
-                rdma_res = lease.recv(RDMA_RECV_POLL_TIMEOUT) => {
+                rdma_res = rdma_receiver.recv(RDMA_RECV_POLL_TIMEOUT) => {
                     match rdma_res {
                         Ok(resp_payload) => {
                             let current_peer = *session_peer.read();
@@ -305,6 +309,8 @@ pub async fn serve(
         }
 
         // Step 5: Evict session key from table on task exit.
+        // Mark channel broken to prevent cross-session datagram bleeding into pooled connections.
+        lease.mark_broken();
         get_udp_session_table().remove(&session_key);
     });
 }

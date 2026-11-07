@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use velda_core::RouteId;
 use velda_rdma::{RdmaError, RdmaSlabClass};
-use velda_transport::Connection;
+use velda_sock::Connection;
 
 use crate::runtime::pipeline::L4TcpConfig;
 use crate::upstream::rdma::RdmaUpstream;
@@ -65,6 +65,9 @@ pub async fn serve(
     let (mut client_reader, mut client_writer) = tokio::io::split(conn.stream);
     let idle_timeout = upstream.inner.timeouts().idle;
 
+    // Transparently decouple RDMA into independent Send and Receive flows ("minh bạch và tách biệt 2 luồng")
+    let (rdma_sender, rdma_receiver) = lease.split();
+
     // Step 3: Directional leg: Client TCP -> RDMA Upstream
     // Leases contiguous 64KB spans from the pre-registered arena, reading directly into pinned memory
     // and posting single-SGE Send WRs (`num_sge = 1`) with zero intermediate user-space copies.
@@ -81,11 +84,12 @@ pub async fn serve(
 
             let n = client_reader.read(&mut slab).await?;
             if n == 0 {
-                // Client reached EOF
+                // Client reached EOF; send explicit shutdown frame to peer
+                let _ = rdma_sender.shutdown().await;
                 break;
             }
 
-            lease
+            rdma_sender
                 .send_lease(&slab, n)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -99,7 +103,7 @@ pub async fn serve(
     let rdma_to_client = async {
         let mut total_bytes = 0u64;
         loop {
-            let payload = match lease.recv(idle_timeout).await {
+            let payload = match rdma_receiver.recv(idle_timeout).await {
                 Ok(bytes) => bytes,
                 Err(RdmaError::Disconnected(_)) => break,
                 Err(e) => return Err(std::io::Error::other(e.to_string())),
@@ -145,6 +149,7 @@ pub async fn serve(
                             );
                         }
                         Err(_) => {
+                            lease.mark_broken();
                             tracing::debug!(
                                 upstream = %upstream_name,
                                 peer = %peer,
@@ -187,4 +192,8 @@ pub async fn serve(
             }
         }
     }
+
+    // Raw L4 TCP streams lack application framing delimiters.
+    // Mark channel broken to prevent cross-session byte bleeding into pooled connections (CWE-444/CWE-456).
+    lease.mark_broken();
 }
