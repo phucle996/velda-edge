@@ -21,7 +21,10 @@
 //! 4. **Lock-Free Atomic Tracking**: All credit operations execute via `AtomicU32` with relaxed/acquire/release
 //!    semantics, ensuring zero mutex contention on the hot path.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+use tokio::sync::Notify;
 
 use crate::error::RdmaError;
 
@@ -42,22 +45,74 @@ pub struct CreditFlowControl {
     unreplenished_recvs: AtomicU32,
 
     /// Threshold of consumed receives that triggers sending a credit update to peer.
-    replenish_threshold: u32,
+    pub replenish_threshold: u32,
+
+    /// Cooperative notification handle waking sender tasks when remote peer grants credits.
+    notify: Arc<Notify>,
 }
 
 impl CreditFlowControl {
     /// Initializes flow control with an initial credit allotment.
+    ///
+    /// Configures early low-watermark replenishment (`replenish_threshold = 16..32`)
+    /// so credits are continuously returned while the in-flight window remains 75-90% full.
     pub fn new(initial_credits: u32) -> Self {
-        let threshold = (initial_credits / 2).max(1);
+        let threshold = (initial_credits / 8)
+            .clamp(8, 32)
+            .min((initial_credits / 2).max(1));
         Self {
             remote_send_credits: AtomicU32::new(initial_credits),
             local_posted_recvs: AtomicU32::new(initial_credits),
             unreplenished_recvs: AtomicU32::new(0),
             replenish_threshold: threshold,
+            notify: Arc::new(Notify::new()),
         }
     }
 
-    /// Acquires 1 send credit before posting a Send WR.
+    /// Acquires 1 send credit, waiting cooperatively if credits are temporarily exhausted.
+    ///
+    /// - **Fast-path**: Atomic CAS decrement. If credits > 0, returns immediately without yielding.
+    /// - **Cold-path (Safety Net)**: If credits reach 0 during high-load bursts, cooperatively awaits
+    ///   replenishment notification from peer via `tokio::sync::Notify` instead of dropping the connection.
+    pub async fn acquire_send_credit(&self, timeout: Duration) -> Result<(), RdmaError> {
+        // Fast-path: Instant lock-free CAS attempt
+        if self.try_acquire_send_credit().is_ok() {
+            return Ok(());
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.notify.notified();
+            // Re-check after registering listener to eliminate race condition
+            if self.try_acquire_send_credit().is_ok() {
+                return Ok(());
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(RdmaError::InsufficientCredits {
+                    available: 0,
+                    required: 1,
+                });
+            }
+
+            let remaining = deadline - now;
+            match tokio::time::timeout(remaining, notified).await {
+                Ok(()) => {
+                    if self.try_acquire_send_credit().is_ok() {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    return Err(RdmaError::Timeout(
+                        "Timed out waiting for remote RDMA send credits".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Non-blocking check attempting to acquire 1 send credit immediately.
     ///
     /// Fails immediately if the remote peer has no available receive buffers.
     #[inline(always)]
@@ -83,26 +138,55 @@ impl CreditFlowControl {
     }
 
     /// Replenishes send credits when remote peer informs us of newly posted receive buffers.
+    ///
+    /// Uses saturating addition and clamps to `max_credits` to protect against integer
+    /// overflow and malicious imm_data tampering. Immediately wakes waiting senders.
     #[inline(always)]
-    pub fn add_remote_credits(&self, credits: u32) {
-        self.remote_send_credits
-            .fetch_add(credits, Ordering::Release);
+    pub fn add_remote_credits(&self, credits: u32, max_credits: u32) {
+        if credits == 0 {
+            return;
+        }
+        let mut current = self.remote_send_credits.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_add(credits).min(max_credits);
+            match self.remote_send_credits.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.notify.notify_waiters();
+                    break;
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Records that the local application consumed a received buffer.
     ///
-    /// If the unreplenished count reaches `replenish_threshold`, returns `Some(credits_to_grant)`
-    /// so the caller can piggyback the credit grant to the remote peer.
+    /// Returns true if unreplenished recvs has reached or exceeded replenish_threshold.
+    /// Does NOT reset the count; only `take_pending_replenishment` resets it, preventing
+    /// credit vanishing on high-throughput streaming.
     #[inline(always)]
-    pub fn on_recv_consumed(&self) -> Option<u32> {
+    pub fn on_recv_consumed(&self) -> bool {
         let count = self.unreplenished_recvs.fetch_add(1, Ordering::AcqRel) + 1;
-        if count >= self.replenish_threshold {
-            // Reset unreplenished count and return batch to replenish
-            self.unreplenished_recvs.store(0, Ordering::Release);
-            Some(count)
-        } else {
-            None
-        }
+        count >= self.replenish_threshold
+    }
+
+    /// Extracts any accumulated receive buffer completions that have not yet been signaled
+    /// to the remote peer, resetting the unreplenished counter to 0.
+    #[inline(always)]
+    pub fn take_pending_replenishment(&self) -> u32 {
+        self.unreplenished_recvs.swap(0, Ordering::AcqRel)
+    }
+
+    /// Re-queues pending credits if an attempt to send them was deferred.
+    #[inline(always)]
+    pub fn add_pending_credits(&self, credits: u32) {
+        self.unreplenished_recvs
+            .fetch_add(credits, Ordering::Release);
     }
 
     /// Returns the currently available send credits.

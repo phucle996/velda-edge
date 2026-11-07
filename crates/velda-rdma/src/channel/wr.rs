@@ -33,7 +33,7 @@ use std::os::raw::c_int;
 
 use crate::ffi::{
     IBV_SEND_SIGNALED, IBV_WR_RDMA_READ, IBV_WR_RDMA_WRITE, IBV_WR_RDMA_WRITE_WITH_IMM,
-    IBV_WR_SEND, IBV_WR_SEND_WITH_IMM, ibv_recv_wr, ibv_send_wr, ibv_send_wr_rdma, ibv_sge,
+    IBV_WR_SEND, ibv_recv_wr, ibv_send_wr, ibv_send_wr_rdma, ibv_sge,
 };
 
 /// Builder for constructing zero-allocation RDMA Send Work Requests.
@@ -43,34 +43,23 @@ pub struct SendWrBuilder<'a> {
 }
 
 impl<'a> SendWrBuilder<'a> {
-    /// Constructs a basic RDMA Send WR.
-    pub fn send(wr_id: u64, sge: &'a [ibv_sge], signaled: bool) -> Self {
-        let flags = if signaled { IBV_SEND_SIGNALED } else { 0 };
+    /// Constructs an RDMA Send WR natively and branchlessly.
+    ///
+    /// When `imm_data == 0`, opcode evaluates to `IBV_WR_SEND`.
+    /// When `imm_data > 0`, opcode evaluates to `IBV_WR_SEND_WITH_IMM` to carry flow-control credits.
+    /// Computes opcode and signaled flags branchlessly via arithmetic, eliminating branch mispredictions.
+    #[inline(always)]
+    pub fn send(wr_id: u64, sge: &'a [ibv_sge], imm_data: u32, signaled: bool) -> Self {
+        let has_imm = (imm_data != 0) as u32;
+        let opcode = IBV_WR_SEND + has_imm;
+        let flags = (signaled as u32) * IBV_SEND_SIGNALED;
         Self {
             wr: ibv_send_wr {
                 wr_id,
                 next: std::ptr::null_mut(),
                 sg_list: sge.as_ptr() as *mut ibv_sge,
                 num_sge: sge.len() as c_int,
-                opcode: IBV_WR_SEND,
-                send_flags: flags,
-                imm_data: 0,
-                wr: ibv_send_wr_rdma::default(),
-            },
-            _sge: sge,
-        }
-    }
-
-    /// Constructs an RDMA Send with Immediate Data (used to piggyback credit updates).
-    pub fn send_with_imm(wr_id: u64, sge: &'a [ibv_sge], imm_data: u32, signaled: bool) -> Self {
-        let flags = if signaled { IBV_SEND_SIGNALED } else { 0 };
-        Self {
-            wr: ibv_send_wr {
-                wr_id,
-                next: std::ptr::null_mut(),
-                sg_list: sge.as_ptr() as *mut ibv_sge,
-                num_sge: sge.len() as c_int,
-                opcode: IBV_WR_SEND_WITH_IMM,
+                opcode,
                 send_flags: flags,
                 imm_data,
                 wr: ibv_send_wr_rdma::default(),

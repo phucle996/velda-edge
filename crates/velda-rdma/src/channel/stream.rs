@@ -9,24 +9,16 @@
 //! `tokio::io::AsyncRead` and `tokio::io::AsyncWrite`.
 //!
 //! `RdmaStream` bridges this gap, providing a seamless abstraction that adapts discrete RDMA message
-//! transfers into a standard asynchronous stream:
+//! transfers into a standard asynchronous stream.
 //!
-//! ### 1. Zero-Copy Inbound Chunk Draining
-//! When incoming data arrives via an RDMA Receive completion, the resulting `Bytes` buffer is stored
-//! in `read_buf`. Sequential `poll_read` calls consume this slice via `Buf::advance()` without copying
-//! bytes across intermediate buffers. When the current message chunk is completely drained, the adapter
-//! initiates another RDMA receive operation on the underlying `RdmaChannel`.
-//!
-//! ### 2. Coalesced Outbound Staging & Direct Post
-//! Outbound writes via `poll_write` are accumulated into an internal `write_buf: BytesMut`. When the
-//! buffer exceeds configured thresholds or when `poll_flush` is invoked, the staged buffer is posted
-//! as an RDMA Send Work Request. This coalesces small application-level writes (e.g. gRPC frame headers)
-//! into contiguous RDMA payloads, maximizing PCIe bus throughput.
-//!
-//! ### 3. Uniform Protocol Pipeline Interoperability
-//! Because `RdmaStream` implements `AsyncRead + AsyncWrite + Send + Unpin`, all Velda Edge protocol
-//! forwarding strategies (`buffered`, `server_stream`, `client_stream`, `duplex`, and raw L4 proxying)
-//! can execute over hardware RDMA links without modifying upper-layer protocol state machines.
+//! ### Decoupled Halves (`into_split` / `RdmaReadHalf` & `RdmaWriteHalf`)
+//! Following the Hourglass Architecture & Flat Workflow (`AGENTS.md`), the inbound and outbound flows
+//! are cleanly split into two independent halves:
+//! - **`RdmaReadHalf` (`AsyncRead`)**: Exclusively polls the underlying `RdmaReceiver`, drains incoming
+//!   chunks zero-copy, and replenishes RQ hardware slots.
+//! - **`RdmaWriteHalf` (`AsyncWrite`)**: Exclusively stages outbound frames into contiguous chunks,
+//!   dispatches Send Work Requests via `RdmaSender`, and coordinates credit backpressure.
+//! - Both halves can be split via `into_split()` and moved into separate Tokio tasks without shared locks.
 
 use bytes::{Buf, Bytes, BytesMut};
 use std::future::Future;
@@ -36,7 +28,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::channel::RdmaChannel;
+use crate::channel::{RdmaChannel, RdmaReceiver, RdmaSender};
 
 /// Maximum discrete payload chunk size dispatched per RDMA Send Work Request (64 KB).
 pub const DEFAULT_RDMA_STREAM_MAX_CHUNK: usize = 65536;
@@ -49,38 +41,36 @@ enum ReadState {
 enum WriteState {
     Idle,
     Pending(Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>>),
+    ShutdownPending(Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>>),
+    Closed,
 }
 
-/// Stream adapter that implements `AsyncRead` + `AsyncWrite` on an underlying `RdmaChannel`.
-pub struct RdmaStream {
-    channel: RdmaChannel,
+/// The readable half of an `RdmaStream`.
+pub struct RdmaReadHalf {
+    pub receiver: RdmaReceiver,
     read_buf: Bytes,
-    write_buf: BytesMut,
     read_state: ReadState,
-    write_state: WriteState,
     timeout: Duration,
 }
 
-impl RdmaStream {
-    /// Creates a new `RdmaStream` wrapping the given RDMA channel.
-    pub fn new(channel: RdmaChannel) -> Self {
+impl RdmaReadHalf {
+    /// Constructs a new `RdmaReadHalf` from an `RdmaReceiver`.
+    pub fn new(receiver: RdmaReceiver) -> Self {
         Self {
-            channel,
+            receiver,
             read_buf: Bytes::new(),
-            write_buf: BytesMut::with_capacity(65536),
             read_state: ReadState::Idle,
-            write_state: WriteState::Idle,
             timeout: Duration::from_secs(30),
         }
     }
 
-    /// Access to the underlying channel.
-    pub fn channel(&self) -> &RdmaChannel {
-        &self.channel
+    /// Sets the receive timeout for inbound RDMA completions.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 }
 
-impl AsyncRead for RdmaStream {
+impl AsyncRead for RdmaReadHalf {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -98,10 +88,10 @@ impl AsyncRead for RdmaStream {
         loop {
             match &mut self.read_state {
                 ReadState::Idle => {
-                    let channel = self.channel.clone();
+                    let receiver = self.receiver.clone();
                     let timeout = self.timeout;
                     let fut = Box::pin(async move {
-                        channel
+                        receiver
                             .recv(timeout)
                             .await
                             .map_err(|e| io::Error::other(e.to_string()))
@@ -132,12 +122,40 @@ impl AsyncRead for RdmaStream {
     }
 }
 
-impl AsyncWrite for RdmaStream {
+/// The writable half of an `RdmaStream`.
+pub struct RdmaWriteHalf {
+    pub sender: RdmaSender,
+    write_buf: BytesMut,
+    write_state: WriteState,
+}
+
+impl RdmaWriteHalf {
+    /// Constructs a new `RdmaWriteHalf` from an `RdmaSender`.
+    pub fn new(sender: RdmaSender) -> Self {
+        Self {
+            sender,
+            write_buf: BytesMut::with_capacity(65536),
+            write_state: WriteState::Idle,
+        }
+    }
+}
+
+impl AsyncWrite for RdmaWriteHalf {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if matches!(
+            self.write_state,
+            WriteState::ShutdownPending(_) | WriteState::Closed
+        ) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "RDMA stream is shut down",
+            )));
+        }
+
         // If there's an ongoing flush, wait for it to complete first
         if let WriteState::Pending(fut) = &mut self.write_state {
             match fut.as_mut().poll(cx) {
@@ -183,9 +201,9 @@ impl AsyncWrite for RdmaStream {
                     let chunk_len =
                         std::cmp::min(self.write_buf.len(), DEFAULT_RDMA_STREAM_MAX_CHUNK);
                     let data = self.write_buf.split_to(chunk_len).freeze();
-                    let channel = self.channel.clone();
+                    let sender = self.sender.clone();
                     let fut = Box::pin(async move {
-                        channel
+                        sender
                             .send(&data)
                             .await
                             .map_err(|e| io::Error::other(e.to_string()))
@@ -195,7 +213,6 @@ impl AsyncWrite for RdmaStream {
                 WriteState::Pending(fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(())) => {
                         self.write_state = WriteState::Idle;
-                        // Loop continues to flush any remaining chunks until write_buf is completely empty
                     }
                     Poll::Ready(Err(e)) => {
                         self.write_state = WriteState::Idle;
@@ -203,11 +220,125 @@ impl AsyncWrite for RdmaStream {
                     }
                     Poll::Pending => return Poll::Pending,
                 },
+                WriteState::ShutdownPending(_) | WriteState::Closed => {
+                    return Poll::Ready(Ok(()));
+                }
             }
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if matches!(self.write_state, WriteState::Closed) {
+            return Poll::Ready(Ok(()));
+        }
+
+        // 1. Flush any pending buffered writes first
+        if !self.write_buf.is_empty() || matches!(self.write_state, WriteState::Pending(_)) {
+            match self.as_mut().poll_flush(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // 2. Drive explicit EOF shutdown frame to peer (Fixes Scenario 5)
+        loop {
+            match &mut self.write_state {
+                WriteState::Idle => {
+                    let sender = self.sender.clone();
+                    let fut = Box::pin(async move {
+                        sender
+                            .shutdown()
+                            .await
+                            .map_err(|e| io::Error::other(e.to_string()))
+                    });
+                    self.write_state = WriteState::ShutdownPending(fut);
+                }
+                WriteState::ShutdownPending(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(())) => {
+                        self.write_state = WriteState::Closed;
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.write_state = WriteState::Closed;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                WriteState::Pending(_) => unreachable!(),
+                WriteState::Closed => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+/// Stream adapter that implements `AsyncRead` + `AsyncWrite` on an underlying `RdmaChannel`.
+pub struct RdmaStream {
+    pub read_half: RdmaReadHalf,
+    pub write_half: RdmaWriteHalf,
+}
+
+impl RdmaStream {
+    /// Creates a new `RdmaStream` wrapping the given RDMA channel.
+    pub fn new(channel: RdmaChannel) -> Self {
+        let (sender, receiver) = channel.into_split();
+        Self {
+            read_half: RdmaReadHalf::new(receiver),
+            write_half: RdmaWriteHalf::new(sender),
+        }
+    }
+
+    /// Constructs an `RdmaStream` from decoupled read and write halves.
+    pub fn from_halves(read_half: RdmaReadHalf, write_half: RdmaWriteHalf) -> Self {
+        Self {
+            read_half,
+            write_half,
+        }
+    }
+
+    /// Splits the stream into borrowed read and write halves.
+    pub fn split(&mut self) -> (&mut RdmaReadHalf, &mut RdmaWriteHalf) {
+        (&mut self.read_half, &mut self.write_half)
+    }
+
+    /// Consumes the stream, returning independent, owned read and write halves.
+    pub fn into_split(self) -> (RdmaReadHalf, RdmaWriteHalf) {
+        (self.read_half, self.write_half)
+    }
+
+    /// Reconstructs the underlying `RdmaChannel`.
+    pub fn channel(&self) -> RdmaChannel {
+        RdmaChannel::new(
+            self.write_half.sender.clone(),
+            self.read_half.receiver.clone(),
+        )
+    }
+}
+
+impl AsyncRead for RdmaStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.read_half).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for RdmaStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.write_half).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.write_half).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.write_half).poll_shutdown(cx)
     }
 }

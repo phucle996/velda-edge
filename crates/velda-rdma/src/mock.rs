@@ -12,14 +12,14 @@
 //! - Uses bounded Tokio `mpsc` channels to simulate Send and Receive Work Request ring buffers.
 //! - Simulates immediate data payloads (`imm_data`), work request IDs (`wr_id`), and atomic credit accounting.
 //! - Accurately replicates hardware flow-control backpressure and credit starvation errors.
-//! - Integrates seamlessly into `RdmaStream` and `RdmaConnector` whenever hardware is unavailable or when
-//!   `RdmaConfig::force_mock` is enabled.
+//! - Explicitly decouples the Send path (`MockSender`) and Receive path (`MockReceiver`), eliminating
+//!   head-of-line blocking between concurrent transmissions and receptions.
 
 use bytes::Bytes;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::error::RdmaError;
 use crate::verbs::qp::QpAddress;
@@ -45,82 +45,47 @@ pub struct MockMessage {
     pub rkey: Option<u32>,
 }
 
-/// In-memory mock representing a connected RDMA Queue Pair.
-pub struct MockChannel {
+/// Simulated RDMA send flow handle.
+#[derive(Clone)]
+pub struct MockSender {
     tx: mpsc::Sender<MockMessage>,
-    rx: mpsc::Receiver<MockMessage>,
-    /// Local Queue Pair address projection.
-    pub qp_address: QpAddress,
-    /// Remote peer Queue Pair address projection.
-    pub remote_address: QpAddress,
-    send_credits: Arc<AtomicU32>,
-    remote_credits: Arc<AtomicU32>,
+    pub send_credits: Arc<AtomicU32>,
+    pub(crate) healthy: Arc<AtomicBool>,
 }
 
-impl MockChannel {
-    /// Creates a bidirectional pair of simulated RDMA channels connected to each other.
-    pub fn pair(capacity: usize) -> (Self, Self) {
-        let (tx1, rx1) = mpsc::channel(capacity);
-        let (tx2, rx2) = mpsc::channel(capacity);
-
-        let credits1 = Arc::new(AtomicU32::new(capacity as u32));
-        let credits2 = Arc::new(AtomicU32::new(capacity as u32));
-
-        let addr1 = QpAddress {
-            qpn: MOCK_BASE_QPN_1,
-            psn: MOCK_BASE_PSN_1,
-            lid: 1,
-            gid: crate::ffi::ibv_gid { raw: [0; 16] },
-        };
-
-        let addr2 = QpAddress {
-            qpn: MOCK_BASE_QPN_2,
-            psn: MOCK_BASE_PSN_2,
-            lid: 2,
-            gid: crate::ffi::ibv_gid { raw: [1; 16] },
-        };
-
-        let channel1 = Self {
-            tx: tx1,
-            rx: rx2,
-            qp_address: addr1,
-            remote_address: addr2,
-            send_credits: credits1.clone(),
-            remote_credits: credits2.clone(),
-        };
-
-        let channel2 = Self {
-            tx: tx2,
-            rx: rx1,
-            qp_address: addr2,
-            remote_address: addr1,
-            send_credits: credits2,
-            remote_credits: credits1,
-        };
-
-        (channel1, channel2)
+impl MockSender {
+    /// Checks whether the mock channel is healthy.
+    #[inline(always)]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 
-    /// Local QP addressing info.
-    pub fn local_address(&self) -> &QpAddress {
-        &self.qp_address
-    }
-
-    /// Remote peer QP addressing info.
-    pub fn remote_address(&self) -> &QpAddress {
-        &self.remote_address
+    /// Marks the mock channel as broken.
+    #[inline(always)]
+    pub fn mark_broken(&self) {
+        self.healthy.store(false, Ordering::Release);
     }
 
     /// Simulates posting an RDMA Send Work Request.
     pub async fn send(&self, payload: Bytes, imm_data: Option<u32>) -> Result<(), RdmaError> {
-        let current = self.send_credits.load(Ordering::Acquire);
-        if current == 0 {
-            return Err(RdmaError::InsufficientCredits {
-                available: 0,
-                required: 1,
-            });
+        let mut current = self.send_credits.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return Err(RdmaError::InsufficientCredits {
+                    available: 0,
+                    required: 1,
+                });
+            }
+            match self.send_credits.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
-        self.send_credits.fetch_sub(1, Ordering::AcqRel);
 
         let msg = MockMessage {
             wr_id: MOCK_WR_ID_SEND,
@@ -134,6 +99,19 @@ impl MockChannel {
             .send(msg)
             .await
             .map_err(|_| RdmaError::Disconnected("Mock peer disconnected".into()))
+    }
+
+    /// Sends an explicit EOF shutdown frame to mock receiver (Fixes Scenario 5).
+    pub async fn shutdown(&self) -> Result<(), RdmaError> {
+        let msg = MockMessage {
+            wr_id: MOCK_WR_ID_SEND,
+            payload: Bytes::new(),
+            imm_data: Some(crate::channel::hardware::RDMA_FLAG_EOF),
+            remote_addr: None,
+            rkey: None,
+        };
+        let _ = self.tx.send(msg).await;
+        Ok(())
     }
 
     /// Simulates posting an RDMA Send Work Request referencing a pre-registered memory address.
@@ -163,19 +141,6 @@ impl MockChannel {
         self.send(payload, None).await
     }
 
-    /// Simulates receiving an RDMA Send Work Request.
-    pub async fn recv(&mut self, timeout: Duration) -> Result<MockMessage, RdmaError> {
-        match tokio::time::timeout(timeout, self.rx.recv()).await {
-            Ok(Some(msg)) => {
-                // Grant send credit back to peer
-                self.remote_credits.fetch_add(1, Ordering::Release);
-                Ok(msg)
-            }
-            Ok(None) => Err(RdmaError::Disconnected("Mock peer closed channel".into())),
-            Err(_) => Err(RdmaError::Timeout("Mock recv timed out".into())),
-        }
-    }
-
     /// Simulates a One-Sided RDMA Write.
     pub async fn rdma_write(
         &self,
@@ -196,5 +161,134 @@ impl MockChannel {
             .send(msg)
             .await
             .map_err(|_| RdmaError::Disconnected("Mock peer disconnected".into()))
+    }
+}
+
+/// Simulated RDMA receive flow handle.
+pub struct MockReceiver {
+    rx: AsyncMutex<mpsc::Receiver<MockMessage>>,
+    remote_credits: Arc<AtomicU32>,
+    pub(crate) healthy: Arc<AtomicBool>,
+}
+
+impl MockReceiver {
+    /// Checks whether the mock channel is healthy.
+    #[inline(always)]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
+
+    /// Marks the mock channel as broken.
+    #[inline(always)]
+    pub fn mark_broken(&self) {
+        self.healthy.store(false, Ordering::Release);
+    }
+
+    /// Simulates receiving an RDMA Send Work Request.
+    pub async fn recv(&self, timeout: Duration) -> Result<MockMessage, RdmaError> {
+        let mut rx = self.rx.lock().await;
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Some(msg)) => {
+                // Grant send credit back to peer
+                self.remote_credits.fetch_add(1, Ordering::Release);
+                Ok(msg)
+            }
+            Ok(None) => Err(RdmaError::Disconnected("Mock peer closed channel".into())),
+            Err(_) => Err(RdmaError::Timeout("Mock recv timed out".into())),
+        }
+    }
+}
+
+/// In-memory mock representing a connected RDMA Queue Pair.
+#[derive(Clone)]
+pub struct MockChannel {
+    pub sender: MockSender,
+    pub receiver: Arc<MockReceiver>,
+    /// Local Queue Pair address projection.
+    pub qp_address: QpAddress,
+    /// Remote peer Queue Pair address projection.
+    pub remote_address: QpAddress,
+}
+
+impl MockChannel {
+    /// Creates a bidirectional pair of simulated RDMA channels connected to each other.
+    pub fn pair(capacity: usize) -> (Self, Self) {
+        let (tx1, rx1) = mpsc::channel(capacity);
+        let (tx2, rx2) = mpsc::channel(capacity);
+
+        let credits1 = Arc::new(AtomicU32::new(capacity as u32));
+        let credits2 = Arc::new(AtomicU32::new(capacity as u32));
+
+        let healthy1 = Arc::new(AtomicBool::new(true));
+        let healthy2 = Arc::new(AtomicBool::new(true));
+
+        let addr1 = QpAddress {
+            qpn: MOCK_BASE_QPN_1,
+            psn: MOCK_BASE_PSN_1,
+            lid: 1,
+            gid: crate::ffi::ibv_gid { raw: [0; 16] },
+        };
+
+        let addr2 = QpAddress {
+            qpn: MOCK_BASE_QPN_2,
+            psn: MOCK_BASE_PSN_2,
+            lid: 2,
+            gid: crate::ffi::ibv_gid { raw: [1; 16] },
+        };
+
+        let channel1 = Self {
+            sender: MockSender {
+                tx: tx1,
+                send_credits: credits1.clone(),
+                healthy: healthy1.clone(),
+            },
+            receiver: Arc::new(MockReceiver {
+                rx: AsyncMutex::new(rx2),
+                remote_credits: credits2.clone(),
+                healthy: healthy1,
+            }),
+            qp_address: addr1,
+            remote_address: addr2,
+        };
+
+        let channel2 = Self {
+            sender: MockSender {
+                tx: tx2,
+                send_credits: credits2,
+                healthy: healthy2.clone(),
+            },
+            receiver: Arc::new(MockReceiver {
+                rx: AsyncMutex::new(rx1),
+                remote_credits: credits1,
+                healthy: healthy2,
+            }),
+            qp_address: addr2,
+            remote_address: addr1,
+        };
+
+        (channel1, channel2)
+    }
+
+    /// Splits the channel into decoupled sender and receiver handles.
+    pub fn split(&self) -> (MockSender, Arc<MockReceiver>) {
+        (self.sender.clone(), self.receiver.clone())
+    }
+
+    /// Consumes the channel, yielding decoupled sender and receiver handles.
+    pub fn into_split(self) -> (MockSender, Arc<MockReceiver>) {
+        (self.sender, self.receiver)
+    }
+
+    /// Checks whether the mock channel is healthy.
+    #[inline(always)]
+    pub fn is_healthy(&self) -> bool {
+        self.sender.is_healthy() && self.receiver.is_healthy()
+    }
+
+    /// Marks the channel as broken.
+    #[inline(always)]
+    pub fn mark_broken(&self) {
+        self.sender.mark_broken();
+        self.receiver.mark_broken();
     }
 }

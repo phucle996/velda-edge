@@ -83,17 +83,15 @@ impl AdaptiveCqPoller {
             if count > 0 {
                 let wc = wc_buf[0];
                 if wc.status != IBV_WC_SUCCESS {
-                    return Err(RdmaError::Verbs(
-                        format!("Work completion failed with status {}", wc.status),
-                        wc.status as i32,
-                    ));
+                    return Err(RdmaError::wc_failed(wc.status));
                 }
                 return Ok(wc);
             }
             std::hint::spin_loop();
         }
 
-        // If no AsyncFd was configured, fallback to polling loop with short yield
+        // If no AsyncFd was configured, fallback to polling loop with non-spinning sleep
+        // to prevent 100% CPU lockup on resource-constrained multi-tenant VMs.
         let async_fd = match &self.async_fd {
             Some(fd) => fd,
             None => {
@@ -103,14 +101,11 @@ impl AdaptiveCqPoller {
                     if count > 0 {
                         let wc = wc_buf[0];
                         if wc.status != IBV_WC_SUCCESS {
-                            return Err(RdmaError::Verbs(
-                                format!("Work completion failed with status {}", wc.status),
-                                wc.status as i32,
-                            ));
+                            return Err(RdmaError::wc_failed(wc.status));
                         }
                         return Ok(wc);
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_micros(50)).await;
                 }
                 return Err(RdmaError::Timeout("CQ polling timed out".into()));
             }
@@ -129,10 +124,7 @@ impl AdaptiveCqPoller {
             if count > 0 {
                 let wc = wc_buf[0];
                 if wc.status != IBV_WC_SUCCESS {
-                    return Err(RdmaError::Verbs(
-                        format!("Work completion failed with status {}", wc.status),
-                        wc.status as i32,
-                    ));
+                    return Err(RdmaError::wc_failed(wc.status));
                 }
                 return Ok(wc);
             }
@@ -147,7 +139,9 @@ impl AdaptiveCqPoller {
                     match guard {
                         Ok(mut g) => {
                             // Acknowledge event
-                            let _ = self.cq.get_and_ack_event();
+                            if let Err(e) = self.cq.get_and_ack_event() {
+                                tracing::trace!(error = %e, "CQ get_and_ack_event returned error");
+                            }
                             g.clear_ready();
 
                             // Poll completed entry
@@ -155,10 +149,7 @@ impl AdaptiveCqPoller {
                             if count > 0 {
                                 let wc = wc_buf[0];
                                 if wc.status != IBV_WC_SUCCESS {
-                                    return Err(RdmaError::Verbs(
-                                        format!("Work completion failed with status {}", wc.status),
-                                        wc.status as i32,
-                                    ));
+                                    return Err(RdmaError::wc_failed(wc.status));
                                 }
                                 return Ok(wc);
                             }

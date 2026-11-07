@@ -29,8 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::channel::{HardwareChannel, RdmaChannel, RdmaStream};
 use crate::config::RdmaConfig;
@@ -38,7 +37,7 @@ use crate::error::RdmaError;
 use crate::ffi::ibv_gid;
 use crate::mock::MockChannel;
 use crate::verbs::cq::CompletionQueue;
-use crate::verbs::device::RdmaDevice;
+use crate::verbs::device::{RdmaContext, RdmaDevice};
 use crate::verbs::pd::ProtectionDomain;
 use crate::verbs::qp::{QpAddress, QueuePair};
 
@@ -49,36 +48,71 @@ pub struct RdmaConnector;
 
 impl RdmaConnector {
     /// Connects to the upstream target, establishes an RDMA Queue Pair, and returns a ready `RdmaChannel`.
+    /// Connects to the upstream target, establishes an RDMA Queue Pair, and returns a ready `RdmaChannel`.
     pub async fn connect(
         target: SocketAddr,
         config: &RdmaConfig,
     ) -> Result<RdmaChannel, RdmaError> {
-        // Fallback to pure-Rust software mock if requested or if no physical devices exist
+        Self::connect_with_pd(target, config, None).await
+    }
+
+    /// Connects to the upstream target, binding the Queue Pair to an optional shared Protection Domain.
+    ///
+    /// When `shared_pd` is provided (e.g. from `RdmaSlabArena::pd()`), the QP is registered within the
+    /// same Protection Domain as pre-registered zero-copy memory slabs, preventing `IBV_WC_LOC_PROT_ERR`.
+    pub async fn connect_with_pd(
+        target: SocketAddr,
+        config: &RdmaConfig,
+        shared_pd: Option<Arc<ProtectionDomain>>,
+    ) -> Result<RdmaChannel, RdmaError> {
+        // Only instantiate in-memory mock channel if explicitly forced by configuration/tests.
         if config.force_mock {
             let (client_mock, _server_mock) = MockChannel::pair(config.max_send_wr as usize);
-            return Ok(RdmaChannel::Mock(Arc::new(AsyncMutex::new(client_mock))));
+            return Ok(RdmaChannel::from_mock(client_mock));
         }
 
-        let devices = match RdmaDevice::list_all() {
-            Ok(devs) if !devs.is_empty() => devs,
-            _ => {
-                tracing::debug!("No physical RDMA devices detected, falling back to mock channel");
-                let (client_mock, _server_mock) = MockChannel::pair(config.max_send_wr as usize);
-                return Ok(RdmaChannel::Mock(Arc::new(AsyncMutex::new(client_mock))));
+        let (context, pd) = match shared_pd {
+            Some(pd) => {
+                let ctx = pd.context().clone();
+                (ctx, pd)
+            }
+            None => {
+                #[cfg(test)]
+                let devices = match RdmaDevice::list_all() {
+                    Ok(devs) if !devs.is_empty() => devs,
+                    _ => {
+                        let (client_mock, _server_mock) =
+                            MockChannel::pair(config.max_send_wr as usize);
+                        return Ok(RdmaChannel::from_mock(client_mock));
+                    }
+                };
+
+                #[cfg(not(test))]
+                let devices = {
+                    let devs = RdmaDevice::list_all()?;
+                    if devs.is_empty() {
+                        return Err(RdmaError::DeviceNotFound(
+                            "No active RDMA hardware devices detected on host".into(),
+                        ));
+                    }
+                    devs
+                };
+
+                // Select device
+                let device = match &config.device_name {
+                    Some(name) => devices
+                        .into_iter()
+                        .find(|d| d.name() == name)
+                        .ok_or_else(|| RdmaError::DeviceNotFound(name.clone()))?,
+                    None => devices.into_iter().next().unwrap(),
+                };
+
+                let ctx = device.open()?;
+                let pd = ProtectionDomain::new(ctx.clone())?;
+                (ctx, pd)
             }
         };
 
-        // Select device
-        let device = match &config.device_name {
-            Some(name) => devices
-                .into_iter()
-                .find(|d| d.name() == name)
-                .ok_or_else(|| RdmaError::DeviceNotFound(name.clone()))?,
-            None => devices.into_iter().next().unwrap(),
-        };
-
-        let context = device.open()?;
-        let pd = ProtectionDomain::new(context.clone())?;
         let send_cq = CompletionQueue::new(context.clone(), config.cq_size, true)?;
         let recv_cq = CompletionQueue::new(context.clone(), config.cq_size, true)?;
 
@@ -125,7 +159,7 @@ impl RdmaConnector {
 
         // Step 6: Construct HardwareChannel, pin contiguous buffer slots, and pre-post initial receive buffers.
         let hw_channel = HardwareChannel::new(qp, send_cq, recv_cq, pd, config)?;
-        Ok(RdmaChannel::Hardware(Arc::new(hw_channel)))
+        Ok(RdmaChannel::from_hardware(hw_channel))
     }
 
     /// Helper to connect and immediately return an `RdmaStream` compatible with `AsyncRead + AsyncWrite`.
@@ -138,8 +172,15 @@ impl RdmaConnector {
     }
 }
 
-/// Generates a random 24-bit Packet Sequence Number (PSN).
+/// Generates a cryptographically random 24-bit Packet Sequence Number (PSN).
 fn rand_psn() -> u32 {
+    let mut buf = [0u8; 4];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(&mut buf).is_ok() {
+            return u32::from_ne_bytes(buf) & 0x00FF_FFFF;
+        }
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -148,7 +189,7 @@ fn rand_psn() -> u32 {
 }
 
 /// Exchanges QpAddress over a short-lived out-of-band TCP socket.
-async fn exchange_oob(
+pub async fn exchange_oob(
     target: SocketAddr,
     local: &QpAddress,
     timeout: Duration,
@@ -188,6 +229,17 @@ async fn exchange_oob(
         let mut remote_gid = ibv_gid { raw: [0; 16] };
         remote_gid.raw.copy_from_slice(&rx_buf[16..32]);
 
+        if remote_qpn == 0 {
+            return Err(RdmaError::Disconnected(
+                "Invalid remote QPN (0) rejected in client OOB bootstrap".into(),
+            ));
+        }
+        if remote_gid.raw == [0u8; 16] && remote_lid == 0 {
+            return Err(RdmaError::Disconnected(
+                "Invalid empty remote GID and LID rejected in client OOB bootstrap".into(),
+            ));
+        }
+
         Ok(QpAddress {
             qpn: remote_qpn,
             psn: remote_psn,
@@ -199,5 +251,180 @@ async fn exchange_oob(
     match tokio::time::timeout(timeout, handshake_fut).await {
         Ok(res) => res,
         Err(_) => Err(RdmaError::Timeout("OOB handshake timed out".into())),
+    }
+}
+
+/// Server-side RDMA listener that accepts incoming out-of-band bootstrap connections
+/// and establishes active hardware RDMA channels.
+pub struct RdmaListener {
+    listener: TcpListener,
+    config: RdmaConfig,
+    shared_context: parking_lot::RwLock<Option<Arc<RdmaContext>>>,
+    shared_pd: parking_lot::RwLock<Option<Arc<ProtectionDomain>>>,
+}
+
+impl RdmaListener {
+    /// Binds an out-of-band TCP listener on the specified socket address.
+    pub async fn bind(addr: SocketAddr, config: RdmaConfig) -> Result<Self, RdmaError> {
+        let listener = TcpListener::bind(addr).await?;
+        Ok(Self {
+            listener,
+            config,
+            shared_context: parking_lot::RwLock::new(None),
+            shared_pd: parking_lot::RwLock::new(None),
+        })
+    }
+
+    /// Returns the local socket address to which this listener is bound.
+    pub fn local_addr(&self) -> Result<SocketAddr, RdmaError> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    /// Accepts an incoming connection, performs the OOB handshake, and yields an `RdmaChannel`.
+    pub async fn accept(&self) -> Result<(RdmaChannel, SocketAddr), RdmaError> {
+        let (mut stream, peer_addr) = self.listener.accept().await?;
+        let timeout = Duration::from_millis(self.config.timeout_ms);
+
+        let handshake_fut = async {
+            // Step 1: Read and validate client's bootstrap frame FIRST before allocating any hardware resources.
+            // Protects against Pinned Memory OOM DoS attacks via unauthenticated TCP handshakes.
+            let mut rx_buf = [0u8; 32];
+            stream.read_exact(&mut rx_buf).await?;
+            if &rx_buf[0..4] != OOB_MAGIC {
+                return Err(RdmaError::Disconnected(
+                    "Invalid OOB handshake magic header from client".into(),
+                ));
+            }
+
+            let remote_qpn = u32::from_be_bytes(rx_buf[4..8].try_into().unwrap());
+            let remote_psn = u32::from_be_bytes(rx_buf[8..12].try_into().unwrap());
+            let remote_lid = u16::from_be_bytes(rx_buf[12..14].try_into().unwrap());
+            let mut remote_gid = ibv_gid { raw: [0; 16] };
+            remote_gid.raw.copy_from_slice(&rx_buf[16..32]);
+
+            if remote_qpn == 0 {
+                return Err(RdmaError::Disconnected(
+                    "Invalid remote QPN (0) rejected in OOB bootstrap".into(),
+                ));
+            }
+            if remote_gid.raw == [0u8; 16] && remote_lid == 0 {
+                return Err(RdmaError::Disconnected(
+                    "Invalid empty remote GID and LID rejected in OOB bootstrap".into(),
+                ));
+            }
+
+            let remote_addr = QpAddress {
+                qpn: remote_qpn,
+                psn: remote_psn,
+                lid: remote_lid,
+                gid: remote_gid,
+            };
+
+            #[cfg(test)]
+            if self.config.force_mock {
+                let (ch1, _ch2) = MockChannel::pair(self.config.max_send_wr as usize);
+                return Ok(RdmaChannel::from_mock(ch1));
+            }
+
+            #[cfg(test)]
+            let devices = match RdmaDevice::list_all() {
+                Ok(devs) if !devs.is_empty() => devs,
+                _ => {
+                    let (ch1, _ch2) = MockChannel::pair(self.config.max_send_wr as usize);
+                    return Ok(RdmaChannel::from_mock(ch1));
+                }
+            };
+
+            #[cfg(not(test))]
+            let devices = {
+                let devs = RdmaDevice::list_all()?;
+                if devs.is_empty() {
+                    return Err(RdmaError::DeviceNotFound(
+                        "No active RDMA hardware devices detected on host".into(),
+                    ));
+                }
+                devs
+            };
+
+            let device = match &self.config.device_name {
+                Some(name) => devices
+                    .into_iter()
+                    .find(|d| d.name() == name)
+                    .ok_or_else(|| RdmaError::DeviceNotFound(name.clone()))?,
+                None => devices.into_iter().next().unwrap(),
+            };
+
+            // Reuse shared Context & Protection Domain across accepted connections (Fixes Scenario 6).
+            // Prevents uverbs FD leaks and eliminates kernel driver allocation overhead on high concurrency.
+            let (context, pd) = {
+                let r_ctx = self.shared_context.read().clone();
+                let r_pd = self.shared_pd.read().clone();
+                if let (Some(ctx), Some(pd)) = (r_ctx, r_pd) {
+                    (ctx, pd)
+                } else {
+                    let ctx = device.open()?;
+                    let pd = ProtectionDomain::new(ctx.clone())?;
+                    *self.shared_context.write() = Some(ctx.clone());
+                    *self.shared_pd.write() = Some(pd.clone());
+                    (ctx, pd)
+                }
+            };
+            let send_cq = CompletionQueue::new(context.clone(), self.config.cq_size, true)?;
+            let recv_cq = CompletionQueue::new(context.clone(), self.config.cq_size, true)?;
+
+            let qp = QueuePair::new(
+                pd.clone(),
+                send_cq.clone(),
+                recv_cq.clone(),
+                self.config.max_send_wr,
+                self.config.max_recv_wr,
+                self.config.max_sge,
+            )?;
+
+            qp.to_init(self.config.port)?;
+
+            let port_attr = context.query_port(self.config.port)?;
+            let local_gid = context
+                .query_gid(self.config.port, self.config.gid_index as i32)
+                .unwrap_or(ibv_gid { raw: [0; 16] });
+
+            let local_psn = rand_psn();
+            let local_addr = QpAddress {
+                qpn: qp.qp_num(),
+                psn: local_psn,
+                lid: port_attr.lid,
+                gid: local_gid,
+            };
+
+            qp.to_rtr(&remote_addr, self.config.port, self.config.gid_index, None)?;
+            qp.to_rts(local_psn, 14, 7, self.config.rnr_retry)?;
+
+            // Respond with server's bootstrap frame
+            let mut tx_buf = [0u8; 32];
+            tx_buf[0..4].copy_from_slice(OOB_MAGIC);
+            tx_buf[4..8].copy_from_slice(&local_addr.qpn.to_be_bytes());
+            tx_buf[8..12].copy_from_slice(&local_addr.psn.to_be_bytes());
+            tx_buf[12..14].copy_from_slice(&local_addr.lid.to_be_bytes());
+            tx_buf[16..32].copy_from_slice(&local_addr.gid.raw);
+
+            stream.write_all(&tx_buf).await?;
+            stream.flush().await?;
+
+            let hw_channel = HardwareChannel::new(qp, send_cq, recv_cq, pd, &self.config)?;
+            Ok(RdmaChannel::from_hardware(hw_channel))
+        };
+
+        let channel = match tokio::time::timeout(timeout, handshake_fut).await {
+            Ok(res) => res?,
+            Err(_) => return Err(RdmaError::Timeout("OOB accept handshake timed out".into())),
+        };
+
+        Ok((channel, peer_addr))
+    }
+
+    /// Accepts an incoming connection and yields an `RdmaStream`.
+    pub async fn accept_stream(&self) -> Result<(RdmaStream, SocketAddr), RdmaError> {
+        let (ch, addr) = self.accept().await?;
+        Ok((RdmaStream::new(ch), addr))
     }
 }
