@@ -35,6 +35,19 @@
 //!    - **Hardware Mode**: Registers memory directly with Mellanox/InfiniBand hardware drivers via `ibv_reg_mr`.
 //!    - **Mock Mode**: Operates on aligned host memory without Verbs syscalls, ensuring tests and non-RDMA
 //!      environments execute reliably.
+//! 6. **Deliberate Hardware Cache Partitioning (Pool Metadata in L2 vs DMA Payload in L3/DRAM)**:
+//!    - **Pool Management Bitmasks (`standard_masks`, `large_masks`) -> L2 Cache (`_MM_HINT_T1`)**:
+//!      Slot allocation bitmasks are tiny (64-256 bytes) and accessed on every request, so they are
+//!      prefetched into L2 (`prefetch_l2_range`) while leaving Core L1D (`_MM_HINT_T0`) exclusively
+//!      for `velda-router`.
+//!    - **RDMA Payload Slots (`Standard2K`, `Large64K`) -> L3 LLC (`_MM_HINT_T2`) & Non-Temporal WC (`NTA`)**:
+//!      PCIe rNIC DMA controllers interact directly with L3 Last-Level Cache (Intel DDIO / AMD SDCI) and DRAM.
+//!      Leased payload slots are prefetched into L3 (`_MM_HINT_T2`)—never L1D/L2—to prevent 64KB buffers
+//!      from evicting routing tables and to avoid PCIe snoop-invalidation stalls on core private caches.
+//!    - **Non-Temporal CWE-226 Zeroing on Drop (`ZERO_NON_TEMPORAL_FN`)**:
+//!      Sanitizing a 64KB slot upon `Drop` uses Non-Temporal Write-Combining streaming stores (`vmovntdq` /
+//!      `movntdq` / `movnti`), flushing zeros directly to L3/DRAM with zero Read-For-Ownership (RFO) traffic
+//!      and zero L1D/L2 cache pollution.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ops::{Deref, DerefMut};
@@ -308,20 +321,58 @@ fn scan_swar_64(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<u
     }
 }
 
-/// Resolves the optimal bitmap scanning function pointer once at initialization.
-#[inline(always)]
-fn resolve_bitmap_scan_fn() -> BitmapScanFn {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            scan_avx2_256
-        } else {
-            scan_sse2_128
+// ============================================================================
+// Universe 4: 32-bit SWAR Parallel Reduction (Quad 32-bit Sub-Word Lanes)
+// Evaluates 64-bit atomic words via 32-bit register pairs on narrow ALU hardware.
+// ============================================================================
+fn scan_swar_32(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
+    let len = words.len();
+    for i in 0..len {
+        let idx = (start + i) & word_mask;
+        let w = words[idx].load(Ordering::Relaxed);
+        let lo = w as u32;
+        let hi = (w >> 32) as u32;
+        if (lo & hi) != !0u32 {
+            return Some(idx);
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        scan_swar_64
+    None
+}
+
+/// Resolves the optimal bitmap scanning function pointer once at initialization
+/// via `velda_core::global_hardware_topology()` across all 4 register tiers.
+#[inline(always)]
+fn resolve_bitmap_scan_fn() -> BitmapScanFn {
+    use velda_core::hardware::RegisterWidth;
+    let caps = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities;
+    match caps.select_for_workload(RegisterWidth::Bits256) {
+        RegisterWidth::Bits256 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx2") {
+                    return scan_avx2_256;
+                }
+                scan_sse2_128
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                scan_swar_64
+            }
+        }
+        RegisterWidth::Bits128 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                scan_sse2_128
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                scan_swar_64
+            }
+        }
+        RegisterWidth::Bits64 => scan_swar_64,
+        RegisterWidth::Bits32 => scan_swar_32,
     }
 }
 
@@ -349,6 +400,12 @@ impl RdmaSlabArenaInner {
         };
 
         let start = hint_atom.load(Ordering::Relaxed) & word_mask;
+
+        // Keep pool management bitmap metadata warm in L2 (_MM_HINT_T1) while payload stays in L3/DRAM.
+        velda_core::prefetch_l2_range(
+            unsafe { words.as_ptr().add(start) as *const u8 },
+            std::mem::size_of_val(words).min(256),
+        );
 
         // Dispatches through cached hardware function pointer (AVX2, SSE2, or SWAR)
         let candidate_start = (self.scan_fn)(words, start, word_mask);
@@ -647,12 +704,9 @@ impl RdmaSlabArena {
 
         let ptr = unsafe { self.inner.base_ptr.add(offset) };
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
-                ptr as *const i8,
-            );
-        }
+        // Prefetch into L3 Last-Level Cache (_MM_HINT_T2 / pldl3keep) where PCIe rNIC DMA
+        // (Intel DDIO / AMD SDCI) operates, strictly avoiding L1D/L2 cache pollution.
+        velda_core::prefetch_l3_range(ptr, 64);
 
         let addr = ptr as u64;
 
@@ -771,10 +825,11 @@ impl DerefMut for RdmaSlabLease {
 
 impl Drop for RdmaSlabLease {
     fn drop(&mut self) {
-        // Zero memory before releasing slot to prevent cross-tenant memory bleed (CWE-226)
-        unsafe {
-            std::ptr::write_bytes(self.ptr, 0, self.len);
-        }
+        // Zero memory before releasing slot to prevent cross-tenant memory bleed (CWE-226).
+        // Uses Non-Temporal Streaming Zero (`vmovntdq` / `movntdq` / `movnti`) to flush zeros
+        // directly through Write-Combining (WC) buffers to L3/RAM without triggering
+        // Read-For-Ownership (RFO) or evicting the hot `velda-router` table from L1D/L2.
+        (*velda_core::ZERO_NON_TEMPORAL_FN)(self.as_mut_slice());
         self.inner.free_slot(self.class, self.slot_idx);
     }
 }
@@ -790,6 +845,53 @@ impl RdmaSlabLease {
     #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    /// Copies `src` into the beginning of this RDMA slot using Register-Adaptive Non-Temporal
+    /// streaming stores (`COPY_NON_TEMPORAL_FN`), bypassing L1D/L2 cache allocation and eliminating
+    /// PCIe snoop-invalidation stalls when the HCA reads the buffer over DMA.
+    #[inline(always)]
+    pub fn copy_from_non_temporal(&mut self, src: &[u8]) {
+        self.write_non_temporal(0, src);
+    }
+
+    /// Writes `src` at `offset` into this RDMA slot using Register-Adaptive Non-Temporal streaming stores.
+    #[inline]
+    pub fn write_non_temporal(&mut self, offset: usize, src: &[u8]) {
+        if offset >= self.len {
+            return;
+        }
+        let to_copy = src.len().min(self.len - offset);
+        if to_copy == 0 {
+            return;
+        }
+        let dst = &mut self.as_mut_slice()[offset..offset + to_copy];
+        (*velda_core::COPY_NON_TEMPORAL_FN)(&src[..to_copy], dst);
+    }
+
+    /// Prefetches `[offset .. offset + len)` of this RDMA slot into L3 Cache (`_MM_HINT_T2` / `pldl3keep`),
+    /// matching Intel DDIO / AMD SDCI PCIe DMA residency without touching Core L1D/L2 caches.
+    #[inline(always)]
+    pub fn prefetch_l3(&self, offset: usize, len: usize) {
+        if offset >= self.len {
+            return;
+        }
+        let to_prefetch = len.min(self.len - offset);
+        if to_prefetch > 0 {
+            velda_core::prefetch_l3_range(unsafe { self.ptr.add(offset) }, to_prefetch);
+        }
+    }
+
+    /// Prefetches `[offset .. offset + len)` of this RDMA slot with Non-Temporal hint (`_MM_HINT_NTA` / `pldl1strm`).
+    #[inline(always)]
+    pub fn prefetch_nta(&self, offset: usize, len: usize) {
+        if offset >= self.len {
+            return;
+        }
+        let to_prefetch = len.min(self.len - offset);
+        if to_prefetch > 0 {
+            velda_core::prefetch_nta_range(unsafe { self.ptr.add(offset) }, to_prefetch);
+        }
     }
 
     /// Virtual address of this slot buffer, referenced directly in RDMA Work Requests.

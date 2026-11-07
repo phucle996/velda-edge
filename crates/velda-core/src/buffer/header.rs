@@ -355,6 +355,41 @@ impl HeaderWorkspace {
         }
     }
 
+    /// Issues hardware Tier-2 (`T1` / L2 Cache) Prefetch hints (`_MM_HINT_T1` / `pldl2keep`).
+    ///
+    /// Pulls the workspace's memory lines into the CPU L2 Cache without displacing the hot
+    /// `velda-router` lookup tables (`_MM_HINT_T0`) from L1D Cache.
+    #[inline(always)]
+    pub fn prefetch_l2_keep(&self) {
+        let ptr = self as *const Self as *const u8;
+        let size = std::mem::size_of::<Self>();
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::{_MM_HINT_T1, _mm_prefetch};
+            let mut offset = 0;
+            while offset < size {
+                unsafe {
+                    _mm_prefetch(ptr.add(offset) as *const i8, _MM_HINT_T1);
+                }
+                offset += 64;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mut offset = 0;
+            while offset < size {
+                unsafe {
+                    std::arch::asm!(
+                        "prfm pldl2keep, [{0}]",
+                        in(reg) ptr.add(offset),
+                        options(nostack, preserves_flags, readonly)
+                    );
+                }
+                offset += 64;
+            }
+        }
+    }
+
     /// Looks up a 16-byte register entry by its 64-bit integer key (`header_key(name)`).
     #[inline(always)]
     pub fn get_raw_by_key(&self, key: u64) -> Option<(u128, NumericFmt)> {

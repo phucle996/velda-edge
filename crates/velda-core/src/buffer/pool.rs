@@ -1,4 +1,14 @@
 //! Core buffer pool implementations: HeaderPool, CoreBufferPool, and ShardedBufferPool.
+//!
+//! # Deliberate Hardware Cache Hierarchy Decision
+//! - **L1D Cache (`_MM_HINT_T0`)** is strictly reserved for `velda-router` hot routing tables.
+//! - **L2 Cache (`_MM_HINT_T1` / `pldl2keep`)** houses [`HeaderPool`] management structures,
+//!   [`HeaderWorkspace`] instances, and [`PayloadSlabPool`] 24-byte descriptor queues.
+//! - **LIFO Burst Acquisition (`guard.burst.pop_back()`)**: During traffic bursts, workers pop from
+//!   the back of the `VecDeque` (most recently recycled workspace) rather than the front (FIFO).
+//!   This keeps the active working set of 1-2 burst workspaces warm in L2 cache instead of rotating
+//!   through hundreds of cold workspaces in DRAM, while `maintain()` / `sweep_expired()` continues
+//!   evicting the oldest untouched items from `guard.burst.front()`.
 
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
@@ -61,7 +71,8 @@ impl HeaderPool {
         let mut guard = self.lock_bucket();
         let ws = if let Some(ws) = guard.baseline.pop() {
             ws
-        } else if let Some((_, ws)) = guard.burst.pop_front() {
+        } else if let Some((_, ws)) = guard.burst.pop_back() {
+            // Priority 2 (LIFO Burst): Warmest recently recycled workspace reused first (keeps in L2/L1D)
             ws
         } else {
             if self.active_leases.load(Ordering::Relaxed) >= guard.max_burst_limit {
@@ -166,6 +177,18 @@ impl HeaderPool {
 pub struct HeaderWorkspaceLease {
     workspace: Option<HeaderWorkspace>,
     pool: Arc<HeaderPool>,
+}
+
+impl HeaderWorkspaceLease {
+    /// Issues hardware Tier-2 (`T1` / L2 Cache) Prefetch hints (`_MM_HINT_T1` / `pldl2keep`)
+    /// on the underlying workspace.
+    #[inline(always)]
+    pub fn prefetch_l2_keep(&self) {
+        self.workspace
+            .as_ref()
+            .expect("HeaderWorkspaceLease held invalid state")
+            .prefetch_l2_keep();
+    }
 }
 
 impl Deref for HeaderWorkspaceLease {
