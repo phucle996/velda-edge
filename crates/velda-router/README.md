@@ -49,25 +49,43 @@ High-performance, protocol-isolated in-memory routing engine for the Velda Edge 
 
 ---
 
-## 2. Two-Tier Routing Engine (Exact + Compressed Radix Trie)
+## 2. Strict Single Responsibility Principle (SRP) Module Layout
 
-For L7 HTTP protocols (HTTP/1.1, HTTP/2, HTTP/3), routes often combine fixed endpoints (`/login`, `/healthz`) with parameterized or nested prefixes (`/api/v1/*`, `/users/*`). 
+The codebase strictly enforces single responsibility across self-contained modules without arbitrary helper splitting:
 
-Rather than relying on non-deterministic regular expressions (which suffer from exponential backtracking / ReDoS) or slow recursive path slicing, `velda-router` deploys a deterministic **Two-Tier Engine**:
+| Module | Responsibility | Microarchitectural Optimization |
+| :--- | :--- | :--- |
+| [`src/method.rs`](src/method.rs) | HTTP Method bitmask parsing & matching | 1-cycle integer bitmask matching (`MethodMask`), parallel multi-route packing (`match_packed_methods`) across 64-bit & dual 32-bit registers. |
+| [`src/host.rs`](src/host.rs) | Domain & authority matching | SWAR colon scanning (`swar_find_colon`), Reverse Block-by-Block tokenization (`ReverseHostLabels`, `HostLabelBlock`), Dual-64 / Quad-32 SWAR wildcard matching (`CompiledHost`). |
+| [`src/path.rs`](src/path.rs) | URI path normalization & Prefix matching | SIMD vector path normalizer (`normalize_path`), Length-Guarded Dual-Chunk SWAR (`starts_with_prefix_swar`), flat cache-resident Slash-Block table (`PathPrefixMatcher` / `SlashBlockPrefixTable`) with **64-byte L1D cache-aligned nodes** (`SlashBlockNode`), hardware temporal prefetching (`prefetch_l1_keep`). |
+| [`src/l7/http1.rs`](src/l7/http1.rs) | HTTP/1.1 protocol routing | Hot/Cold Data-Oriented Separation (`Http1HotCandidate`), 64-byte aligned [`ListenerHttp1Router`], 1-cycle method/host filter. |
+| [`src/l7/http2.rs`](src/l7/http2.rs) | HTTP/2 protocol routing | Dedicated multiplexed H2 route table, Hot/Cold Separation (`Http2HotCandidate`), 64-byte aligned [`ListenerHttp2Router`]. |
+| [`src/l7/http3.rs`](src/l7/http3.rs) | HTTP/3 QUIC protocol routing | Dedicated QUIC datagram route table, Hot/Cold Separation (`Http3HotCandidate`), 64-byte aligned [`ListenerHttp3Router`]. |
+| [`src/l7/grpc.rs`](src/l7/grpc.rs) | gRPC RPC service/method routing | SWAR 1-cycle URI delimiter scan (`swar_find_first_delimiter`), Hot/Cold Separation (`GrpcHotCandidate`), 64-byte aligned [`ListenerGrpcRouter`]. |
+| [`src/l4/tcp.rs`](src/l4/tcp.rs) | L4 Raw TCP port dispatch | Direct $\mathcal{O}(1)$ slot lookup in **0.24 ns**. |
+| [`src/l4/udp.rs`](src/l4/udp.rs) | L4 Raw UDP port dispatch | Atomic contiguous endpoint rotation in **1.67 ns**. |
+
+---
+
+## 3. Two-Tier Routing Engine (Exact + Flat Slash-Block Prefix Table)
+
+For L7 HTTP protocols (HTTP/1.1, HTTP/2, HTTP/3), routes combine fixed endpoints (`/login`, `/healthz`) with parameterized or nested prefixes (`/api/v1/*`, `/users/*`). 
+
+Rather than relying on pointer-chasing tree structures or slow recursive path slicing, `velda-router` deploys a deterministic **Two-Tier Engine**:
 
 ```text
 Incoming Path: "/api/v1/orders/12345/details"
                      │
                      ▼
        ┌───────────────────────────┐
-       │   Tier 1: Exact Match     │ ───[HIT]───► Match Host & Method ──► Route Found
+       │   Tier 1: Exact Match     │ ───[HIT]───► 1-Cycle Method & Host Check ──► Route Found
        │  (O(1) FxHashMap Lookup)  │
        └─────────────┬─────────────┘
                      │ [MISS]
                      ▼
        ┌───────────────────────────┐
        │   Tier 2: Prefix Match    │
-       │   (Compressed Radix Trie) │ ───[HIT]───► Longest Prefix Match ──► Route Found
+       │  (Flat Slash-Block Table) │ ───[HIT]───► Longest Prefix Match ──► Route Found
        │    O(P) Early Termination │
        └─────────────┬─────────────┘
                      │ [MISS]
@@ -77,48 +95,27 @@ Incoming Path: "/api/v1/orders/12345/details"
 
 1. **Tier 1 — Exact Match ($O(1)$)**:
    - Direct hash lookup on exact path strings (`exact_path`) via Fibonacci hashing (`FxHashMap`).
-   - Resolves in **~38 ns** on 5,000-route tables with **0 heap allocations**.
-2. **Tier 2 — Compressed Radix Trie (Patricia Trie) ($O(P)$)**:
-   - Custom in-house zero-allocation Trie ([`trie.rs`](src/l7/trie.rs)) caching edge `first_byte` for branch selection without pointer chasing.
-   - Strictly $O(P)$ complexity (where $P$ is the matched prefix depth, not the full URI length $M$). Early-terminates as soon as an edge diverges.
-   - Evaluates prefix matching in **~29 ns** with **0 heap allocations** across 100 to 5,000 routes.
-   - Zero external automaton dependencies (`aho-corasick` eliminated).
+   - Resolves in **~14.67 ns** on 5,000-route tables with **0 heap allocations**.
+2. **Tier 2 — Flat Cache-Resident Slash-Block Prefix Table ($O(P)$)**:
+   - Flat contiguous node arena ([`src/path.rs`](src/path.rs)) with **64-byte L1D cache-aligned nodes** (`SlashBlockNode`), eliminating linked tree pointers.
+   - Evaluates prefix matching in **strictly $\mathcal{O}(P)$ complexity** (where $P$ is the matched prefix depth, not the full URI length $M$). Early-terminates as soon as an edge diverges.
+   - Uses hardware-accelerated **Length-Guarded Dual-Chunk SWAR & SIMD** across all 4 register tiers (`Bits256`, `Bits128`, `Bits64`, `Bits32`), probed once at boot via [`global_hardware_topology()`].
 
 ---
 
-## 3. Subsystem Breakdown
+## 4. Hot/Cold Data-Oriented Separation & L1D Cache Line Alignment
 
-### 3.1 Layer 4 Routers (`TcpRouter`, `UdpRouter`)
-- **Location**: [`src/l4/tcp.rs`](src/l4/tcp.rs), [`src/l4/udp.rs`](src/l4/udp.rs)
-- **Scope**: L4 Raw TCP and UDP streams.
-- **Data Model**: Dedicated, protocol-isolated `TcpRouter` and `UdpRouter` storing `TcpRoute` and `UdpRoute`.
-- **Performance**: Direct lookup in **0.24 ns** (TCP) and **1.80 ns** (UDP).
-
-### 3.2 Layer 7 HTTP Routers (`Http1Router`, `Http2Router`, `Http3Router`)
-- **Location**: [`src/l7/http1.rs`](src/l7/http1.rs), [`src/l7/http2.rs`](src/l7/http2.rs), [`src/l7/http3.rs`](src/l7/http3.rs)
-- **Scope**: HTTP/1.1 text streaming, HTTP/2 binary framing, and HTTP/3 QUIC datagram streams.
-- **Request Views**: Zero-copy borrowed projections (`Http1RouteRequest<'a>`, `Http2RouteRequest<'a>`, `Http3RouteRequest<'a>`) holding `&'a str` references to `path`, `host`, and `method`.
-- **Filter Rules**: Enforces URI path, optional `Host` header (case-insensitive with fast byte-scanned `clean_host`), and optional HTTP `Method`.
-
-### 3.3 Layer 7 gRPC Router (`GrpcRouter`)
-- **Location**: [`src/l7/grpc.rs`](src/l7/grpc.rs)
-- **Scope**: Dedicated RPC routing over HTTP/2 framing.
-- **Request View**: `GrpcRouteRequest<'a>` holding `service`, `method`, and optional `authority`.
-- **Dispatch**: Direct hash map lookup on `service` name, followed by method and authority matching; falls back to `catch_all` wildcard services (`"*"`) if configured.
-- **Performance**: Service dispatch in **10.94 ns**; zero-alloc URI slice parse & match in **52.13 ns**.
-
----
-
-## 4. Invariants & Engineering Guarantees
-
-1. **Hot-Path Zero-Allocation Invariant**:
-   All route resolution functions (`route_tcp`, `route_udp`, `route_http1`, `route_http2`, `route_http3`, `route_grpc`) take borrowed request views and return `Option<&Route>`. **No `String`, `Vec`, or heap memory is allocated during lookup.**
-2. **Deterministic Lookups & ReDoS Immunity**:
-   No dynamic regex engines are used on the serving path. All prefix matching uses deterministic, non-backtracking Radix Trie traversal.
-3. **Lock-Free Concurrency**:
-   Compiled `Router` structures are immutable once built and safely shared across CPU threads via `Arc<Router>` or `ArcSwap<Runtime>`. Readers execute concurrent lookups with zero cross-core locking or cache contention.
-4. **Clean Protocol Boundaries**:
-   HTTP routes never match gRPC traffic, and gRPC routes never match HTTP paths. Cross-protocol targets are validated and rejected ahead-of-time during snapshot compilation.
+To maximize L1D cache residency and eliminate Pseudo-LRU (PLRU) cache line eviction:
+1. **Separation of Concerns**:
+   - Full route definitions (`Http1Route`, `Http2Route`, etc.) contain cold metadata (`listener_id: String`, `upstream_name: String`, `plugins: Vec<String>`) exceeding 200+ bytes.
+   - They reside in a contiguous `routes: Vec<Route>` arena per listener and are **never scanned** during the search loop.
+2. **Hot Candidate Matching**:
+   - Hot search structures (`exact_routes`, `prefix_routes`) store compact, 16-byte-aligned [`Http1HotCandidate`] descriptors.
+   - Route-to-request evaluation (`matches_req`) executes entirely within compact L1D lines. The cold route is dereferenced exactly **ONCE** when returning `Some(&Route)`.
+3. **64-Byte Cache Line Alignment**:
+   - `SlashBlockNode` and listener routers (`ListenerHttp1Router`, `ListenerGrpcRouter`) are declared `#[repr(C, align(64))]` to align strictly with CPU L1D cache lines, preventing split-line memory bus stalls.
+4. **Hardware Temporal Prefetching**:
+   - Hot lookup entry points execute `prefetch_l1_keep` (using `_mm_prefetch(..., _MM_HINT_T0)` on x86-64 and `prfm pldl1keep` on AArch64) to mark hot tables Most-Recently-Used in L1D cache.
 
 ---
 
@@ -171,15 +168,16 @@ if let Some(route) = router.route_http1("listener-http-1", &req) {
 
 ## 6. Empirical Performance Summary
 
-Empirical data extracted from production benchmarks on a 5,000-route, 1,000-upstream dataset:
+Empirical data extracted from production benchmarks on a 5,000-route, 1,000-upstream dataset in RAM:
 
 | Target Scenario | Operation / Path | Latency / op | Allocs / op | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **L4 TCP Route** | `l4-in-0:tcp` | **0.24 ns** | **0.00** | **4,150.2 M ops/s** |
-| **L4 UDP Route** | `l4-in-9:udp` | **1.80 ns** | **0.00** | **555.7 M ops/s** |
-| **L7 HTTP Exact** | `/endpoints/action_0005/exec` | **38.52 ns** | **0.00** | **25.9 M ops/s** |
-| **L7 HTTP Prefix** | `/api/v1/service_1000/orders/items/42` | **29.61 ns** | **0.00** | **33.7 M ops/s** |
-| **L7 HTTP Miss** | `/unknown/unmatched/path/404` | **9.36 ns** | **0.00** | **106.8 M ops/s** |
-| **L7 gRPC Exact** | `service.v1.Service_0007` | **10.94 ns** | **0.00** | **91.4 M ops/s** |
-| **L7 gRPC Parse+Route** | `/service.v1.Service_0007/CreateOrder` | **52.13 ns** | **0.00** | **19.1 M ops/s** |
-| **Multicore (256 Workers)**| Mixed Concurrent Traffic | **2.50 ns** | **0.00** | **399.3 M ops/s** |
+| **L4 TCP Route** | `l4-in-0:tcp` | **0.24 ns** | **0.00** | **4,100.8 M ops/s** |
+| **L4 UDP Route** | `l4-in-9:udp` | **1.67 ns** | **0.00** | **598.2 M ops/s** |
+| **L7 HTTP Exact** | `/endpoints/action_0005/exec` | **14.67 ns** | **0.00** | **68.2 M ops/s** |
+| **L7 HTTP Prefix** | `/api/v1/service_1000/orders/items/42` | **31.87 ns** | **0.00** | **31.4 M ops/s** |
+| **L7 HTTP Miss** | `/unknown/unmatched/path/404` | **9.20 ns** | **0.00** | **108.7 M ops/s** |
+| **L7 gRPC Exact** | `service.v1.Service_0007` | **12.00 ns** | **0.00** | **83.4 M ops/s** |
+| **L7 gRPC Parse+Route** | `/service.v1.Service_0007/CreateOrder` | **15.92 ns** | **0.00** | **62.8 M ops/s** |
+| **Multicore Peak (16 Workers)**| Mixed Concurrent Traffic | **4.06 ns** | **0.00** | **246.3 M ops/s** |
+| **Multicore Peak (64 Workers)**| Mixed Concurrent Traffic | **3.92 ns** | **0.00** | **254.9 M ops/s** |
