@@ -24,12 +24,12 @@ use std::sync::Arc;
 
 use crate::error::RdmaError;
 use crate::ffi::{
-    IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE, IBV_MTU_1024,
-    IBV_QP_ACCESS_FLAGS, IBV_QP_AV, IBV_QP_DEST_QPN, IBV_QP_MAX_DEST_RD_ATOMIC,
-    IBV_QP_MAX_QP_RD_ATOMIC, IBV_QP_MIN_RNR_TIMER, IBV_QP_PATH_MTU, IBV_QP_PKEY_INDEX, IBV_QP_PORT,
-    IBV_QP_RETRY_CNT, IBV_QP_RNR_RETRY, IBV_QP_RQ_PSN, IBV_QP_SQ_PSN, IBV_QP_STATE, IBV_QP_TIMEOUT,
-    IBV_QPS_INIT, IBV_QPS_RTR, IBV_QPS_RTS, IBV_QPT_RC, IbvLib, get_ibv_lib, ibv_gid, ibv_qp,
-    ibv_qp_attr, ibv_qp_cap, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr,
+    IBV_ACCESS_LOCAL_WRITE, IBV_MTU_1024, IBV_QP_ACCESS_FLAGS, IBV_QP_AV, IBV_QP_DEST_QPN,
+    IBV_QP_MAX_DEST_RD_ATOMIC, IBV_QP_MAX_QP_RD_ATOMIC, IBV_QP_MIN_RNR_TIMER, IBV_QP_PATH_MTU,
+    IBV_QP_PKEY_INDEX, IBV_QP_PORT, IBV_QP_RETRY_CNT, IBV_QP_RNR_RETRY, IBV_QP_RQ_PSN,
+    IBV_QP_SQ_PSN, IBV_QP_STATE, IBV_QP_TIMEOUT, IBV_QPS_ERR, IBV_QPS_INIT, IBV_QPS_RESET,
+    IBV_QPS_RTR, IBV_QPS_RTS, IBV_QPT_RC, IbvLib, get_ibv_lib, ibv_gid, ibv_qp, ibv_qp_attr,
+    ibv_qp_cap, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr,
 };
 use crate::verbs::cq::CompletionQueue;
 use crate::verbs::pd::ProtectionDomain;
@@ -131,15 +131,18 @@ impl QueuePair {
         self.qp_num
     }
 
-    /// Step 1: Transitions QP from RESET to INIT state.
+    /// Step 1: Transitions QP from RESET to INIT state with secure local-only write permissions.
     pub fn to_init(&self, port: u8) -> Result<(), RdmaError> {
+        self.to_init_with_access(port, IBV_ACCESS_LOCAL_WRITE)
+    }
+
+    /// Transitions QP from RESET to INIT state with explicitly specified access flags.
+    pub fn to_init_with_access(&self, port: u8, access_flags: u32) -> Result<(), RdmaError> {
         let mut attr = ibv_qp_attr {
             qp_state: IBV_QPS_INIT,
             pkey_index: 0,
             port_num: port,
-            qp_access_flags: IBV_ACCESS_LOCAL_WRITE
-                | IBV_ACCESS_REMOTE_WRITE
-                | IBV_ACCESS_REMOTE_READ,
+            qp_access_flags: access_flags,
             ..unsafe { std::mem::zeroed() }
         };
 
@@ -154,6 +157,40 @@ impl QueuePair {
             });
         }
         Ok(())
+    }
+
+    /// Transitions QP to ERROR state, causing all queued and in-flight WRs to be flushed.
+    pub fn to_error(&self) -> Result<(), RdmaError> {
+        let mut attr: ibv_qp_attr = unsafe { std::mem::zeroed() };
+        attr.qp_state = IBV_QPS_ERR;
+        let mask = IBV_QP_STATE as c_int;
+        let ret = unsafe { (self.lib.modify_qp)(self.raw, &mut attr, mask) };
+        if ret != 0 {
+            Err(RdmaError::StateTransition {
+                from: "ACTIVE",
+                to: "ERR",
+                reason: format!("ibv_modify_qp returned {ret}"),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Transitions QP back to RESET state, immediately ceasing all NIC DMA activities.
+    pub fn to_reset(&self) -> Result<(), RdmaError> {
+        let mut attr: ibv_qp_attr = unsafe { std::mem::zeroed() };
+        attr.qp_state = IBV_QPS_RESET;
+        let mask = IBV_QP_STATE as c_int;
+        let ret = unsafe { (self.lib.modify_qp)(self.raw, &mut attr, mask) };
+        if ret != 0 {
+            Err(RdmaError::StateTransition {
+                from: "ACTIVE",
+                to: "RESET",
+                reason: format!("ibv_modify_qp returned {ret}"),
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// Step 2: Transitions QP from INIT to RTR (Ready to Receive).
@@ -247,7 +284,7 @@ impl QueuePair {
     #[inline(always)]
     pub unsafe fn post_send(&self, wr: *mut ibv_send_wr) -> Result<(), RdmaError> {
         let mut bad_wr = std::ptr::null_mut();
-        let ret = unsafe { (self.lib.post_send)(self.raw, wr, &mut bad_wr) };
+        let ret = unsafe { crate::ffi::ibv_post_send(self.raw, wr, &mut bad_wr) };
         if ret != 0 {
             Err(RdmaError::Verbs(
                 "Failed to post Send WR (ibv_post_send)".into(),
@@ -267,7 +304,7 @@ impl QueuePair {
     #[inline(always)]
     pub unsafe fn post_recv(&self, wr: *mut ibv_recv_wr) -> Result<(), RdmaError> {
         let mut bad_wr = std::ptr::null_mut();
-        let ret = unsafe { (self.lib.post_recv)(self.raw, wr, &mut bad_wr) };
+        let ret = unsafe { crate::ffi::ibv_post_recv(self.raw, wr, &mut bad_wr) };
         if ret != 0 {
             Err(RdmaError::Verbs(
                 "Failed to post Recv WR (ibv_post_recv)".into(),

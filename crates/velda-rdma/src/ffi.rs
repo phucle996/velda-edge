@@ -78,6 +78,8 @@ pub const IBV_WC_RETRY_EXC_ERR: u32 = 12;
 pub const IBV_WC_RNR_RETRY_EXC_ERR: u32 = 13;
 pub const IBV_WC_RESP_TIMEOUT_ERR: u32 = 20;
 
+pub const IBV_WC_WITH_IMM: u32 = 1 << 1;
+
 pub const IBV_MTU_1024: u32 = 3;
 pub const IBV_MTU_2048: u32 = 4;
 pub const IBV_MTU_4096: u32 = 5;
@@ -144,12 +146,115 @@ pub struct ibv_device {
 }
 
 #[repr(C)]
+pub struct ibv_context_ops {
+    pub _compat_query_device: usize,
+    pub _compat_query_port: usize,
+    pub _compat_alloc_pd: usize,
+    pub _compat_dealloc_pd: usize,
+    pub _compat_reg_mr: usize,
+    pub _compat_rereg_mr: usize,
+    pub _compat_dereg_mr: usize,
+    pub alloc_mw: usize,
+    pub bind_mw: usize,
+    pub dealloc_mw: usize,
+    pub _compat_create_cq: usize,
+    pub poll_cq:
+        unsafe extern "C" fn(cq: *mut ibv_cq, num_entries: c_int, wc: *mut ibv_wc) -> c_int,
+    pub req_notify_cq: unsafe extern "C" fn(cq: *mut ibv_cq, solicited_only: c_int) -> c_int,
+    pub _compat_cq_event: usize,
+    pub _compat_resize_cq: usize,
+    pub _compat_destroy_cq: usize,
+    pub _compat_create_srq: usize,
+    pub _compat_modify_srq: usize,
+    pub _compat_query_srq: usize,
+    pub _compat_destroy_srq: usize,
+    pub post_srq_recv: usize,
+    pub _compat_create_qp: usize,
+    pub _compat_query_qp: usize,
+    pub _compat_modify_qp: usize,
+    pub _compat_destroy_qp: usize,
+    pub post_send: unsafe extern "C" fn(
+        qp: *mut ibv_qp,
+        wr: *mut ibv_send_wr,
+        bad_wr: *mut *mut ibv_send_wr,
+    ) -> c_int,
+    pub post_recv: unsafe extern "C" fn(
+        qp: *mut ibv_qp,
+        wr: *mut ibv_recv_wr,
+        bad_wr: *mut *mut ibv_recv_wr,
+    ) -> c_int,
+}
+
+#[repr(C)]
 pub struct ibv_context {
     pub device: *mut ibv_device,
-    pub ops: [usize; 32],
+    pub ops: ibv_context_ops,
     pub cmd_fd: c_int,
     pub async_fd: c_int,
     pub num_comp_vectors: c_int,
+}
+
+/// Dispatches a Send WR directly through device-specific hardware operations on `context->ops`.
+///
+/// # Safety
+///
+/// Caller must ensure `qp` is a valid pointer to an initialized `ibv_qp` and `wr` points to
+/// a valid linked list of `ibv_send_wr`.
+#[inline(always)]
+pub unsafe fn ibv_post_send(
+    qp: *mut ibv_qp,
+    wr: *mut ibv_send_wr,
+    bad_wr: *mut *mut ibv_send_wr,
+) -> c_int {
+    unsafe {
+        let ctx = (*qp).context;
+        ((*ctx).ops.post_send)(qp, wr, bad_wr)
+    }
+}
+
+/// Dispatches a Receive WR directly through device-specific hardware operations on `context->ops`.
+///
+/// # Safety
+///
+/// Caller must ensure `qp` is a valid pointer to an initialized `ibv_qp` and `wr` points to
+/// a valid linked list of `ibv_recv_wr`.
+#[inline(always)]
+pub unsafe fn ibv_post_recv(
+    qp: *mut ibv_qp,
+    wr: *mut ibv_recv_wr,
+    bad_wr: *mut *mut ibv_recv_wr,
+) -> c_int {
+    unsafe {
+        let ctx = (*qp).context;
+        ((*ctx).ops.post_recv)(qp, wr, bad_wr)
+    }
+}
+
+/// Harvests Work Completions directly through device-specific hardware operations on `context->ops`.
+///
+/// # Safety
+///
+/// Caller must ensure `cq` is a valid pointer to an initialized `ibv_cq` and `wc` points to
+/// a buffer capable of holding at least `num_entries` items.
+#[inline(always)]
+pub unsafe fn ibv_poll_cq(cq: *mut ibv_cq, num_entries: c_int, wc: *mut ibv_wc) -> c_int {
+    unsafe {
+        let ctx = (*cq).context;
+        ((*ctx).ops.poll_cq)(cq, num_entries, wc)
+    }
+}
+
+/// Arms Completion Queue interrupts directly through device-specific hardware operations on `context->ops`.
+///
+/// # Safety
+///
+/// Caller must ensure `cq` is a valid pointer to an initialized `ibv_cq`.
+#[inline(always)]
+pub unsafe fn ibv_req_notify_cq(cq: *mut ibv_cq, solicited_only: c_int) -> c_int {
+    unsafe {
+        let ctx = (*cq).context;
+        ((*ctx).ops.req_notify_cq)(cq, solicited_only)
+    }
 }
 
 #[repr(C)]
@@ -345,19 +450,6 @@ pub struct IbvLib {
     pub destroy_qp: unsafe extern "C" fn(qp: *mut ibv_qp) -> c_int,
     pub modify_qp:
         unsafe extern "C" fn(qp: *mut ibv_qp, attr: *mut ibv_qp_attr, attr_mask: c_int) -> c_int,
-    pub post_send: unsafe extern "C" fn(
-        qp: *mut ibv_qp,
-        wr: *mut ibv_send_wr,
-        bad_wr: *mut *mut ibv_send_wr,
-    ) -> c_int,
-    pub post_recv: unsafe extern "C" fn(
-        qp: *mut ibv_qp,
-        wr: *mut ibv_recv_wr,
-        bad_wr: *mut *mut ibv_recv_wr,
-    ) -> c_int,
-    pub poll_cq:
-        unsafe extern "C" fn(cq: *mut ibv_cq, num_entries: c_int, wc: *mut ibv_wc) -> c_int,
-    pub req_notify_cq: unsafe extern "C" fn(cq: *mut ibv_cq, solicited_only: c_int) -> c_int,
     pub get_cq_event: unsafe extern "C" fn(
         channel: *mut ibv_comp_channel,
         cq: *mut *mut ibv_cq,
@@ -478,30 +570,6 @@ pub fn get_ibv_lib() -> Option<&'static IbvLib> {
                     modify_qp: sym!(
                         "ibv_modify_qp",
                         unsafe extern "C" fn(*mut ibv_qp, *mut ibv_qp_attr, c_int) -> c_int
-                    ),
-                    post_send: sym!(
-                        "ibv_post_send",
-                        unsafe extern "C" fn(
-                            *mut ibv_qp,
-                            *mut ibv_send_wr,
-                            *mut *mut ibv_send_wr,
-                        ) -> c_int
-                    ),
-                    post_recv: sym!(
-                        "ibv_post_recv",
-                        unsafe extern "C" fn(
-                            *mut ibv_qp,
-                            *mut ibv_recv_wr,
-                            *mut *mut ibv_recv_wr,
-                        ) -> c_int
-                    ),
-                    poll_cq: sym!(
-                        "ibv_poll_cq",
-                        unsafe extern "C" fn(*mut ibv_cq, c_int, *mut ibv_wc) -> c_int
-                    ),
-                    req_notify_cq: sym!(
-                        "ibv_req_notify_cq",
-                        unsafe extern "C" fn(*mut ibv_cq, c_int) -> c_int
                     ),
                     get_cq_event: sym!(
                         "ibv_get_cq_event",

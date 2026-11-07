@@ -82,3 +82,18 @@ pub enum RdmaError {
     #[error("RDMA mock error: {0}")]
     Mock(String),
 }
+
+impl RdmaError {
+    /// Cold-path constructor for Work Completion failures.
+    ///
+    /// Marked `#[cold]` and `#[inline(never)]` to prevent polluting the L1 instruction
+    /// cache and branch predictor tables on the hot CQ polling path.
+    #[cold]
+    #[inline(never)]
+    pub fn wc_failed(status: u32) -> Self {
+        Self::Verbs(
+            format!("Work completion failed with status {}", status),
+            status as i32,
+        )
+    }
+}

@@ -56,6 +56,26 @@ impl CompletionQueue {
                     std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
                 ));
             }
+
+            // Set completion channel FD to non-blocking so AsyncFd and get_cq_event never block worker threads
+            let fd = unsafe { (*channel_ptr).fd };
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags < 0 {
+                    (lib.destroy_comp_channel)(channel_ptr);
+                    return Err(RdmaError::Verbs(
+                        "Failed to get completion channel FD flags (fcntl F_GETFL)".into(),
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                    ));
+                }
+                if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                    (lib.destroy_comp_channel)(channel_ptr);
+                    return Err(RdmaError::Verbs(
+                        "Failed to set completion channel FD to O_NONBLOCK (fcntl F_SETFL)".into(),
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                    ));
+                }
+            }
         }
 
         let cq_ptr = unsafe {
@@ -107,7 +127,7 @@ impl CompletionQueue {
     /// Returns the number of Work Completions placed into `wc`.
     #[inline(always)]
     pub fn poll(&self, wc: &mut [ibv_wc]) -> Result<usize, RdmaError> {
-        let ret = unsafe { (self.lib.poll_cq)(self.raw, wc.len() as c_int, wc.as_mut_ptr()) };
+        let ret = unsafe { crate::ffi::ibv_poll_cq(self.raw, wc.len() as c_int, wc.as_mut_ptr()) };
 
         if ret < 0 {
             Err(RdmaError::Verbs(
@@ -122,7 +142,7 @@ impl CompletionQueue {
     /// Arms the completion queue to trigger a hardware notification on the next completion event.
     #[inline(always)]
     pub fn req_notify(&self, solicited_only: bool) -> Result<(), RdmaError> {
-        let ret = unsafe { (self.lib.req_notify_cq)(self.raw, solicited_only as c_int) };
+        let ret = unsafe { crate::ffi::ibv_req_notify_cq(self.raw, solicited_only as c_int) };
         if ret != 0 {
             Err(RdmaError::Verbs(
                 "Failed to arm CQ notification (ibv_req_notify_cq)".into(),
@@ -144,6 +164,12 @@ impl CompletionQueue {
 
         let ret = unsafe { (self.lib.get_cq_event)(self.channel, &mut cq_ptr, &mut cq_context) };
         if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EAGAIN)
+                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                return Ok(());
+            }
             return Err(RdmaError::Verbs(
                 "Failed to get CQ event (ibv_get_cq_event)".into(),
                 ret,

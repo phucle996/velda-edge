@@ -21,10 +21,7 @@ use std::os::raw::c_void;
 use std::sync::Arc;
 
 use crate::error::RdmaError;
-use crate::ffi::{
-    IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE, IbvLib, get_ibv_lib,
-    ibv_mr,
-};
+use crate::ffi::{IBV_ACCESS_LOCAL_WRITE, IbvLib, get_ibv_lib, ibv_mr};
 use crate::verbs::pd::ProtectionDomain;
 
 /// Pinned, zero-copy memory region registered with the HCA.
@@ -77,10 +74,22 @@ impl MemoryRegion {
         })
     }
 
-    /// Helper to register a mutable slice with standard read/write permissions.
+    /// Helper to register a mutable slice with local write permissions.
+    ///
+    /// Remote access flags (`IBV_ACCESS_REMOTE_WRITE`, `IBV_ACCESS_REMOTE_READ`) are omitted by default
+    /// to adhere to the principle of least privilege and prevent unauthorized remote memory manipulation.
     pub fn register_slice(pd: Arc<ProtectionDomain>, slice: &mut [u8]) -> Result<Self, RdmaError> {
-        let flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
+        let flags = IBV_ACCESS_LOCAL_WRITE;
         Self::register(pd, slice.as_mut_ptr(), slice.len(), flags)
+    }
+
+    /// Registers a mutable slice with caller-specified Verbs access permissions.
+    pub fn register_slice_with_access(
+        pd: Arc<ProtectionDomain>,
+        slice: &mut [u8],
+        access_flags: u32,
+    ) -> Result<Self, RdmaError> {
+        Self::register(pd, slice.as_mut_ptr(), slice.len(), access_flags)
     }
 
     /// Local memory key used by the local HCA to access memory in Work Requests.
@@ -105,6 +114,12 @@ impl MemoryRegion {
     #[inline(always)]
     pub fn length(&self) -> usize {
         self.length
+    }
+
+    /// Reference to the underlying Protection Domain.
+    #[inline(always)]
+    pub fn pd(&self) -> &Arc<ProtectionDomain> {
+        &self._pd
     }
 }
 

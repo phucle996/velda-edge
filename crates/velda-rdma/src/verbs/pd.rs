@@ -56,6 +56,12 @@ impl ProtectionDomain {
     pub fn raw(&self) -> *mut ibv_pd {
         self.raw
     }
+
+    /// Returns a reference to the parent RDMA context.
+    #[inline(always)]
+    pub fn context(&self) -> &Arc<RdmaContext> {
+        &self._context
+    }
 }
 
 impl Drop for ProtectionDomain {

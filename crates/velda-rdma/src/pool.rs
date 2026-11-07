@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::config::RdmaConfig;
 use crate::error::RdmaError;
-use crate::ffi::{IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE};
+use crate::ffi::IBV_ACCESS_LOCAL_WRITE;
 use crate::verbs::device::RdmaDevice;
 use crate::verbs::mr::MemoryRegion;
 use crate::verbs::pd::ProtectionDomain;
@@ -144,6 +144,12 @@ impl RdmaSlabConfig {
     }
 }
 
+/// Parallel bitmap scanning function signature for pre-registered RDMA memory arenas.
+///
+/// Dispatched dynamically via cached function pointer resolved at initialization
+/// based on detected CPU capability (AVX2 256-bit, SSE2 128-bit, or SWAR 64-bit integer registers).
+pub type BitmapScanFn = fn(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize>;
+
 /// Internal shared state of the RDMA slab arena.
 struct RdmaSlabArenaInner {
     base_ptr: *mut u8,
@@ -153,10 +159,13 @@ struct RdmaSlabArenaInner {
     config: RdmaSlabConfig,
     standard_masks: Box<[AtomicU64]>,
     large_masks: Box<[AtomicU64]>,
+    standard_word_mask: usize,
+    large_word_mask: usize,
     standard_hint: AtomicUsize,
     large_hint: AtomicUsize,
     standard_used: AtomicUsize,
     large_used: AtomicUsize,
+    scan_fn: BitmapScanFn,
 }
 
 unsafe impl Send for RdmaSlabArenaInner {}
@@ -176,108 +185,221 @@ impl Drop for RdmaSlabArenaInner {
     }
 }
 
-impl RdmaSlabArenaInner {
-    /// Allocates an available slot index from the atomic bitmask for the requested class.
-    fn alloc_slot(&self, class: RdmaSlabClass) -> Result<u32, RdmaError> {
-        match class {
-            RdmaSlabClass::Standard2K => {
-                let count = self.config.standard_count;
-                let words = &self.standard_masks;
-                let num_words = words.len();
-                if num_words == 0 {
-                    return Err(RdmaError::ArenaExhausted {
-                        class: class.as_str(),
-                    });
-                }
+// ============================================================================
+// Universe 1: AVX2 256-bit Vector Lane Scanning (4x 64-bit words = 256 slots)
+// ============================================================================
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_avx2_256_inner(
+    words: &[AtomicU64],
+    start: usize,
+    _word_mask: usize,
+) -> Option<usize> {
+    use core::arch::x86_64::*;
+    unsafe {
+        let num_chunks = words.len() / 4;
+        let start_chunk = (start / 4) & (num_chunks - 1);
+        let all_ones = _mm256_set1_epi64x(-1);
 
-                let start = self.standard_hint.load(Ordering::Relaxed) % num_words;
-                for i in 0..num_words {
-                    let word_idx = (start + i) % num_words;
-                    let atomic_word = &words[word_idx];
-                    let mut current = atomic_word.load(Ordering::Acquire);
-
-                    while current != !0u64 {
-                        let bit = (!current).trailing_zeros();
-                        if bit >= BITS_PER_ATOMIC_WORD as u32 {
-                            break;
-                        }
-
-                        let slot_idx = (word_idx * BITS_PER_ATOMIC_WORD + bit as usize) as u32;
-                        if slot_idx as usize >= count {
-                            // Slot index exceeds valid capacity
-                            break;
-                        }
-
-                        let new_val = current | (1u64 << bit);
-                        match atomic_word.compare_exchange_weak(
-                            current,
-                            new_val,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => {
-                                self.standard_used.fetch_add(1, Ordering::Relaxed);
-                                self.standard_hint.store(word_idx, Ordering::Relaxed);
-                                return Ok(slot_idx);
-                            }
-                            Err(actual) => current = actual,
-                        }
-                    }
-                }
-
-                Err(RdmaError::ArenaExhausted {
-                    class: class.as_str(),
-                })
-            }
-            RdmaSlabClass::Large64K => {
-                let count = self.config.large_count;
-                let words = &self.large_masks;
-                let num_words = words.len();
-                if num_words == 0 {
-                    return Err(RdmaError::ArenaExhausted {
-                        class: class.as_str(),
-                    });
-                }
-
-                let start = self.large_hint.load(Ordering::Relaxed) % num_words;
-                for i in 0..num_words {
-                    let word_idx = (start + i) % num_words;
-                    let atomic_word = &words[word_idx];
-                    let mut current = atomic_word.load(Ordering::Acquire);
-
-                    while current != !0u64 {
-                        let bit = (!current).trailing_zeros();
-                        if bit >= BITS_PER_ATOMIC_WORD as u32 {
-                            break;
-                        }
-
-                        let slot_idx = (word_idx * BITS_PER_ATOMIC_WORD + bit as usize) as u32;
-                        if slot_idx as usize >= count {
-                            break;
-                        }
-
-                        let new_val = current | (1u64 << bit);
-                        match atomic_word.compare_exchange_weak(
-                            current,
-                            new_val,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => {
-                                self.large_used.fetch_add(1, Ordering::Relaxed);
-                                self.large_hint.store(word_idx, Ordering::Relaxed);
-                                return Ok(slot_idx);
-                            }
-                            Err(actual) => current = actual,
-                        }
-                    }
-                }
-
-                Err(RdmaError::ArenaExhausted {
-                    class: class.as_str(),
-                })
+        for chunk in 0..num_chunks {
+            let chunk_idx = (start_chunk + chunk) & (num_chunks - 1);
+            let base_word = chunk_idx * 4;
+            let ptr = words.as_ptr().add(base_word) as *const __m256i;
+            let ymm = _mm256_loadu_si256(ptr);
+            let cmp = _mm256_cmpeq_epi64(ymm, all_ones);
+            let mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
+            if mask != 0x0F {
+                let free_lane = (!mask & 0x0F).trailing_zeros() as usize;
+                return Some(base_word + free_lane);
             }
         }
+    }
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn scan_avx2_256(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
+    if words.len() >= 4 {
+        unsafe { scan_avx2_256_inner(words, start, word_mask) }
+    } else {
+        scan_swar_64(words, start, word_mask)
+    }
+}
+
+// ============================================================================
+// Universe 2: SSE2 128-bit Vector Lane Scanning (2x 64-bit words = 128 slots)
+// Baseline on 100% of x86_64 CPUs since 2003 (Zero downclocking risk)
+// ============================================================================
+#[cfg(target_arch = "x86_64")]
+fn scan_sse2_128(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
+    use core::arch::x86_64::*;
+    if words.len() < 2 {
+        return scan_swar_64(words, start, word_mask);
+    }
+    let num_pairs = words.len() / 2;
+    let start_pair = (start / 2) & (num_pairs - 1);
+    let all_ones = unsafe { _mm_set1_epi32(-1) };
+
+    for pair in 0..num_pairs {
+        let pair_idx = (start_pair + pair) & (num_pairs - 1);
+        let base_word = pair_idx * 2;
+        let ptr = unsafe { words.as_ptr().add(base_word) as *const __m128i };
+        let xmm = unsafe { _mm_loadu_si128(ptr) };
+        let cmp = unsafe { _mm_cmpeq_epi32(xmm, all_ones) };
+        let mask = unsafe { _mm_movemask_ps(_mm_castsi128_ps(cmp)) };
+        if mask != 0x0F {
+            if (mask & 0x03) != 0x03 {
+                return Some(base_word);
+            } else {
+                return Some(base_word + 1);
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
+// Universe 3: Pure 64-bit SWAR (SIMD-Within-A-Register) Parallel Reduction
+// 100% universal across all CPU architectures (x86_64, aarch64, riscv64)
+// Evaluates 4x 64-bit words (256 slots) in 3 single-cycle ALU bitwise operations
+// ============================================================================
+fn scan_swar_64(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
+    let len = words.len();
+    if len >= 4 && (len & 3) == 0 {
+        let num_quads = len / 4;
+        let start_quad = (start / 4) & (num_quads - 1);
+
+        for quad in 0..num_quads {
+            let quad_idx = (start_quad + quad) & (num_quads - 1);
+            let b = quad_idx * 4;
+            let w0 = words[b].load(Ordering::Relaxed);
+            let w1 = words[b + 1].load(Ordering::Relaxed);
+            let w2 = words[b + 2].load(Ordering::Relaxed);
+            let w3 = words[b + 3].load(Ordering::Relaxed);
+
+            // SWAR parallel reduction across 4 general-purpose registers
+            let full_01 = w0 & w1;
+            let full_23 = w2 & w3;
+            let all_full = full_01 & full_23;
+
+            if all_full != !0u64 {
+                if full_01 != !0u64 {
+                    if w0 != !0u64 {
+                        return Some(b);
+                    } else {
+                        return Some(b + 1);
+                    }
+                } else if w2 != !0u64 {
+                    return Some(b + 2);
+                } else {
+                    return Some(b + 3);
+                }
+            }
+        }
+        None
+    } else {
+        for i in 0..len {
+            let idx = (start + i) & word_mask;
+            if words[idx].load(Ordering::Relaxed) != !0u64 {
+                return Some(idx);
+            }
+        }
+        None
+    }
+}
+
+/// Resolves the optimal bitmap scanning function pointer once at initialization.
+#[inline(always)]
+fn resolve_bitmap_scan_fn() -> BitmapScanFn {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            scan_avx2_256
+        } else {
+            scan_sse2_128
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scan_swar_64
+    }
+}
+
+impl RdmaSlabArenaInner {
+    /// Allocates an available slot index from the atomic bitmask for the requested class.
+    ///
+    /// Dispatches through a hardware-resolved function pointer (`scan_fn`) directly
+    /// without runtime CPU branching on the hot path, leveraging the CPU branch target buffer (BTB).
+    fn alloc_slot(&self, class: RdmaSlabClass) -> Result<u32, RdmaError> {
+        let (count, words, word_mask, hint_atom, used_atom) = match class {
+            RdmaSlabClass::Standard2K => (
+                self.config.standard_count,
+                &self.standard_masks,
+                self.standard_word_mask,
+                &self.standard_hint,
+                &self.standard_used,
+            ),
+            RdmaSlabClass::Large64K => (
+                self.config.large_count,
+                &self.large_masks,
+                self.large_word_mask,
+                &self.large_hint,
+                &self.large_used,
+            ),
+        };
+
+        let start = hint_atom.load(Ordering::Relaxed) & word_mask;
+
+        // Dispatches through cached hardware function pointer (AVX2, SSE2, or SWAR)
+        let candidate_start = (self.scan_fn)(words, start, word_mask);
+
+        let search_start = match candidate_start {
+            Some(w) => w,
+            None => {
+                return Err(RdmaError::ArenaExhausted {
+                    class: class.as_str(),
+                });
+            }
+        };
+
+        // Atomic CAS allocation loop starting at the candidate word
+        for i in 0..words.len() {
+            let word_idx = (search_start + i) & word_mask;
+            let atomic_word = &words[word_idx];
+            let mut current = atomic_word.load(Ordering::Acquire);
+
+            while current != !0u64 {
+                let bit = (!current).trailing_zeros();
+                if bit >= BITS_PER_ATOMIC_WORD as u32 {
+                    break;
+                }
+
+                let slot_idx = (word_idx * BITS_PER_ATOMIC_WORD + bit as usize) as u32;
+                if slot_idx as usize >= count {
+                    // Slot index exceeds valid capacity
+                    break;
+                }
+
+                let new_val = current | (1u64 << bit);
+                match atomic_word.compare_exchange_weak(
+                    current,
+                    new_val,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        used_atom.fetch_add(1, Ordering::Relaxed);
+                        hint_atom.store(word_idx, Ordering::Relaxed);
+                        return Ok(slot_idx);
+                    }
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+
+        Err(RdmaError::ArenaExhausted {
+            class: class.as_str(),
+        })
     }
 
     /// Atomically marks a slot as free in the corresponding bitmask.
@@ -300,6 +422,11 @@ impl RdmaSlabArenaInner {
                 }
             }
         }
+    }
+
+    /// Returns the underlying Protection Domain associated with this arena, if hardware-backed.
+    pub fn pd(&self) -> Option<Arc<ProtectionDomain>> {
+        self.mr.as_ref().map(|m| m.pd().clone())
     }
 }
 
@@ -351,9 +478,10 @@ impl RdmaSlabArena {
             }
         }
 
-        // Step 3: Register the entire contiguous block once with the HCA protection domain
-        let access_flags =
-            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
+        // Step 3: Register the entire contiguous block once with the HCA protection domain.
+        // Grant exclusively LOCAL_WRITE. Remote read/write operations are forbidden to
+        // eliminate unauthorized cross-connection RDMA tampering of slab buffers.
+        let access_flags = IBV_ACCESS_LOCAL_WRITE;
         let mr = match MemoryRegion::register(pd, ptr, total_bytes, access_flags) {
             Ok(region) => region,
             Err(e) => {
@@ -368,7 +496,10 @@ impl RdmaSlabArena {
         Self::create_with_ptr(ptr, layout, Some(mr), lkey, config)
     }
 
-    /// Automatically discovers RDMA hardware, falling back to mock mode if unavailable.
+    /// Automatically discovers RDMA hardware.
+    ///
+    /// In production builds (`cfg(not(test))`), missing hardware immediately fails fast with an error.
+    /// In test mode (`cfg(test)`), falls back to mock arena to allow hermetic local testing.
     pub fn new_auto(config: &RdmaConfig, slab_config: RdmaSlabConfig) -> Result<Self, RdmaError> {
         if config.force_mock {
             return Self::new_mock(slab_config);
@@ -388,9 +519,24 @@ impl RdmaSlabArena {
                 {
                     return Ok(arena);
                 }
-                Self::new_mock(slab_config)
+
+                #[cfg(test)]
+                return Self::new_mock(slab_config);
+
+                #[cfg(not(test))]
+                Err(RdmaError::DeviceNotFound(
+                    "No active RDMA devices found or failed to initialize hardware arena".into(),
+                ))
             }
-            _ => Self::new_mock(slab_config),
+            _ => {
+                #[cfg(test)]
+                return Self::new_mock(slab_config);
+
+                #[cfg(not(test))]
+                Err(RdmaError::DeviceNotFound(
+                    "No active RDMA hardware devices detected on host for slab arena".into(),
+                ))
+            }
         }
     }
 
@@ -430,9 +576,10 @@ impl RdmaSlabArena {
         lkey: u32,
         config: RdmaSlabConfig,
     ) -> Result<Self, RdmaError> {
-        let std_words = config.standard_count.div_ceil(BITS_PER_ATOMIC_WORD);
-        let mut std_vec = Vec::with_capacity(std_words);
-        for i in 0..std_words {
+        let std_words = config.standard_count.div_ceil(BITS_PER_ATOMIC_WORD).max(1);
+        let std_capacity = std_words.max(4).next_power_of_two();
+        let mut std_vec = Vec::with_capacity(std_capacity);
+        for i in 0..std_capacity {
             let mut init_mask = 0u64;
             // Mark out-of-range trailing bits as in-use so they are never allocated
             let start_slot = i * BITS_PER_ATOMIC_WORD;
@@ -444,9 +591,10 @@ impl RdmaSlabArena {
             std_vec.push(AtomicU64::new(init_mask));
         }
 
-        let lrg_words = config.large_count.div_ceil(BITS_PER_ATOMIC_WORD);
-        let mut lrg_vec = Vec::with_capacity(lrg_words);
-        for i in 0..lrg_words {
+        let lrg_words = config.large_count.div_ceil(BITS_PER_ATOMIC_WORD).max(1);
+        let lrg_capacity = lrg_words.max(4).next_power_of_two();
+        let mut lrg_vec = Vec::with_capacity(lrg_capacity);
+        for i in 0..lrg_capacity {
             let mut init_mask = 0u64;
             let start_slot = i * BITS_PER_ATOMIC_WORD;
             for bit in 0..BITS_PER_ATOMIC_WORD {
@@ -457,6 +605,9 @@ impl RdmaSlabArena {
             lrg_vec.push(AtomicU64::new(init_mask));
         }
 
+        let standard_word_mask = std_capacity - 1;
+        let large_word_mask = lrg_capacity - 1;
+
         let inner = RdmaSlabArenaInner {
             base_ptr: ptr,
             layout,
@@ -465,10 +616,13 @@ impl RdmaSlabArena {
             config,
             standard_masks: std_vec.into_boxed_slice(),
             large_masks: lrg_vec.into_boxed_slice(),
+            standard_word_mask,
+            large_word_mask,
             standard_hint: AtomicUsize::new(0),
             large_hint: AtomicUsize::new(0),
             standard_used: AtomicUsize::new(0),
             large_used: AtomicUsize::new(0),
+            scan_fn: resolve_bitmap_scan_fn(),
         };
 
         Ok(Self {
@@ -492,6 +646,14 @@ impl RdmaSlabArena {
         };
 
         let ptr = unsafe { self.inner.base_ptr.add(offset) };
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                ptr as *const i8,
+            );
+        }
+
         let addr = ptr as u64;
 
         Ok(RdmaSlabLease {
@@ -512,6 +674,12 @@ impl RdmaSlabArena {
             needed: size,
         })?;
         self.acquire(class)
+    }
+
+    /// Returns the underlying Protection Domain associated with this hardware arena, if present.
+    #[inline(always)]
+    pub fn pd(&self) -> Option<Arc<ProtectionDomain>> {
+        self.inner.pd()
     }
 
     /// Returns the number of available (unallocated) slots for the given class.
@@ -603,6 +771,10 @@ impl DerefMut for RdmaSlabLease {
 
 impl Drop for RdmaSlabLease {
     fn drop(&mut self) {
+        // Zero memory before releasing slot to prevent cross-tenant memory bleed (CWE-226)
+        unsafe {
+            std::ptr::write_bytes(self.ptr, 0, self.len);
+        }
         self.inner.free_slot(self.class, self.slot_idx);
     }
 }
@@ -807,5 +979,100 @@ mod tests {
         }
 
         assert_eq!(arena.available_slots(RdmaSlabClass::Standard2K), 128);
+    }
+
+    #[test]
+    fn test_avx2_bitmap_scan_and_high_occupancy_saturation() {
+        let arena = RdmaSlabArena::new_mock(RdmaSlabConfig {
+            standard_count: 512,
+            large_count: 64,
+        })
+        .expect("Arena creation should succeed");
+
+        // 1. Acquire first 256 slots (fills exactly 4x64-bit words, i.e. 1 full AVX2 256-bit chunk)
+        let mut leases = Vec::with_capacity(512);
+        for i in 0..256 {
+            let lease = arena
+                .acquire(RdmaSlabClass::Standard2K)
+                .expect("Acquiring initial 256 slots");
+            assert_eq!(lease.slot_index(), i as u32);
+            leases.push(lease);
+        }
+
+        // 2. The next slot MUST come from chunk 1 (slot index 256)
+        let lease_256 = arena
+            .acquire(RdmaSlabClass::Standard2K)
+            .expect("Acquiring 257th slot across 256-bit boundary");
+        assert_eq!(lease_256.slot_index(), 256);
+        leases.push(lease_256);
+
+        // 3. Acquire remaining slots up to 512
+        for i in 257..512 {
+            let lease = arena
+                .acquire(RdmaSlabClass::Standard2K)
+                .expect("Acquiring remaining slots");
+            assert_eq!(lease.slot_index(), i as u32);
+            leases.push(lease);
+        }
+
+        // 4. Verify fail-fast exhaustion
+        let err = arena.acquire(RdmaSlabClass::Standard2K);
+        assert!(matches!(err, Err(RdmaError::ArenaExhausted { .. })));
+
+        // 5. Drop slot 100 in chunk 0; verify AVX2 vector scan wraps and re-leases slot 100
+        leases.remove(100);
+        let recycled = arena
+            .acquire(RdmaSlabClass::Standard2K)
+            .expect("Acquiring recycled slot in chunk 0");
+        assert_eq!(recycled.slot_index(), 100);
+    }
+
+    #[test]
+    fn test_parallel_scan_universes_avx2_sse2_swar_equivalence() {
+        use std::sync::atomic::AtomicU64;
+
+        // 8 words = 512 slots
+        let words = [
+            AtomicU64::new(!0u64),         // word 0: full
+            AtomicU64::new(!0u64),         // word 1: full
+            AtomicU64::new(!0u64),         // word 2: full
+            AtomicU64::new(!0u64),         // word 3: full (slots 0..255 all full)
+            AtomicU64::new(!(1u64 << 12)), // word 4: has bit 12 free!
+            AtomicU64::new(!0u64),         // word 5: full
+            AtomicU64::new(!0u64),         // word 6: full
+            AtomicU64::new(!0u64),         // word 7: full
+        ];
+
+        // 1. SWAR (pure 64-bit GPR)
+        let res_swar = scan_swar_64(&words, 0, 7);
+        assert_eq!(res_swar, Some(4), "SWAR must locate word 4");
+
+        // 2. SSE2 (128-bit XMM)
+        #[cfg(target_arch = "x86_64")]
+        {
+            let res_sse2 = scan_sse2_128(&words, 0, 7);
+            assert_eq!(res_sse2, Some(4), "SSE2 must locate word 4");
+        }
+
+        // 3. AVX2 (256-bit YMM)
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") {
+                let res_avx2 = scan_avx2_256(&words, 0, 7);
+                assert_eq!(res_avx2, Some(4), "AVX2 must locate word 4");
+            }
+        }
+
+        // Fill word 4 so all 512 slots are full
+        words[4].store(!0u64, Ordering::Relaxed);
+
+        assert_eq!(scan_swar_64(&words, 0, 7), None);
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(scan_sse2_128(&words, 0, 7), None);
+            if std::is_x86_feature_detected!("avx2") {
+                assert_eq!(scan_avx2_256(&words, 0, 7), None);
+            }
+        }
     }
 }
