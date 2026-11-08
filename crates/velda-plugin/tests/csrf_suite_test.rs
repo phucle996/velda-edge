@@ -103,7 +103,7 @@ fn test_csrf_neutralizes_w3c_simple_request_trap() {
     attacker_headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
 
     let mut attacker_req = build_test_request(Method::POST, "/api/transfer", attacker_headers);
-    let mut target: Arc<str> = Arc::from("core_fintech_upstream");
+    let mut target = velda_core::UpstreamId::from("core_fintech_upstream");
 
     // Phase 1: Pre-route plugins evaluate. Simple request is POST (not OPTIONS), so cors_preflight continues!
     let pre_route_hooks = plan.pre_route_hooks.as_deref().unwrap_or(&[]);
@@ -177,7 +177,7 @@ fn test_subdomain_cookie_tossing_defense() {
     )
     .unwrap();
 
-    let mut target: Arc<str> = Arc::from("upstream");
+    let mut target = velda_core::UpstreamId::from("upstream");
 
     // Attacker on sub.example.com tossed a cookie with a fabricated token
     let forged_token = "000000006718a999.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -213,7 +213,7 @@ fn test_fetch_metadata_and_origin_enforcement() {
     )
     .unwrap();
 
-    let mut target: Arc<str> = Arc::from("upstream");
+    let mut target = velda_core::UpstreamId::from("upstream");
 
     // Case 1: Origin mismatch against Host and trusted_origins
     let mut headers_mismatch = HeaderMap::new();
@@ -258,7 +258,7 @@ fn test_csrf_e2e_short_referer_and_empty_tokens() {
     )
     .unwrap();
 
-    let mut target: Arc<str> = Arc::from("upstream");
+    let mut target = velda_core::UpstreamId::from("upstream");
 
     // 1. Short Referer with 1 byte ("x") must NOT panic
     let mut headers_short_ref = HeaderMap::new();

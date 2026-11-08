@@ -301,18 +301,14 @@ pub fn compile_to_runtime_router(
 
             match proto {
                 TransportProtocol::Tcp => {
-                    let tcp =
-                        TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
-                            .with_plugins(route.plugins.clone());
+                    let tcp = TcpRoute::new(route_id, &route.listener, upstream_id);
                     builder = builder.add_tcp_route(tcp);
                 }
                 TransportProtocol::Udp => {
-                    let udp =
-                        UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
-                            .with_udp_idle_timeout(
-                                route.timeouts.downstream_idle_ms.map(Duration::from_millis),
-                            )
-                            .with_plugins(route.plugins.clone());
+                    let udp = UdpRoute::new(route_id, &route.listener, upstream_id)
+                        .with_udp_idle_timeout(
+                            route.timeouts.downstream_idle_ms.map(Duration::from_millis),
+                        );
                     builder = builder.add_udp_route(udp);
                 }
             }
@@ -333,14 +329,8 @@ pub fn compile_to_runtime_router(
                     .unwrap_or("*");
                 let service = raw_service.strip_prefix('/').unwrap_or(raw_service);
 
-                let mut grpc_route = GrpcRoute::new(
-                    route_id,
-                    &route.listener,
-                    service,
-                    upstream_id,
-                    &route.upstream,
-                )
-                .with_plugins(route.plugins.clone());
+                let mut grpc_route =
+                    GrpcRoute::new(route_id, &route.listener, service, upstream_id);
 
                 if let Some(ref host) = route.match_rule.host {
                     grpc_route = grpc_route.with_authority(host.clone());
@@ -349,25 +339,12 @@ pub fn compile_to_runtime_router(
                 builder = builder.add_grpc_route(grpc_route);
             } else {
                 let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    Http1Route::new_exact(
-                        route_id,
-                        &route.listener,
-                        exact.clone(),
-                        upstream_id,
-                        &route.upstream,
-                    )
+                    Http1Route::new_exact(route_id, &route.listener, exact.clone(), upstream_id)
                 } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    Http1Route::new(
-                        route_id,
-                        &route.listener,
-                        prefix.clone(),
-                        upstream_id,
-                        &route.upstream,
-                    )
+                    Http1Route::new(route_id, &route.listener, prefix.clone(), upstream_id)
                 } else {
-                    Http1Route::new(route_id, &route.listener, "/", upstream_id, &route.upstream)
-                }
-                .with_plugins(route.plugins.clone());
+                    Http1Route::new(route_id, &route.listener, "/", upstream_id)
+                };
 
                 if let Some(ref host) = route.match_rule.host {
                     http_route = http_route.with_host(host.clone());

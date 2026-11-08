@@ -39,7 +39,7 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
         distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-1", config));
-    let mut target = Arc::from("upstream-llm");
+    let mut target = velda_core::UpstreamId::from("upstream-llm");
 
     // Request 1: Allowed, remaining = 2
     let mut h1 = HeaderMap::new();
@@ -116,7 +116,7 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
         distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-2", config));
-    let mut target = Arc::from("upstream-llm");
+    let mut target = velda_core::UpstreamId::from("upstream-llm");
 
     // Alice consumes 2 requests (exhausts her quota)
     for _ in 0..2 {
@@ -171,7 +171,7 @@ fn test_consumer_quota_fallback_to_client_ip() {
         distributed: None,
     };
     let plugin = Arc::new(ConsumerQuotaPlugin::new("quota-test-3", config));
-    let mut target = Arc::from("upstream-llm");
+    let mut target = velda_core::UpstreamId::from("upstream-llm");
 
     // No x-user-id header, should fallback to x-forwarded-for
     let mut h1 = HeaderMap::new();

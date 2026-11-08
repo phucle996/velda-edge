@@ -104,14 +104,34 @@ impl EndpointMetrics {
     /// Returns the total number of active connections summed across all shards.
     #[inline]
     pub fn active_connections(&self) -> u32 {
-        if self.shards.len() == 1 {
+        let len = self.shards.len();
+        if len == 1 {
             return self.shards[0]
                 .active_connections
                 .load(Ordering::Relaxed)
                 .max(0) as u32;
         }
-        let mut sum = 0i64;
-        for s in &self.shards {
+        let chunks = len / 4;
+        let mut sum0 = 0i64;
+        let mut sum1 = 0i64;
+        let mut sum2 = 0i64;
+        let mut sum3 = 0i64;
+        for i in 0..chunks {
+            let base = i * 4;
+            sum0 += self.shards[base].active_connections.load(Ordering::Relaxed) as i64;
+            sum1 += self.shards[base + 1]
+                .active_connections
+                .load(Ordering::Relaxed) as i64;
+            sum2 += self.shards[base + 2]
+                .active_connections
+                .load(Ordering::Relaxed) as i64;
+            sum3 += self.shards[base + 3]
+                .active_connections
+                .load(Ordering::Relaxed) as i64;
+        }
+        let remainder_start = chunks * 4;
+        let mut sum = (sum0 + sum1) + (sum2 + sum3);
+        for s in &self.shards[remainder_start..len] {
             sum += s.active_connections.load(Ordering::Relaxed) as i64;
         }
         sum.max(0) as u32
@@ -140,14 +160,34 @@ impl EndpointMetrics {
     /// Returns the total in-flight requests summed across all shards.
     #[inline]
     pub fn inflight_requests(&self) -> u32 {
-        if self.shards.len() == 1 {
+        let len = self.shards.len();
+        if len == 1 {
             return self.shards[0]
                 .inflight_requests
                 .load(Ordering::Relaxed)
                 .max(0) as u32;
         }
-        let mut sum = 0i64;
-        for s in &self.shards {
+        let chunks = len / 4;
+        let mut sum0 = 0i64;
+        let mut sum1 = 0i64;
+        let mut sum2 = 0i64;
+        let mut sum3 = 0i64;
+        for i in 0..chunks {
+            let base = i * 4;
+            sum0 += self.shards[base].inflight_requests.load(Ordering::Relaxed) as i64;
+            sum1 += self.shards[base + 1]
+                .inflight_requests
+                .load(Ordering::Relaxed) as i64;
+            sum2 += self.shards[base + 2]
+                .inflight_requests
+                .load(Ordering::Relaxed) as i64;
+            sum3 += self.shards[base + 3]
+                .inflight_requests
+                .load(Ordering::Relaxed) as i64;
+        }
+        let remainder_start = chunks * 4;
+        let mut sum = (sum0 + sum1) + (sum2 + sum3);
+        for s in &self.shards[remainder_start..len] {
             sum += s.inflight_requests.load(Ordering::Relaxed) as i64;
         }
         sum.max(0) as u32
@@ -156,13 +196,43 @@ impl EndpointMetrics {
     /// Returns the combined load (active connections + in-flight requests) in a single cache-line pass.
     #[inline]
     pub fn total_load(&self) -> u32 {
-        if self.shards.len() == 1 {
+        let len = self.shards.len();
+        if len == 1 {
             let act = self.shards[0].active_connections.load(Ordering::Relaxed) as i64;
             let inf = self.shards[0].inflight_requests.load(Ordering::Relaxed) as i64;
             return (act + inf).max(0) as u32;
         }
-        let mut sum = 0i64;
-        for s in &self.shards {
+        let chunks = len / 4;
+        let mut sum0 = 0i64;
+        let mut sum1 = 0i64;
+        let mut sum2 = 0i64;
+        let mut sum3 = 0i64;
+        for i in 0..chunks {
+            let base = i * 4;
+            sum0 += self.shards[base].active_connections.load(Ordering::Relaxed) as i64
+                + self.shards[base].inflight_requests.load(Ordering::Relaxed) as i64;
+            sum1 += self.shards[base + 1]
+                .active_connections
+                .load(Ordering::Relaxed) as i64
+                + self.shards[base + 1]
+                    .inflight_requests
+                    .load(Ordering::Relaxed) as i64;
+            sum2 += self.shards[base + 2]
+                .active_connections
+                .load(Ordering::Relaxed) as i64
+                + self.shards[base + 2]
+                    .inflight_requests
+                    .load(Ordering::Relaxed) as i64;
+            sum3 += self.shards[base + 3]
+                .active_connections
+                .load(Ordering::Relaxed) as i64
+                + self.shards[base + 3]
+                    .inflight_requests
+                    .load(Ordering::Relaxed) as i64;
+        }
+        let remainder_start = chunks * 4;
+        let mut sum = (sum0 + sum1) + (sum2 + sum3);
+        for s in &self.shards[remainder_start..len] {
             sum += s.active_connections.load(Ordering::Relaxed) as i64
                 + s.inflight_requests.load(Ordering::Relaxed) as i64;
         }

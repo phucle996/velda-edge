@@ -20,39 +20,33 @@
 //!   after the winning candidate is identified.
 
 use rustc_hash::FxHashMap;
-use velda_core::{RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId, UpstreamId};
 
 use crate::error::RouterError;
 use crate::host::{CompiledHost, ReverseHostLabels, host_specificity};
 use crate::method::MethodMask;
 use crate::path::PathPrefixMatcher;
 
-/// Concrete compiled HTTP/1.1 Layer 7 routing rule (cold data arena).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Concrete compiled HTTP/1.1 Layer 7 route (12 bytes, `Copy`, zero heap strings).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http1Route {
     pub id: RouteId,
-    pub listener_id: String,
-    pub host: Option<String>,
-    pub path_prefix: Option<String>,
-    pub exact_path: Option<String>,
-    pub method: Option<String>,
+    pub listener_id: ListenerId,
     pub upstream_id: UpstreamId,
-    pub upstream_name: String,
-    pub plugins: Vec<String>,
-    pub method_mask: MethodMask,
-    pub compiled_host: CompiledHost,
 }
 
 impl Http1Route {
-    /// Creates a new prefix-based HTTP/1.1 route rule.
+    /// Creates a new prefix-based HTTP/1.1 route rule for router compilation.
+    #[inline]
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         id: RouteId,
-        listener_id: impl Into<String>,
+        listener_id: impl Into<ListenerId>,
         path_prefix: impl Into<String>,
         upstream_id: UpstreamId,
-        upstream_name: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Http1RouteRule {
+        Http1RouteRule {
             id,
             listener_id: listener_id.into(),
             host: None,
@@ -60,22 +54,21 @@ impl Http1Route {
             exact_path: None,
             method: None,
             upstream_id,
-            upstream_name: upstream_name.into(),
-            plugins: Vec::new(),
             method_mask: MethodMask::ANY,
             compiled_host: CompiledHost::Any,
         }
     }
 
-    /// Creates a new exact-path HTTP/1.1 route rule.
+    /// Creates a new exact-path HTTP/1.1 route rule for router compilation.
+    #[inline]
+    #[allow(clippy::new_ret_no_self)]
     pub fn new_exact(
         id: RouteId,
-        listener_id: impl Into<String>,
+        listener_id: impl Into<ListenerId>,
         exact_path: impl Into<String>,
         upstream_id: UpstreamId,
-        upstream_name: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Http1RouteRule {
+        Http1RouteRule {
             id,
             listener_id: listener_id.into(),
             host: None,
@@ -83,13 +76,30 @@ impl Http1Route {
             exact_path: Some(exact_path.into()),
             method: None,
             upstream_id,
-            upstream_name: upstream_name.into(),
-            plugins: Vec::new(),
             method_mask: MethodMask::ANY,
             compiled_host: CompiledHost::Any,
         }
     }
+}
 
+/// Builder specification for an HTTP/1.1 route rule consumed during router compilation.
+///
+/// All pattern strings (`host`, `path_prefix`, `exact_path`, `method`) are consumed and
+/// dropped once compiled into [`ListenerHttp1Router`], leaving only 12-byte [`Http1Route`]s in RAM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Http1RouteRule {
+    pub id: RouteId,
+    pub listener_id: ListenerId,
+    pub host: Option<String>,
+    pub path_prefix: Option<String>,
+    pub exact_path: Option<String>,
+    pub method: Option<String>,
+    pub upstream_id: UpstreamId,
+    pub method_mask: MethodMask,
+    pub compiled_host: CompiledHost,
+}
+
+impl Http1RouteRule {
     /// Attaches an expected host constraint (e.g. `"api.velda.io"` or `"*.velda.io"`).
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
         let h = host.into();
@@ -106,19 +116,13 @@ impl Http1Route {
         self
     }
 
-    /// Attaches plugin identifiers to this route.
-    pub fn with_plugins(mut self, plugins: Vec<String>) -> Self {
-        self.plugins = plugins;
-        self
-    }
-
-    /// Checks whether this route matches the given parsed request host.
+    /// Checks whether this route rule matches the given parsed request host.
     #[inline]
     pub fn matches_host(&self, host: &ReverseHostLabels) -> bool {
         self.compiled_host.matches(host)
     }
 
-    /// Checks whether this route matches the given request method mask.
+    /// Checks whether this route rule matches the given request method mask.
     #[inline]
     pub fn matches_method(&self, req_mask: MethodMask) -> bool {
         self.method_mask.matches(req_mask)
@@ -145,8 +149,8 @@ impl Http1Route {
 
 /// Compact, 16-byte-aligned hot candidate descriptor for L1D cache line residency.
 ///
-/// Contains ONLY the fields required during the hot matching loop, keeping cold
-/// metadata (`String` URLs, `upstream_name`, `plugins`) in the listener's cold `routes` arena.
+/// Contains ONLY the fields required during the hot matching loop, indexing into the
+/// listener's 12-byte `routes: Vec<Http1Route>` table once a winner is identified.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Http1HotCandidate {
@@ -172,6 +176,52 @@ impl Http1HotCandidate {
         } else {
             false
         }
+    }
+}
+
+/// Compact candidate descriptor for listeners with small route tables (<= 3 routes).
+///
+/// Eliminates FxHashMap hashing and flat Slash-Block table traversals, resolving routes
+/// via linear register-unrolled evaluation in GPRs (%rax, %rcx, %rdx).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Http1SmallCandidate {
+    pub route: Http1Route,
+    pub exact_path: Option<String>,
+    pub path_prefix: Option<String>,
+    pub compiled_host: CompiledHost,
+    pub method_mask: MethodMask,
+}
+
+impl Http1SmallCandidate {
+    /// Evaluates small candidate matching against an incoming request view.
+    #[inline(always)]
+    pub fn matches_req(&self, req: &Http1RouteRequest<'_>) -> bool {
+        if !self.method_mask.matches(req.method_mask) {
+            return false;
+        }
+        if self.compiled_host != CompiledHost::Any {
+            let host_matches = if req.parsed_host.count > 0 || req.parsed_host.is_ip_or_unbracketed
+            {
+                self.compiled_host.matches(&req.parsed_host)
+            } else if let Some(h) = req.host {
+                self.compiled_host.matches(&ReverseHostLabels::parse(h))
+            } else {
+                false
+            };
+            if !host_matches {
+                return false;
+            }
+        }
+        if let Some(ref exact) = self.exact_path {
+            if req.path != exact.as_str() {
+                return false;
+            }
+        } else if let Some(ref prefix) = self.path_prefix
+            && !req.path.starts_with(prefix.as_str())
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -215,26 +265,99 @@ impl<'a> Http1RouteRequest<'a> {
     }
 }
 
+/// Function pointer signature for HTTP/1.1 route lookup strategies.
+pub type Http1RouteFn =
+    for<'a> fn(&'a ListenerHttp1Router, &Http1RouteRequest<'_>) -> Option<&'a Http1Route>;
+
 /// Route table for a single HTTP/1.1 listener with Hot/Cold Data-Oriented Separation.
 ///
 /// Aligned to 64 bytes to sit on an exact L1D cache line boundary, preventing split-line
 /// header loads and false sharing between worker threads.
 #[repr(C, align(64))]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ListenerHttp1Router {
     routes: Vec<Http1Route>,
     exact_routes: FxHashMap<String, Vec<Http1HotCandidate>>,
     matcher: PathPrefixMatcher,
     prefix_routes: Vec<Vec<Http1HotCandidate>>,
+    small_candidates: Vec<Http1SmallCandidate>,
+    route_fn: Http1RouteFn,
+}
+
+impl Default for ListenerHttp1Router {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            exact_routes: FxHashMap::default(),
+            matcher: PathPrefixMatcher::default(),
+            prefix_routes: Vec::new(),
+            small_candidates: Vec::new(),
+            route_fn: route_small,
+        }
+    }
 }
 
 impl ListenerHttp1Router {
     /// Builds a new compiled HTTP/1.1 router for a single listener.
-    pub fn new(routes: Vec<Http1Route>) -> Result<Self, RouterError> {
+    ///
+    /// Automatically selects between Workload-Adaptive strategies:
+    /// - `rules.len() <= 3`: Scalar register unrolled matching ([`route_small`]), eliminating hashing and Slash-Block overhead.
+    /// - `rules.len() > 3`: SIMD/Slash-Block prefix matcher + FxHashMap exact matcher ([`route_table`]).
+    pub fn new(rules: Vec<Http1RouteRule>) -> Result<Self, RouterError> {
+        if rules.len() <= 3 {
+            let mut sorted_rules = rules;
+            sorted_rules.sort_by(|a, b| {
+                let a_is_exact = a.exact_path.is_some();
+                let b_is_exact = b.exact_path.is_some();
+                if a_is_exact != b_is_exact {
+                    return b_is_exact.cmp(&a_is_exact);
+                }
+                let a_prefix_len = a.path_prefix.as_ref().map_or(0, |p| p.len());
+                let b_prefix_len = b.path_prefix.as_ref().map_or(0, |p| p.len());
+                if a_prefix_len != b_prefix_len {
+                    return b_prefix_len.cmp(&a_prefix_len);
+                }
+                let a_host_spec = host_specificity(a.host.as_deref());
+                let b_host_spec = host_specificity(b.host.as_deref());
+                b_host_spec.cmp(&a_host_spec)
+            });
+
+            let small_candidates = sorted_rules
+                .into_iter()
+                .map(|r| Http1SmallCandidate {
+                    route: Http1Route {
+                        id: r.id,
+                        listener_id: r.listener_id,
+                        upstream_id: r.upstream_id,
+                    },
+                    exact_path: r.exact_path,
+                    path_prefix: r.path_prefix,
+                    compiled_host: r.compiled_host,
+                    method_mask: r.method_mask,
+                })
+                .collect();
+
+            return Ok(Self {
+                routes: Vec::new(),
+                exact_routes: FxHashMap::default(),
+                matcher: PathPrefixMatcher::default(),
+                prefix_routes: Vec::new(),
+                small_candidates,
+                route_fn: route_small,
+            });
+        }
+
         let mut exact_map: FxHashMap<String, Vec<Http1HotCandidate>> = FxHashMap::default();
         let mut prefix_map: FxHashMap<String, Vec<Http1HotCandidate>> = FxHashMap::default();
+        let mut routes = Vec::with_capacity(rules.len());
 
-        for (idx, r) in routes.iter().enumerate() {
+        for (idx, r) in rules.iter().enumerate() {
+            routes.push(Http1Route {
+                id: r.id,
+                listener_id: r.listener_id,
+                upstream_id: r.upstream_id,
+            });
+
             let candidate = Http1HotCandidate {
                 compiled_host: r.compiled_host.clone(),
                 route_idx: idx as u32,
@@ -255,13 +378,13 @@ impl ListenerHttp1Router {
 
         for list in exact_map.values_mut() {
             list.sort_by_key(|c| {
-                let r = &routes[c.route_idx as usize];
+                let r = &rules[c.route_idx as usize];
                 std::cmp::Reverse(host_specificity(r.host.as_deref()))
             });
         }
         for list in prefix_map.values_mut() {
             list.sort_by_key(|c| {
-                let r = &routes[c.route_idx as usize];
+                let r = &rules[c.route_idx as usize];
                 std::cmp::Reverse(host_specificity(r.host.as_deref()))
             });
         }
@@ -281,56 +404,80 @@ impl ListenerHttp1Router {
             exact_routes: exact_map,
             matcher,
             prefix_routes,
+            small_candidates: Vec::new(),
+            route_fn: route_table,
         })
     }
 
     /// Resolves an HTTP/1.1 route for an incoming request view.
     ///
-    /// Evaluates Tier 1 exact matches first ($O(1)$), followed by Tier 2 prefix matching via flat Slash-Block table ($O(P)$).
-    /// Prefix matching uses longest-prefix-first ordering with automatic fallback to shorter prefixes when host or method filters fail.
-    #[inline]
+    /// Evaluates using the pre-bound workload-adaptive function pointer:
+    /// - For small listeners (<= 3 routes): executes unrolled scalar [`route_small`].
+    /// - For large listeners (> 3 routes): executes exact FxHashMap + flat Slash-Block [`route_table`].
+    #[inline(always)]
     pub fn route(&self, req: &Http1RouteRequest<'_>) -> Option<&Http1Route> {
-        // Hardware temporal L1 prefetch: warm prefix table into L1D cache in parallel
-        if let Some(first_node) = self.matcher.nodes().first() {
-            crate::path::prefetch_l1_keep(first_node as *const _ as *const u8);
-        }
+        (self.route_fn)(self, req)
+    }
+}
 
-        // Tier 1: Exact match lookup (O(1))
-        if let Some(candidates) = self.exact_routes.get(req.path)
+#[inline]
+fn route_small<'a>(
+    router: &'a ListenerHttp1Router,
+    req: &Http1RouteRequest<'_>,
+) -> Option<&'a Http1Route> {
+    for c in &router.small_candidates {
+        if c.matches_req(req) {
+            return Some(&c.route);
+        }
+    }
+    None
+}
+
+#[inline]
+fn route_table<'a>(
+    router: &'a ListenerHttp1Router,
+    req: &Http1RouteRequest<'_>,
+) -> Option<&'a Http1Route> {
+    // Hardware temporal L1 prefetch: warm prefix table into L1D cache in parallel
+    if let Some(first_node) = router.matcher.nodes().first() {
+        crate::path::prefetch_l1_keep(first_node as *const _ as *const u8);
+    }
+
+    // Tier 1: Exact match lookup (O(1))
+    if let Some(candidates) = router.exact_routes.get(req.path)
+        && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
+    {
+        return router.routes.get(c.route_idx as usize);
+    }
+
+    // Tier 2: Prefix match lookup via flat Slash-Block table (O(P)) with longest-prefix-first fallback
+    let mut matches = [0usize; 32];
+    let count = router.matcher.match_prefixes(req.path, &mut matches);
+
+    // Iterate reverse: longest prefix match is at the end of matches buffer
+    for &pattern_idx in matches[..count].iter().rev() {
+        if let Some(candidates) = router.prefix_routes.get(pattern_idx)
             && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
         {
-            return self.routes.get(c.route_idx as usize);
+            return router.routes.get(c.route_idx as usize);
         }
-
-        // Tier 2: Prefix match lookup via flat Slash-Block table (O(P)) with longest-prefix-first fallback
-        let mut matches = [0usize; 32];
-        let count = self.matcher.match_prefixes(req.path, &mut matches);
-
-        // Iterate reverse: longest prefix match is at the end of matches buffer
-        for &pattern_idx in matches[..count].iter().rev() {
-            if let Some(candidates) = self.prefix_routes.get(pattern_idx)
-                && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
-            {
-                return self.routes.get(c.route_idx as usize);
-            }
-        }
-
-        None
     }
+
+    None
 }
 
 /// Unified, thread-safe HTTP/1.1 routing table coordinating all HTTP/1.1 listeners.
 #[derive(Debug, Default, Clone)]
 pub struct Http1Router {
-    listeners: FxHashMap<String, ListenerHttp1Router>,
+    listeners: FxHashMap<ListenerId, ListenerHttp1Router>,
 }
 
 impl Http1Router {
-    /// Builds a new [`Http1Router`] from a list of compiled [`Http1Route`] rules.
-    pub fn new(routes: impl IntoIterator<Item = Http1Route>) -> Result<Self, RouterError> {
-        let mut grouped: FxHashMap<String, Vec<Http1Route>> = FxHashMap::default();
+    /// Builds a new [`Http1Router`] from a list of [`Http1RouteRule`] specifications.
+    pub fn new(routes: impl IntoIterator<Item = Http1RouteRule>) -> Result<Self, RouterError> {
+        let mut grouped: FxHashMap<ListenerId, Vec<Http1RouteRule>> = FxHashMap::default();
         for r in routes {
-            grouped.entry(r.listener_id.clone()).or_default().push(r);
+            grouped.entry(r.listener_id).or_default().push(r);
         }
 
         let mut listeners = FxHashMap::with_capacity_and_hasher(grouped.len(), Default::default());
@@ -343,15 +490,19 @@ impl Http1Router {
 
     /// Resolves an HTTP/1.1 route for an incoming request on a listener.
     #[inline]
-    pub fn route(&self, listener_id: &str, req: &Http1RouteRequest<'_>) -> Option<&Http1Route> {
-        let listener_router = self.listeners.get(listener_id)?;
+    pub fn route(
+        &self,
+        listener_id: impl Into<ListenerId>,
+        req: &Http1RouteRequest<'_>,
+    ) -> Option<&Http1Route> {
+        let listener_router = self.listeners.get(&listener_id.into())?;
         listener_router.route(req)
     }
 
     /// Returns the compiled route table for a specific listener.
     #[inline]
-    pub fn listener(&self, listener_id: &str) -> Option<&ListenerHttp1Router> {
-        self.listeners.get(listener_id)
+    pub fn listener(&self, listener_id: impl Into<ListenerId>) -> Option<&ListenerHttp1Router> {
+        self.listeners.get(&listener_id.into())
     }
 
     /// Returns the number of registered listeners.
@@ -373,14 +524,12 @@ mod tests {
                 "listener-1",
                 "/healthz",
                 UpstreamId::new(10),
-                "health-upstream",
             ),
             Http1Route::new(
                 RouteId::new(2),
                 "listener-1",
                 "/api/v1",
                 UpstreamId::new(20),
-                "api-upstream",
             ),
         ];
 
@@ -389,12 +538,12 @@ mod tests {
         let req1 = Http1RouteRequest::new("/healthz");
         let r1 = router.route("listener-1", &req1).unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_name, "health-upstream");
+        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         let req2 = Http1RouteRequest::new("/api/v1/users/42");
         let r2 = router.route("listener-1", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_name, "api-upstream");
+        assert_eq!(r2.upstream_id, UpstreamId::new(20));
 
         let req3 = Http1RouteRequest::new("/unknown");
         assert!(router.route("listener-1", &req3).is_none());
@@ -408,7 +557,6 @@ mod tests {
                 "listener-1",
                 "/api/v1/internal",
                 UpstreamId::new(10),
-                "internal-upstream",
             )
             .with_host("internal.velda.io"),
             Http1Route::new(
@@ -416,7 +564,6 @@ mod tests {
                 "listener-1",
                 "/api/v1",
                 UpstreamId::new(20),
-                "public-upstream",
             ),
         ];
 
@@ -427,49 +574,92 @@ mod tests {
             Http1RouteRequest::new("/api/v1/internal/secrets").with_host("internal.velda.io");
         let r1 = router.route("listener-1", &req1).unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_name, "internal-upstream");
+        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         // Host mismatch on Route A falls back to Route B
         let req2 = Http1RouteRequest::new("/api/v1/internal/data").with_host("public.velda.io");
         let r2 = router.route("listener-1", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_name, "public-upstream");
+        assert_eq!(r2.upstream_id, UpstreamId::new(20));
     }
 
     #[test]
     fn test_http1_exact_host_precedence_over_wildcard() {
         // Register wildcard route FIRST, then exact route SECOND
         let routes = vec![
-            Http1Route::new(
-                RouteId::new(1),
-                "listener-1",
-                "/api",
-                UpstreamId::new(10),
-                "wildcard-upstream",
-            )
-            .with_host("*.velda.io"),
-            Http1Route::new(
-                RouteId::new(2),
-                "listener-1",
-                "/api",
-                UpstreamId::new(20),
-                "exact-upstream",
-            )
-            .with_host("api.velda.io"),
+            Http1Route::new(RouteId::new(1), "listener-1", "/api", UpstreamId::new(10))
+                .with_host("*.velda.io"),
+            Http1Route::new(RouteId::new(2), "listener-1", "/api", UpstreamId::new(20))
+                .with_host("api.velda.io"),
         ];
 
         let router = Http1Router::new(routes).unwrap();
 
-        // Exact match for api.velda.io MUST route to exact-upstream (Route 2), not wildcard-upstream (Route 1)
+        // Exact match for api.velda.io MUST route to Route 2, not Route 1
         let req = Http1RouteRequest::new("/api/data").with_host("api.velda.io");
         let matched = router.route("listener-1", &req).unwrap();
         assert_eq!(matched.id, RouteId::new(2));
-        assert_eq!(matched.upstream_name, "exact-upstream");
+        assert_eq!(matched.upstream_id, UpstreamId::new(20));
 
-        // Other subdomains route to wildcard-upstream (Route 1)
+        // Other subdomains route to Route 1
         let req2 = Http1RouteRequest::new("/api/data").with_host("billing.velda.io");
         let matched2 = router.route("listener-1", &req2).unwrap();
         assert_eq!(matched2.id, RouteId::new(1));
-        assert_eq!(matched2.upstream_name, "wildcard-upstream");
+        assert_eq!(matched2.upstream_id, UpstreamId::new(10));
+    }
+
+    #[test]
+    fn test_http1_large_table_workload_adaptive() {
+        // > 3 routes triggers route_table (SIMD/Slash-Block + FxHashMap)
+        let routes = vec![
+            Http1Route::new_exact(
+                RouteId::new(1),
+                "listener-1",
+                "/healthz",
+                UpstreamId::new(10),
+            ),
+            Http1Route::new(
+                RouteId::new(2),
+                "listener-1",
+                "/api/v1",
+                UpstreamId::new(20),
+            ),
+            Http1Route::new(
+                RouteId::new(3),
+                "listener-1",
+                "/api/v2",
+                UpstreamId::new(30),
+            ),
+            Http1Route::new(
+                RouteId::new(4),
+                "listener-1",
+                "/static",
+                UpstreamId::new(40),
+            ),
+            Http1Route::new(RouteId::new(5), "listener-1", "/auth", UpstreamId::new(50)),
+        ];
+
+        let router = Http1Router::new(routes).unwrap();
+
+        let req1 = Http1RouteRequest::new("/healthz");
+        assert_eq!(
+            router.route("listener-1", &req1).unwrap().id,
+            RouteId::new(1)
+        );
+
+        let req2 = Http1RouteRequest::new("/api/v2/items");
+        assert_eq!(
+            router.route("listener-1", &req2).unwrap().id,
+            RouteId::new(3)
+        );
+
+        let req3 = Http1RouteRequest::new("/static/logo.png");
+        assert_eq!(
+            router.route("listener-1", &req3).unwrap().id,
+            RouteId::new(4)
+        );
+
+        let req_miss = Http1RouteRequest::new("/non-existent");
+        assert!(router.route("listener-1", &req_miss).is_none());
     }
 }

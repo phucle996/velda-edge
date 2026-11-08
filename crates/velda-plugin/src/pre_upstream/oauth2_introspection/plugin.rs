@@ -241,7 +241,11 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         let (token, matched_header) = match self.extract_token(req) {
             Some(res) => res,
             None => {

@@ -5,13 +5,18 @@ pub mod http1;
 pub mod http2;
 pub mod http3;
 
-pub use grpc::{GrpcHotCandidate, GrpcRoute, GrpcRouteRequest, GrpcRouter, ListenerGrpcRouter};
+pub use grpc::{
+    GrpcHotCandidate, GrpcRoute, GrpcRouteRequest, GrpcRouteRule, GrpcRouter, ListenerGrpcRouter,
+};
 pub use http1::{
-    Http1HotCandidate, Http1Route, Http1RouteRequest, Http1Router, ListenerHttp1Router,
+    Http1HotCandidate, Http1Route, Http1RouteRequest, Http1RouteRule, Http1Router,
+    ListenerHttp1Router,
 };
 pub use http2::{
-    Http2HotCandidate, Http2Route, Http2RouteRequest, Http2Router, ListenerHttp2Router,
+    Http2HotCandidate, Http2Route, Http2RouteRequest, Http2RouteRule, Http2Router,
+    ListenerHttp2Router,
 };
 pub use http3::{
-    Http3HotCandidate, Http3Route, Http3RouteRequest, Http3Router, ListenerHttp3Router,
+    Http3HotCandidate, Http3Route, Http3RouteRequest, Http3RouteRule, Http3Router,
+    ListenerHttp3Router,
 };

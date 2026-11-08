@@ -87,6 +87,203 @@ pub struct XdpSlabArena {
     inner: Arc<XdpSlabArenaInner>,
 }
 
+// ============================================================================
+// 4-Tier Hardware Bitmask Scanner for UMEM Arena
+// ============================================================================
+
+/// Function pointer type for hardware-accelerated bitmask word scanning.
+pub type ScanFn = fn(&[AtomicU64], usize) -> Option<usize>;
+
+// ----------------------------------------------------------------------------
+// Tier 1: 256-bit AVX2 Vector Scanner (4x 64-bit words = 256 UMEM frames)
+// ----------------------------------------------------------------------------
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_avx2_256_inner(words: &[AtomicU64], start: usize) -> Option<usize> {
+    use core::arch::x86_64::*;
+    let len = words.len();
+    let num_quads = len / 4;
+    let start_quad = (start / 4) % num_quads;
+    let all_ones = _mm256_set1_epi64x(-1);
+
+    for quad in 0..num_quads {
+        let quad_idx = (start_quad + quad) % num_quads;
+        let base_word = quad_idx * 4;
+        unsafe {
+            let ptr = words.as_ptr().add(base_word) as *const __m256i;
+            let ymm = _mm256_loadu_si256(ptr);
+            let cmp = _mm256_cmpeq_epi64(ymm, all_ones);
+            let mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
+            if mask != 0x0F {
+                let free_lane = (!mask & 0x0F).trailing_zeros() as usize;
+                return Some(base_word + free_lane);
+            }
+        }
+    }
+    ((num_quads * 4)..len).find(|&i| words[i].load(Ordering::Relaxed) != !0u64)
+}
+
+/// Tier 1 (256-bit AVX2): Evaluates 4 `u64` words (256 UMEM frames) in one register.
+#[cfg(target_arch = "x86_64")]
+pub fn scan_avx2_256(words: &[AtomicU64], start: usize) -> Option<usize> {
+    if words.len() >= 4 {
+        unsafe { scan_avx2_256_inner(words, start) }
+    } else {
+        scan_swar_64(words, start)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tier 2: 128-bit SSE2 Vector Scanner (2x 64-bit words = 128 UMEM frames)
+// ----------------------------------------------------------------------------
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn scan_sse2_128_inner(words: &[AtomicU64], start: usize) -> Option<usize> {
+    use core::arch::x86_64::*;
+    let len = words.len();
+    let num_pairs = len / 2;
+    let start_pair = (start / 2) % num_pairs;
+    let all_ones = _mm_set1_epi32(-1);
+
+    for pair in 0..num_pairs {
+        let pair_idx = (start_pair + pair) % num_pairs;
+        let base_word = pair_idx * 2;
+        unsafe {
+            let ptr = words.as_ptr().add(base_word) as *const __m128i;
+            let xmm = _mm_loadu_si128(ptr);
+            let cmp = _mm_cmpeq_epi32(xmm, all_ones);
+            let mask = _mm_movemask_ps(_mm_castsi128_ps(cmp));
+            if mask != 0x0F {
+                if (mask & 0x03) != 0x03 {
+                    return Some(base_word);
+                } else {
+                    return Some(base_word + 1);
+                }
+            }
+        }
+    }
+    ((num_pairs * 2)..len).find(|&i| words[i].load(Ordering::Relaxed) != !0u64)
+}
+
+/// Tier 2 (128-bit SSE2): Evaluates 2 `u64` words (128 UMEM frames) in one register.
+#[cfg(target_arch = "x86_64")]
+pub fn scan_sse2_128(words: &[AtomicU64], start: usize) -> Option<usize> {
+    if words.len() >= 2 {
+        unsafe { scan_sse2_128_inner(words, start) }
+    } else {
+        scan_swar_64(words, start)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tier 3: 64-bit Dual-SWAR Parallel Reduction Scanner
+// ----------------------------------------------------------------------------
+/// Tier 3 (64-bit Dual-SWAR): Evaluates 4x 64-bit words in parallel ALU bitwise reduction.
+pub fn scan_swar_64(words: &[AtomicU64], start: usize) -> Option<usize> {
+    let len = words.len();
+    if len >= 4 {
+        let num_quads = len / 4;
+        let start_quad = (start / 4) % num_quads;
+
+        for quad in 0..num_quads {
+            let quad_idx = (start_quad + quad) % num_quads;
+            let b = quad_idx * 4;
+            let w0 = words[b].load(Ordering::Relaxed);
+            let w1 = words[b + 1].load(Ordering::Relaxed);
+            let w2 = words[b + 2].load(Ordering::Relaxed);
+            let w3 = words[b + 3].load(Ordering::Relaxed);
+
+            let full_01 = w0 & w1;
+            let full_23 = w2 & w3;
+            let all_full = full_01 & full_23;
+
+            if all_full != !0u64 {
+                if full_01 != !0u64 {
+                    if w0 != !0u64 {
+                        return Some(b);
+                    } else {
+                        return Some(b + 1);
+                    }
+                } else if w2 != !0u64 {
+                    return Some(b + 2);
+                } else {
+                    return Some(b + 3);
+                }
+            }
+        }
+        ((num_quads * 4)..len).find(|&i| words[i].load(Ordering::Relaxed) != !0u64)
+    } else {
+        for i in 0..len {
+            let idx = (start + i) % len;
+            if words[idx].load(Ordering::Relaxed) != !0u64 {
+                return Some(idx);
+            }
+        }
+        None
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tier 4: 32-bit Quad-SWAR Sub-Word Scanner
+// ----------------------------------------------------------------------------
+/// Tier 4 (32-bit Quad-SWAR): Evaluates 64-bit atomic words via 32-bit sub-word halves.
+pub fn scan_swar_32(words: &[AtomicU64], start: usize) -> Option<usize> {
+    let len = words.len();
+    for i in 0..len {
+        let idx = (start + i) % len;
+        let w = words[idx].load(Ordering::Relaxed);
+        let lo = w as u32;
+        let hi = (w >> 32) as u32;
+        if (lo & hi) != !0u32 {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Pre-resolved static function pointer for 4-tier bitmask scanning.
+///
+/// Bound once at bootstrap via `velda_core::global_hardware_topology().cpu.register_capabilities`.
+pub static SCAN_AVAILABLE_WORD_FN: std::sync::LazyLock<ScanFn> = std::sync::LazyLock::new(|| {
+    use velda_core::hardware::RegisterWidth;
+    let caps = velda_core::global_hardware_topology()
+        .cpu
+        .register_capabilities;
+    match caps.select_for_workload(RegisterWidth::Bits256) {
+        RegisterWidth::Bits256 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx2") {
+                    return scan_avx2_256;
+                }
+                scan_sse2_128
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                scan_swar_64
+            }
+        }
+        RegisterWidth::Bits128 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                scan_sse2_128
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                scan_swar_64
+            }
+        }
+        RegisterWidth::Bits64 => scan_swar_64,
+        RegisterWidth::Bits32 => scan_swar_32,
+    }
+});
+
+/// Dispatches bitmask word scanning through the hardware-resolved function pointer.
+#[inline]
+pub fn scan_available_word(words: &[AtomicU64], start: usize) -> Option<usize> {
+    (*SCAN_AVAILABLE_WORD_FN)(words, start)
+}
+
 impl XdpSlabArena {
     /// Allocates and page-aligns a contiguous host memory block for UMEM registration.
     pub fn new(config: &XdpConfig) -> Result<Self> {
@@ -148,14 +345,20 @@ impl XdpSlabArena {
             });
         }
 
-        let start = self.inner.hint.load(Ordering::Relaxed) % num_words;
+        let mut scan_start = self.inner.hint.load(Ordering::Relaxed) % num_words;
         // Keep UMEM pool management bitmask metadata warm in L2 (_MM_HINT_T1).
         velda_core::prefetch_l2_range(
-            unsafe { words.as_ptr().add(start) as *const u8 },
+            unsafe { words.as_ptr().add(scan_start) as *const u8 },
             std::mem::size_of_val(words).min(256),
         );
-        for i in 0..num_words {
-            let word_idx = (start + i) % num_words;
+
+        let mut attempts = 0;
+        while attempts < num_words {
+            let word_idx = match scan_available_word(words, scan_start) {
+                Some(idx) => idx,
+                None => break,
+            };
+
             let atomic_word = &words[word_idx];
             let mut current = atomic_word.load(Ordering::Acquire);
 
@@ -195,6 +398,9 @@ impl XdpSlabArena {
                     Err(actual) => current = actual,
                 }
             }
+
+            scan_start = (word_idx + 1) % num_words;
+            attempts += 1;
         }
 
         Err(XdpError::RingFull {
@@ -506,5 +712,67 @@ mod tests {
         // Slab released on drop
         assert_eq!(arena.leased_count(), 0);
         assert_eq!(arena.available_count(), 64);
+    }
+
+    #[test]
+    fn test_scan_available_word_all_tiers_consistency() {
+        let words: Vec<AtomicU64> = (0..8).map(|_| AtomicU64::new(!0u64)).collect();
+        // All words are completely full
+        assert_eq!(scan_swar_32(&words, 0), None);
+        assert_eq!(scan_swar_64(&words, 0), None);
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(scan_sse2_128(&words, 0), None);
+            assert_eq!(scan_avx2_256(&words, 0), None);
+        }
+        assert_eq!(scan_available_word(&words, 0), None);
+
+        // Make word 5 have one free bit
+        words[5].store(!(1u64 << 17), Ordering::Release);
+        assert_eq!(scan_swar_32(&words, 0), Some(5));
+        assert_eq!(scan_swar_64(&words, 0), Some(5));
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(scan_sse2_128(&words, 0), Some(5));
+            assert_eq!(scan_avx2_256(&words, 0), Some(5));
+        }
+        assert_eq!(scan_available_word(&words, 0), Some(5));
+
+        // Start scanning after word 5 with wrap-around
+        words[5].store(!0u64, Ordering::Release);
+        words[2].store(!(1u64 << 3), Ordering::Release);
+        assert_eq!(scan_swar_32(&words, 6), Some(2));
+        assert_eq!(scan_swar_64(&words, 6), Some(2));
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(scan_sse2_128(&words, 6), Some(2));
+            assert_eq!(scan_avx2_256(&words, 6), Some(2));
+        }
+        assert_eq!(scan_available_word(&words, 6), Some(2));
+    }
+
+    #[test]
+    fn test_slab_arena_exhaustion_and_recovery() {
+        let config = XdpConfig::new("lo", 0).with_frame_count(64);
+        let arena = XdpSlabArena::new(&config).expect("Arena creation ok");
+
+        let mut leases = Vec::new();
+        for _ in 0..64 {
+            leases.push(arena.lease().expect("Should lease successfully"));
+        }
+        assert_eq!(arena.leased_count(), 64);
+        assert_eq!(arena.available_count(), 0);
+
+        // 65th lease should fail with RingFull
+        assert!(arena.lease().is_err());
+
+        // Drop one lease
+        leases.pop();
+        assert_eq!(arena.leased_count(), 63);
+        assert_eq!(arena.available_count(), 1);
+
+        // Lease again should succeed
+        let recovered = arena.lease();
+        assert!(recovered.is_ok());
     }
 }

@@ -33,14 +33,12 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         "https-in",
         "/healthz",
         UpstreamId::new(10),
-        "health-backend",
     ));
     http_routes.push(Http1Route::new_exact(
         RouteId::new(2),
         "https-in",
         "/metrics",
         UpstreamId::new(20),
-        "metrics-backend",
     ));
 
     // Deep nested prefixes
@@ -49,21 +47,18 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
         UpstreamId::new(30),
-        "deep-analytics-backend",
     ));
     http_routes.push(Http1Route::new(
         RouteId::new(4),
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics",
         UpstreamId::new(40),
-        "medium-analytics-backend",
     ));
     http_routes.push(Http1Route::new(
         RouteId::new(5),
         "https-in",
         "/api/v1/clusters",
         UpstreamId::new(50),
-        "clusters-fallback-backend",
     ));
 
     // Host-restricted route
@@ -73,7 +68,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
             "https-in",
             "/secure/vault",
             UpstreamId::new(60),
-            "vault-backend",
         )
         .with_host("*.api.velda.internal"),
     );
@@ -85,7 +79,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
             "https-in",
             format!("/services/tenant_{i:04}/resource"),
             UpstreamId::new(i as u32),
-            format!("tenant-{i}-backend"),
         ));
     }
     let http_router = Http1Router::new(http_routes).unwrap();
@@ -96,7 +89,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
             "grpc-in",
             "velda.auth.v1.AuthService",
             UpstreamId::new(100),
-            "auth-grpc-backend",
         )
         .with_method("Authenticate"),
         GrpcRoute::new(
@@ -104,7 +96,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
             "grpc-in",
             "velda.billing.v2.PaymentService",
             UpstreamId::new(101),
-            "billing-grpc-backend",
         ),
     ];
     let grpc_router = GrpcRouter::new(grpc_routes).unwrap();
@@ -113,7 +104,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         RouteId::new(200),
         "tcp-in",
         UpstreamId::new(200),
-        "tcp-backend",
     )];
     let tcp_router = TcpRouter::new(tcp_routes).unwrap();
 
@@ -121,7 +111,6 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         RouteId::new(201),
         "udp-in",
         UpstreamId::new(201),
-        "udp-backend",
     )];
     let udp_router = UdpRouter::new(udp_routes).unwrap();
 

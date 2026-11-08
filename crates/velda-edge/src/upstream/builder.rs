@@ -167,7 +167,10 @@ pub fn build_upstreams(
             .map(Arc::from);
         let is_tls = config.tls.is_some();
         let protocol_str = Arc::from(config.protocol.transport.as_str());
-        let balancer = LbAlgorithm::from_name(&config.load_balancer.algorithm);
+        let balancer = LbAlgorithm::from_name_with_capacity(
+            &config.load_balancer.algorithm,
+            config.endpoints.len(),
+        );
 
         // Concurrency-driven Pool Sizing pre-computed during bootstrap:
         let topology = velda_core::global_hardware_topology();
@@ -278,6 +281,8 @@ pub fn build_upstreams(
             _ => None,
         };
 
+        let uid = config.upstream_id();
+
         if transport == "rdma" && app != "grpc" {
             let rdma_config = velda_rdma::RdmaConfig {
                 device_name: None,
@@ -285,8 +290,8 @@ pub fn build_upstreams(
                 ..Default::default()
             };
             let u = Arc::new(RdmaUpstream::new(inner, rdma_config, pool_config));
-            rdma_map.insert(config.id.clone(), Arc::clone(&u));
-            raw_map.insert(config.id.clone(), Arc::new(RawUpstream::Rdma(u)));
+            rdma_map.insert(uid, Arc::clone(&u));
+            raw_map.insert(uid, Arc::new(RawUpstream::Rdma(u)));
             continue;
         }
 
@@ -297,7 +302,7 @@ pub fn build_upstreams(
                         velda_rdma::RdmaConfig::for_streaming(config.protocol.streaming, None);
                     rdma_config.timeout_ms = timeouts.connect.as_millis().max(1000) as u64;
                     grpc_map.insert(
-                        config.id.clone(),
+                        uid,
                         Arc::new(GrpcUpstream::Rdma(Arc::new(GrpcRdmaUpstream::new(
                             inner,
                             rdma_config,
@@ -325,7 +330,7 @@ pub fn build_upstreams(
                         }
                     };
                     grpc_map.insert(
-                        config.id.clone(),
+                        uid,
                         Arc::new(GrpcUpstream::Udp(Arc::new(GrpcUdpUpstream::new(
                             inner,
                             sni,
@@ -344,7 +349,7 @@ pub fn build_upstreams(
                             is_tls,
                         );
                     grpc_map.insert(
-                        config.id.clone(),
+                        uid,
                         Arc::new(GrpcUpstream::Tcp(Arc::new(GrpcTcpUpstream::new(
                             inner,
                             tls,
@@ -371,7 +376,7 @@ pub fn build_upstreams(
                     }
                 };
                 http_map.insert(
-                    config.id.clone(),
+                    uid,
                     Arc::new(HttpUpstream::Http3(Arc::new(Http3Upstream::new(
                         inner,
                         sni,
@@ -391,7 +396,7 @@ pub fn build_upstreams(
                     is_tls,
                 );
                 http_map.insert(
-                    config.id.clone(),
+                    uid,
                     Arc::new(HttpUpstream::Http2(Arc::new(Http2Upstream::new(
                         inner,
                         tls,
@@ -411,7 +416,7 @@ pub fn build_upstreams(
                     is_tls,
                 );
                 http_map.insert(
-                    config.id.clone(),
+                    uid,
                     Arc::new(HttpUpstream::Http1(Arc::new(Http1Upstream::new(
                         inner,
                         tls,
@@ -426,7 +431,7 @@ pub fn build_upstreams(
             "raw" | "udp" if transport == "udp" => {
                 let udp_acceleration = UdpAccelerationPath::for_topology(topology);
                 raw_map.insert(
-                    config.id.clone(),
+                    uid,
                     Arc::new(RawUpstream::Udp(Arc::new(UdpUpstream::new(
                         inner,
                         udp_acceleration,
@@ -437,7 +442,7 @@ pub fn build_upstreams(
                 let tcp_acceleration =
                     TcpAccelerationPath::for_topology(topology, &timeouts, is_tls);
                 raw_map.insert(
-                    config.id.clone(),
+                    uid,
                     Arc::new(RawUpstream::Tcp(Arc::new(TcpUpstream::new(
                         inner,
                         tcp_acceleration,

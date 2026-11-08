@@ -15,7 +15,6 @@
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
-use std::sync::Arc;
 use velda_core::{Action, Body, L7Request, L7Response};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -227,7 +226,11 @@ impl PreUpstreamPlugin for RequestTerminationPlugin {
     /// 1. Clones the pre-compiled [`L7Response`] (`Bytes` ref-count increment or static slice).
     /// 2. Automatically preserves incoming `x-request-id` into the response.
     /// 3. Returns [`Action::Respond`] directly to bypass upstream dispatch.
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         let mut resp = self.base_response.clone();
         if let Some(req_id) = req.headers.get(&X_REQUEST_ID) {
             resp.headers.insert(X_REQUEST_ID, req_id.clone());
@@ -271,7 +274,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -323,7 +326,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -376,7 +379,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {

@@ -238,6 +238,14 @@ pub struct ListenerConfig {
     pub raw: Option<RawListenerConfig>,
 }
 
+impl ListenerConfig {
+    /// Returns the deterministic 32-bit `ListenerId` compiled from `self.id`.
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        velda_core::ListenerId::from_name(self.id.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ListenerTlsConfig {
     pub enabled: bool,

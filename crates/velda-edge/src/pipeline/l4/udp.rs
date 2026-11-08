@@ -446,11 +446,11 @@ pub async fn handle_l4_udp(
     };
 
     // 6. Upstream Backend Resolution (Lock-free in-memory lookup)
-    let Some(raw_upstream) = rt.upstreams.raw.get(&route.upstream_name) else {
+    let Some(raw_upstream) = rt.upstreams.raw.get(route.upstream_id) else {
         tracing::error!(
             listener = %key.listener_id,
             route = %route.id,
-            upstream = %route.upstream_name,
+            upstream = %route.upstream_id,
             peer = %client_addr,
             "No backend upstream available in Raw upstream table; dropping datagram"
         );
@@ -469,7 +469,7 @@ pub async fn handle_l4_udp(
             tracing::error!(
                 listener = %key.listener_id,
                 route = %route.id,
-                upstream = %route.upstream_name,
+                upstream = %route.upstream_id,
                 "Cannot forward UDP datagram to TCP raw upstream"
             );
         }

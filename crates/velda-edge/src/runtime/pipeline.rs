@@ -248,8 +248,8 @@ impl UdpPipeline {
 /// Built once during bootstrap/reload and stored in `Runtime` for single-lookup O(1) hot-path resolution.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineTable {
-    tcp: FxHashMap<String, TcpPipeline>,
-    udp: FxHashMap<String, UdpPipeline>,
+    tcp: FxHashMap<velda_core::ListenerId, TcpPipeline>,
+    udp: FxHashMap<velda_core::ListenerId, UdpPipeline>,
 }
 
 impl PipelineTable {
@@ -269,6 +269,7 @@ impl PipelineTable {
         let mut udp = FxHashMap::default();
 
         for listener in listeners {
+            let lid = listener.listener_id();
             let app = listener.application.protocol.to_ascii_lowercase();
 
             let is_tls = listener.tls.enabled;
@@ -288,7 +289,7 @@ impl PipelineTable {
                         unassured_timeout: std::time::Duration::from_secs(3),
                         recv_buffer_size: 2048,
                     };
-                    udp.insert(listener.id.clone(), UdpPipeline::Raw { config });
+                    udp.insert(lid, UdpPipeline::Raw { config });
                 } else {
                     let topo = velda_core::global_hardware_topology();
                     let default_buffer_size =
@@ -310,7 +311,7 @@ impl PipelineTable {
                         idle_timeout,
                         max_connections,
                     };
-                    tcp.insert(listener.id.clone(), TcpPipeline::Raw { config });
+                    tcp.insert(lid, TcpPipeline::Raw { config });
                 }
                 continue;
             }
@@ -320,7 +321,7 @@ impl PipelineTable {
                     "http" | "http3" => {
                         let config = resolve_http3_config(listener, cores, ram_bytes);
                         udp.insert(
-                            listener.id.clone(),
+                            lid,
                             UdpPipeline::Http3 {
                                 tls_enabled: is_tls,
                                 streaming,
@@ -331,7 +332,7 @@ impl PipelineTable {
                     "grpc" => {
                         let config = resolve_grpc_config(listener, cores, ram_bytes);
                         udp.insert(
-                            listener.id.clone(),
+                            lid,
                             UdpPipeline::Grpc {
                                 tls_enabled: is_tls,
                                 streaming,
@@ -356,7 +357,7 @@ impl PipelineTable {
                         let alt_svc = resolve_alt_svc_header(listener);
                         if is_tls {
                             tcp.insert(
-                                listener.id.clone(),
+                                lid,
                                 TcpPipeline::HttpAuto {
                                     tls_enabled: true,
                                     streaming,
@@ -367,7 +368,7 @@ impl PipelineTable {
                             );
                         } else {
                             tcp.insert(
-                                listener.id.clone(),
+                                lid,
                                 TcpPipeline::Http1 {
                                     tls_enabled: false,
                                     streaming,
@@ -381,7 +382,7 @@ impl PipelineTable {
                         let config = resolve_http1_config(listener, cores, ram_bytes);
                         let alt_svc = resolve_alt_svc_header(listener);
                         tcp.insert(
-                            listener.id.clone(),
+                            lid,
                             TcpPipeline::Http1 {
                                 tls_enabled: is_tls,
                                 streaming,
@@ -394,7 +395,7 @@ impl PipelineTable {
                         let config = resolve_http2_config(listener, cores, ram_bytes);
                         let alt_svc = resolve_alt_svc_header(listener);
                         tcp.insert(
-                            listener.id.clone(),
+                            lid,
                             TcpPipeline::Http2 {
                                 tls_enabled: is_tls,
                                 streaming,
@@ -406,7 +407,7 @@ impl PipelineTable {
                     "grpc" => {
                         let config = resolve_grpc_config(listener, cores, ram_bytes);
                         tcp.insert(
-                            listener.id.clone(),
+                            lid,
                             TcpPipeline::Grpc {
                                 tls_enabled: is_tls,
                                 streaming,
@@ -439,14 +440,20 @@ impl PipelineTable {
 
     /// Returns the pre-compiled TCP pipeline for a listener, if registered.
     #[inline]
-    pub fn tcp_pipeline(&self, listener_id: &str) -> Option<&TcpPipeline> {
-        self.tcp.get(listener_id)
+    pub fn tcp_pipeline(
+        &self,
+        listener_id: impl Into<velda_core::ListenerId>,
+    ) -> Option<&TcpPipeline> {
+        self.tcp.get(&listener_id.into())
     }
 
     /// Returns the pre-compiled UDP pipeline for a listener, if registered.
     #[inline]
-    pub fn udp_pipeline(&self, listener_id: &str) -> Option<&UdpPipeline> {
-        self.udp.get(listener_id)
+    pub fn udp_pipeline(
+        &self,
+        listener_id: impl Into<velda_core::ListenerId>,
+    ) -> Option<&UdpPipeline> {
+        self.udp.get(&listener_id.into())
     }
 }
 

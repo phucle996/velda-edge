@@ -23,10 +23,11 @@ pub use host::{
 };
 pub use l4::{TcpRoute, TcpRouter, UdpRoute, UdpRouter, UdpSessionAffinity};
 pub use l7::{
-    GrpcHotCandidate, GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1HotCandidate, Http1Route,
-    Http1RouteRequest, Http1Router, Http2HotCandidate, Http2Route, Http2RouteRequest, Http2Router,
-    Http3HotCandidate, Http3Route, Http3RouteRequest, Http3Router, ListenerGrpcRouter,
-    ListenerHttp1Router, ListenerHttp2Router, ListenerHttp3Router,
+    GrpcHotCandidate, GrpcRoute, GrpcRouteRequest, GrpcRouteRule, GrpcRouter, Http1HotCandidate,
+    Http1Route, Http1RouteRequest, Http1RouteRule, Http1Router, Http2HotCandidate, Http2Route,
+    Http2RouteRequest, Http2RouteRule, Http2Router, Http3HotCandidate, Http3Route,
+    Http3RouteRequest, Http3RouteRule, Http3Router, ListenerGrpcRouter, ListenerHttp1Router,
+    ListenerHttp2Router, ListenerHttp3Router,
 };
 pub use method::{
     MATCH_PACKED_METHODS_FN, MatchPackedMethodsFn, MethodMask, match_packed_methods,

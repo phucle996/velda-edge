@@ -13,8 +13,6 @@
 //! # Performance
 //! - In-memory execution in ~5-10 ns with zero disk I/O, zero network calls, and zero heap allocation.
 
-use std::sync::Arc;
-
 use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use velda_core::{Action, L7Request};
@@ -73,7 +71,11 @@ impl PreUpstreamPlugin for W3cTraceContextPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         let existing_traceparent = req
             .headers
             .get(&TRACEPARENT)
@@ -179,7 +181,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("main-upstream");
+        let mut target = velda_core::UpstreamId::from("main-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
 
@@ -215,7 +217,7 @@ mod tests {
             HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
         );
 
-        let mut target: Arc<str> = Arc::from("main-upstream");
+        let mut target = velda_core::UpstreamId::from("main-upstream");
         plugin.on_upstream_request(&mut req, &mut target);
 
         let tp = req.headers.get(&TRACEPARENT).unwrap().to_str().unwrap();

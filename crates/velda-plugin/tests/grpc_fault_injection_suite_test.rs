@@ -49,7 +49,7 @@ fn test_suite_grpc_fault_delay_only() {
     let chain = vec![plugin];
 
     let mut req = build_grpc_request("/order.v1.OrderService/CreateOrder");
-    let mut upstream: Arc<str> = Arc::from("order_upstream");
+    let mut upstream = velda_core::UpstreamId::from("order_upstream");
 
     let action = run_pre_upstream_plugins(&chain, &mut req, &mut upstream);
     match action {
@@ -72,7 +72,7 @@ fn test_suite_grpc_fault_abort_trailers_only() {
     let chain = vec![plugin];
 
     let mut req = build_grpc_request("/payment.v1.PaymentService/ProcessPayment");
-    let mut upstream: Arc<str> = Arc::from("payment_upstream");
+    let mut upstream = velda_core::UpstreamId::from("payment_upstream");
 
     let action = run_pre_upstream_plugins(&chain, &mut req, &mut upstream);
     match action {
@@ -105,7 +105,7 @@ fn test_suite_grpc_fault_delay_and_abort() {
     let chain = vec![plugin];
 
     let mut req = build_grpc_request("/inventory.v1.InventoryService/CheckStock");
-    let mut upstream: Arc<str> = Arc::from("inventory_upstream");
+    let mut upstream = velda_core::UpstreamId::from("inventory_upstream");
 
     let action = run_pre_upstream_plugins(&chain, &mut req, &mut upstream);
     match action {
@@ -139,7 +139,7 @@ fn test_suite_grpc_fault_pass_through_when_disabled() {
     let chain = vec![plugin];
 
     let mut req = build_grpc_request("/order.v1.OrderService/GetOrder");
-    let mut upstream: Arc<str> = Arc::from("order_upstream");
+    let mut upstream = velda_core::UpstreamId::from("order_upstream");
 
     let action = run_pre_upstream_plugins(&chain, &mut req, &mut upstream);
     assert!(matches!(action, Action::Continue));

@@ -2,16 +2,333 @@
 
 use crate::LoadBalancer;
 use crate::context::SelectionContext;
+use crate::metrics::EndpointMetrics;
 use velda_core::Endpoint;
 
+/// Function pointer signature for least-connections metrics evaluation.
+pub type LeastConnMetricsFn = fn(&[EndpointMetrics], usize) -> usize;
+
+/// Function pointer signature for least-requests metrics evaluation.
+pub type LeastReqMetricsFn = fn(&[EndpointMetrics], usize) -> usize;
+
+/// Scalar unrolled loop for small workloads (<= 4 endpoints) executing entirely in GPRs (%rax, %rcx, %rdx).
+#[inline]
+pub fn least_conn_scalar(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    let mut best_idx = 0;
+    let mut min_load = metrics[0].active_connections();
+    for (i, m) in metrics[..limit].iter().enumerate().skip(1) {
+        let load = m.active_connections();
+        if load < min_load {
+            min_load = load;
+            best_idx = i;
+        }
+    }
+    best_idx
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_min_index_u32_avx2(loads: &[u32]) -> usize {
+    use std::arch::x86_64::*;
+    let len = loads.len();
+    if len <= 1 {
+        return 0;
+    }
+
+    let ptr = loads.as_ptr();
+    unsafe {
+        let mut min_vec = _mm256_set1_epi32(i32::MAX);
+        let chunks = len / 8;
+
+        for i in 0..chunks {
+            let v = _mm256_loadu_si256(ptr.add(i * 8) as *const __m256i);
+            min_vec = _mm256_min_epu32(min_vec, v);
+        }
+
+        let low = _mm256_castsi256_si128(min_vec);
+        let high = _mm256_extracti128_si256(min_vec, 1);
+        let min128 = _mm_min_epu32(low, high);
+        let min64 = _mm_min_epu32(min128, _mm_shuffle_epi32(min128, 0x4E));
+        let min32 = _mm_min_epu32(min64, _mm_shuffle_epi32(min64, 0xB1));
+        let mut min_val = _mm_cvtsi128_si32(min32) as u32;
+
+        let remainder_start = chunks * 8;
+        for i in remainder_start..len {
+            let val = *ptr.add(i);
+            if val < min_val {
+                min_val = val;
+            }
+        }
+
+        let min_broadcast = _mm256_set1_epi32(min_val as i32);
+        for i in 0..chunks {
+            let v = _mm256_loadu_si256(ptr.add(i * 8) as *const __m256i);
+            let eq = _mm256_cmpeq_epi32(v, min_broadcast);
+            let mask = _mm256_movemask_ps(_mm256_castsi256_ps(eq));
+            if mask != 0 {
+                return i * 8 + (mask.trailing_zeros() as usize);
+            }
+        }
+
+        for i in remainder_start..len {
+            if *ptr.add(i) == min_val {
+                return i;
+            }
+        }
+
+        0
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn find_min_index_u32_sse41(loads: &[u32]) -> usize {
+    use std::arch::x86_64::*;
+    let len = loads.len();
+    if len <= 1 {
+        return 0;
+    }
+
+    let ptr = loads.as_ptr();
+    unsafe {
+        let mut min_vec = _mm_set1_epi32(i32::MAX);
+        let chunks = len / 4;
+
+        for i in 0..chunks {
+            let v = _mm_loadu_si128(ptr.add(i * 4) as *const __m128i);
+            min_vec = _mm_min_epu32(min_vec, v);
+        }
+
+        let min64 = _mm_min_epu32(min_vec, _mm_shuffle_epi32(min_vec, 0x4E));
+        let min32 = _mm_min_epu32(min64, _mm_shuffle_epi32(min64, 0xB1));
+        let mut min_val = _mm_cvtsi128_si32(min32) as u32;
+
+        let remainder_start = chunks * 4;
+        for i in remainder_start..len {
+            let val = *ptr.add(i);
+            if val < min_val {
+                min_val = val;
+            }
+        }
+
+        let min_broadcast = _mm_set1_epi32(min_val as i32);
+        for i in 0..chunks {
+            let v = _mm_loadu_si128(ptr.add(i * 4) as *const __m128i);
+            let eq = _mm_cmpeq_epi32(v, min_broadcast);
+            let mask = _mm_movemask_ps(_mm_castsi128_ps(eq));
+            if mask != 0 {
+                return i * 4 + (mask.trailing_zeros() as usize);
+            }
+        }
+
+        for i in remainder_start..len {
+            if *ptr.add(i) == min_val {
+                return i;
+            }
+        }
+
+        0
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn find_min_index_u32_neon(loads: &[u32]) -> usize {
+    use std::arch::aarch64::*;
+    let len = loads.len();
+    if len <= 1 {
+        return 0;
+    }
+    let ptr = loads.as_ptr();
+    let mut min_vec = vdupq_n_u32(u32::MAX);
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let v = vld1q_u32(ptr.add(i * 4));
+        min_vec = vminq_u32(min_vec, v);
+    }
+    let mut min_val = vminvq_u32(min_vec);
+    let remainder_start = chunks * 4;
+    for i in remainder_start..len {
+        let val = *ptr.add(i);
+        if val < min_val {
+            min_val = val;
+        }
+    }
+    for i in 0..len {
+        if *ptr.add(i) == min_val {
+            return i;
+        }
+    }
+    0
+}
+
+/// 256-bit AVX2-accelerated minimum search across active connection counters.
+#[inline]
+pub fn least_conn_avx2(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_conn_scalar(metrics, limit);
+    }
+    let mut loads = [0u32; 64];
+    let count = limit.min(64);
+    for i in 0..count {
+        loads[i] = metrics[i].active_connections();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_min_index_u32_avx2(&loads[..count]) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        least_conn_scalar(metrics, limit)
+    }
+}
+
+/// 128-bit SSE4.1/NEON-accelerated minimum search across active connection counters.
+#[inline]
+pub fn least_conn_sse2(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_conn_scalar(metrics, limit);
+    }
+    let mut loads = [0u32; 64];
+    let count = limit.min(64);
+    for i in 0..count {
+        loads[i] = metrics[i].active_connections();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_min_index_u32_sse41(&loads[..count]) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { find_min_index_u32_neon(&loads[..count]) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        least_conn_scalar(metrics, limit)
+    }
+}
+
+/// Scalar unrolled loop for small workloads (<= 4 endpoints) evaluating in-flight requests.
+#[inline]
+pub fn least_req_scalar(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    let mut best_idx = 0;
+    let mut min_inflight = metrics[0].inflight_requests();
+    for (i, m) in metrics[..limit].iter().enumerate().skip(1) {
+        let inflight = m.inflight_requests();
+        if inflight < min_inflight {
+            min_inflight = inflight;
+            best_idx = i;
+        }
+    }
+    best_idx
+}
+
+/// 256-bit AVX2-accelerated minimum search across in-flight request counters.
+#[inline]
+pub fn least_req_avx2(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_req_scalar(metrics, limit);
+    }
+    let mut loads = [0u32; 64];
+    let count = limit.min(64);
+    for i in 0..count {
+        loads[i] = metrics[i].inflight_requests();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_min_index_u32_avx2(&loads[..count]) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        least_req_scalar(metrics, limit)
+    }
+}
+
+/// 128-bit SSE4.1/NEON-accelerated minimum search across in-flight request counters.
+#[inline]
+pub fn least_req_sse2(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_req_scalar(metrics, limit);
+    }
+    let mut loads = [0u32; 64];
+    let count = limit.min(64);
+    for i in 0..count {
+        loads[i] = metrics[i].inflight_requests();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { find_min_index_u32_sse41(&loads[..count]) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { find_min_index_u32_neon(&loads[..count]) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        least_req_scalar(metrics, limit)
+    }
+}
+
 /// Chooses the endpoint with the smallest number of active connections.
-#[derive(Debug, Default)]
-pub struct LeastConnections;
+#[derive(Debug, Clone, Copy)]
+pub struct LeastConnections {
+    metrics_fn: LeastConnMetricsFn,
+}
+
+impl Default for LeastConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LeastConnections {
-    /// Creates a new least-connections load balancer.
-    pub const fn new() -> Self {
-        Self
+    /// Creates a new least-connections load balancer with host default width.
+    pub fn new() -> Self {
+        Self::for_workload(0)
+    }
+
+    /// Selects optimal register width and matching function pointer for the given endpoint count.
+    ///
+    /// - `count <= 4`: Bound to scalar unrolled loop ([`least_conn_scalar`]) in GPRs.
+    /// - `count > 4`: Bound to hardware vector SIMD ([`least_conn_avx2`] or [`least_conn_sse2`])
+    ///   probed via `velda_core::global_hardware_topology().cpu.register_capabilities`.
+    pub fn for_workload(count: usize) -> Self {
+        if count != 0 && count <= 4 {
+            return Self {
+                metrics_fn: least_conn_scalar,
+            };
+        }
+
+        use velda_core::hardware::RegisterWidth;
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+
+        let width = if count == 0 {
+            caps.select_for_workload(RegisterWidth::Bits256)
+        } else {
+            caps.select_for_workload_size(count / 2)
+        };
+
+        let metrics_fn = match width {
+            RegisterWidth::Bits256 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if std::is_x86_feature_detected!("avx2") {
+                        least_conn_avx2
+                    } else {
+                        least_conn_sse2
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    least_conn_sse2
+                }
+            }
+            RegisterWidth::Bits128 => least_conn_sse2,
+            _ => least_conn_scalar,
+        };
+
+        Self { metrics_fn }
     }
 }
 
@@ -27,16 +344,7 @@ impl LoadBalancer for LeastConnections {
             if limit == 0 {
                 return Some(0);
             }
-            let mut best_idx = 0;
-            let mut min_load = metrics[0].active_connections();
-            for (i, m) in metrics[..limit].iter().enumerate().skip(1) {
-                let load = m.active_connections();
-                if load < min_load {
-                    min_load = load;
-                    best_idx = i;
-                }
-            }
-            return Some(best_idx);
+            return Some((self.metrics_fn)(metrics, limit));
         }
 
         let Some(metrics_map) = ctx.metrics_map else {
@@ -66,13 +374,62 @@ impl LoadBalancer for LeastConnections {
 }
 
 /// Chooses the endpoint with the smallest number of currently in-flight requests.
-#[derive(Debug, Default)]
-pub struct LeastRequests;
+#[derive(Debug, Clone, Copy)]
+pub struct LeastRequests {
+    metrics_fn: LeastReqMetricsFn,
+}
+
+impl Default for LeastRequests {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LeastRequests {
     /// Creates a new least-requests load balancer.
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::for_workload(0)
+    }
+
+    /// Selects optimal register width and matching function pointer for the given endpoint count.
+    pub fn for_workload(count: usize) -> Self {
+        if count != 0 && count <= 4 {
+            return Self {
+                metrics_fn: least_req_scalar,
+            };
+        }
+
+        use velda_core::hardware::RegisterWidth;
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+
+        let width = if count == 0 {
+            caps.select_for_workload(RegisterWidth::Bits256)
+        } else {
+            caps.select_for_workload_size(count / 2)
+        };
+
+        let metrics_fn = match width {
+            RegisterWidth::Bits256 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if std::is_x86_feature_detected!("avx2") {
+                        least_req_avx2
+                    } else {
+                        least_req_sse2
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    least_req_sse2
+                }
+            }
+            RegisterWidth::Bits128 => least_req_sse2,
+            _ => least_req_scalar,
+        };
+
+        Self { metrics_fn }
     }
 }
 
@@ -88,16 +445,7 @@ impl LoadBalancer for LeastRequests {
             if limit == 0 {
                 return Some(0);
             }
-            let mut best_idx = 0;
-            let mut min_inflight = metrics[0].inflight_requests();
-            for (i, m) in metrics[..limit].iter().enumerate().skip(1) {
-                let inflight = m.inflight_requests();
-                if inflight < min_inflight {
-                    min_inflight = inflight;
-                    best_idx = i;
-                }
-            }
-            return Some(best_idx);
+            return Some((self.metrics_fn)(metrics, limit));
         }
 
         let Some(metrics_map) = ctx.metrics_map else {
@@ -233,5 +581,31 @@ mod tests {
 
         let selected = balancer.select(&endpoints, &ctx).unwrap();
         assert_eq!(selected.address, ep2);
+    }
+
+    #[test]
+    fn test_least_connections_workload_adaptive_simd() {
+        // 8 endpoints exercises vectorized SIMD evaluation
+        let mut endpoints = Vec::new();
+        let mut metrics = Vec::new();
+
+        for i in 0..8 {
+            let ep: SocketAddr = format!("10.0.0.{}:8080", i + 1).parse().unwrap();
+            endpoints.push(Endpoint::new(format!("e{i}"), ep, 1));
+            let m = EndpointMetrics::new();
+            // Give endpoint 5 the lowest load (1 active)
+            let load = if i == 5 { 1 } else { 10 + i as u32 };
+            for _ in 0..load {
+                m.inc_active();
+            }
+            metrics.push(m);
+        }
+
+        let ctx = SelectionContext::NONE.with_metrics_slice(&metrics);
+        let balancer_simd = LeastConnections::for_workload(8);
+        assert_eq!(balancer_simd.select_index(&endpoints, &ctx), Some(5));
+
+        let balancer_scalar = LeastConnections::for_workload(3);
+        assert_eq!(balancer_scalar.select_index(&endpoints, &ctx), Some(5));
     }
 }

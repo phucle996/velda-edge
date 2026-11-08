@@ -291,7 +291,7 @@ fn test_w3c_trace_context_end_to_end_flow() {
         Body::Empty,
     );
 
-    let mut target: Arc<str> = Arc::from("upstream-srv");
+    let mut target = velda_core::UpstreamId::from("upstream-srv");
     let action = tracer_plugin.on_upstream_request(&mut req, &mut target);
     assert!(matches!(action, velda_core::Action::Continue));
 

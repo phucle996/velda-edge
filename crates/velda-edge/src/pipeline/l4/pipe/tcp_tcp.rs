@@ -18,7 +18,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use velda_core::RouteId;
+use velda_core::{RouteId, UpstreamId};
 use velda_sock::Connection;
 
 use crate::runtime::pipeline::L4TcpConfig;
@@ -30,14 +30,14 @@ pub async fn serve(
     upstream: &Arc<TcpUpstream>,
     config: &L4TcpConfig,
     route_id: RouteId,
-    upstream_name: &str,
+    upstream_id: UpstreamId,
     peer: SocketAddr,
     listener_id: &str,
 ) {
     tracing::debug!(
         listener = %listener_id,
         route = %route_id,
-        upstream = %upstream_name,
+        upstream = %upstream_id,
         peer = %peer,
         "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
     );
@@ -58,7 +58,7 @@ pub async fn serve(
         Ok(stats) => {
             // Step 3: Record transferred byte telemetry upon graceful stream closure.
             tracing::debug!(
-                upstream = %upstream_name,
+                upstream = %upstream_id,
                 peer = %peer,
                 client_to_server = stats.client_to_server_bytes,
                 server_to_client = stats.server_to_client_bytes,
@@ -69,7 +69,7 @@ pub async fn serve(
             // Step 4: Log abnormal connection termination (e.g. client reset, network drop, timeout).
             tracing::warn!(
                 error = %e,
-                upstream = %upstream_name,
+                upstream = %upstream_id,
                 peer = %peer,
                 "L4 TCP stream forwarding terminated with error"
             );

@@ -21,7 +21,6 @@
 //!     preventing Subdomain Cookie Tossing bypasses.
 //! - **Flat Workflow**: Sequential execution top-to-bottom without helper indirection (Rule 2.2).
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::{COOKIE, HOST, ORIGIN, REFERER};
@@ -218,7 +217,11 @@ impl PreUpstreamPlugin for CsrfPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // ─────────────────────────────────────────────────────────────────────
         // Gate 1: Safe Methods Fast Path (O(1) Single-Instruction Bitmask)
         // ─────────────────────────────────────────────────────────────────────
@@ -384,7 +387,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let safe_methods = [Method::GET, Method::HEAD, Method::OPTIONS];
         for m in safe_methods {
@@ -407,7 +410,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));
@@ -436,7 +439,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, HeaderValue::from_static("aurora_csrf=token_legit"));
@@ -464,7 +467,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let nonce = [0x42u8; 16];
@@ -533,7 +536,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         // Case 1: Browser marks cross-site from untrusted origin -> Instant 403
         let mut headers = HeaderMap::new();
@@ -575,7 +578,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         for short_ref in ["x", "http:", "https", "1234567"] {
             let mut headers = HeaderMap::new();
@@ -603,7 +606,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
             let mut req = build_test_request(m, "/api/data", HeaderMap::new());
@@ -632,7 +635,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));
@@ -656,7 +659,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target: Arc<str> = Arc::from("backend");
+        let mut target = velda_core::UpstreamId::from("backend");
 
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));

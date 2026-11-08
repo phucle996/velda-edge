@@ -103,5 +103,5 @@ pub use hardware::{
 pub use provenance::Provenance;
 pub use request_id::{RequestIdPool, next_request_id};
 pub use socket::{SocketManager, global_socket_manager};
-pub use types::{ConnectionId, RequestId, RouteId, UpstreamId};
+pub use types::{ConnectionId, ListenerId, RequestId, RouteId, UpstreamId, fnv1a_hash_32};
 pub use worker::{CorePartition, WorkerId, WorkerRegistry, global_worker_registry};

@@ -6,29 +6,25 @@
 
 use rustc_hash::FxHashMap;
 use std::time::Duration;
-use velda_core::{RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId, UpstreamId};
 
 use crate::error::RouterError;
 
-/// Concrete compiled Layer 4 UDP routing rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Concrete compiled Layer 4 UDP routing rule (`Copy`, zero heap strings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UdpRoute {
     /// Unique identifier of this route.
     pub id: RouteId,
     /// Ingress listener identifier this route attaches to.
-    pub listener_id: String,
+    pub listener_id: ListenerId,
     /// Logical upstream destination for forwarding traffic.
     pub upstream_id: UpstreamId,
-    /// Upstream target name as declared in configuration.
-    pub upstream_name: String,
     /// Optional idle timeout for stateful bidirectional L4 UDP sessions.
     /// If `None`, UDP is unidirectional (1 chiều fire-and-forget).
     /// If `Some`, UDP is bidirectional (2 chiều stateful proxying).
     pub udp_idle_timeout: Option<Duration>,
     /// Session affinity strategy (pure L4 client peer address vs opt-in payload token).
     pub session_affinity: UdpSessionAffinity,
-    /// Plugin hook identifiers associated with this route.
-    pub plugins: Vec<String>,
 }
 
 /// Session affinity strategy for L4 UDP stateful routing.
@@ -88,69 +84,59 @@ impl UdpSessionAffinity {
 
 impl UdpRoute {
     /// Creates a new L4 UDP route rule.
-    pub fn new(
-        id: RouteId,
-        listener_id: impl Into<String>,
-        upstream_id: UpstreamId,
-        upstream_name: impl Into<String>,
-    ) -> Self {
+    #[inline]
+    pub fn new(id: RouteId, listener_id: impl Into<ListenerId>, upstream_id: UpstreamId) -> Self {
         Self {
             id,
             listener_id: listener_id.into(),
             upstream_id,
-            upstream_name: upstream_name.into(),
             udp_idle_timeout: None,
             session_affinity: UdpSessionAffinity::ClientAddr,
-            plugins: Vec::new(),
         }
     }
 
     /// Sets the optional idle timeout for stateful bidirectional L4 UDP sessions.
-    pub fn with_udp_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+    #[inline]
+    pub const fn with_udp_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.udp_idle_timeout = timeout;
         self
     }
 
     /// Sets the session affinity strategy (pure L4 peer address vs opt-in payload token).
-    pub fn with_session_affinity(mut self, affinity: UdpSessionAffinity) -> Self {
+    #[inline]
+    pub const fn with_session_affinity(mut self, affinity: UdpSessionAffinity) -> Self {
         self.session_affinity = affinity;
         self
     }
 
     /// Returns whether this route is configured for unidirectional (fire-and-forget) UDP.
     #[inline]
-    pub fn is_unidirectional(&self) -> bool {
+    pub const fn is_unidirectional(&self) -> bool {
         self.udp_idle_timeout.is_none()
-    }
-
-    /// Attaches plugin identifiers to this route.
-    pub fn with_plugins(mut self, plugins: Vec<String>) -> Self {
-        self.plugins = plugins;
-        self
     }
 }
 
 /// High-performance, in-memory L4 UDP route lookup table.
 ///
-/// Provides zero-allocation $O(1)$ route resolution from `listener_id` to [`UdpRoute`] via [`FxHashMap`].
+/// Provides zero-allocation $O(1)$ route resolution from [`ListenerId`] to [`UdpRoute`] via [`FxHashMap`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UdpRouter {
-    listeners: FxHashMap<String, UdpRoute>,
+    listeners: FxHashMap<ListenerId, UdpRoute>,
 }
 
 impl UdpRouter {
     /// Builds a new [`UdpRouter`] from a list of compiled [`UdpRoute`] rules.
     pub fn new(routes: impl IntoIterator<Item = UdpRoute>) -> Result<Self, RouterError> {
-        let mut listeners: FxHashMap<String, UdpRoute> = FxHashMap::default();
+        let mut listeners: FxHashMap<ListenerId, UdpRoute> = FxHashMap::default();
 
         for r in routes {
             if listeners.contains_key(&r.listener_id) {
                 return Err(RouterError::DuplicateRoute {
-                    listener: r.listener_id,
+                    listener: r.listener_id.to_string(),
                     protocol: "Udp".to_string(),
                 });
             }
-            listeners.insert(r.listener_id.clone(), r);
+            listeners.insert(r.listener_id, r);
         }
 
         Ok(Self { listeners })
@@ -158,8 +144,8 @@ impl UdpRouter {
 
     /// Resolves a UDP route for an incoming datagram on a listener.
     #[inline]
-    pub fn route(&self, listener_id: &str) -> Option<&UdpRoute> {
-        self.listeners.get(listener_id)
+    pub fn route(&self, listener_id: impl Into<ListenerId>) -> Option<&UdpRoute> {
+        self.listeners.get(&listener_id.into())
     }
 
     /// Returns the total number of configured UDP routes.
@@ -182,19 +168,9 @@ mod tests {
     #[test]
     fn test_udp_router_lookup() {
         let routes = vec![
-            UdpRoute::new(
-                RouteId::new(1),
-                "dns-in",
-                UpstreamId::new(10),
-                "dns-backend",
-            )
-            .with_udp_idle_timeout(Some(Duration::from_secs(30))),
-            UdpRoute::new(
-                RouteId::new(2),
-                "syslog-in",
-                UpstreamId::new(20),
-                "syslog-backend",
-            ),
+            UdpRoute::new(RouteId::new(1), "dns-in", UpstreamId::new(10))
+                .with_udp_idle_timeout(Some(Duration::from_secs(30))),
+            UdpRoute::new(RouteId::new(2), "syslog-in", UpstreamId::new(20)),
         ];
 
         let router = UdpRouter::new(routes).unwrap();
@@ -203,12 +179,12 @@ mod tests {
 
         let r1 = router.route("dns-in").unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_name, "dns-backend");
+        assert_eq!(r1.upstream_id, UpstreamId::new(10));
         assert!(!r1.is_unidirectional());
 
         let r2 = router.route("syslog-in").unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_name, "syslog-backend");
+        assert_eq!(r2.upstream_id, UpstreamId::new(20));
         assert!(r2.is_unidirectional());
 
         assert!(router.route("unknown").is_none());
@@ -217,8 +193,8 @@ mod tests {
     #[test]
     fn test_udp_router_duplicate_fails() {
         let routes = vec![
-            UdpRoute::new(RouteId::new(1), "dns", UpstreamId::new(10), "d1"),
-            UdpRoute::new(RouteId::new(2), "dns", UpstreamId::new(20), "d2"),
+            UdpRoute::new(RouteId::new(1), "dns", UpstreamId::new(10)),
+            UdpRoute::new(RouteId::new(2), "dns", UpstreamId::new(20)),
         ];
 
         let err = UdpRouter::new(routes).unwrap_err();

@@ -66,11 +66,11 @@ pub async fn handle_l4_tcp(
         return;
     };
 
-    let Some(raw_upstream) = rt.upstreams.raw.get(&route.upstream_name) else {
+    let Some(raw_upstream) = rt.upstreams.raw.get(route.upstream_id) else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,
-            upstream = %route.upstream_name,
+            upstream = %route.upstream_id,
             peer = %peer,
             "No backend upstream available in Raw upstream table; dropping connection"
         );
@@ -84,7 +84,7 @@ pub async fn handle_l4_tcp(
                 upstream,
                 &config,
                 route.id,
-                &route.upstream_name,
+                route.upstream_id,
                 peer,
                 &listener_id,
             )
@@ -96,7 +96,7 @@ pub async fn handle_l4_tcp(
                 upstream,
                 &config,
                 route.id,
-                &route.upstream_name,
+                route.upstream_id,
                 peer,
                 &listener_id,
             )
@@ -106,7 +106,7 @@ pub async fn handle_l4_tcp(
             tracing::error!(
                 listener = %listener_id,
                 route = %route.id,
-                upstream = %route.upstream_name,
+                upstream = %route.upstream_id,
                 "Cannot forward TCP connection to UDP raw upstream"
             );
         }

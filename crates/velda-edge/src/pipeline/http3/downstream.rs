@@ -279,7 +279,7 @@ async fn process_http3_request(
         return;
     };
 
-    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
+    let mut target_upstream: velda_core::UpstreamId = route.upstream_id;
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -388,7 +388,7 @@ async fn process_http3_request(
         }
     }
 
-    let Some(upstream_target) = rt.upstreams.http.get(target_upstream.as_ref()) else {
+    let Some(upstream_target) = rt.upstreams.http.get(target_upstream) else {
         tracing::error!(
             listener = %listener_id,
             route = %route.id,

@@ -12,6 +12,7 @@ thiserror = "2.0"
 tracing = "0.1"
 libc = "0.2"
 parking_lot = "0.12"
+rustc-hash = "2.1"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

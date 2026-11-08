@@ -65,7 +65,7 @@ mod tests {
         headers1.insert(http::header::HOST, "api.example.com".parse().unwrap());
         headers1.insert("x-request-id", "req-001".parse().unwrap());
         let mut req1 = L7Request::new(Method::GET, uri1, Version::HTTP_11, headers1, Body::Empty);
-        let mut target1: Arc<str> = Arc::from("default_upstream");
+        let mut target1 = velda_core::UpstreamId::from("default_upstream");
         let action1 = lookup_plugin.on_upstream_request(&mut req1, &mut target1);
         assert!(action1.is_continue());
         assert!(req1.headers.contains_key("x-velda-cache-key"));
@@ -110,7 +110,7 @@ mod tests {
         headers2.insert(http::header::HOST, "api.example.com".parse().unwrap());
         let mut req2 = L7Request::new(Method::GET, uri2, Version::HTTP_11, headers2, Body::Empty);
 
-        let mut target2: Arc<str> = Arc::from("default_upstream");
+        let mut target2 = velda_core::UpstreamId::from("default_upstream");
         let action2 = lookup_plugin.on_upstream_request(&mut req2, &mut target2);
         match action2 {
             Action::ServeCached(cached) => {

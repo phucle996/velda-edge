@@ -288,7 +288,11 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
         SupportedProtocols::ALL_L7
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _upstream_target: &mut velda_core::UpstreamId,
+    ) -> Action {
         let key_hash = resolve_quota_key(req, &self.config.key_headers);
 
         // Use authoritative pre-sampled ingress timestamp from HeaderWorkspace (0ns)

@@ -265,6 +265,8 @@ pub fn validate_listeners_with_lkg(
     current_lkg: &[ListenerConfig],
 ) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(listeners.len());
+    let mut seen_hash_ids: HashMap<velda_core::ListenerId, &str> =
+        HashMap::with_capacity(listeners.len());
     let mut parsed_bindings: Vec<(&str, L4Protocol, SocketAddr)> =
         Vec::with_capacity(listeners.len());
 
@@ -301,6 +303,17 @@ pub fn validate_listeners_with_lkg(
             return Err(SyncError::Validation {
                 domain: "listeners".into(),
                 reason: format!("Duplicate listener ID '{}'", listener.id),
+            });
+        }
+
+        let listener_hash_id = listener.listener_id();
+        if let Some(prev) = seen_hash_ids.insert(listener_hash_id, listener.id.as_str()) {
+            return Err(SyncError::Validation {
+                domain: "listeners".into(),
+                reason: format!(
+                    "ListenerId u32 hash collision ({listener_hash_id}) between '{}' and '{prev}'",
+                    listener.id
+                ),
             });
         }
 

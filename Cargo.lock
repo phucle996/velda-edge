@@ -2350,6 +2350,7 @@ dependencies = [
  "bytes",
  "libc",
  "parking_lot",
+ "rustc-hash",
  "thiserror",
  "tokio",
  "tracing",

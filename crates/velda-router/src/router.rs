@@ -1,12 +1,14 @@
 //! Unified top-level Router coordinating L4 (TCP, UDP) and L7 (HTTP/1.1, HTTP/2, HTTP/3, and gRPC) routing.
 
+use velda_core::ListenerId;
+
 use crate::error::RouterError;
 use crate::l4::tcp::{TcpRoute, TcpRouter};
 use crate::l4::udp::{UdpRoute, UdpRouter};
-use crate::l7::grpc::{GrpcRoute, GrpcRouteRequest, GrpcRouter};
-use crate::l7::http1::{Http1Route, Http1RouteRequest, Http1Router};
-use crate::l7::http2::{Http2Route, Http2RouteRequest, Http2Router};
-use crate::l7::http3::{Http3Route, Http3RouteRequest, Http3Router};
+use crate::l7::grpc::{GrpcRoute, GrpcRouteRequest, GrpcRouteRule, GrpcRouter};
+use crate::l7::http1::{Http1Route, Http1RouteRequest, Http1RouteRule, Http1Router};
+use crate::l7::http2::{Http2Route, Http2RouteRequest, Http2RouteRule, Http2Router};
+use crate::l7::http3::{Http3Route, Http3RouteRequest, Http3RouteRule, Http3Router};
 
 /// Unified runtime router holding dedicated routing structures for each supported protocol.
 ///
@@ -44,13 +46,13 @@ impl Router {
 
     /// Resolves an L4 TCP route by `listener_id`.
     #[inline]
-    pub fn route_tcp(&self, listener_id: &str) -> Option<&TcpRoute> {
+    pub fn route_tcp(&self, listener_id: impl Into<ListenerId>) -> Option<&TcpRoute> {
         self.tcp.route(listener_id)
     }
 
     /// Resolves an L4 UDP route by `listener_id`.
     #[inline]
-    pub fn route_udp(&self, listener_id: &str) -> Option<&UdpRoute> {
+    pub fn route_udp(&self, listener_id: impl Into<ListenerId>) -> Option<&UdpRoute> {
         self.udp.route(listener_id)
     }
 
@@ -58,7 +60,7 @@ impl Router {
     #[inline]
     pub fn route_http1(
         &self,
-        listener_id: &str,
+        listener_id: impl Into<ListenerId>,
         req: &Http1RouteRequest<'_>,
     ) -> Option<&Http1Route> {
         self.http1.route(listener_id, req)
@@ -68,7 +70,7 @@ impl Router {
     #[inline]
     pub fn http1_listener(
         &self,
-        listener_id: &str,
+        listener_id: impl Into<ListenerId>,
     ) -> Option<&crate::l7::http1::ListenerHttp1Router> {
         self.http1.listener(listener_id)
     }
@@ -77,7 +79,7 @@ impl Router {
     #[inline]
     pub fn route_http2(
         &self,
-        listener_id: &str,
+        listener_id: impl Into<ListenerId>,
         req: &Http2RouteRequest<'_>,
     ) -> Option<&Http2Route> {
         self.http2.route(listener_id, req)
@@ -87,7 +89,7 @@ impl Router {
     #[inline]
     pub fn route_http3(
         &self,
-        listener_id: &str,
+        listener_id: impl Into<ListenerId>,
         req: &Http3RouteRequest<'_>,
     ) -> Option<&Http3Route> {
         self.http3.route(listener_id, req)
@@ -95,7 +97,11 @@ impl Router {
 
     /// Resolves a gRPC route by `listener_id` and request view.
     #[inline]
-    pub fn route_grpc(&self, listener_id: &str, req: &GrpcRouteRequest<'_>) -> Option<&GrpcRoute> {
+    pub fn route_grpc(
+        &self,
+        listener_id: impl Into<ListenerId>,
+        req: &GrpcRouteRequest<'_>,
+    ) -> Option<&GrpcRoute> {
         self.grpc.route(listener_id, req)
     }
 
@@ -141,10 +147,10 @@ impl Router {
 pub struct RouterBuilder {
     tcp_routes: Vec<TcpRoute>,
     udp_routes: Vec<UdpRoute>,
-    http1_routes: Vec<Http1Route>,
-    http2_routes: Vec<Http2Route>,
-    http3_routes: Vec<Http3Route>,
-    grpc_routes: Vec<GrpcRoute>,
+    http1_routes: Vec<Http1RouteRule>,
+    http2_routes: Vec<Http2RouteRule>,
+    http3_routes: Vec<Http3RouteRule>,
+    grpc_routes: Vec<GrpcRouteRule>,
 }
 
 impl RouterBuilder {
@@ -166,25 +172,25 @@ impl RouterBuilder {
     }
 
     /// Adds an HTTP/1.1 route rule.
-    pub fn add_http1_route(mut self, route: Http1Route) -> Self {
+    pub fn add_http1_route(mut self, route: Http1RouteRule) -> Self {
         self.http1_routes.push(route);
         self
     }
 
     /// Adds an HTTP/2 route rule.
-    pub fn add_http2_route(mut self, route: Http2Route) -> Self {
+    pub fn add_http2_route(mut self, route: Http2RouteRule) -> Self {
         self.http2_routes.push(route);
         self
     }
 
     /// Adds an HTTP/3 route rule.
-    pub fn add_http3_route(mut self, route: Http3Route) -> Self {
+    pub fn add_http3_route(mut self, route: Http3RouteRule) -> Self {
         self.http3_routes.push(route);
         self
     }
 
     /// Adds a gRPC route rule.
-    pub fn add_grpc_route(mut self, route: GrpcRoute) -> Self {
+    pub fn add_grpc_route(mut self, route: GrpcRouteRule) -> Self {
         self.grpc_routes.push(route);
         self
     }

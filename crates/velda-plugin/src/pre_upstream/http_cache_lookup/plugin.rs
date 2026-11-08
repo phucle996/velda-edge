@@ -145,7 +145,11 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // 1. Method check: only cacheable methods (GET, HEAD) are evaluated
         if !self.config.cacheable_methods.contains(&req.method) {
             return Action::Continue;
@@ -298,7 +302,7 @@ mod tests {
         );
 
         // 1. Initial request: MISS -> Action::Continue and injected x-velda-cache-key
-        let mut target1 = Arc::from("default-upstream");
+        let mut target1 = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(action.is_continue());
         assert!(req.headers.contains_key("x-velda-cache-key"));
@@ -340,7 +344,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target2 = Arc::from("default-upstream");
+        let mut target2 = velda_core::UpstreamId::from("default-upstream");
         let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         match action2 {
             Action::ServeCached(cached) => {
@@ -413,7 +417,7 @@ mod tests {
             headers,
             Body::Empty,
         );
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::ServeCached(cached) => {
@@ -448,7 +452,7 @@ mod tests {
             headers_br,
             Body::Empty,
         );
-        let mut target_br = Arc::from("default-upstream");
+        let mut target_br = velda_core::UpstreamId::from("default-upstream");
         let action_br = plugin.on_upstream_request(&mut req_br, &mut target_br);
         match action_br {
             Action::ServeCached(cached) => {
@@ -472,7 +476,7 @@ mod tests {
             headers_raw,
             Body::Empty,
         );
-        let mut target_raw = Arc::from("default-upstream");
+        let mut target_raw = velda_core::UpstreamId::from("default-upstream");
         let action_raw = plugin.on_upstream_request(&mut req_raw, &mut target_raw);
         match action_raw {
             Action::ServeCached(cached) => {
@@ -537,7 +541,7 @@ mod tests {
             headers1,
             Body::Empty,
         );
-        let mut target1 = Arc::from("default-upstream");
+        let mut target1 = velda_core::UpstreamId::from("default-upstream");
         let action1 = plugin.on_upstream_request(&mut req1, &mut target1);
         match action1 {
             Action::ServeCached(cached) => {
@@ -566,7 +570,7 @@ mod tests {
             headers2,
             Body::Empty,
         );
-        let mut target2 = Arc::from("default-upstream");
+        let mut target2 = velda_core::UpstreamId::from("default-upstream");
         let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         assert!(action2.is_continue());
         assert!(req2.headers.contains_key("x-velda-cache-key"));
@@ -595,7 +599,7 @@ mod tests {
             Body::Bytes(bytes::Bytes::from_static(b"{}")),
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(action.is_continue());
         assert!(!req.headers.contains_key("x-velda-cache-key"));
@@ -645,7 +649,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(action.is_continue());
         // Transient cache key is NOT injected because it bypassed
@@ -698,7 +702,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::ServeCached(cached) => {
@@ -753,7 +757,7 @@ mod tests {
             bob_headers,
             Body::Empty,
         );
-        let mut target_bob = Arc::from("default-upstream");
+        let mut target_bob = velda_core::UpstreamId::from("default-upstream");
         let action_bob = plugin.on_upstream_request(&mut req_bob, &mut target_bob);
         assert!(action_bob.is_continue());
 
@@ -768,7 +772,7 @@ mod tests {
             alice_headers,
             Body::Empty,
         );
-        let mut target_alice = Arc::from("default-upstream");
+        let mut target_alice = velda_core::UpstreamId::from("default-upstream");
         let action_alice = plugin.on_upstream_request(&mut req_alice, &mut target_alice);
         match action_alice {
             Action::ServeCached(cached) => {

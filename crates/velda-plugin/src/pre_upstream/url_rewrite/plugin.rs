@@ -18,7 +18,6 @@
 
 use http::Uri;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use velda_core::{Action, L7Request, RejectReason};
 use velda_sync::post_sync::plugin::PluginConfig;
 
@@ -127,7 +126,11 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         let current_path = req.uri.path();
         let current_query = req.uri.query();
 
@@ -226,7 +229,7 @@ mod tests {
         .unwrap();
 
         let mut req = make_test_request("/api/v1/orders/10?type=fast");
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/orders/10");
@@ -248,7 +251,7 @@ mod tests {
         .unwrap();
 
         let mut req = make_test_request("/api/v1/../../etc/shadow");
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::BadRequest)));
     }

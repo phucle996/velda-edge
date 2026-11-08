@@ -1,6 +1,5 @@
 //! End-to-End Test Suite for `hmac_auth` Pre-Upstream Plugin.
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::HeaderValue;
@@ -150,7 +149,7 @@ fn test_hmac_auth_e2e_valid_hex() {
         "uuid-hex-1111",
         0,
     );
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     assert!(matches!(
         plugin.on_upstream_request(&mut req, &mut target),
         Action::Continue
@@ -175,7 +174,7 @@ fn test_hmac_auth_e2e_valid_base64() {
         "uuid-b64-2222",
         0,
     );
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     assert!(matches!(
         plugin.on_upstream_request(&mut req, &mut target),
         Action::Continue
@@ -196,7 +195,7 @@ fn test_hmac_auth_e2e_sha512() {
         "uuid-sha512-3333",
         0,
     );
-    let mut target = Arc::from("sha512-upstream");
+    let mut target = velda_core::UpstreamId::from("sha512-upstream");
     assert!(matches!(
         plugin.on_upstream_request(&mut req, &mut target),
         Action::Continue
@@ -214,7 +213,7 @@ fn test_hmac_auth_missing_access_key() {
         Body::Empty,
     );
 
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
     assert!(
         matches!(action, Action::Reject(RejectReason::Unauthorized)),
@@ -243,7 +242,7 @@ fn test_hmac_auth_invalid_access_key() {
         Body::Empty,
     );
 
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
     assert!(
         matches!(action, Action::Reject(RejectReason::Unauthorized)),
@@ -266,7 +265,7 @@ fn test_hmac_auth_expired_timestamp() {
         -120, // 2 minutes ago (skew max is 60s)
     );
 
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
     assert!(
         matches!(action, Action::Reject(RejectReason::Unauthorized)),
@@ -293,7 +292,7 @@ fn test_hmac_auth_tampered_header() {
     req.headers
         .insert("host", HeaderValue::from_static("evil.attacker.com"));
 
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
     let action = plugin.on_upstream_request(&mut req, &mut target);
     assert!(
         matches!(action, Action::Reject(RejectReason::Unauthorized)),
@@ -316,7 +315,7 @@ fn test_hmac_auth_replay_attack_prevention() {
         0,
     );
 
-    let mut target = Arc::from("fintech-upstream");
+    let mut target = velda_core::UpstreamId::from("fintech-upstream");
 
     // First request: valid
     assert!(matches!(

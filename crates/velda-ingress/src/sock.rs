@@ -29,6 +29,8 @@ const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 pub struct TcpBinding {
     /// Unique listener identifier declared in configuration.
     pub id: String,
+    /// Pre-compiled 32-bit FNV-1a listener identifier for zero-allocation hot-path dispatch.
+    pub listener_id: velda_core::ListenerId,
     /// Local address to bind and listen on.
     pub addr: SocketAddr,
     /// Whether downstream TLS is enabled on this listener.
@@ -40,12 +42,21 @@ pub struct TcpBinding {
 impl TcpBinding {
     /// Creates a new TCP ingress binding.
     pub fn new(id: impl Into<String>, addr: SocketAddr, tls_enabled: bool) -> Self {
+        let id = id.into();
+        let listener_id = velda_core::ListenerId::from_name(&id);
         Self {
-            id: id.into(),
+            id,
+            listener_id,
             addr,
             tls_enabled,
             config: TcpListenerConfig::default(),
         }
+    }
+
+    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        self.listener_id
     }
 
     /// Sets the TCP socket configuration.
@@ -114,6 +125,12 @@ impl TcpIngress {
     #[inline]
     pub fn id(&self) -> &str {
         &self.binding.id
+    }
+
+    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        self.binding.listener_id
     }
 
     /// Accepts an incoming connection from the first shard, tagged with this listener's id.
@@ -268,6 +285,8 @@ impl TcpIngress {
 pub struct UdpBinding {
     /// Unique listener identifier declared in configuration.
     pub id: String,
+    /// Pre-compiled 32-bit FNV-1a listener identifier for zero-allocation hot-path dispatch.
+    pub listener_id: velda_core::ListenerId,
     /// Local address to bind and listen on.
     pub addr: SocketAddr,
     /// Whether downstream TLS (QUIC/DTLS) is enabled on this listener.
@@ -279,12 +298,21 @@ pub struct UdpBinding {
 impl UdpBinding {
     /// Creates a new UDP ingress binding.
     pub fn new(id: impl Into<String>, addr: SocketAddr, tls_enabled: bool) -> Self {
+        let id = id.into();
+        let listener_id = velda_core::ListenerId::from_name(&id);
         Self {
-            id: id.into(),
+            id,
+            listener_id,
             addr,
             tls_enabled,
             config: UdpSocketConfig::default(),
         }
+    }
+
+    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        self.listener_id
     }
 
     /// Sets the UDP socket configuration.
@@ -356,6 +384,12 @@ impl UdpIngress {
     #[inline]
     pub fn id(&self) -> &str {
         &self.binding.id
+    }
+
+    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        self.binding.listener_id
     }
 
     /// Spawns an ingress receive loop for each socket shard on the provided `JoinSet`.

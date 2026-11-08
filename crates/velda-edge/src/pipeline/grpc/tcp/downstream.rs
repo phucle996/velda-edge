@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{Action, L7Request};
+use velda_core::{Action, L7Request, UpstreamId};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
@@ -173,7 +173,7 @@ async fn dispatch_grpc_tcp_request_stream(
     };
 
     let rt = runtime.load();
-    let Some(route) = rt.router.route_grpc(&meta.listener_id, &grpc_req) else {
+    let Some(route) = rt.router.route_grpc(&*meta.listener_id, &grpc_req) else {
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
@@ -181,7 +181,7 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
-    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
+    let mut target_upstream: UpstreamId = route.upstream_id;
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -315,7 +315,7 @@ async fn dispatch_grpc_tcp_request_stream(
         }
     }
 
-    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream.as_ref()) else {
+    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream) else {
         tracing::error!(
             listener = %meta.listener_id,
             route = %route.id,
@@ -391,7 +391,7 @@ async fn dispatch_grpc_tcp_request_stream(
     if let Err(e) = pipe_res {
         tracing::warn!(
             error = %e,
-            upstream = %route.upstream_name,
+            upstream = %route.upstream_id,
             "gRPC stream pipe terminated with error"
         );
     }

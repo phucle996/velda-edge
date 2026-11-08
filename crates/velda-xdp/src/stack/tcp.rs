@@ -20,8 +20,9 @@
 //! on recyclable pre-allocated slabs. Malicious or uncompleted SYNs are discarded in nanoseconds
 //! without allocating system RAM or impacting the kernel.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
+
+use rustc_hash::FxHashMap;
 
 use crate::error::{Result, XdpError};
 
@@ -112,15 +113,50 @@ pub struct TcpSegment<'a> {
 }
 
 /// 4-tuple key uniquely identifying a bidirectional TCP connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpConnectionKey {
     pub client: SocketAddr,
     pub server: SocketAddr,
 }
 
 impl TcpConnectionKey {
+    #[inline]
     pub fn new(client: SocketAddr, server: SocketAddr) -> Self {
         Self { client, server }
+    }
+}
+
+impl std::hash::Hash for TcpConnectionKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match (&self.client, &self.server) {
+            (SocketAddr::V4(c), SocketAddr::V4(s)) => {
+                // Packed 12-byte IPv4 4-tuple hashing:
+                // Evaluates two 32-bit IPs packed into a 64-bit integer, followed by
+                // two 16-bit ports packed into a 32-bit integer.
+                // Dispatches directly into FxHasher (2 multiplies, 0 SipHash state rounds).
+                let c_ip = u32::from_ne_bytes(c.ip().octets());
+                let s_ip = u32::from_ne_bytes(s.ip().octets());
+                let ips = (c_ip as u64) | ((s_ip as u64) << 32);
+                let ports = (c.port() as u32) | ((s.port() as u32) << 16);
+                state.write_u64(ips);
+                state.write_u32(ports);
+            }
+            (c, s) => {
+                // Generic fallback for IPv6 / mixed sockets
+                state.write_u8(1);
+                match c.ip() {
+                    std::net::IpAddr::V4(ip) => state.write_u32(u32::from_ne_bytes(ip.octets())),
+                    std::net::IpAddr::V6(ip) => state.write(&ip.octets()),
+                }
+                state.write_u16(c.port());
+                match s.ip() {
+                    std::net::IpAddr::V4(ip) => state.write_u32(u32::from_ne_bytes(ip.octets())),
+                    std::net::IpAddr::V6(ip) => state.write(&ip.octets()),
+                }
+                state.write_u16(s.port());
+            }
+        }
     }
 }
 
@@ -221,7 +257,7 @@ impl TcpConnection {
 
 /// Thread-local lock-free connection table managing active AF_XDP TCP streams on one core.
 pub struct TcpConnectionTable {
-    connections: HashMap<TcpConnectionKey, TcpConnection>,
+    connections: FxHashMap<TcpConnectionKey, TcpConnection>,
 }
 
 impl Default for TcpConnectionTable {
@@ -234,7 +270,7 @@ impl TcpConnectionTable {
     /// Creates an empty connection table for this worker core.
     pub fn new() -> Self {
         Self {
-            connections: HashMap::with_capacity(1024),
+            connections: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
         }
     }
 
@@ -382,5 +418,68 @@ mod tests {
         // Verify accumulated stream data
         let stream_data = conn.drain_rx_stream();
         assert_eq!(stream_data, http_payload);
+    }
+
+    #[test]
+    fn test_tcp_connection_key_packed_hashing() {
+        use rustc_hash::FxHasher;
+        use std::hash::{Hash, Hasher};
+
+        let client1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345);
+        let server1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80);
+        let key1 = TcpConnectionKey::new(client1, server1);
+
+        let client2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345);
+        let server2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80);
+        let key2 = TcpConnectionKey::new(client2, server2);
+
+        // Identical keys produce identical hashes
+        let hash_key = |k: &TcpConnectionKey| {
+            let mut h = FxHasher::default();
+            k.hash(&mut h);
+            h.finish()
+        };
+
+        assert_eq!(hash_key(&key1), hash_key(&key2));
+
+        // Different client port produces distinct hash
+        let key_diff_cport = TcpConnectionKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12346),
+            server1,
+        );
+        assert_ne!(hash_key(&key1), hash_key(&key_diff_cport));
+
+        // Different server port produces distinct hash
+        let key_diff_sport = TcpConnectionKey::new(
+            client1,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+        );
+        assert_ne!(hash_key(&key1), hash_key(&key_diff_sport));
+
+        // Different IP produces distinct hash
+        let key_diff_ip = TcpConnectionKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)), 12345),
+            server1,
+        );
+        assert_ne!(hash_key(&key1), hash_key(&key_diff_ip));
+
+        // IPv6 key hashing works consistently
+        use std::net::Ipv6Addr;
+        let v6_client = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 5000);
+        let v6_server = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080);
+        let v6_key1 = TcpConnectionKey::new(v6_client, v6_server);
+        let v6_key2 = TcpConnectionKey::new(v6_client, v6_server);
+        assert_eq!(hash_key(&v6_key1), hash_key(&v6_key2));
+
+        // TcpConnectionTable lookup and removal
+        let mut table = TcpConnectionTable::new();
+        table.get_or_create(key1);
+        table.get_or_create(key_diff_cport);
+        assert_eq!(table.active_connections(), 2);
+        assert!(table.get_mut(&key1).is_some());
+        assert!(table.get_mut(&key2).is_some()); // key2 == key1
+        assert!(table.remove(&key1).is_some());
+        assert_eq!(table.active_connections(), 1);
+        assert!(table.get_mut(&key1).is_none());
     }
 }

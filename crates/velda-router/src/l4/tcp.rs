@@ -5,70 +5,55 @@
 //! or L7 framing constructs. Maintains dedicated, lock-free $O(1)$ listener resolution.
 
 use rustc_hash::FxHashMap;
-use velda_core::{RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId, UpstreamId};
 
 use crate::error::RouterError;
 
-/// Concrete compiled Layer 4 TCP routing rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Concrete compiled Layer 4 TCP routing rule (12 bytes, `Copy`, zero heap strings).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpRoute {
     /// Unique identifier of this route.
     pub id: RouteId,
     /// Ingress listener identifier this route attaches to.
-    pub listener_id: String,
+    pub listener_id: ListenerId,
     /// Logical upstream destination for forwarding traffic.
     pub upstream_id: UpstreamId,
-    /// Upstream target name as declared in configuration.
-    pub upstream_name: String,
-    /// Plugin hook identifiers associated with this route.
-    pub plugins: Vec<String>,
 }
 
 impl TcpRoute {
     /// Creates a new L4 TCP route rule.
-    pub fn new(
-        id: RouteId,
-        listener_id: impl Into<String>,
-        upstream_id: UpstreamId,
-        upstream_name: impl Into<String>,
-    ) -> Self {
+    #[inline]
+    pub fn new(id: RouteId, listener_id: impl Into<ListenerId>, upstream_id: UpstreamId) -> Self {
         Self {
             id,
             listener_id: listener_id.into(),
             upstream_id,
-            upstream_name: upstream_name.into(),
-            plugins: Vec::new(),
         }
-    }
-
-    /// Attaches plugin identifiers to this route.
-    pub fn with_plugins(mut self, plugins: Vec<String>) -> Self {
-        self.plugins = plugins;
-        self
     }
 }
 
 /// High-performance, in-memory L4 TCP route lookup table.
 ///
-/// Provides zero-allocation $O(1)$ route resolution from `listener_id` to [`TcpRoute`] via [`FxHashMap`].
+/// Provides zero-allocation $O(1)$ route resolution from [`ListenerId`] to [`TcpRoute`] via [`FxHashMap`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TcpRouter {
-    listeners: FxHashMap<String, TcpRoute>,
+    listeners: FxHashMap<ListenerId, TcpRoute>,
 }
 
 impl TcpRouter {
     /// Builds a new [`TcpRouter`] from a list of compiled [`TcpRoute`] rules.
     pub fn new(routes: impl IntoIterator<Item = TcpRoute>) -> Result<Self, RouterError> {
-        let mut listeners: FxHashMap<String, TcpRoute> = FxHashMap::default();
+        let mut listeners: FxHashMap<ListenerId, TcpRoute> = FxHashMap::default();
 
         for r in routes {
             if listeners.contains_key(&r.listener_id) {
                 return Err(RouterError::DuplicateRoute {
-                    listener: r.listener_id,
+                    listener: r.listener_id.to_string(),
                     protocol: "Tcp".to_string(),
                 });
             }
-            listeners.insert(r.listener_id.clone(), r);
+            listeners.insert(r.listener_id, r);
         }
 
         Ok(Self { listeners })
@@ -76,8 +61,8 @@ impl TcpRouter {
 
     /// Resolves a TCP route for an incoming connection on a listener.
     #[inline]
-    pub fn route(&self, listener_id: &str) -> Option<&TcpRoute> {
-        self.listeners.get(listener_id)
+    pub fn route(&self, listener_id: impl Into<ListenerId>) -> Option<&TcpRoute> {
+        self.listeners.get(&listener_id.into())
     }
 
     /// Returns the total number of configured TCP routes.
@@ -100,18 +85,8 @@ mod tests {
     #[test]
     fn test_tcp_router_lookup() {
         let routes = vec![
-            TcpRoute::new(
-                RouteId::new(1),
-                "postgres-in",
-                UpstreamId::new(10),
-                "postgres-backend",
-            ),
-            TcpRoute::new(
-                RouteId::new(2),
-                "redis-in",
-                UpstreamId::new(20),
-                "redis-backend",
-            ),
+            TcpRoute::new(RouteId::new(1), "postgres-in", UpstreamId::new(10)),
+            TcpRoute::new(RouteId::new(2), "redis-in", UpstreamId::new(20)),
         ];
 
         let router = TcpRouter::new(routes).unwrap();
@@ -120,11 +95,11 @@ mod tests {
 
         let r1 = router.route("postgres-in").unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_name, "postgres-backend");
+        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         let r2 = router.route("redis-in").unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_name, "redis-backend");
+        assert_eq!(r2.upstream_id, UpstreamId::new(20));
 
         assert!(router.route("unknown").is_none());
     }
@@ -132,8 +107,8 @@ mod tests {
     #[test]
     fn test_tcp_router_duplicate_fails() {
         let routes = vec![
-            TcpRoute::new(RouteId::new(1), "redis", UpstreamId::new(10), "r1"),
-            TcpRoute::new(RouteId::new(2), "redis", UpstreamId::new(20), "r2"),
+            TcpRoute::new(RouteId::new(1), "redis", UpstreamId::new(10)),
+            TcpRoute::new(RouteId::new(2), "redis", UpstreamId::new(20)),
         ];
 
         let err = TcpRouter::new(routes).unwrap_err();

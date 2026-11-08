@@ -17,7 +17,6 @@
 //! - **Protocol Isolation (Rule 2.7)**: Restricted strictly to `SupportedProtocols::GRPC`.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -268,7 +267,11 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
     /// 3. Zero-Division Delay: Pre-computed `self.delay_dur` used directly.
     /// 4. Compact Abort: Pre-compiled 3-slot Trailers-Only response cloned with minimal footprint.
     #[inline]
-    fn on_upstream_request(&self, _req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        _req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // Step 1: Single-cycle fast-path bypass when fault injection is inactive
         if self.combined_mask == 0 {
             return Action::Continue;
@@ -354,7 +357,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let mut target = velda_core::UpstreamId::from("grpc_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -378,7 +381,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let mut target = velda_core::UpstreamId::from("grpc_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -412,7 +415,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let mut target = velda_core::UpstreamId::from("grpc_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -442,7 +445,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("grpc_upstream");
+        let mut target = velda_core::UpstreamId::from("grpc_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }

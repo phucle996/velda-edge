@@ -259,13 +259,12 @@ pub async fn run_http2_loop<IO>(
 
                     consecutive_not_founds = 0;
 
-                    let Some(upstream_target) =
-                        rt.upstreams.http.get(&route.upstream_name).cloned()
+                    let Some(upstream_target) = rt.upstreams.http.get(route.upstream_id).cloned()
                     else {
                         tracing::error!(
                             listener = %meta.listener_id,
                             route = %route.id,
-                            upstream = %route.upstream_name,
+                            upstream = %route.upstream_id,
                             "No healthy backend endpoints available for HTTP upstream"
                         );
                         if !receiver.is_end_stream() {
@@ -295,7 +294,7 @@ pub async fn run_http2_loop<IO>(
                     if overload_lvl.is_shedding() {
                         tracing::warn!(
                             route = %route.id,
-                            upstream = %route.upstream_name,
+                            upstream = %route.upstream_id,
                             overload = ?overload_lvl,
                             "Shedding HTTP/2 request due to memory saturation"
                         );
@@ -328,7 +327,7 @@ pub async fn run_http2_loop<IO>(
                         meta: Arc::clone(&meta),
                         config,
                         default_upstream: upstream_target,
-                        default_upstream_name: Arc::from(route.upstream_name.as_str()),
+                        default_upstream_id: route.upstream_id,
                         http_upstreams: Arc::clone(&rt.upstreams.http),
                         plan: rt.plugins.get_plan(route.id).clone(),
                         request_id,
@@ -375,7 +374,7 @@ struct Http2StreamContext {
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     default_upstream: Arc<HttpUpstream>,
-    default_upstream_name: Arc<str>,
+    default_upstream_id: velda_core::UpstreamId,
     http_upstreams: Arc<crate::upstream::SubUpstreamTable<HttpUpstream>>,
     plan: Arc<RoutePluginPlan>,
     request_id: velda_core::RequestId,
@@ -393,12 +392,12 @@ async fn serve_http2_stream(
         meta,
         config,
         default_upstream,
-        default_upstream_name,
+        default_upstream_id,
         http_upstreams,
         plan,
         request_id,
     } = ctx;
-    let mut target_upstream: Arc<str> = Arc::clone(&default_upstream_name);
+    let mut target_upstream = default_upstream_id;
 
     // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
     // directly from downstream connection metadata BEFORE pre_route and pre_upstream plugins.
@@ -575,9 +574,9 @@ async fn serve_http2_stream(
         }
     }
 
-    let upstream_target = if target_upstream.as_ref() == default_upstream_name.as_ref() {
+    let upstream_target = if target_upstream == default_upstream_id {
         default_upstream
-    } else if let Some(target) = http_upstreams.get(target_upstream.as_ref()) {
+    } else if let Some(target) = http_upstreams.get(target_upstream) {
         target.clone()
     } else {
         tracing::error!(
@@ -834,14 +833,15 @@ mod tests {
     #[test]
     fn test_h2_canary_target_missing_resolution() {
         use rustc_hash::FxHashMap;
-        let default_upstream_name: Arc<str> = Arc::from("main_upstream");
-        let target_upstream: Arc<str> = Arc::from("canary_v2_upstream");
+        let default_upstream_id = velda_core::UpstreamId::new(1);
+        let target_upstream = velda_core::UpstreamId::new(2);
 
-        let http_upstreams: FxHashMap<String, Arc<HttpUpstream>> = FxHashMap::default();
+        let http_upstreams: FxHashMap<velda_core::UpstreamId, Arc<HttpUpstream>> =
+            FxHashMap::default();
 
-        let resolved = if target_upstream.as_ref() == default_upstream_name.as_ref() {
+        let resolved = if target_upstream == default_upstream_id {
             Some("default")
-        } else if http_upstreams.contains_key(target_upstream.as_ref()) {
+        } else if http_upstreams.contains_key(&target_upstream) {
             Some("target")
         } else {
             None // Must reject with 503, never fallback to default!

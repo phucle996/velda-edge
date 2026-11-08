@@ -34,6 +34,81 @@ struct SwrrShard {
     mutex: Mutex<SwrrState>,
 }
 
+/// Function pointer signature for Smooth Weighted Round-Robin weight update and max selection.
+pub type SwrrUpdateFn = fn(&mut [i64], &[Endpoint]) -> usize;
+
+/// Scalar unrolled loop for small workloads (<= 4 endpoints) executing in GPRs.
+#[inline]
+pub fn swrr_update_scalar(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
+    let mut best_idx = 0;
+    let mut max_weight = i64::MIN;
+    for (i, ep) in endpoints.iter().enumerate() {
+        current_weights[i] += ep.weight as i64;
+        if current_weights[i] > max_weight {
+            max_weight = current_weights[i];
+            best_idx = i;
+        }
+    }
+    best_idx
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn swrr_update_avx2(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
+    use std::arch::x86_64::*;
+    let len = endpoints.len();
+    if len <= 4 {
+        return swrr_update_scalar(current_weights, endpoints);
+    }
+
+    let mut weights_raw = [0i64; 64];
+    let count = len.min(64);
+    for i in 0..count {
+        weights_raw[i] = endpoints[i].weight as i64;
+    }
+
+    let chunks = count / 4;
+    let cw_ptr = current_weights.as_mut_ptr();
+    let w_ptr = weights_raw.as_ptr();
+
+    unsafe {
+        for i in 0..chunks {
+            let cw_vec = _mm256_loadu_si256(cw_ptr.add(i * 4) as *const __m256i);
+            let w_vec = _mm256_loadu_si256(w_ptr.add(i * 4) as *const __m256i);
+            let sum_vec = _mm256_add_epi64(cw_vec, w_vec);
+            _mm256_storeu_si256(cw_ptr.add(i * 4) as *mut __m256i, sum_vec);
+        }
+
+        let remainder_start = chunks * 4;
+        for i in remainder_start..count {
+            *cw_ptr.add(i) += *w_ptr.add(i);
+        }
+
+        let mut best_idx = 0;
+        let mut max_weight = *cw_ptr;
+        for i in 1..count {
+            let w = *cw_ptr.add(i);
+            if w > max_weight {
+                max_weight = w;
+                best_idx = i;
+            }
+        }
+        best_idx
+    }
+}
+
+/// Vector-accelerated SWRR weight accumulator with runtime CPU feature fallback.
+#[inline]
+pub fn swrr_update_vector(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return unsafe { swrr_update_avx2(current_weights, endpoints) };
+        }
+    }
+    swrr_update_scalar(current_weights, endpoints)
+}
+
 /// Smooth Weighted Round Robin balancer with sharded state.
 ///
 /// Weight ranges from 1 to 100 per endpoint.
@@ -41,6 +116,7 @@ pub struct WeightedRoundRobin {
     // Thread-sharded Mutex array padded to 64-byte cache lines completely eliminates
     // cross-core false sharing and lock contention across worker threads.
     shards: Box<[SwrrShard]>,
+    update_fn: SwrrUpdateFn,
 }
 
 #[derive(Default)]
@@ -57,12 +133,20 @@ impl Default for WeightedRoundRobin {
 impl WeightedRoundRobin {
     /// Creates a new weighted round-robin balancer reading worker concurrency from RAM.
     pub fn new() -> Self {
-        Self::with_workers(velda_core::global_hardware_topology().worker_threads)
+        Self::for_workload(velda_core::global_hardware_topology().worker_threads, 0)
     }
 
     /// Creates a new weighted round-robin balancer with explicit worker count
     /// injected by the caller (`velda-edge` supervisor).
     pub fn with_workers(workers: usize) -> Self {
+        Self::for_workload(workers, 0)
+    }
+
+    /// Creates a new weighted round-robin balancer with workload-adaptive register binding.
+    ///
+    /// - `endpoint_count <= 4`: Bound to scalar unrolled loop in GPRs.
+    /// - `endpoint_count > 4`: Bound to 256-bit AVX2 vector SIMD weight accumulator.
+    pub fn for_workload(workers: usize, endpoint_count: usize) -> Self {
         let count = workers.max(1).next_power_of_two();
         let shards = (0..count)
             .map(|_| SwrrShard {
@@ -70,7 +154,26 @@ impl WeightedRoundRobin {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { shards }
+
+        let update_fn = if endpoint_count != 0 && endpoint_count <= 4 {
+            swrr_update_scalar
+        } else {
+            use velda_core::hardware::RegisterWidth;
+            let caps = velda_core::global_hardware_topology()
+                .cpu
+                .register_capabilities;
+            let width = if endpoint_count == 0 {
+                caps.select_for_workload(RegisterWidth::Bits256)
+            } else {
+                caps.select_for_workload_size(endpoint_count)
+            };
+            match width {
+                RegisterWidth::Bits256 => swrr_update_vector,
+                _ => swrr_update_scalar,
+            }
+        };
+
+        Self { shards, update_fn }
     }
 }
 
@@ -101,17 +204,7 @@ impl LoadBalancer for WeightedRoundRobin {
             return Some(FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed) % endpoints.len());
         }
 
-        let mut best_idx = 0;
-        let mut max_weight = i64::MIN;
-
-        for (i, ep) in endpoints.iter().enumerate() {
-            lock.current_weights[i] += ep.weight as i64;
-            if lock.current_weights[i] > max_weight {
-                max_weight = lock.current_weights[i];
-                best_idx = i;
-            }
-        }
-
+        let best_idx = (self.update_fn)(&mut lock.current_weights, endpoints);
         lock.current_weights[best_idx] -= total_weight;
         Some(best_idx)
     }

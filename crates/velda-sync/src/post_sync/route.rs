@@ -116,6 +116,26 @@ pub struct RouteConfig {
     pub plugins: Vec<String>,
 }
 
+impl RouteConfig {
+    /// Returns the deterministic 32-bit `RouteId` compiled from `self.id`.
+    #[inline]
+    pub const fn route_id(&self) -> velda_core::RouteId {
+        velda_core::RouteId::from_name(self.id.as_str())
+    }
+
+    /// Returns the deterministic 32-bit `ListenerId` compiled from `self.listener`.
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        velda_core::ListenerId::from_name(self.listener.as_str())
+    }
+
+    /// Returns the deterministic 32-bit `UpstreamId` compiled from `self.upstream`.
+    #[inline]
+    pub const fn upstream_id(&self) -> velda_core::UpstreamId {
+        velda_core::UpstreamId::from_name(self.upstream.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct IngestRoutesFile {
     pub schema_version: u32,
@@ -265,6 +285,8 @@ fn trim_in_place(s: &mut String) {
 /// Validates route configuration rules locally without silent fallbacks.
 pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(routes.len());
+    let mut seen_hash_ids: std::collections::HashMap<velda_core::RouteId, &str> =
+        std::collections::HashMap::with_capacity(routes.len());
 
     for route in routes {
         trim_in_place(&mut route.id);
@@ -284,6 +306,17 @@ pub fn validate_routes(routes: &mut [RouteConfig]) -> Result<(), SyncError> {
             return Err(SyncError::Validation {
                 domain: "routes".into(),
                 reason: format!("Duplicate route ID '{}'", route.id),
+            });
+        }
+
+        let route_hash_id = route.route_id();
+        if let Some(prev) = seen_hash_ids.insert(route_hash_id, route.id.as_str()) {
+            return Err(SyncError::Validation {
+                domain: "routes".into(),
+                reason: format!(
+                    "RouteId u32 hash collision ({route_hash_id}) between '{}' and '{prev}'",
+                    route.id
+                ),
             });
         }
 

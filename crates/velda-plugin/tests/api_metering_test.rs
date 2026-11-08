@@ -55,7 +55,7 @@ fn test_api_metering_free_tier_rejection_402() {
         distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-1", config));
-    let mut target = Arc::from("upstream-ai");
+    let mut target = velda_core::UpstreamId::from("upstream-ai");
 
     // Request 1: Allowed, remaining = 1
     let mut h1 = HeaderMap::new();
@@ -145,7 +145,7 @@ fn test_api_metering_pro_tier_rejection_429() {
         distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-2", config));
-    let mut target = Arc::from("upstream-ai");
+    let mut target = velda_core::UpstreamId::from("upstream-ai");
 
     // Request 1: Allowed
     let mut h1 = HeaderMap::new();
@@ -214,7 +214,7 @@ fn test_api_metering_enterprise_overage_passthrough() {
         distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-3", config));
-    let mut target = Arc::from("upstream-ai");
+    let mut target = velda_core::UpstreamId::from("upstream-ai");
 
     // Request 1: Consumes the 100_000 credit -> balance = 0
     let mut h1 = HeaderMap::new();
@@ -265,7 +265,7 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
         distributed: None,
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-credits-test", config));
-    let mut target = Arc::from("upstream-ai");
+    let mut target = velda_core::UpstreamId::from("upstream-ai");
 
     // Request 1: Consumes 500_000, remaining balance = 500_000
     let mut h1 = HeaderMap::new();

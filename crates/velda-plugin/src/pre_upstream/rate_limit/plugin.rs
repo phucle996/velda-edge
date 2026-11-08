@@ -9,7 +9,6 @@
 
 use http::HeaderName;
 use http::header::RETRY_AFTER;
-use std::sync::Arc;
 use velda_core::{Action, L7Request, RejectReason};
 
 use super::algorithm::{RateLimitAlgorithm, ShardedState};
@@ -301,7 +300,11 @@ impl PreUpstreamPlugin for RateLimitPlugin {
     ///
     /// # Performance Contract
     /// Executes 100% in-memory with lock-striped sharding. Zero Network I/O.
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // Optimization: Zero-allocation direct hashing into FxHasher (eliminating heap String allocations on hot path)
         let key_hash = self
             .config
@@ -395,7 +398,7 @@ mod tests {
 
         let mut req = make_test_request(HeaderMap::new());
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
 
         // 1st request -> PASS
         assert!(matches!(
@@ -433,7 +436,7 @@ mod tests {
         };
         let plugin = RateLimitPlugin::with_config("rate-fw", config);
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
 
         // 1st request -> PASS
         assert!(matches!(
@@ -519,7 +522,7 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         // 1st request -> PASS via memory fallback
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
@@ -547,7 +550,7 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         // Should continuously pass through (fail-open)
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),

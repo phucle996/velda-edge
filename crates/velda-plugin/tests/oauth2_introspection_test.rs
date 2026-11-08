@@ -197,7 +197,7 @@ fn test_oauth2_introspection_e2e_valid_header_and_cache_hit() {
         "reject",
         true,
     );
-    let mut target = Arc::from("orders-upstream");
+    let mut target = velda_core::UpstreamId::from("orders-upstream");
 
     // 1st Request: Cache Miss -> calls IdP
     let mut req1 = test_req(
@@ -233,7 +233,7 @@ fn test_oauth2_introspection_e2e_valid_header_and_cache_hit() {
 fn test_oauth2_introspection_e2e_authorization_bearer_extraction() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", true);
-    let mut target = Arc::from("profile-upstream");
+    let mut target = velda_core::UpstreamId::from("profile-upstream");
 
     let mut req = test_req(
         Method::GET,
@@ -250,7 +250,7 @@ fn test_oauth2_introspection_e2e_authorization_bearer_extraction() {
 fn test_oauth2_introspection_e2e_cookie_extraction() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", false);
-    let mut target = Arc::from("profile-upstream");
+    let mut target = velda_core::UpstreamId::from("profile-upstream");
 
     let mut req = test_req(
         Method::GET,
@@ -269,7 +269,7 @@ fn test_oauth2_introspection_e2e_cookie_extraction() {
 fn test_oauth2_introspection_e2e_query_param_extraction() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", false);
-    let mut target = Arc::from("ws-upstream");
+    let mut target = velda_core::UpstreamId::from("ws-upstream");
 
     let mut req = test_req(
         Method::GET,
@@ -285,7 +285,7 @@ fn test_oauth2_introspection_e2e_query_param_extraction() {
 fn test_oauth2_introspection_e2e_missing_token_rejected() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", true);
-    let mut target = Arc::from("secure-upstream");
+    let mut target = velda_core::UpstreamId::from("secure-upstream");
 
     let mut req = test_req(Method::GET, "/v1/secure", &[]);
     let action = plugin.on_upstream_request(&mut req, &mut target);
@@ -300,7 +300,7 @@ fn test_oauth2_introspection_e2e_missing_token_rejected() {
 fn test_oauth2_introspection_e2e_revoked_token_negative_caching() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", true);
-    let mut target = Arc::from("orders-upstream");
+    let mut target = velda_core::UpstreamId::from("orders-upstream");
 
     let mut req1 = test_req(
         Method::GET,
@@ -345,7 +345,7 @@ fn test_oauth2_introspection_e2e_insufficient_scopes_forbidden() {
         "reject",
         true,
     );
-    let mut target = Arc::from("orders-upstream");
+    let mut target = velda_core::UpstreamId::from("orders-upstream");
 
     let mut req = test_req(
         Method::POST,
@@ -364,7 +364,7 @@ fn test_oauth2_introspection_e2e_insufficient_scopes_forbidden() {
 fn test_oauth2_introspection_e2e_expired_token_rejected() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec![], "reject", true);
-    let mut target = Arc::from("data-upstream");
+    let mut target = velda_core::UpstreamId::from("data-upstream");
 
     let mut req = test_req(
         Method::GET,
@@ -382,7 +382,7 @@ fn test_oauth2_introspection_e2e_expired_token_rejected() {
 #[test]
 fn test_oauth2_introspection_e2e_idp_down_fallback_behavior() {
     let dummy_addr: SocketAddr = "127.0.0.1:49151".parse().unwrap();
-    let mut target = Arc::from("upstream");
+    let mut target = velda_core::UpstreamId::from("upstream");
 
     // 1. Fail-Closed: fallback_behavior = "reject"
     let plugin_reject = build_test_plugin(dummy_addr, vec![], "reject", true);
@@ -409,7 +409,7 @@ fn test_oauth2_introspection_e2e_idp_down_fallback_behavior() {
 fn test_oauth2_introspection_e2e_anti_header_spoofing() {
     let idp = spawn_mock_idp_server();
     let plugin = build_test_plugin(idp.addr, vec!["read".to_string()], "reject", true);
-    let mut target = Arc::from("secure-upstream");
+    let mut target = velda_core::UpstreamId::from("secure-upstream");
 
     // Client maliciously supplies forged claims in headers
     let mut req = test_req(

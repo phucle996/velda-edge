@@ -48,6 +48,7 @@ logs/
 .DS_Store
 Thumbs.db
 .idea/
+.agents/skills/
 .vscode/
 *.swp
 *.swo

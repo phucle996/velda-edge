@@ -73,6 +73,14 @@ pub struct UpstreamConfig {
     pub buffer: Option<UpstreamBufferConfig>,
 }
 
+impl UpstreamConfig {
+    /// Returns the deterministic 32-bit `UpstreamId` compiled from `self.id`.
+    #[inline]
+    pub const fn upstream_id(&self) -> velda_core::UpstreamId {
+        velda_core::UpstreamId::from_name(self.id.as_str())
+    }
+}
+
 /// Upstream reverse proxy buffering and regulation configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UpstreamBufferConfig {
@@ -242,6 +250,8 @@ where
     F: Fn() -> velda_core::hardware::RdmaProfile,
 {
     let mut seen_ids = HashSet::with_capacity(upstreams.len());
+    let mut seen_hash_ids: std::collections::HashMap<velda_core::UpstreamId, &str> =
+        std::collections::HashMap::with_capacity(upstreams.len());
     let mut host_rdma_profile: Option<velda_core::hardware::RdmaProfile> = None;
 
     for upstream in upstreams {
@@ -264,6 +274,17 @@ where
             return Err(SyncError::Validation {
                 domain: "upstreams".into(),
                 reason: format!("Duplicate upstream ID '{}'", upstream.id),
+            });
+        }
+
+        let upstream_hash_id = upstream.upstream_id();
+        if let Some(prev) = seen_hash_ids.insert(upstream_hash_id, upstream.id.as_str()) {
+            return Err(SyncError::Validation {
+                domain: "upstreams".into(),
+                reason: format!(
+                    "UpstreamId u32 hash collision ({upstream_hash_id}) between '{}' and '{prev}'",
+                    upstream.id
+                ),
             });
         }
 

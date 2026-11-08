@@ -83,6 +83,15 @@ impl IngressBinding {
         }
     }
 
+    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    #[inline]
+    pub const fn listener_id(&self) -> velda_core::ListenerId {
+        match self {
+            Self::Tcp(b) | Self::XdpTcp(b, _) => b.listener_id,
+            Self::Udp(b) | Self::XdpUdp(b, _) => b.listener_id,
+        }
+    }
+
     /// Returns the local address to bind.
     #[inline]
     pub fn addr(&self) -> SocketAddr {

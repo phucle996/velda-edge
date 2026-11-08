@@ -307,7 +307,11 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         SupportedProtocols::ALL_L7
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _upstream_target: &mut velda_core::UpstreamId,
+    ) -> Action {
         let (account_hash, tier_name) = resolve_account_and_tier(
             req,
             &self.config.account_headers,

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use velda_core::{Action, L7Request, L7Response};
+use velda_core::{Action, L7Request, L7Response, UpstreamId};
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::udp::GrpcUdpPipeStrategy;
 use velda_grpc::udp::server::GrpcUdpServerStream;
@@ -129,7 +129,7 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 
-    let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
+    let mut target_upstream: UpstreamId = route.upstream_id;
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -215,7 +215,7 @@ pub async fn process_grpc_udp_request(
         }
     }
 
-    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream.as_ref()) else {
+    let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream) else {
         return GrpcStatus::Unavailable.to_l7_response(Some("upstream not configured"));
     };
 
@@ -277,7 +277,7 @@ pub async fn process_grpc_udp_request(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_name,
+                upstream = %route.upstream_id,
                 "gRPC over UDP stream pipe terminated with error"
             );
             GrpcStatus::Unavailable.to_l7_response(Some("upstream unavailable"))

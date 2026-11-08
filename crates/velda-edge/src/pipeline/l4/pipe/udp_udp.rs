@@ -199,7 +199,7 @@ pub async fn serve(
     let is_unidirectional = route.is_unidirectional();
     let udp_idle_timeout = route.udp_idle_timeout;
     let route_id = route.id;
-    let upstream_name = &route.upstream_name;
+    let upstream_id = route.upstream_id;
     // Step 1: Resolve physical backend target endpoint using load balancer context.
     // Uses token hash affinity if available; falls back to client IP affinity.
     let selection_ctx = match token {
@@ -211,7 +211,7 @@ pub async fn serve(
         tracing::error!(
             listener = %key.listener_id,
             route = %route_id,
-            upstream = %upstream_name,
+            upstream = %upstream_id,
             peer = %client_addr,
             "No backend endpoints available for L4 UDP upstream; dropping datagram"
         );

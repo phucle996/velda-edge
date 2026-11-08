@@ -130,7 +130,7 @@ pub fn build_plugin_table(
         })?;
 
         if !plan.is_empty() {
-            let route_id = RouteId::new(crate::runtime::router::hash_id_to_u32(&route.id));
+            let route_id = route.route_id();
             route_plans.insert(route_id, Arc::new(plan));
         }
     }

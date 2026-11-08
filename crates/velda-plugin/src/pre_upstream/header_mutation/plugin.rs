@@ -7,8 +7,6 @@
 //! - Evaluates and interpolates dynamic runtime variables (`$client_ip`, `$request_id`, etc.).
 //! - Appends values to existing headers (e.g. multi-value `X-Forwarded-For`).
 
-use std::sync::Arc;
-
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, HeaderWorkspace, L7Request};
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -347,7 +345,11 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         &self.id
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // Step 1: Strip RFC Hop-by-hop headers if configured
         if self.config.strip_hop_by_hop {
             strip_hop_by_hop_headers(&mut req.headers);
@@ -648,7 +650,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         plugin.on_upstream_request(&mut req, &mut target);
 
         assert!(!req.headers.contains_key("x-legacy-token"));
@@ -711,7 +713,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("billing-backend-cluster");
+        let mut target = velda_core::UpstreamId::from("billing-backend-cluster");
         plugin.on_upstream_request(&mut req, &mut target);
 
         // Verify arithmetic workspace state before rendering
@@ -768,7 +770,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = Arc::from("default-upstream");
+        let mut target = velda_core::UpstreamId::from("default-upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));

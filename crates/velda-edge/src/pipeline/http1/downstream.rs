@@ -22,7 +22,7 @@ use super::pipe;
 use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
-use velda_core::{Action, L7Request};
+use velda_core::{Action, L7Request, UpstreamId};
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 use velda_observability::{
@@ -280,7 +280,7 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
-        let mut target_upstream: Arc<str> = Arc::from(route.upstream_name.as_str());
+        let mut target_upstream: UpstreamId = route.upstream_id;
 
         let plan = rt.plugins.get_plan(route.id);
         if !plan.is_empty() {
@@ -478,7 +478,7 @@ pub async fn run_http1_loop<IO>(
             }
         }
 
-        let Some(upstream_target) = rt.upstreams.http.get(target_upstream.as_ref()) else {
+        let Some(upstream_target) = rt.upstreams.http.get(target_upstream) else {
             tracing::error!(
                 listener = %meta.listener_id,
                 route = %route.id,
@@ -677,7 +677,7 @@ pub async fn run_http1_loop<IO>(
         if let Err(e) = pipe_result {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_name,
+                upstream = %route.upstream_id,
                 "HTTP/1.1 upstream stream pipe failed"
             );
             conn.mark_close();

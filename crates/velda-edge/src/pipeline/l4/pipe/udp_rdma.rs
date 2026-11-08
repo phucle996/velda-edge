@@ -57,11 +57,11 @@ pub async fn serve(
     let is_unidirectional = route.is_unidirectional();
     let udp_idle_timeout = route.udp_idle_timeout;
     let route_id = route.id;
-    let upstream_name = &route.upstream_name;
+    let upstream_id = route.upstream_id;
     tracing::debug!(
         listener = %key.listener_id,
         route = %route_id,
-        upstream = %upstream_name,
+        upstream = %upstream_id,
         peer = %client_addr,
         token = ?token,
         is_unidirectional,
@@ -77,7 +77,7 @@ pub async fn serve(
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    upstream = %upstream_name,
+                    upstream = %upstream_id,
                     peer = %client_addr,
                     "Failed to acquire RDMA channel for unidirectional UDP forwarding"
                 );
@@ -98,7 +98,7 @@ pub async fn serve(
             lease.mark_broken();
             tracing::warn!(
                 error = %e,
-                upstream = %upstream_name,
+                upstream = %upstream_id,
                 peer = %client_addr,
                 "Failed to send unidirectional UDP datagram over RDMA channel"
             );
@@ -136,7 +136,6 @@ pub async fn serve(
     let up_clone = Arc::clone(upstream);
     let unassured_timeout = config.unassured_timeout;
     let idle_timeout = udp_idle_timeout.unwrap_or(DEFAULT_UDP_IDLE_TIMEOUT);
-    let upstream_name_owned = upstream_name.to_string();
 
     // Step 4: Spawn background session worker driving bidirectional UDP <-> RDMA bridging.
     tokio::spawn(async move {
@@ -148,7 +147,7 @@ pub async fn serve(
                 tracing::error!(
                     error = %e,
                     listener = %session_key.listener_id,
-                    upstream = %upstream_name_owned,
+                    upstream = %upstream_id,
                     "Failed to acquire RDMA lease for bidirectional L4 UDP session"
                 );
                 get_udp_session_table().remove(&session_key);
@@ -170,7 +169,7 @@ pub async fn serve(
             tracing::warn!(
                 error = %e,
                 listener = %session_key.listener_id,
-                upstream = %upstream_name_owned,
+                upstream = %upstream_id,
                 "Failed to send initial UDP datagram over RDMA channel"
             );
             lease.mark_broken();
@@ -204,7 +203,7 @@ pub async fn serve(
                                 tracing::warn!(
                                     error = %e,
                                     listener = %session_key.listener_id,
-                                    upstream = %upstream_name_owned,
+                                    upstream = %upstream_id,
                                     "Failed posting RDMA Send Work Request for client datagram"
                                 );
                                 lease.mark_broken();
@@ -226,7 +225,7 @@ pub async fn serve(
                                             tracing::warn!(
                                                 error = %e,
                                                 listener = %session_key.listener_id,
-                                                upstream = %upstream_name_owned,
+                                                upstream = %upstream_id,
                                                 "Failed posting batched RDMA Send Work Request"
                                             );
                                             lease.mark_broken();
@@ -267,7 +266,7 @@ pub async fn serve(
                             tracing::warn!(
                                 error = %e,
                                 listener = %session_key.listener_id,
-                                upstream = %upstream_name_owned,
+                                upstream = %upstream_id,
                                 "RDMA channel receive failure during L4 UDP session"
                             );
                             lease.mark_broken();
@@ -298,7 +297,7 @@ pub async fn serve(
                         let current_peer = *session_peer.read();
                         tracing::debug!(
                             client = %current_peer,
-                            upstream = %upstream_name_owned,
+                            upstream = %upstream_id,
                             assured,
                             "L4 UDP-to-RDMA session timeout elapsed ({limit:?}); closing session"
                         );

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use velda_core::UpstreamId;
 
 use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
@@ -11,10 +12,10 @@ use super::rdma::RdmaUpstream;
 
 /// Pre-compiled single-protocol lookup table providing lock-free O(1) reads.
 ///
-/// Pre-constructed during snapshot build; maps upstream_id -> Arc<T>.
+/// Pre-constructed during snapshot build; maps `UpstreamId` -> `Arc<T>`.
 pub struct SubUpstreamTable<T> {
     /// [PRE-COMPILED]: In-memory mapping of upstream identifiers to protocol processors.
-    entries: FxHashMap<String, Arc<T>>,
+    entries: FxHashMap<UpstreamId, Arc<T>>,
 }
 
 impl<T> Clone for SubUpstreamTable<T> {
@@ -43,14 +44,14 @@ impl<T> std::fmt::Debug for SubUpstreamTable<T> {
 
 impl<T> SubUpstreamTable<T> {
     /// Creates a new protocol sub-table from an owned entry map.
-    pub fn new(entries: FxHashMap<String, Arc<T>>) -> Self {
+    pub fn new(entries: FxHashMap<UpstreamId, Arc<T>>) -> Self {
         Self { entries }
     }
 
     /// Retrieves an upstream processor by identifier.
     #[inline]
-    pub fn get(&self, id: &str) -> Option<&Arc<T>> {
-        self.entries.get(id)
+    pub fn get(&self, id: impl Into<UpstreamId>) -> Option<&Arc<T>> {
+        self.entries.get(&id.into())
     }
 
     /// Returns the number of upstreams in this sub-table.
@@ -224,25 +225,25 @@ impl UpstreamTable {
 
     /// Retrieves an upstream processor in the Raw family.
     #[inline]
-    pub fn get_raw(&self, id: &str) -> Option<&Arc<RawUpstream>> {
+    pub fn get_raw(&self, id: impl Into<UpstreamId>) -> Option<&Arc<RawUpstream>> {
         self.raw.get(id)
     }
 
     /// Retrieves an upstream processor in the HTTP family.
     #[inline]
-    pub fn get_http(&self, id: &str) -> Option<&Arc<HttpUpstream>> {
+    pub fn get_http(&self, id: impl Into<UpstreamId>) -> Option<&Arc<HttpUpstream>> {
         self.http.get(id)
     }
 
     /// Retrieves an upstream processor in the gRPC family.
     #[inline]
-    pub fn get_grpc(&self, id: &str) -> Option<&Arc<GrpcUpstream>> {
+    pub fn get_grpc(&self, id: impl Into<UpstreamId>) -> Option<&Arc<GrpcUpstream>> {
         self.grpc.get(id)
     }
 
     /// Retrieves an upstream processor in the RDMA family.
     #[inline]
-    pub fn get_rdma(&self, id: &str) -> Option<&Arc<RdmaUpstream>> {
+    pub fn get_rdma(&self, id: impl Into<UpstreamId>) -> Option<&Arc<RdmaUpstream>> {
         self.rdma.get(id)
     }
 

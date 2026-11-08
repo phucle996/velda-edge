@@ -1,6 +1,5 @@
 //! Router compilation from route and upstream configurations.
 
-use velda_core::{RouteId, UpstreamId};
 use velda_router::{
     GrpcRoute, Http1Route, Http2Route, Http3Route, Router, RouterBuilder, TcpRoute, UdpRoute,
 };
@@ -9,15 +8,6 @@ use velda_sync::post_sync::route::RouteConfig;
 use velda_sync::post_sync::upstream::UpstreamConfig;
 
 use crate::error::EdgeError;
-
-pub(crate) fn hash_id_to_u32(s: &str) -> u32 {
-    let mut h: u32 = 0x811c9dc5;
-    for b in s.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    h
-}
 
 /// Compiles declarative route, upstream, and listener configurations into a [`Router`] instance.
 pub fn build_router(
@@ -28,11 +18,12 @@ pub fn build_router(
     let mut builder = RouterBuilder::new();
 
     for route in routes {
+        let route_id = route.route_id();
+        let listener_id = route.listener_id();
+        let upstream_id = route.upstream_id();
+
         if route.kind.eq_ignore_ascii_case("l4") {
             let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("tcp");
-
-            let route_id = RouteId::new(hash_id_to_u32(&route.id));
-            let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
 
             // Validate cross-protocol compatibility between L4 route and targeted upstream
             if let Some(up) = upstreams.iter().find(|u| u.id == route.upstream) {
@@ -62,9 +53,7 @@ pub fn build_router(
                             ),
                         });
                     }
-                    let tcp_route =
-                        TcpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
-                            .with_plugins(route.plugins.clone());
+                    let tcp_route = TcpRoute::new(route_id, listener_id, upstream_id);
 
                     builder = builder.add_tcp_route(tcp_route);
                 }
@@ -90,11 +79,9 @@ pub fn build_router(
                         _ => velda_router::UdpSessionAffinity::ClientAddr,
                     };
 
-                    let udp_route =
-                        UdpRoute::new(route_id, &route.listener, upstream_id, &route.upstream)
-                            .with_udp_idle_timeout(udp_idle_timeout)
-                            .with_session_affinity(session_affinity)
-                            .with_plugins(route.plugins.clone());
+                    let udp_route = UdpRoute::new(route_id, listener_id, upstream_id)
+                        .with_udp_idle_timeout(udp_idle_timeout)
+                        .with_session_affinity(session_affinity);
 
                     builder = builder.add_udp_route(udp_route);
                 }
@@ -116,8 +103,6 @@ pub fn build_router(
                     ),
                 });
             }
-            let route_id = RouteId::new(hash_id_to_u32(&route.id));
-            let upstream_id = UpstreamId::new(hash_id_to_u32(&route.upstream));
 
             let protocol_str = match route.match_rule.protocol.as_deref() {
                 Some("grpc") => "grpc",
@@ -173,62 +158,33 @@ pub fn build_router(
 
             match protocol_str {
                 "http" => {
-                    let (http1_route, http2_route) = if let Some(ref exact) = route.match_rule.path
-                    {
-                        (
-                            Http1Route::new_exact(
-                                route_id,
-                                &route.listener,
-                                exact.clone(),
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                            Http2Route::new_exact(
-                                route_id,
-                                &route.listener,
-                                exact.clone(),
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                        )
-                    } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        (
-                            Http1Route::new(
-                                route_id,
-                                &route.listener,
-                                prefix.clone(),
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                            Http2Route::new(
-                                route_id,
-                                &route.listener,
-                                prefix.clone(),
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                        )
-                    } else {
-                        (
-                            Http1Route::new(
-                                route_id,
-                                &route.listener,
-                                "/",
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                            Http2Route::new(
-                                route_id,
-                                &route.listener,
-                                "/",
-                                upstream_id,
-                                &route.upstream,
-                            ),
-                        )
-                    };
-
-                    let mut http1_route = http1_route.with_plugins(route.plugins.clone());
-                    let mut http2_route = http2_route.with_plugins(route.plugins.clone());
+                    let (mut http1_route, mut http2_route) =
+                        if let Some(ref exact) = route.match_rule.path {
+                            (
+                                Http1Route::new_exact(
+                                    route_id,
+                                    listener_id,
+                                    exact.clone(),
+                                    upstream_id,
+                                ),
+                                Http2Route::new_exact(
+                                    route_id,
+                                    listener_id,
+                                    exact.clone(),
+                                    upstream_id,
+                                ),
+                            )
+                        } else if let Some(ref prefix) = route.match_rule.path_prefix {
+                            (
+                                Http1Route::new(route_id, listener_id, prefix.clone(), upstream_id),
+                                Http2Route::new(route_id, listener_id, prefix.clone(), upstream_id),
+                            )
+                        } else {
+                            (
+                                Http1Route::new(route_id, listener_id, "/", upstream_id),
+                                Http2Route::new(route_id, listener_id, "/", upstream_id),
+                            )
+                        };
 
                     if let Some(ref host) = route.match_rule.host {
                         http1_route = http1_route.with_host(host.clone());
@@ -249,14 +205,8 @@ pub fn build_router(
                     let clean = raw_service.strip_prefix('/').unwrap_or(raw_service);
                     let service = clean.strip_suffix('/').unwrap_or(clean);
 
-                    let mut grpc_route = GrpcRoute::new(
-                        route_id,
-                        &route.listener,
-                        service,
-                        upstream_id,
-                        &route.upstream,
-                    )
-                    .with_plugins(route.plugins.clone());
+                    let mut grpc_route =
+                        GrpcRoute::new(route_id, listener_id, service, upstream_id);
 
                     if let Some(ref auth) = route.match_rule.host {
                         grpc_route = grpc_route.with_authority(auth.clone());
@@ -266,31 +216,12 @@ pub fn build_router(
                 }
                 "http1" => {
                     let mut http1_route = if let Some(ref exact) = route.match_rule.path {
-                        Http1Route::new_exact(
-                            route_id,
-                            &route.listener,
-                            exact.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http1Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http1Route::new(
-                            route_id,
-                            &route.listener,
-                            prefix.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http1Route::new(route_id, listener_id, prefix.clone(), upstream_id)
                     } else {
-                        Http1Route::new(
-                            route_id,
-                            &route.listener,
-                            "/",
-                            upstream_id,
-                            &route.upstream,
-                        )
-                    }
-                    .with_plugins(route.plugins.clone());
+                        Http1Route::new(route_id, listener_id, "/", upstream_id)
+                    };
 
                     if let Some(ref host) = route.match_rule.host {
                         http1_route = http1_route.with_host(host.clone());
@@ -300,31 +231,12 @@ pub fn build_router(
                 }
                 "http2" => {
                     let mut http2_route = if let Some(ref exact) = route.match_rule.path {
-                        Http2Route::new_exact(
-                            route_id,
-                            &route.listener,
-                            exact.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http2Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http2Route::new(
-                            route_id,
-                            &route.listener,
-                            prefix.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http2Route::new(route_id, listener_id, prefix.clone(), upstream_id)
                     } else {
-                        Http2Route::new(
-                            route_id,
-                            &route.listener,
-                            "/",
-                            upstream_id,
-                            &route.upstream,
-                        )
-                    }
-                    .with_plugins(route.plugins.clone());
+                        Http2Route::new(route_id, listener_id, "/", upstream_id)
+                    };
 
                     if let Some(ref host) = route.match_rule.host {
                         http2_route = http2_route.with_host(host.clone());
@@ -334,31 +246,12 @@ pub fn build_router(
                 }
                 "http3" => {
                     let mut http3_route = if let Some(ref exact) = route.match_rule.path {
-                        Http3Route::new_exact(
-                            route_id,
-                            &route.listener,
-                            exact.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http3Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http3Route::new(
-                            route_id,
-                            &route.listener,
-                            prefix.clone(),
-                            upstream_id,
-                            &route.upstream,
-                        )
+                        Http3Route::new(route_id, listener_id, prefix.clone(), upstream_id)
                     } else {
-                        Http3Route::new(
-                            route_id,
-                            &route.listener,
-                            "/",
-                            upstream_id,
-                            &route.upstream,
-                        )
-                    }
-                    .with_plugins(route.plugins.clone());
+                        Http3Route::new(route_id, listener_id, "/", upstream_id)
+                    };
 
                     if let Some(ref host) = route.match_rule.host {
                         http3_route = http3_route.with_host(host.clone());
@@ -379,6 +272,7 @@ pub fn build_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_core::{ListenerId, UpstreamId};
     use velda_sync::post_sync::listener::{
         ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
@@ -564,14 +458,13 @@ mod tests {
 
         // Verify L4 TCP route
         let tcp = router.route_tcp("postgres-in").unwrap();
-        assert_eq!(tcp.listener_id, "postgres-in");
-        assert_eq!(tcp.upstream_name, "postgres-backend");
-        assert_eq!(tcp.plugins, vec!["rate-limit"]);
+        assert_eq!(tcp.listener_id, ListenerId::from_name("postgres-in"));
+        assert_eq!(tcp.upstream_id, UpstreamId::from_name("postgres-backend"));
 
         // Verify L4 UDP route
         let udp = router.route_udp("dns-in").unwrap();
-        assert_eq!(udp.listener_id, "dns-in");
-        assert_eq!(udp.upstream_name, "dns-backend");
+        assert_eq!(udp.listener_id, ListenerId::from_name("dns-in"));
+        assert_eq!(udp.upstream_id, UpstreamId::from_name("dns-backend"));
         assert_eq!(
             udp.session_affinity,
             velda_router::UdpSessionAffinity::ClientAddr
@@ -586,7 +479,10 @@ mod tests {
         // Verify L7 HTTP/1.1 route compilation
         let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");
         let http_matched = router.route_http1("http-in", &http_req).unwrap();
-        assert_eq!(http_matched.upstream_name, "http-backend");
+        assert_eq!(
+            http_matched.upstream_id,
+            UpstreamId::from_name("http-backend")
+        );
 
         // Verify protocol isolation: HTTP/1 route is NOT in HTTP/2 router
         let h2_req = velda_router::Http2RouteRequest::new("/api/v1/users");

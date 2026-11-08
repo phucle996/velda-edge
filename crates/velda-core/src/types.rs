@@ -94,12 +94,120 @@ impl fmt::Display for ConnectionId {
     }
 }
 
+/// Canonical 32-bit FNV-1a deterministic hash for compiling string names into `u32` IDs.
+///
+/// Offset basis: `0x811c9dc5`, Prime: `0x01000193`.
+#[inline]
+pub const fn fnv1a_hash_32(name: &str) -> u32 {
+    let bytes = name.as_bytes();
+    let mut hash: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    hash
+}
+
+/// Identifier of a configured ingress listener.
+///
+/// Deterministically derived from the listener configuration name at sync/compile time.
+#[repr(transparent)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ListenerId(pub u32);
+
+impl ListenerId {
+    /// Creates a new listener identifier.
+    #[inline]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Deterministically computes a `ListenerId` from a listener name using 32-bit FNV-1a.
+    #[inline]
+    pub const fn from_name(name: &str) -> Self {
+        Self(fnv1a_hash_32(name))
+    }
+
+    /// Returns the underlying identifier value.
+    #[inline]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for ListenerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for ListenerId {
+    #[inline]
+    fn from(name: &str) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<&String> for ListenerId {
+    #[inline]
+    fn from(name: &String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
+impl From<String> for ListenerId {
+    #[inline]
+    fn from(name: String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
+impl From<&std::sync::Arc<str>> for ListenerId {
+    #[inline]
+    fn from(name: &std::sync::Arc<str>) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<std::sync::Arc<str>> for ListenerId {
+    #[inline]
+    fn from(name: std::sync::Arc<str>) -> Self {
+        Self::from_name(&name)
+    }
+}
+
 /// Identifier of a configured route.
 ///
 /// A route ID is assigned by the routing/configuration subsystem and
 /// remains independent from the actual route matching algorithm.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct RouteId(pub u32);
 
 impl RouteId {
@@ -107,6 +215,12 @@ impl RouteId {
     #[inline]
     pub const fn new(value: u32) -> Self {
         Self(value)
+    }
+
+    /// Deterministically computes a `RouteId` from a route name using 32-bit FNV-1a.
+    #[inline]
+    pub const fn from_name(name: &str) -> Self {
+        Self(fnv1a_hash_32(name))
     }
 
     /// Returns the underlying identifier value.
@@ -122,12 +236,45 @@ impl fmt::Display for RouteId {
     }
 }
 
+impl From<&str> for RouteId {
+    #[inline]
+    fn from(name: &str) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<&String> for RouteId {
+    #[inline]
+    fn from(name: &String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
+impl From<String> for RouteId {
+    #[inline]
+    fn from(name: String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
 /// Identifier of a configured upstream.
 ///
 /// The ID identifies an upstream definition selected for the request.
 /// It does not represent a concrete TCP connection.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct UpstreamId(pub u32);
 
 impl UpstreamId {
@@ -135,6 +282,12 @@ impl UpstreamId {
     #[inline]
     pub const fn new(value: u32) -> Self {
         Self(value)
+    }
+
+    /// Deterministically computes an `UpstreamId` from an upstream name using 32-bit FNV-1a.
+    #[inline]
+    pub const fn from_name(name: &str) -> Self {
+        Self(fnv1a_hash_32(name))
     }
 
     /// Returns the underlying identifier value.
@@ -150,6 +303,41 @@ impl fmt::Display for UpstreamId {
     }
 }
 
+impl From<&str> for UpstreamId {
+    #[inline]
+    fn from(name: &str) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<&String> for UpstreamId {
+    #[inline]
+    fn from(name: &String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
+impl From<String> for UpstreamId {
+    #[inline]
+    fn from(name: String) -> Self {
+        Self::from_name(name.as_str())
+    }
+}
+
+impl From<&std::sync::Arc<str>> for UpstreamId {
+    #[inline]
+    fn from(name: &std::sync::Arc<str>) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<std::sync::Arc<str>> for UpstreamId {
+    #[inline]
+    fn from(name: std::sync::Arc<str>) -> Self {
+        Self::from_name(&name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,17 +346,36 @@ mod tests {
     fn test_strongly_typed_ids() {
         let req = RequestId::new(1001);
         let conn = ConnectionId::new(2002);
+        let listener = ListenerId::new(2505);
         let route = RouteId::new(3003);
         let up = UpstreamId::new(4004);
 
         assert_eq!(req.value(), 1001);
         assert_eq!(conn.value(), 2002);
+        assert_eq!(listener.value(), 2505);
         assert_eq!(route.value(), 3003);
         assert_eq!(up.value(), 4004);
 
         assert_eq!(format!("{req}"), "000000000000000000000000000003e9");
         assert_eq!(format!("{conn}"), "2002");
+        assert_eq!(format!("{listener}"), "2505");
         assert_eq!(format!("{route}"), "3003");
         assert_eq!(format!("{up}"), "4004");
+    }
+
+    #[test]
+    fn test_deterministic_fnv1a_ids() {
+        let l1 = ListenerId::from_name("http-80");
+        let l2 = ListenerId::from("http-80");
+        assert_eq!(l1, l2);
+        assert_ne!(l1, ListenerId::from_name("http-443"));
+
+        let r1 = RouteId::from_name("route-api");
+        let r2 = RouteId::from("route-api");
+        assert_eq!(r1, r2);
+
+        let u1 = UpstreamId::from_name("backend-v1");
+        let u2 = UpstreamId::from("backend-v1");
+        assert_eq!(u1, u2);
     }
 }

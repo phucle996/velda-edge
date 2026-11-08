@@ -10,8 +10,6 @@
 //! - **Header Sanitization**: When dynamic overrides are allowed, `x-fault-delay-ms` and `x-fault-abort-code`
 //!   are purged from request headers to prevent internal chaos tokens from leaking to upstream.
 
-use std::sync::Arc;
-
 use http::header::HeaderName;
 use velda_core::{Action, L7Request};
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -166,7 +164,11 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
     /// 4. Evaluates delay injection criteria.
     /// 5. Evaluates abort injection criteria.
     /// 6. Composes non-blocking [`Action`] (Delay first, then Abort or Continue).
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut Arc<str>) -> Action {
+    fn on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        _target_upstream: &mut velda_core::UpstreamId,
+    ) -> Action {
         // Security Hygiene: Always extract and purge chaos testing headers so testing tokens
         // NEVER leak to upstream backends, regardless of whether request matches scope or overrides are enabled.
         let (override_delay, override_abort) = if self.condition.allow_header_override {
@@ -247,7 +249,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }
@@ -267,7 +269,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -293,7 +295,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -324,7 +326,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -380,7 +382,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target: Arc<str> = Arc::from("http_upstream");
+        let mut target = velda_core::UpstreamId::from("http_upstream");
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {

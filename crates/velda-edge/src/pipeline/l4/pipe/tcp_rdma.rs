@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use velda_core::RouteId;
+use velda_core::{RouteId, UpstreamId};
 use velda_rdma::{RdmaError, RdmaSlabClass};
 use velda_sock::Connection;
 
@@ -34,14 +34,14 @@ pub async fn serve(
     upstream: &Arc<RdmaUpstream>,
     _config: &L4TcpConfig,
     route_id: RouteId,
-    upstream_name: &str,
+    upstream_id: UpstreamId,
     peer: SocketAddr,
     listener_id: &str,
 ) {
     tracing::debug!(
         listener = %listener_id,
         route = %route_id,
-        upstream = %upstream_name,
+        upstream = %upstream_id,
         peer = %peer,
         "Proxying L4 TCP stream to RDMA kernel-bypass upstream via zero-copy arena"
     );
@@ -53,7 +53,7 @@ pub async fn serve(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                upstream = %upstream_name,
+                upstream = %upstream_id,
                 peer = %peer,
                 "Failed to acquire RDMA lease for L4 raw forwarding"
             );
@@ -132,7 +132,7 @@ pub async fn serve(
                     match tokio::time::timeout(idle_timeout, &mut rdma_to_client).await {
                         Ok(Ok(s2c)) => {
                             tracing::debug!(
-                                upstream = %upstream_name,
+                                upstream = %upstream_id,
                                 peer = %peer,
                                 client_to_server = c2s,
                                 server_to_client = s2c,
@@ -143,7 +143,7 @@ pub async fn serve(
                             lease.mark_broken();
                             tracing::warn!(
                                 error = %e,
-                                upstream = %upstream_name,
+                                upstream = %upstream_id,
                                 peer = %peer,
                                 "RDMA receive failed after client EOF"
                             );
@@ -151,7 +151,7 @@ pub async fn serve(
                         Err(_) => {
                             lease.mark_broken();
                             tracing::debug!(
-                                upstream = %upstream_name,
+                                upstream = %upstream_id,
                                 peer = %peer,
                                 client_to_server = c2s,
                                 "Idle timeout awaiting final RDMA response; stream closed"
@@ -163,7 +163,7 @@ pub async fn serve(
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,
-                        upstream = %upstream_name,
+                        upstream = %upstream_id,
                         peer = %peer,
                         "L4 TCP client read terminated with error"
                     );
@@ -174,7 +174,7 @@ pub async fn serve(
             match s2c_res {
                 Ok(s2c) => {
                     tracing::debug!(
-                        upstream = %upstream_name,
+                        upstream = %upstream_id,
                         peer = %peer,
                         server_to_client = s2c,
                         "RDMA upstream terminated forwarding"
@@ -184,7 +184,7 @@ pub async fn serve(
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,
-                        upstream = %upstream_name,
+                        upstream = %upstream_id,
                         peer = %peer,
                         "RDMA to TCP stream forwarding terminated with error"
                     );

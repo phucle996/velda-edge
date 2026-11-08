@@ -100,10 +100,27 @@ impl FillRing {
             return 0;
         }
 
-        for (i, &addr) in addrs.iter().take(count).enumerate() {
-            let idx = (self.cached_prod.wrapping_add(i as u32) & self.mask) as usize;
+        let start = (self.cached_prod & self.mask) as usize;
+        let first_chunk = ((self.size as usize) - start).min(count);
+        let second_chunk = count - first_chunk;
+
+        // Slice 1: contiguous transfer at ring index start
+        unsafe {
+            let dst = self.ring.add(start);
+            let src = addrs.as_ptr();
+            for i in 0..first_chunk {
+                std::ptr::write_volatile(dst.add(i), *src.add(i));
+            }
+        }
+
+        // Slice 2: contiguous wrap-around transfer starting at ring index 0
+        if second_chunk > 0 {
             unsafe {
-                std::ptr::write_volatile(self.ring.add(idx), addr);
+                let dst = self.ring;
+                let src = addrs.as_ptr().add(first_chunk);
+                for i in 0..second_chunk {
+                    std::ptr::write_volatile(dst.add(i), *src.add(i));
+                }
             }
         }
 
@@ -197,9 +214,29 @@ impl RxRing {
 
         // Acquire barrier: ensures CPU does not read descriptor payloads before confirming producer index
         fence(Ordering::Acquire);
-        for (i, slot) in out.iter_mut().take(count).enumerate() {
-            let idx = (self.cached_cons.wrapping_add(i as u32) & self.mask) as usize;
-            *slot = unsafe { std::ptr::read_volatile(self.ring.add(idx)) };
+
+        let start = (self.cached_cons & self.mask) as usize;
+        let first_chunk = ((self.size as usize) - start).min(count);
+        let second_chunk = count - first_chunk;
+
+        // Slice 1: copy descriptors in contiguous chunk at ring index start
+        unsafe {
+            let src = self.ring.add(start);
+            let dst = out.as_mut_ptr();
+            for i in 0..first_chunk {
+                *dst.add(i) = std::ptr::read_volatile(src.add(i));
+            }
+        }
+
+        // Slice 2: copy descriptors in contiguous wrap-around chunk at ring index 0
+        if second_chunk > 0 {
+            unsafe {
+                let src = self.ring;
+                let dst = out.as_mut_ptr().add(first_chunk);
+                for i in 0..second_chunk {
+                    *dst.add(i) = std::ptr::read_volatile(src.add(i));
+                }
+            }
         }
 
         fence(Ordering::Release);
@@ -284,10 +321,27 @@ impl TxRing {
             return 0;
         }
 
-        for (i, desc) in descs.iter().take(count).enumerate() {
-            let idx = (self.cached_prod.wrapping_add(i as u32) & self.mask) as usize;
+        let start = (self.cached_prod & self.mask) as usize;
+        let first_chunk = ((self.size as usize) - start).min(count);
+        let second_chunk = count - first_chunk;
+
+        // Slice 1: copy outbound descriptors in contiguous chunk at ring index start
+        unsafe {
+            let dst = self.ring.add(start);
+            let src = descs.as_ptr();
+            for i in 0..first_chunk {
+                std::ptr::write_volatile(dst.add(i), *src.add(i));
+            }
+        }
+
+        // Slice 2: copy outbound descriptors in contiguous wrap-around chunk at ring index 0
+        if second_chunk > 0 {
             unsafe {
-                std::ptr::write_volatile(self.ring.add(idx), *desc);
+                let dst = self.ring;
+                let src = descs.as_ptr().add(first_chunk);
+                for i in 0..second_chunk {
+                    std::ptr::write_volatile(dst.add(i), *src.add(i));
+                }
             }
         }
 
@@ -380,9 +434,29 @@ impl CompletionRing {
         }
 
         fence(Ordering::Acquire);
-        for (i, slot) in out.iter_mut().take(count).enumerate() {
-            let idx = (self.cached_cons.wrapping_add(i as u32) & self.mask) as usize;
-            *slot = unsafe { std::ptr::read_volatile(self.ring.add(idx)) };
+
+        let start = (self.cached_cons & self.mask) as usize;
+        let first_chunk = ((self.size as usize) - start).min(count);
+        let second_chunk = count - first_chunk;
+
+        // Slice 1: copy addresses in contiguous chunk at ring index start
+        unsafe {
+            let src = self.ring.add(start);
+            let dst = out.as_mut_ptr();
+            for i in 0..first_chunk {
+                *dst.add(i) = std::ptr::read_volatile(src.add(i));
+            }
+        }
+
+        // Slice 2: copy addresses in contiguous wrap-around chunk at ring index 0
+        if second_chunk > 0 {
+            unsafe {
+                let src = self.ring;
+                let dst = out.as_mut_ptr().add(first_chunk);
+                for i in 0..second_chunk {
+                    *dst.add(i) = std::ptr::read_volatile(src.add(i));
+                }
+            }
         }
 
         fence(Ordering::Release);
@@ -576,5 +650,128 @@ mod tests {
         assert_eq!(dequeued2, 1);
         assert_eq!(consumer, 3);
         assert_eq!(out_remaining[0].addr, 300);
+    }
+
+    #[test]
+    fn test_rings_wrap_around_contiguous_split() {
+        let size = 4u32;
+
+        // 1. FillRing wrap-around
+        let mut fill_prod = 3u32;
+        let fill_cons = 3u32;
+        let mut fill_storage = [0u64; 4];
+        let mut fill = unsafe {
+            FillRing::from_raw(
+                &mut fill_prod as *mut u32,
+                &fill_cons as *const u32,
+                fill_storage.as_mut_ptr(),
+                std::ptr::null(),
+                size,
+            )
+        };
+        let addrs = [1000u64, 2000, 3000];
+        let enqueued = fill.enqueue_batch(&addrs);
+        assert_eq!(enqueued, 3);
+        assert_eq!(fill_prod, 6);
+        assert_eq!(fill_storage[3], 1000);
+        assert_eq!(fill_storage[0], 2000);
+        assert_eq!(fill_storage[1], 3000);
+
+        // 2. RxRing wrap-around
+        let rx_prod = 6u32;
+        let mut rx_cons = 3u32;
+        let mut rx_storage = [xdp_desc::default(); 4];
+        rx_storage[3] = xdp_desc {
+            addr: 10,
+            len: 1,
+            options: 0,
+        };
+        rx_storage[0] = xdp_desc {
+            addr: 20,
+            len: 2,
+            options: 0,
+        };
+        rx_storage[1] = xdp_desc {
+            addr: 30,
+            len: 3,
+            options: 0,
+        };
+        let mut rx = unsafe {
+            RxRing::from_raw(
+                &rx_prod as *const u32,
+                &mut rx_cons as *mut u32,
+                rx_storage.as_ptr(),
+                std::ptr::null(),
+                size,
+            )
+        };
+        let mut rx_out = [xdp_desc::default(); 3];
+        let rx_dequeued = rx.dequeue_batch(&mut rx_out);
+        assert_eq!(rx_dequeued, 3);
+        assert_eq!(rx_cons, 6);
+        assert_eq!(rx_out[0].addr, 10);
+        assert_eq!(rx_out[1].addr, 20);
+        assert_eq!(rx_out[2].addr, 30);
+
+        // 3. TxRing wrap-around
+        let mut tx_prod = 3u32;
+        let tx_cons = 3u32;
+        let mut tx_storage = [xdp_desc::default(); 4];
+        let mut tx = unsafe {
+            TxRing::from_raw(
+                &mut tx_prod as *mut u32,
+                &tx_cons as *const u32,
+                tx_storage.as_mut_ptr(),
+                std::ptr::null(),
+                size,
+            )
+        };
+        let tx_descs = [
+            xdp_desc {
+                addr: 100,
+                len: 10,
+                options: 0,
+            },
+            xdp_desc {
+                addr: 200,
+                len: 20,
+                options: 0,
+            },
+            xdp_desc {
+                addr: 300,
+                len: 30,
+                options: 0,
+            },
+        ];
+        let tx_enqueued = tx.enqueue_batch(&tx_descs);
+        assert_eq!(tx_enqueued, 3);
+        assert_eq!(tx_prod, 6);
+        assert_eq!(tx_storage[3].addr, 100);
+        assert_eq!(tx_storage[0].addr, 200);
+        assert_eq!(tx_storage[1].addr, 300);
+
+        // 4. CompletionRing wrap-around
+        let comp_prod = 6u32;
+        let mut comp_cons = 3u32;
+        let mut comp_storage = [0u64; 4];
+        comp_storage[3] = 555;
+        comp_storage[0] = 666;
+        comp_storage[1] = 777;
+        let mut comp = unsafe {
+            CompletionRing::from_raw(
+                &comp_prod as *const u32,
+                &mut comp_cons as *mut u32,
+                comp_storage.as_ptr(),
+                std::ptr::null(),
+                size,
+            )
+        };
+        let mut comp_out = [0u64; 3];
+        let comp_dequeued = comp.dequeue_batch(&mut comp_out);
+        assert_eq!(comp_dequeued, 3);
+        assert_eq!(comp_cons, 6);
+        assert_eq!(comp_out[0], 555);
+        assert_eq!(comp_out[1], 666);
+        assert_eq!(comp_out[2], 777);
     }
 }

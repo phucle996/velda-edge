@@ -55,11 +55,21 @@ impl LoadBalancer for LbAlgorithm {
 impl LbAlgorithm {
     /// Compiles declarative algorithm string into pre-compiled balancer variant.
     pub fn from_name(name: &str) -> Self {
+        Self::from_name_with_capacity(name, 0)
+    }
+
+    /// Compiles declarative algorithm string into workload-adaptive pre-compiled balancer variant.
+    pub fn from_name_with_capacity(name: &str, endpoint_count: usize) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
-            "least_connections" | "least_conn" => Self::LeastConnections(LeastConnections::new()),
+            "least_connections" | "least_conn" => {
+                Self::LeastConnections(LeastConnections::for_workload(endpoint_count))
+            }
             "random" => Self::Random(Random::new()),
             "ip_hash" | "hash" => Self::IpHash(IpHash::new()),
-            "weighted_round_robin" | "wrr" => Self::WeightedRoundRobin(WeightedRoundRobin::new()),
+            "weighted_round_robin" | "wrr" => {
+                let workers = velda_core::global_hardware_topology().worker_threads;
+                Self::WeightedRoundRobin(WeightedRoundRobin::for_workload(workers, endpoint_count))
+            }
             "p2c" | "power_of_two_choices" => Self::PowerOfTwoChoices(PowerOfTwoChoices::new()),
             _ => Self::RoundRobin(RoundRobin::new()),
         }
