@@ -18,7 +18,19 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 ---
 
-## 2. 100% Explicit Configuration Invariant
+## 2. Technical Documentation Index
+
+| Document | Purpose & Scope |
+| :--- | :--- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Deep-dive architectural specification, Port Isolation Invariant, Socket Handoff from `velda-core`, Lock-Free snapshot extraction, and 200-byte LUT OpenMetrics serialization engine |
+| [MACHINE_CODE_ANALYSIS.md](MACHINE_CODE_ANALYSIS.md) | Ground-truth machine code analysis, reciprocal division-free arithmetic (`fast_write_u64`), AVX2 vector reduction (`_mm256_add_epi64`), L1D cache residency, and zero-contention invariant |
+| [BENCHMARK.md](BENCHMARK.md) | Standardized 4-tier benchmark specification form (Macro, System, Kernel Syscalls, HPC/CPU Hardware Counters) across 5 scenarios and comparative matrix vs OpenResty, Envoy, and Kong |
+| [RUNBOOK.md](RUNBOOK.md) | Emergency incident runbook for SRE/DevOps, P0–P3 triage matrix, Mermaid incident decision flowchart, field diagnostic CLI toolkit, and emergency remediation |
+| [TEST.md](TEST.md) | Automated unit & integration test catalog, OpenMetrics compliance assertions, and reproduction commands |
+
+---
+
+## 3. 100% Explicit Configuration Invariant
 
 > [!IMPORTANT]
 > **Strict Configuration Contract**: Every configuration block and parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Fields for disabled features must be explicitly declared as `"none"`, `false`, `[]`, or `null`.
@@ -46,7 +58,7 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 ---
 
-## 3. Management Port Isolation Invariant
+## 4. Management Port Isolation Invariant
 
 > [!CAUTION]
 > **Management Port Isolation Invariant**: The Prometheus exporter socket (`listen`) runs as a shadow background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
@@ -56,7 +68,7 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 ---
 
-## 4. Configuration Manifest Example (`plugins.json`)
+## 5. Configuration Manifest Example (`plugins.json`)
 
 ```json
 {
@@ -102,7 +114,7 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 
 ---
 
-## 5. Prometheus Scrape Configuration (`prometheus.yml`)
+## 6. Prometheus Scrape Configuration (`prometheus.yml`)
 
 ```yaml
 scrape_configs:

@@ -38,3 +38,19 @@ libc = "0.2"
 tempfile = "3"
 rcgen = "0.14.10"
 
+[[test]]
+name = "health_probe_machine_code_test"
+path = "src/background/health_probe/harness/machine_code_test.rs"
+
+[[test]]
+name = "prometheus_exporter_machine_code_test"
+path = "src/background/prometheus_exporter/harness/machine_code_test.rs"
+
+[[test]]
+name = "otlp_metrics_exporter_machine_code_test"
+path = "src/background/otlp_metrics_exporter/harness/machine_code_test.rs"
+
+[[test]]
+name = "statsd_exporter_machine_code_test"
+path = "src/background/statsd_exporter/harness/machine_code_test.rs"
+

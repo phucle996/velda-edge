@@ -19,10 +19,12 @@ use crate::error::PluginError;
 pub mod health_probe;
 pub mod otlp_metrics_exporter;
 pub mod prometheus_exporter;
+pub mod statsd_exporter;
 
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
+pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
 
 /// Contract for plugins operating as background logistics services.
 pub trait BackgroundPlugin: Send + Sync {
@@ -100,6 +102,10 @@ pub fn instantiate(
         }
         "otlp_metrics_exporter" => {
             let exporter = OtlpMetricsExporterPlugin::from_config(config)?;
+            Ok(Arc::new(exporter))
+        }
+        "statsd_exporter" => {
+            let exporter = StatsdExporterPlugin::from_config(config)?;
             Ok(Arc::new(exporter))
         }
         other => Err(PluginError::Config(format!(

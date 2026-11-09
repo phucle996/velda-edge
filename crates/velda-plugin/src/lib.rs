@@ -31,7 +31,8 @@ pub use background::prometheus_exporter::{
 };
 pub use background::{
     BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, OtlpMetricsExporterConfig,
-    OtlpMetricsExporterPlugin, spawn_background_plugins,
+    OtlpMetricsExporterPlugin, StatsdExporterConfig, StatsdExporterPlugin,
+    spawn_background_plugins,
 };
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;

@@ -319,7 +319,96 @@ impl SocketManager {
     /// Releases a shadow socket reservation by identifier.
     pub fn release_shadow_tcp(&self, shadow_id: &str) {
         if let Ok(mut claims) = self.claims.write() {
-            claims.retain(|c| !(c.role == SocketRole::Shadow && c.owner_id == shadow_id));
+            claims.retain(|c| {
+                !(c.role == SocketRole::Shadow
+                    && c.owner_id == shadow_id
+                    && c.protocol == SocketProtocol::Tcp)
+            });
+        }
+    }
+
+    /// Binds an OS UDP socket for a shadow logistics service, verifying against port collisions.
+    pub fn acquire_shadow_udp(
+        &self,
+        address: SocketAddr,
+        shadow_id: impl Into<String>,
+    ) -> Result<std::net::UdpSocket, SocketError> {
+        let shadow_id = shadow_id.into();
+        let mut claims = self.claims.write().unwrap();
+
+        // Check for conflicts with existing UDP claims if explicit non-zero port
+        if address.port() != 0 {
+            for existing in claims.iter() {
+                if existing.protocol == SocketProtocol::Udp
+                    && existing.address == Some(address)
+                    && existing.owner_id != shadow_id
+                {
+                    return Err(SocketError::Conflict {
+                        existing_owner: existing.owner_id.clone(),
+                        existing_role: existing.role,
+                        conflicting_owner: shadow_id,
+                        conflicting_role: SocketRole::Shadow,
+                        binding: address.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Perform OS bind with SO_REUSEADDR and SO_REUSEPORT (if non-zero port)
+        let domain = if address.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let socket =
+            socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(SocketError::Io)?;
+        socket.set_reuse_address(true).map_err(SocketError::Io)?;
+        if address.port() != 0 {
+            #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                let opt: libc::c_int = 1;
+                let _ = libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEPORT,
+                    &opt as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&opt) as libc::socklen_t,
+                );
+            }
+        }
+        socket.bind(&address.into()).map_err(SocketError::Io)?;
+        let std_socket: std::net::UdpSocket = socket.into();
+        let actual_addr = std_socket.local_addr().unwrap_or(address);
+
+        // Record or update claim
+        if let Some(pos) = claims.iter().position(|c| {
+            c.protocol == SocketProtocol::Udp
+                && c.address == Some(actual_addr)
+                && c.owner_id == shadow_id
+        }) {
+            claims[pos].role = SocketRole::Shadow;
+        } else {
+            claims.push(SocketClaim {
+                protocol: SocketProtocol::Udp,
+                address: Some(actual_addr),
+                path: None,
+                role: SocketRole::Shadow,
+                owner_id: shadow_id,
+            });
+        }
+
+        Ok(std_socket)
+    }
+
+    /// Releases a shadow UDP socket reservation by identifier.
+    pub fn release_shadow_udp(&self, shadow_id: &str) {
+        if let Ok(mut claims) = self.claims.write() {
+            claims.retain(|c| {
+                !(c.role == SocketRole::Shadow
+                    && c.owner_id == shadow_id
+                    && c.protocol == SocketProtocol::Udp)
+            });
         }
     }
 

@@ -37,6 +37,9 @@ pub use prometheus_exporter::*;
 pub mod otlp_metrics_exporter;
 pub use otlp_metrics_exporter::*;
 
+pub mod statsd_exporter;
+pub use statsd_exporter::*;
+
 // ============================================================================
 // Binary Protocol Constants & Domain Header
 // ============================================================================
@@ -120,6 +123,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
         "otlp_metrics_exporter" => Some("background"),
+        "statsd_exporter" => Some("background"),
         _ => None,
     }
 }
@@ -553,6 +557,15 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     &plugin.id,
                     &plugin.config,
                 )?;
+            }
+            "statsd_exporter" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                statsd_exporter::validate_statsd_exporter_config(&plugin.id, &plugin.config)?;
             }
             "opentelemetry_logger" => {
                 if plugin.phase != "post_response" {
