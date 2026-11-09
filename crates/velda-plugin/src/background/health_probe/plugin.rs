@@ -12,6 +12,9 @@
 //! - **Graceful Draining Semantics**: When shutdown is signaled (e.g. SIGTERM), readiness immediately flips
 //!   to `503 Service Unavailable`, allowing Kubernetes / upstream load balancers to route traffic away
 //!   before active connections are drained.
+//! - **Zero Spawn & Zero MPSC**: Handed off directly at bootstrap to the Shadow Logistics Worker.
+//!   Probe connections are processed sequentially inline with hard `timeout_ms` limits, completely
+//!   eliminating `tokio::spawn` task allocation overhead and inter-thread `mpsc` channel passing.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -221,7 +224,11 @@ impl HealthProbePlugin {
         }
     }
 
-    /// Handles a single incoming probe connection.
+    /// Handles a single incoming probe connection using a stack-allocated buffer.
+    ///
+    /// # Zero-Allocation & Early-Exit Invariants
+    /// - If the peer connects and closes without sending bytes (`n == 0`), returns immediately.
+    /// - Evaluates path in-place against static constants, writing directly back to socket.
     pub async fn handle_connection(
         config: &HealthProbeConfig,
         state: &HealthState,
@@ -229,6 +236,9 @@ impl HealthProbePlugin {
     ) {
         let mut buf = [0u8; 512];
         let n = stream.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            return;
+        }
         let req_str = std::str::from_utf8(&buf[..n]).unwrap_or("");
 
         let line = req_str.lines().next().unwrap_or("");
@@ -273,8 +283,7 @@ impl BackgroundPlugin for HealthProbePlugin {
                 "Health & readiness probe service listening"
             );
 
-            let config = Arc::new(self.config.clone());
-            let state = self.state.clone();
+            let timeout_duration = Duration::from_millis(self.config.timeout_ms);
 
             loop {
                 tokio::select! {
@@ -287,16 +296,18 @@ impl BackgroundPlugin for HealthProbePlugin {
                             }
                         };
 
-                        let cfg_clone = config.clone();
-                        let state_clone = state.clone();
-                        tokio::spawn(async move {
-                            Self::handle_connection(&cfg_clone, &state_clone, stream).await;
-                        });
+                        // Flat Sequential Inline Execution on Shadow Worker:
+                        // Zero tokio::spawn, zero heap allocations, zero mpsc channel messaging.
+                        // Strictly bounded by timeout_duration to prevent slowloris stalling.
+                        let _ = tokio::time::timeout(
+                            timeout_duration,
+                            Self::handle_connection(&self.config, &self.state, stream),
+                        ).await;
                     }
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() {
                             tracing::info!("Health probe received shutdown signal; entering draining state");
-                            state.set_draining(true);
+                            self.state.set_draining(true);
                             break;
                         }
                     }

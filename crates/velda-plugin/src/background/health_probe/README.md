@@ -18,7 +18,18 @@ Background service exposing ultra-lightweight cloud-native health and readiness 
 
 ---
 
-## 2. 100% Explicit Configuration Invariant
+## 2. Technical Documentation Index
+
+| Document | Purpose & Scope |
+| :--- | :--- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Deep-dive architectural specification, Port Isolation Invariant, Bootstrap Zero-mpsc handoff, Shadow Worker ownership, and Graceful Draining state machine |
+| [BENCHMARK.md](BENCHMARK.md) | Standardized performance benchmark specification, topology, microsecond latency tables, and reproduction commands |
+| [TEST.md](TEST.md) | Automated unit & integration test catalog, assertions, and Kubernetes pod lifecycle simulation |
+| [RUNBOOK.md](RUNBOOK.md) | SRE operational runbook, On-call P0–P3 triage matrix, decision flowchart, and emergency remediation |
+
+---
+
+## 3. 100% Explicit Configuration Invariant
 
 > [!IMPORTANT]
 > **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
@@ -33,7 +44,7 @@ Background service exposing ultra-lightweight cloud-native health and readiness 
 
 ---
 
-## 3. Management Port Isolation Invariant
+## 4. Management Port Isolation Invariant
 
 > [!CAUTION]
 > **Management Port Isolation Invariant**: The health probe socket (`listen`) runs as a shadow background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
@@ -45,7 +56,7 @@ Running health checks on an isolated management port prevents cascading outages:
 
 ---
 
-## 4. Configuration Manifest Example (`plugins.json`)
+## 5. Configuration Manifest Example (`plugins.json`)
 
 ```json
 {
@@ -70,7 +81,7 @@ Running health checks on an isolated management port prevents cascading outages:
 
 ---
 
-## 5. Kubernetes Pod Specification Example
+## 6. Kubernetes Pod Specification Example
 
 ```yaml
 apiVersion: v1
