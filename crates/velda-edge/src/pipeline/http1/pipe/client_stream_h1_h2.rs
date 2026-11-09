@@ -1,8 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/2 Client-Stream Bridge Pipeline.
+//! # Pipeline Strategy: `client_stream_h1_h2`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/2 Upstream (Client Streaming Bridge)
 //!
-//! Handles client-streaming uploads (chunked file upload, batch ingest) where
-//! downstream HTTP/1.1 chunks are progressively streamed to an upstream HTTP/2 connection,
-//! and a single buffered response is returned downstream.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H2) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head ──────────────────►│                                    │
+//!            │                                      │── 2. acquire_stream() ────────────►│ (Lease H2 multiplex stream)
+//!            │                                      │── 3. HEADERS (end_stream = false) ►│
+//!            │◄─ 4. 100 Continue (if Expect) ───────┤                                    │
+//!            │── 5. Chunk N (Data) ────────────────►│                                    │
+//!            │                                      │── 6. DATA Frame (end_stream = false)►│
+//!            │                      ... progressive client upload ...                    │
+//!            │── 7. Chunk 0 (EOF) ─────────────────►│                                    │
+//!            │                                      │── 8. DATA Frame (end_stream = true)►│
+//!            │                                      │◄─ 9. HEADERS (Response status) ────┤
+//!            │                                      │◄─ 10. DATA Frame (Response body) ──┤
+//!            │                                      ├── 11. Run Post-Response Plugins    │
+//!            │                                      │── 12. H2 stream closed ───────────►│ (H2 connection stays warm)
+//!            │◄─ 13. writev [ Head + Body ] ────────┤                                    │
+//!            ▼                                      ▼                                    ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **Multiplexed Ingest**: Translates H1 chunked input into H2 binary DATA frames with window flow control.
+//! - **Zero Buffer Bloat**: Forward loop consumes chunks progressively into active H2 stream credit.
+//! - **Zero-Copy Egress**: Vectored write (`write_vectored`) delivers response to downstream socket in 1 syscall.
 
 use std::sync::Arc;
 

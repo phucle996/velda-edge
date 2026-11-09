@@ -1,12 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/1.1 Client-Stream Pipeline.
+//! # Pipeline Strategy: `client_stream_h1_h1`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/1.1 Upstream (Client Streaming / Chunked Upload)
 //!
-//! Handles client streaming uploads (e.g. chunked file uploads, log batch ingest) where
-//! downstream request chunks are streamed in real-time to the upstream backend.
-//! Leases upstream connection prior to transmission.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H1) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head ──────────────────►│                                    │
+//!            │                                      │── 2. acquire() ───────────────────►│ (Lease pooled socket upfront)
+//!            │                                      │── 3. Send Request Head ───────────►│
+//!            │◄─ 4. 100 Continue (if Expect) ───────┤                                    │
+//!            │── 5. Chunk N (Data) ────────────────►│                                    │
+//!            │                                      │── 6. send_chunk(Chunk N) ─────────►│
+//!            │                      ... progressive client upload ...                    │
+//!            │── 7. Chunk 0 (EOF) ─────────────────►│                                    │
+//!            │                                      │── 8. send_chunked_end (0\r\n\r\n) ─►│
+//!            │                                      │◄─ 9. Read Response Head ───────────┤
+//!            │                                      │◄─ 10. Read Response Body ──────────┤
+//!            │                                      ├── 11. Run Post-Response Plugins    │
+//!            │                                      │── 12. DROP UPSTREAM LEASE ────────►│ (Socket committed to pool)
+//!            │◄─ 13. writev [ Head + Body ] ────────┤                                    │
+//!            ▼                                      ▼                                    ▼
+//! ```
 //!
-//! In accordance with Velda Edge Hourglass Architecture:
-//! Protocol crates (`velda-http1`) strictly provide primitives ("WHAT"),
-//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
+//! ### Microarchitectural Invariants:
+//! - **Real-Time Streaming**: Downstream chunks pumped directly to backend without full buffering in RAM.
+//! - **Pre-Allocated Slab Transfer**: Ingests chunks via `ProgressiveChunkDecoder` directly into reusable buffers.
+//! - **Early Lease Drop**: Backend socket returned to pool immediately once upstream response body is slurped.
 
 use std::sync::Arc;
 use std::time::Duration;

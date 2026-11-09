@@ -1,8 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/2 Server-Stream Bridge Pipeline.
+//! # Pipeline Strategy: `server_stream_h1_h2`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/2 Upstream (Server Streaming / SSE Bridge)
 //!
-//! Handles server-streaming RPCs (Server-Sent Events, progressive chunks, LLM tokens)
-//! where downstream HTTP/1.1 requests are forwarded over HTTP/2, and response DATA chunks
-//! are pumped progressively downstream as HTTP/1.1 chunked transfer encoding.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H2) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Expect: 100) ────►│                                    │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                    │
+//!            │── 3. Body (buffered into RAM) ──────►│ ──► [ RAM Slab Pool ]              │
+//!            │                                      │                                    │
+//!            │                                      │── 4. acquire_stream() ────────────►│ (Lease H2 multiplex stream)
+//!            │                                      │── 5. HEADERS + DATA (end_stream) ─►│
+//!            │                                      │◄─ 6. HEADERS (Response status) ────┤
+//!            │◄─ 7. Chunked Response Head ──────────┤                                    │
+//!            │                                      │◄─ 8. DATA Frame ───────────────────┤
+//!            │◄─ 9. send_chunk(DATA payload) ───────┤                                    │
+//!            │                      ... progressive streaming ...                        │
+//!            │                                      │◄─ 10. DATA Frame (end_stream) ─────┤
+//!            │◄─ 11. send_chunked_end (0\r\n\r\n) ──┤                                    │
+//!            │                                      │── 12. Stream slot released ───────►│ (H2 connection stays warm)
+//!            ▼                                      ▼                                    ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **Chunk Coalescing**: Uses opportunistic `poll_ready_chunk` to coalesce back-to-back DATA frames into 1 write.
+//! - **Multiplexed Upstream**: Pumps tokens/SSE chunks over single multiplexed H2 TCP connection without HoL blocking.
+//! - **Streaming Translation**: Translates binary H2 DATA framing into text-based RFC 9112 chunked framing.
 
 use std::sync::Arc;
 

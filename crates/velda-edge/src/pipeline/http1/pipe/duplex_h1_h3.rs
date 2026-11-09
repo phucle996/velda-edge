@@ -1,7 +1,29 @@
-//! Layer 7 HTTP/1.1 to HTTP/3 Duplex Streaming Bridge Pipeline.
+//! # Pipeline Strategy: `duplex_h1_h3`
+//! ## L7 HTTP/1.1 Downstream <---> L7 HTTP/3 Upstream (Bidirectional QUIC Bridge)
 //!
-//! Handles full-duplex bidirectional streaming (e.g. WebSocket over H3, bidirectional RPC)
-//! where downstream HTTP/1.1 chunks and upstream HTTP/3 QUIC frames flow concurrently.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H3/QUIC) ]
+//!            │                                      │                                      │
+//!            │── 1. Request Head (Upgrade / Bidi) ─►│                                      │
+//!            │                                      │── 2. acquire() ─────────────────────►│ (Lease warm QUIC conn)
+//!            │                                      │── 3. send_request(HEADERS) ─────────►│ (QPACK encoded)
+//!            │                                      │◄─ 4. Response HEADERS (101 / 200) ───┤
+//!            │◄─ 5. Response Head (101 / 200) ──────┤                                      │
+//!            │                                      │                                      │
+//!            │══════════════════════ 6. Concurrent Full-Duplex Loop ═════════════════════│
+//!            │── H1 Chunk (Data) ──────────────────►│── QUIC DATA Stream ─────────────────►│
+//!            │◄─ send_chunk(DATA payload) ──────────│◄─ QUIC DATA Stream ──────────────────┤
+//!            │═══════════════════════════════════════════════════════════════════════════│
+//!            │                                      │                                      │
+//!            │── 7. Client EOF / Stream Reset ─────►│── 8. QUIC Stream FIN / Reset ───────►│
+//!            │                                      │── 9. Stream closed ─────────────────►│ (QUIC session recycled)
+//!            ▼                                      ▼                                      ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **QUIC Multiplexing**: Channels bidirectional stream frames through UDP datagram socket with zero HoL blocking.
+//! - **Real-Time Frame Conversion**: Converts text chunked frames to raw QUIC datagrams with zero heap allocation.
+//! - **Symmetrical Teardown**: Propagates cancellation and stream reset immediately across the bridge.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

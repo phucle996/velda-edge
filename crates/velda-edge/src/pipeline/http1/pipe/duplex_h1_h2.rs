@@ -1,7 +1,29 @@
-//! Layer 7 HTTP/1.1 to HTTP/2 Duplex Streaming Bridge Pipeline.
+//! # Pipeline Strategy: `duplex_h1_h2`
+//! ## L7 HTTP/1.1 Downstream <---> L7 HTTP/2 Upstream (Bidirectional Duplex Bridge)
 //!
-//! Handles full-duplex bidirectional streaming (e.g. WebSocket over H2, bidirectional RPC)
-//! where downstream HTTP/1.1 chunks and upstream HTTP/2 DATA frames flow concurrently.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H2) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Upgrade / Bidi) ─►│                                    │
+//!            │                                      │── 2. acquire_stream() ────────────►│ (Lease H2 multiplex stream)
+//!            │                                      │── 3. HEADERS (end_stream = false) ►│
+//!            │                                      │◄─ 4. HEADERS (101 / 200) ──────────┤
+//!            │◄─ 5. Response Head (101 / 200) ──────┤                                    │
+//!            │                                      │                                    │
+//!            │══════════════════════ 6. Concurrent Full-Duplex Loop ═════════════════════│
+//!            │── H1 Chunk (Data) ──────────────────►│── H2 DATA Frame ──────────────────►│
+//!            │◄─ send_chunk(DATA payload) ──────────│◄─ H2 DATA Frame ───────────────────┤
+//!            │═══════════════════════════════════════════════════════════════════════════│
+//!            │                                      │                                    │
+//!            │── 7. Client EOF / Stream Reset ─────►│── 8. H2 RST_STREAM / End Data ────►│
+//!            │                                      │── 9. Stream closed ───────────────►│ (H2 connection stays warm)
+//!            ▼                                      ▼                                    ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **H1 <-> H2 Framing Translation**: Concurrently converts HTTP/1.1 chunks to HTTP/2 DATA frames and vice versa.
+//! - **Multiplexed Reuse**: Forwarded over an established HTTP/2 connection without TCP handshake latency.
+//! - **Zero Buffer Bloat**: Streaming loops yield immediately upon packet arrival, minimizing queue delays.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1,12 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/1.1 Server-Stream Pipeline.
+//! # Pipeline Strategy: `server_stream_h1_h1`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/1.1 Upstream (Server Streaming / SSE / LLM Tokens)
 //!
-//! Handles server-streaming RPCs (Server-Sent Events, progressive chunks, LLM tokens)
-//! where downstream request body is completely read into RAM first, and response chunks
-//! are pumped progressively downstream.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H1) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Expect: 100) ────►│                                    │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                    │
+//!            │── 3. Body (buffered into RAM) ──────►│ ──► [ RAM Slab Pool ]              │
+//!            │                                      │                                    │
+//!            │                                      │── 4. acquire() ───────────────────►│ (Lease pooled socket)
+//!            │                                      │── 5. Request Head + Body ─────────►│
+//!            │                                      │◄─ 6. Response Head (Chunked/SSE) ──┤
+//!            │◄─ 7. Response Head (Chunked/SSE) ────┤                                    │
+//!            │                                      │◄─ 8. Chunk / SSE Event ────────────┤
+//!            │◄─ 9. send_chunk(Chunk) ──────────────┤                                    │
+//!            │                      ... progressive streaming ...                        │
+//!            │                                      │◄─ 10. Upstream EOF / Chunk 0 ──────┤
+//!            │◄─ 11. send_chunked_end (0\r\n\r\n) ──┤                                    │
+//!            │                                      │── 12. DROP UPSTREAM LEASE ────────►│ (Socket committed to pool)
+//!            ▼                                      ▼                                    ▼
+//! ```
 //!
-//! In accordance with Velda Edge Hourglass Architecture:
-//! Protocol crates (`velda-http1`) strictly provide primitives ("WHAT"),
-//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
+//! ### Microarchitectural Invariants:
+//! - **Progressive Pump**: Forwards SSE events / LLM tokens with zero intermediate buffer bloating.
+//! - **Head-First Unblock**: Response headers dispatched downstream immediately to prime client stream parser.
+//! - **Safe Teardown**: Client disconnect propagates upstream to abort backend generator loop promptly.
 
 use std::sync::Arc;
 

@@ -1,11 +1,29 @@
-//! Layer 7 HTTP/1.1 to HTTP/1.1 Duplex Pipeline.
+//! # Pipeline Strategy: `duplex_h1_h1`
+//! ## L7 HTTP/1.1 Downstream <---> L7 HTTP/1.1 Upstream (Bidirectional Duplex / WebSocket)
 //!
-//! Handles concurrent full-duplex bidirectional streaming (WebSocket upgrade, tunnels)
-//! between downstream HTTP/1.1 client and upstream HTTP/1.1 backend.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H1) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Upgrade / Bidi) ─►│                                    │
+//!            │                                      │── 2. acquire() ───────────────────►│ (Lease dedicated backend socket)
+//!            │                                      │── 3. Send Request Head ───────────►│
+//!            │                                      │◄─ 4. Response Head (101 / 200) ────┤
+//!            │◄─ 5. Response Head (101 / 200) ──────┤                                    │
+//!            │                                      │                                    │
+//!            │══════════════════════ 6. Concurrent Full-Duplex Loop ═════════════════════│
+//!            │── Client Frame / Chunk ─────────────►│── Forward to Backend ─────────────►│
+//!            │◄─ Forward to Client ─────────────────│◄─ Backend Frame / Chunk ───────────┤
+//!            │═══════════════════════════════════════════════════════════════════════════│
+//!            │                                      │                                    │
+//!            │── 7. Client or Backend FIN/Close ───►│── 8. Graceful Teardown ───────────►│
+//!            │                                      │── 9. Socket closed/recycled ──────►│
+//!            ▼                                      ▼                                    ▼
+//! ```
 //!
-//! In accordance with Velda Edge Hourglass Architecture:
-//! Protocol crates (`velda-http1`) strictly provide primitives ("WHAT"),
-//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
+//! ### Microarchitectural Invariants:
+//! - **Full-Duplex Symmetrical Streaming**: Pumps upstream and downstream traffic concurrently via `tokio::select!`.
+//! - **Bidirectional Teardown Propagation**: Half-close or socket disconnect on either side cleanly terminates the peer.
+//! - **Zero Intermediate Allocation**: Frame payloads are forwarded directly through shared slab buffers without heap allocation.
 
 use std::sync::Arc;
 use std::time::Duration;

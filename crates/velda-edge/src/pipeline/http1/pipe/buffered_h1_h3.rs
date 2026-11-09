@@ -1,8 +1,29 @@
-//! Layer 7 HTTP/1.1 to HTTP/3 Buffered Bridge Pipeline.
+//! # Pipeline Strategy: `buffered_h1_h3`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/3 Upstream (Buffered QUIC Bridge)
 //!
-//! Standard request-response REST API bridge where downstream HTTP/1.1 request body
-//! is completely buffered into RAM, then forwarded over an upstream HTTP/3 / QUIC
-//! client multiplexing session without Head-of-Line blocking.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H3/QUIC) ]
+//!            │                                      │                                      │
+//!            │── 1. Request Head (Expect: 100) ────►│                                      │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                      │
+//!            │── 3. Body Stream ───────────────────►│ ──► [ RAM Slab Pool ]                │
+//!            │                                      │     (No QUIC stream opened)          │
+//!            │                                      │                                      │
+//!            │                                      │── 4. acquire() ─────────────────────►│ (Lease warm QUIC conn)
+//!            │                                      │── 5. send_request(HEADERS + DATA) ──►│ (QPACK encoded frames)
+//!            │                                      │◄─ 6. Response HEADERS ───────────────┤ (QPACK decoded)
+//!            │                                      │◄─ 7. Response DATA (Body) ───────────┤
+//!            │                                      │                                      │
+//!            │                                      ├── 8. Post-Response Plugins           │
+//!            │                                      │── 9. QUIC stream closed ────────────►│ (Connection returns to pool)
+//!            │◄─ 10. writev [ Head + Body ] ────────┤                                      │
+//!            ▼                                      ▼                                      ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **Anti-Slowloris**: Downstream body 100% buffered in RAM before opening upstream QUIC stream.
+//! - **QUIC Zero-HOL**: Forwarded over an established HTTP/3 QUIC connection with independent packet streams.
+//! - **Zero-Copy Egress**: Vectored write (`write_vectored`) transmits HTTP/1.1 head + body in 1 syscall.
 
 use std::sync::Arc;
 

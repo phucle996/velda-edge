@@ -1,7 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/3 Server-Stream Bridge Pipeline.
+//! # Pipeline Strategy: `server_stream_h1_h3`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/3 Upstream (Server Streaming / QUIC Bridge)
 //!
-//! Handles server-streaming RPCs (e.g. Server-Sent Events, LLM token streaming)
-//! where downstream HTTP/1.1 requests are forwarded over HTTP/3 / QUIC.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H3/QUIC) ]
+//!            │                                      │                                      │
+//!            │── 1. Request Head (Expect: 100) ────►│                                      │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                      │
+//!            │── 3. Body (buffered into RAM) ──────►│ ──► [ RAM Slab Pool ]                │
+//!            │                                      │                                      │
+//!            │                                      │── 4. acquire() ─────────────────────►│ (Lease warm QUIC conn)
+//!            │                                      │── 5. send_request(HEADERS + DATA) ──►│
+//!            │                                      │◄─ 6. Response HEADERS (QPACK) ───────┤
+//!            │◄─ 7. Chunked Response Head ──────────┤                                      │
+//!            │                                      │◄─ 8. QUIC DATA Chunk ────────────────┤
+//!            │◄─ 9. send_chunk(DATA payload) ───────┤                                      │
+//!            │                      ... progressive streaming ...                          │
+//!            │                                      │◄─ 10. QUIC Stream FIN ───────────────┤
+//!            │◄─ 11. send_chunked_end (0\r\n\r\n) ──┤                                      │
+//!            │                                      │── 12. Stream closed ────────────────►│ (QUIC session recycled)
+//!            ▼                                      ▼                                      ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **QUIC Datagram Streaming**: Pushes packets directly from UDP socket without TCP HoL blocking.
+//! - **QPACK Decoding**: Stream headers decompressed once in place and immediately formatted into HTTP/1.1 chunked head.
+//! - **Zero Memory Bloat**: Progressive streaming forward loop avoids holding chunks in RAM.
 
 use std::sync::Arc;
 

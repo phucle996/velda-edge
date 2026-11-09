@@ -1,8 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/3 Client-Stream Bridge Pipeline.
+//! # Pipeline Strategy: `client_stream_h1_h3`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/3 Upstream (Client Streaming / QUIC Bridge)
 //!
-//! Handles progressive client-streaming uploads (e.g. file uploads, log batch ingest) where
-//! downstream HTTP/1.1 chunks are progressively streamed to an upstream HTTP/3 QUIC connection,
-//! and a single response is returned downstream with zero whole-payload buffering in RAM.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H3/QUIC) ]
+//!            │                                      │                                      │
+//!            │── 1. Request Head ──────────────────►│                                      │
+//!            │                                      │── 2. acquire() ─────────────────────►│ (Lease warm QUIC conn)
+//!            │                                      │── 3. send_request(HEADERS) ─────────►│ (QPACK encoded)
+//!            │◄─ 4. 100 Continue (if Expect) ───────┤                                      │
+//!            │── 5. Chunk N (Data) ────────────────►│                                      │
+//!            │                                      │── 6. send_data(Chunk N, fin=false) ─►│
+//!            │                      ... progressive client upload ...                      │
+//!            │── 7. Chunk 0 (EOF) ─────────────────►│                                      │
+//!            │                                      │── 8. send_data(fin = true) ─────────►│
+//!            │                                      │◄─ 9. Response HEADERS ───────────────┤ (QPACK decoded)
+//!            │                                      │◄─ 10. Response DATA (Body) ──────────┤
+//!            │                                      ├── 11. Run Post-Response Plugins      │
+//!            │                                      │── 12. QUIC stream closed ───────────►│ (QUIC session recycled)
+//!            │◄─ 13. writev [ Head + Body ] ────────┤                                      │
+//!            ▼                                      ▼                                      ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **QUIC Zero-HOL Ingest**: Client chunks stream as independent QUIC stream frames across packet boundaries.
+//! - **Bounded RAM Footprint**: Streams chunks progressively without whole-payload memory staging.
+//! - **Zero-Copy Egress**: Vectored write (`write_vectored`) delivers response to downstream socket in 1 syscall.
 
 use std::sync::Arc;
 

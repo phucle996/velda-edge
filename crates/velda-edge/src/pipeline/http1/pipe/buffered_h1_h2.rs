@@ -1,8 +1,29 @@
-//! Layer 7 HTTP/1.1 to HTTP/2 Buffered Bridge Pipeline.
+//! # Pipeline Strategy: `buffered_h1_h2`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/2 Upstream (Buffered Bridge)
 //!
-//! Standard request-response REST API bridge where downstream HTTP/1.1 request body
-//! is completely buffered into RAM, then forwarded over an upstream multiplexed HTTP/2
-//! connection (RFC 9113) without Head-of-Line blocking.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H2) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Expect: 100) ────►│                                    │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                    │
+//!            │── 3. Body Stream ───────────────────►│ ──► [ RAM Slab Pool ]              │
+//!            │                                      │     (No upstream H2 stream opened) │
+//!            │                                      │                                    │
+//!            │                                      │── 4. acquire_stream() ────────────►│ (Lease H2 multiplex stream)
+//!            │                                      │── 5. HEADERS + DATA frames ───────►│ (end_stream = true)
+//!            │                                      │◄─ 6. HEADERS (Response status) ────┤
+//!            │                                      │◄─ 7. DATA frames (Body chunks) ────┤
+//!            │                                      │                                    │
+//!            │                                      ├── 8. Post-Response Plugins         │
+//!            │                                      │── 9. Stream slot released ────────►│ (H2 stream closed, conn stays open)
+//!            │◄─ 10. writev [ Head + Body ] ────────┤                                    │
+//!            ▼                                      ▼                                    ▼
+//! ```
+//!
+//! ### Microarchitectural Invariants:
+//! - **Anti-Slowloris**: Downstream body 100% buffered in RAM before leasing upstream H2 stream.
+//! - **Multiplexed Reuse**: Forwarded over an established HTTP/2 connection without TCP handshake.
+//! - **Zero-Copy Egress**: Vectored write (`write_vectored`) transmits HTTP/1.1 head + body in 1 syscall.
 
 use std::sync::Arc;
 

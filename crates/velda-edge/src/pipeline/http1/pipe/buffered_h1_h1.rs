@@ -1,12 +1,30 @@
-//! Layer 7 HTTP/1.1 to HTTP/1.1 Buffered Pipeline.
+//! # Pipeline Strategy: `buffered_h1_h1`
+//! ## L7 HTTP/1.1 Downstream ---> L7 HTTP/1.1 Upstream (Buffered Request-Response)
 //!
-//! Handles standard request-response REST APIs where the full downstream request body
-//! is buffered into RAM before an upstream connection is leased from the pool.
-//! Completely eliminates upstream pool connection starvation from slow downstream uploads.
+//! ```text
+//! [ Downstream Client (H1) ]          [ Velda Worker (Local Core) ]          [ Upstream Backend (H1) ]
+//!            │                                      │                                    │
+//!            │── 1. Request Head (Expect: 100) ────►│                                    │
+//!            │◄─ 2. 100 Continue (unblock) ─────────┤                                    │
+//!            │── 3. Body Stream (into RAM slab) ───►│ ──► [ RAM Slab Pool ]              │
+//!            │                                      │     (Backend socket NOT leased!)   │
+//!            │                                      │                                    │
+//!            │                                      │── 4. acquire() ───────────────────►│ (Lease pooled socket)
+//!            │                                      │── 5. Request Head + Body ─────────►│
+//!            │                                      │◄─ 6. Response Head + Framing ──────┤
+//!            │                                      │◄─ 7. Response Body Stream ─────────┤
+//!            │                                      │                                    │
+//!            │                                      ├── 8. Run Post-Response Plugins     │
+//!            │                                      │── 9. DROP UPSTREAM LEASE ─────────►│ (Socket returned to pool!)
+//!            │◄─ 10. writev [ Head + Body ] ────────┤                                    │
+//!            ▼                                      ▼                                    ▼
+//! ```
 //!
-//! In accordance with Velda Edge Hourglass Architecture:
-//! Protocol crates (`velda-http1`) strictly provide primitives ("WHAT"),
-//! while this edge pipeline module owns the end-to-end execution workflow ("HOW").
+//! ### Microarchitectural Invariants:
+//! - **Anti-Slowloris**: Downstream body 100% buffered into RAM before upstream lease.
+//! - **Early Lease Drop**: Upstream socket released back to pool BEFORE downstream writev begins.
+//! - **Zero-Copy Egress**: Vectored write (`write_vectored`) transmits response head + body in 1 syscall.
+//! - **1-Shot Self-Healing**: Transparently retries on a fresh connection if leased pooled socket is stale.
 
 use std::sync::Arc;
 
