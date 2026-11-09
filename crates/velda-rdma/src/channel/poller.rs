@@ -51,7 +51,8 @@ impl AdaptiveCqPoller {
     /// Creates an adaptive poller for the given Completion Queue.
     pub fn new(cq: Arc<CompletionQueue>, spin_count: u32) -> Result<Self, RdmaError> {
         let async_fd = match cq.channel_fd() {
-            Some(fd) => match AsyncFd::new(fd) {
+            // SAFETY: The RDMA completion queue channel fd remains valid and open for the lifetime of `cq`.
+            Some(fd) => match unsafe { AsyncFd::register(fd) } {
                 Ok(afd) => Some(afd),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to register CQ event channel with Tokio AsyncFd; falling back to busy-poll only");
