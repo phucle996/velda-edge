@@ -26,7 +26,9 @@ pub use hook::{
     try_dispatch_shadow,
 };
 
-pub use background::prometheus::{PrometheusExporter, format_snapshot};
+pub use background::prometheus_exporter::{
+    PrometheusExporter, PrometheusExporterPlugin, format_snapshot,
+};
 pub use background::{
     BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, OtlpMetricsExporterConfig,
     OtlpMetricsExporterPlugin, spawn_background_plugins,

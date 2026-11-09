@@ -1,4 +1,4 @@
-# Prometheus Telemetry Exporter Plugin (`prometheus`) — Test Verification Matrix
+# Prometheus Telemetry Exporter Plugin (`prometheus_exporter`) — Test Verification Matrix
 
 This document defines the test suite coverage, invariants verification, and edge-case validation for the **Prometheus Exporter** plugin.
 

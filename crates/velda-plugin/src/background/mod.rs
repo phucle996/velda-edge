@@ -18,11 +18,11 @@ use crate::error::PluginError;
 
 pub mod health_probe;
 pub mod otlp_metrics_exporter;
-pub mod prometheus;
+pub mod prometheus_exporter;
 
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
-pub use prometheus::{PrometheusExporter, format_snapshot};
+pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
 
 /// Contract for plugins operating as background logistics services.
 pub trait BackgroundPlugin: Send + Sync {
@@ -95,7 +95,7 @@ pub fn instantiate(
             Ok(Arc::new(probe))
         }
         "prometheus_exporter" => {
-            let exporter = PrometheusExporter::from_config(config)?;
+            let exporter = PrometheusExporterPlugin::from_config(config)?;
             Ok(Arc::new(exporter))
         }
         "otlp_metrics_exporter" => {

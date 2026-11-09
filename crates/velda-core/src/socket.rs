@@ -2,6 +2,85 @@
 //!
 //! Provides the process-wide Single Source of Truth for all listening network sockets
 //! opened across the host (Data Plane Traffic, Shadow Logistics Services, and Gateway Management).
+//!
+//! # Architecture & Port Isolation Mechanism
+//!
+//! ```text
+//! ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+//! ║                          VELDA EDGE — GLOBAL SOCKET MANAGER & PORT ISOLATION MECHANISM                           ║
+//! ║                                  (crates/velda-core/src/socket.rs: GlobalSocketManager)                          ║
+//! ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+//!
+//!                                          ┌───────────────────────────────────┐
+//!                                          │       BOOTSTRAP & CONFIG          │
+//!                                          │ (Config / RuntimeSnapshot Loaded) │
+//!                                          └─────────────────┬─────────────────┘
+//!                                                            │
+//!                                                            ▼
+//!                              ┌───────────────────────────────────────────────────────────┐
+//!                              │       GlobalSocketManager (crates/velda-core)             │
+//!                              │   RwLock<Vec<SocketClaim>>: Process-Wide Conflict Registry│
+//!                              └─────────────┬───────────────────────────────┬─────────────┘
+//!                                            │                               │
+//!                       [SocketRole::Traffic]│                               │[SocketRole::Shadow]
+//!                       (Traffic: :80, :443) │                               │(Admin/Probe: :9091)
+//!                                            │                               │
+//!                                            ▼                               ▼
+//!                       ┌───────────────────────────┐  atomic check  ┌───────────────────────────┐
+//!                       │    register_claim()       │ ◄────────────► │    acquire_shadow_tcp()   │
+//!                       │ Ingress Port Verification │  anti-conflict │ Socket Binding & Claim    │
+//!                       └─────────────┬─────────────┘                └─────────────┬─────────────┘
+//!                                     │                                            │
+//!                                     │ SO_REUSEADDR | SO_REUSEPORT                │ SO_REUSEADDR | SO_REUSEPORT
+//!                                     │ bind() + listen(4096)                      │ bind() + listen(1024)
+//!                                     ▼                                            ▼
+//!                       ┌───────────────────────────┐                ┌───────────────────────────┐
+//!                       │   std::net::TcpListener   │                │   std::net::TcpListener   │
+//!                       │  (Ingress Traffic Handle) │                │  (Shadow Dedicated Handle)│
+//!                       └─────────────┬─────────────┘                └─────────────┬─────────────┘
+//!                                     │                                            │
+//!                   Handoff Ownership to IngressEngine              Handoff Ownership to BackgroundPlugin
+//!                                     │                                            │
+//!                                     ▼                                            ▼
+//! ╔══════════════════════════════════════════════════════════╗ ╔══════════════════════════════════════════════════════════╗
+//! ║        FRONTLINE TRAFFIC CONE (Top-Cone Ingress)         ║ ║       SHADOW LOGISTICS RUNNER (Background Daemon)    ║
+//! ║        Owner: velda-ingress + velda-sock / velda-xdp     ║ ║       Owner: velda-plugin (health_probe)             ║
+//! ╠══════════════════════════════════════════════════════════╣ ╠══════════════════════════════════════════════════════════╣
+//! ║                                                          ║ ║                                                          ║
+//! ║  • Multi-Shard Worker Distribution (run_ingress_shard)   ║ ║  • Dedicated Background Thread: velda-shadow-0           ║
+//! ║  • 1:1 Core Pinning:                                     ║ ║  • Linux Scheduling Policy: SCHED_IDLE                   ║
+//! ║    ├── Core 0: velda-worker-0 (SCHED_NORMAL, Priority 1) ║ ║    └── Yields 100% CPU when frontline worker needs it    ║
+//! ║    └── Core 1: velda-worker-1 (SCHED_NORMAL, Priority 1) ║ ║                                                          ║
+//! ║                                                          ║ ║  [ Sequential Inline Accept Loop — Zero Tokio Spawn ]    ║
+//! ║  [ Hot-Path Request Forwarding Pipeline ]                ║ ║  loop {                                                  ║
+//! ║  Downstream Client Request (:8080)                       ║ ║      select! {                                           ║
+//! ║        │                                                 ║ ║          biased;                                         ║
+//! ║        ▼                                                 ║ ║          _ = shutdown.changed() => break,                ║
+//! ║  ┌───────────┐     ┌──────────┐     ┌────────────────┐   ║ ║          conn = listener.accept() => {                   ║
+//! ║  │   Decode  │ ──► │  Router  │ ──► │ Upstream (8081)│   ║ ║              tokio::time::timeout(500ms, async {         ║
+//! ║  └───────────┘     └──────────┘     └────────────────┘   ║ ║                  let mut buf = [0u8; 512]; // Stack      ║
+//! ║                                                          ║ ║                  let n = stream.read(&mut buf).await;    ║
+//! ║  Invariants:                                             ║ ║                  let resp = (self.eval_fn)(&buf[..n]);   ║
+//! ║  - Zero JSON Parsing, Zero Disk I/O, Zero Dynamic Sniff  ║ ║                  stream.write_all(resp).await; // L1D    ║
+//! ║  - Completely UNAWARE of and UNTOUCHED by Port 9091!     ║ ║              });                                         ║
+//! ║                                                          ║ ║          }                                               ║
+//! ║                                                          ║ ║      }                                                   ║
+//! ║                                                          ║ ║  }                                                       ║
+//! ╚══════════════════════════════════════════════════════════╝ ╚══════════════════════════════════════════════════════════╝
+//!                                     ▲                                            ▲
+//!                                     │                                            │
+//!                                     └───────────────────┬────────────────────────┘
+//!                                                         │
+//!                                     ┌───────────────────┴───────────────────┐
+//!                                     │      CLEAN LIFECYCLE DEALLOCATION     │
+//!                                     │          (SIGTERM / Shutdown)         │
+//!                                     ├───────────────────────────────────────┤
+//!                                     │ 1. Broadcast shutdown via watch::rx   │
+//!                                     │ 2. Shadow Worker closes listener      │
+//!                                     │ 3. Invoke release_shadow_tcp(id)      │
+//!                                     │    -> Returns clean port to Kernel    │
+//!                                     └───────────────────────────────────────┘
+//! ```
 
 use std::net::SocketAddr;
 use std::sync::{OnceLock, RwLock};
@@ -311,15 +390,15 @@ mod tests {
             .unwrap();
 
         // Conflict when shadow tries to claim traffic port
-        let res = mgr.acquire_shadow_tcp(addr1, "prometheus");
+        let res = mgr.acquire_shadow_tcp(addr1, "prometheus_exporter");
         assert!(res.is_err());
 
         // Shadow successfully acquires distinct port
-        let listener = mgr.acquire_shadow_tcp(addr2, "prometheus");
+        let listener = mgr.acquire_shadow_tcp(addr2, "prometheus_exporter");
         assert!(listener.is_ok());
 
         // Release works
-        mgr.release_shadow_tcp("prometheus");
+        mgr.release_shadow_tcp("prometheus_exporter");
         assert_eq!(mgr.claims().len(), 1);
     }
 }

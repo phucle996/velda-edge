@@ -122,3 +122,58 @@ By avoiding `tokio::spawn` per probe:
   $$T_{\text{total}} = 1000 \times 15\ \mu\text{s} = 15\ \text{ms} = 1.5\%\ \text{of 1 CPU core}$$
 - Zero green-thread scheduling queues are touched.
 - Cachelines for `config` and `state` remain warm in L1 Data Cache.
+
+---
+
+## 4. Microarchitectural Optimization: Adaptive SWAR & Contiguous L1D Storage
+
+### 4.1 Contiguous L1D Cache-Resident Wire Responses (`WIRE_RESPONSES`)
+Rather than maintaining an array of pointers to disparate string slices scattered throughout `.rodata` (which incurs double dereferencing and multi-cacheline pollution), all 3 wire responses are packed contiguously into a single 64-byte aligned structure:
+
+```rust
+#[repr(C, align(64))]
+pub struct ContiguousWireResponses {
+    /// 195 bytes: 200 OK (57B) + 503 Service Unavailable (74B) + 404 Not Found (64B)
+    pub raw: [u8; 195],
+}
+```
+
+- **Cacheline Footprint**: $\lceil 195 / 64 \rceil = 4\text{ cache lines}$.
+- **L1D Cache Share**: Consumes $\approx 0.5\%$ of a typical 32KB L1 Data Cache.
+- **Zero Double-Dereference**: Socket writes stream payload bytes directly from L1D into kernel socket buffers without crossing the DRAM memory wall ($< 1\text{ns}$ vs $60\text{--}80\text{ns}$).
+
+### 4.2 Adaptive Register SWAR Path Matching
+Probe paths (`/livez`, `/readyz`, `/healthz`) are inspected without string parsing, allocations, or loops:
+
+- **64-bit Architecture (`eval_swar_64`)**:
+  Inspects 8 bytes in a single 64-bit GP register (`u64::from_le_bytes`) in 1 CPU cycle using bitwise XOR and AND:
+  $$\text{diff} = (\text{word} \oplus \text{token}) \ \& \ \text{mask} == 0$$
+- **Dual 32-bit Architecture (`eval_swar_32x2`)**:
+  For 32-bit CPUs (ARMv7, i686) or systems under 64-bit register pressure, inspects the 8 bytes using two 32-bit GP registers (`u32_lo`, `u32_hi`):
+  $$\text{diff} = ((\text{lo} \oplus \text{tok\_lo}) \ \& \ \text{mask\_lo}) \ | \ ((\text{hi} \oplus \text{tok\_hi}) \ \& \ \text{mask\_hi}) == 0$$
+- **Bootstrap Function Pointer Resolution**:
+  The function pointer (`eval_fn: ProbeEvalFn`) is resolved once at plugin initialization via `resolve_eval_fn`, guaranteeing 0 CPU feature checking on the serving path.
+
+### 4.3 Branchless ALU Response Index Calculation
+Target response selection executes without conditional branching (`if`/`else`):
+
+$$\text{index} = 2 - \text{probe\_match} - \text{probe\_ok}$$
+
+| Scenario | `probe_match` | `probe_ok` | Formula: $2 - \text{match} - \text{ok}$ | Result Index | Target Response |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Unknown Path** | `0` | `0` | $2 - 0 - 0$ | **2** | `RESP_404` |
+| **Valid Probe & Unhealthy** | `1` | `0` | $2 - 1 - 0$ | **1** | `RESP_503` |
+| **Valid Probe & Healthy** | `1` | `1` | $2 - 1 - 1$ | **0** | `RESP_200` |
+
+Achieves 0% branch misprediction penalty and guarantees constant-time CPU execution.
+
+---
+
+## 5. Socket Lifecycle Handoff from Core (`velda-core::socket`)
+
+The `health_probe` plugin does not perform raw socket syscalls, port binding, or process-wide conflict detection. In accordance with the **Crate Boundary Invariant** and **Hourglass Architecture**:
+
+- **Socket Authority Delegated to Core**: All network listener lifecycles, kernel socket options, and anti-collision checks are centrally owned and managed by [`velda-core::socket::GlobalSocketManager`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs). (For the comprehensive internal architecture, see [`crates/velda-core/src/socket.rs`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs)).
+- **Direct Handoff at Bootstrap**: During bootstrap, the runtime environment requests a shadow socket claim (`SocketRole::Shadow`) from `velda-core` for the configured management port (e.g. `0.0.0.0:9091`). Once verified against the Port Isolation Invariant ($\text{ManagementPort} \cap \text{TrafficPorts} = \emptyset$), the pre-bound listener handle is handed off directly to `health_probe`.
+- **Autonomous Shadow Loop**: Upon receiving the listener handoff, `health_probe` executes exclusively within `velda-shadow-0` (`SCHED_IDLE`) via its flat sequential accept loop. Frontline traffic workers (`velda-worker-{0..N}`) remain completely detached from and unaware of the management socket.
+- **Clean Deallocation on Shutdown**: On SIGTERM, `health_probe` exits its accept loop and yields the socket handle back to the core runtime for clean deregistration and release.

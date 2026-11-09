@@ -145,8 +145,8 @@ To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factor
 | [`std_http_access_log`](src/post_response/std_http_access_log/) | `post_response` | All HTTP | Lock-free, hardware-harmonized standard stream HTTP access logging with status-aware sampling. |
 | [`std_grpc_access_log`](src/post_response/std_grpc_access_log/) | `post_response` | gRPC | Lock-free, hardware-harmonized standard stream gRPC access logging with canonical status sampling. |
 | [`cors`](src/post_response/cors.rs) | `post_response` | All L7 | Injects CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`). |
-| [`prometheus_exporter`](src/background/prometheus/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Shadow Worker. |
-| [`health_probe`](src/background/health_probe.rs) | `background` | Management (:8081) | Kubernetes liveness and readiness probe HTTP endpoint. |
+| [`prometheus_exporter`](src/background/prometheus_exporter/mod.rs) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Shadow Worker. |
+| [`health_probe`](src/background/health_probe/mod.rs) | `background` | Management (:9091) | Kubernetes liveness and readiness probe HTTP endpoint. |
 
 ---
 

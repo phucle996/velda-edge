@@ -1,4 +1,4 @@
-# Prometheus Telemetry Exporter Plugin (`prometheus`) — Performance Benchmark Analysis
+# Prometheus Telemetry Exporter Plugin (`prometheus_exporter`) — Performance Benchmark Analysis
 
 This document details empirical cross-ecosystem comparative benchmarks, concurrency scalability, live Azure virtual network test results, throughput capacity, latency percentiles, and resource consumption for **Velda Edge**, **Nginx**, **OpenResty**, **Envoy**, and **Kong Gateway**.
 

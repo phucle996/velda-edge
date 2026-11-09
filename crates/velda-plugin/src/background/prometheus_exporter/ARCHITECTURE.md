@@ -1,4 +1,4 @@
-# Prometheus Telemetry Exporter Plugin (`prometheus`) — Architecture
+# Prometheus Telemetry Exporter Plugin (`prometheus_exporter`) — Architecture
 
 This document describes the architectural design, security boundaries, telemetry invariants, and internal pipeline of the **Prometheus Exporter** plugin in Velda Edge.
 
@@ -6,7 +6,7 @@ This document describes the architectural design, security boundaries, telemetry
 
 ## 1. Architectural Mission & Invariants
 
-The Prometheus Exporter plugin (`crates/velda-plugin/src/background/prometheus/`) provides an OpenMetrics-compliant, low-overhead HTTP/1.1 and HTTPS endpoint for scraping gateway metrics (`GET /metrics`) and health status (`GET /healthz`).
+The Prometheus Exporter plugin (`crates/velda-plugin/src/background/prometheus_exporter/`) provides an OpenMetrics-compliant, low-overhead HTTP/1.1 and HTTPS endpoint for scraping gateway metrics (`GET /metrics`) and health status (`GET /healthz`).
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐

@@ -101,6 +101,9 @@ pub struct PrometheusExporter {
     expected_auth_header: Option<String>,
 }
 
+/// Canonical type alias adhering to `*Plugin` background plugin naming conventions.
+pub type PrometheusExporterPlugin = PrometheusExporter;
+
 impl PrometheusExporter {
     /// Constructs and initializes the Prometheus Exporter from validated configuration.
     pub fn new(
