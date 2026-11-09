@@ -61,7 +61,7 @@ Like the IP (Internet Protocol) layer in the Internet Architecture, the Router i
   - **Never** inspects request body payloads.
   - **Never** parses JSON, YAML, or configuration files.
   - **Never** performs dynamic trait downcasting (`Box<dyn Any>`).
-  - **Zero Heap Allocations**: Route matching against pre-compiled trie/radix tables operates with zero heap allocations on the hot path.
+  - **Zero Heap Allocations & Zero Pointer-Chasing**: Route matching rejects traditional pointer-based Radix Tries (which cause LLC cache misses and pipeline stalls in Envoy/Kong/Traefik). Instead, it evaluates against pre-compiled **Flat Cache-Resident Slash-Block Tables** using 64-bit integer words (`head8: u64`) and branchless SWAR registers, operating with zero heap allocations on the hot path.
 
 ### 2.3 The Bottom Cone: Upstream Egress (Specialized & Autonomous)
 Once `upstream_id` is resolved at the waist, execution fans out into the bottom cone. Here, each upstream backend is an autonomous, pre-compiled engine specialized for its target protocol (`Http1Upstream`, `Http2Upstream`, `Http3Upstream`, `GrpcTcpUpstream`, `GrpcUdpUpstream`, `TcpUpstream`, `UdpUpstream`).

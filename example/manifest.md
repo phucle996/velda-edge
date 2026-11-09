@@ -61,7 +61,7 @@ Once all modified binary files are written to disk, `velda-sync` sends a structu
 | Domain Name | Config File | Binary Output | Required | Description |
 | :--- | :--- | :--- | :---: | :--- |
 | `listeners` | `listeners.json` | `listeners.bin` | Yes | Ingress ports, protocols, and early `pre_route` plugins. |
-| `routes` | `routes.json` | `routes.bin` | Yes | Routing trie rules and phased plugin chains (`pre_upstream`, `post_response`). |
+| `routes` | `routes.json` | `routes.bin` | Yes | Routing rules (exact map + Flat Slash-Block table) and phased plugin chains (`pre_upstream`, `post_response`). |
 | `upstreams` | `upstreams.json` | `upstreams.bin` | Yes | Backend pools, DNS discovery, load balancing, health checks. |
 | `plugins` | `plugins.json` | `plugins.bin` | Yes | Plugin definitions and typed configurations. |
 | `tls` | `tls.json` | `tls.bin` | No | Server TLS certificates, private keys, and client CAs. |

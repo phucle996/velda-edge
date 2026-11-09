@@ -29,7 +29,7 @@ Velda Edge configuration is structured around the **Hourglass Architecture**:
 | Domain | Configuration File | Specification Document | Responsibility & Lifecycle |
 | :--- | :--- | :--- | :--- |
 | **Ingress Listeners** | [`listeners.json`](./listeners.json) | [`listeners.md`](./listeners.md) | Network sockets, L4 transport, L7 protocol family, TLS termination, and `pre_route` edge guards. |
-| **Routing** | [`routes.json`](./routes.json) | [`routes.md`](./routes.md) | Path/Host matching trie, upstream target binding, `pre_upstream` request hooks, and `post_response` response hooks. |
+| **Routing** | [`routes.json`](./routes.json) | [`routes.md`](./routes.md) | Path/Host matching (Tier 1 exact map + Tier 2 Flat Slash-Block table), upstream target binding, `pre_upstream` request hooks, and `post_response` response hooks. |
 | **Upstream Topologies** | [`upstreams.json`](./upstreams.json) | [`upstreams.md`](./upstreams.md) | Physical endpoint pools, DNS discovery, load balancing algorithms, health checks, and connection pooling. |
 | **Plugin Catalog** | [`plugins.json`](./plugins.json) | [`plugins.md`](./plugins.md) | Catalog and parameter configurations for reusable plugins (`jwt_auth`, `rate_limit`, `ip_filter`, etc.). |
 | **TLS Certificates** | [`tls.json`](./tls.json) | [`tls.md`](./tls.md) | Edge TLS certificates, private keys, client CA (mTLS), and ALPN protocols. |

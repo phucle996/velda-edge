@@ -41,7 +41,7 @@ HTTPS HTTP/2 Clean Proxy Traffic (oha)    ─── [23,328.01 RPS]  ───�
 ### 1.2 Key Performance Highlights
 
 1. **108k+ RPS Malicious Edge Short-Circuit**:
-   By intercepting attacks during the `pre_route` phase prior to route trie matching and upstream connection pool leasing, `waf_lite` terminates attack probes at **108,089.42 RPS** with a median latency of **471.00 µs**, repelling over 1.08 million attacks in 10 seconds without backend degradation.
+   By intercepting attacks during the `pre_route` phase prior to router table matching and upstream connection pool leasing, `waf_lite` terminates attack probes at **108,089.42 RPS** with a median latency of **471.00 µs**, repelling over 1.08 million attacks in 10 seconds without backend degradation.
 2. **Negligible Clean Traffic Overhead (< 1.31%)**:
    Enabling comprehensive WAF scanning on URI path, query parameters, User-Agent, and multiple custom headers reduced throughput by only **585.45 RPS** compared to the uninspected baseline (44,387.24 RPS vs 43,801.79 RPS). Median P50 latency differed by only **20 µs** (**1.25 ms** vs **1.27 ms**).
 3. **Sub-776µs Rejection Under Full TLS 1.3**:
@@ -79,7 +79,7 @@ WAF Lite Active      ─── [1.27 ms] ──────┤ (+0.02 ms / +20 �
 #### 2. Edge Short-Circuiting Capacity
 - **Attack Mitigation Throughput**: Reaches **$107,531 - 108,089\ \text{RPS}$** with median latency of only **$470 - 477\ \mu\text{s}$** ($< 0.5\ \text{ms}$).
 - **Mitigation Multiplier**: Attack probe termination throughput is **$2.46\times$ higher** than clean request proxying throughput ($108,089\ \text{RPS}$ vs $43,801\ \text{RPS}$).
-- **Upstream Connection Pool Shielding**: Operating at the `pre_route` phase allows malicious probes to be terminated with pre-baked static `403 Forbidden` responses immediately, completely **bypassing router trie resolution**, **avoiding HTTP body stream allocation**, and **preventing upstream connection pool exhaustion**.
+- **Upstream Connection Pool Shielding**: Operating at the `pre_route` phase allows malicious probes to be terminated with pre-baked static `403 Forbidden` responses immediately, completely **bypassing router table resolution**, **avoiding HTTP body stream allocation**, and **preventing upstream connection pool exhaustion**.
 
 ### 1.4 Cost-Benefit Assessment
 

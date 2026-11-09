@@ -39,7 +39,7 @@ Plugins execute across four strictly isolated lifecycle phases:
 └────────────┬────────────┘
              │
              ▼
-[ Route Trie Matching & Upstream Selection ]
+[ Route Table Matching & Upstream Selection ]
              │
              ▼
 ┌─────────────────────────┐

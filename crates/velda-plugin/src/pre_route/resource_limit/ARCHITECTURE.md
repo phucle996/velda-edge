@@ -6,10 +6,10 @@ This document specifies the internal pipeline design, single-pass branch-minimiz
 
 ## 1. System Mindset & Architectural Invariants
 
-The `resource_limit` plugin operates at the ingress pre-route phase of Velda Edge, enforcing physical resource boundaries before router trie lookup, authentication plugins, body streaming, or upstream connection leasing. It adheres strictly to five core architectural invariants:
+The `resource_limit` plugin operates at the ingress pre-route phase of Velda Edge, enforcing physical resource boundaries before router table lookup, authentication plugins, body streaming, or upstream connection leasing. It adheres strictly to five core architectural invariants:
 
 1. **Pre-Route Ingress Isolation**:
-   Terminates requests exceeding physical bounds **prior** to router trie resolution or downstream pipeline execution. Prevents oversized queries and headers from wasting CPU cycles in WAF regexes, access log formatters, or upstream backend connection pools.
+   Terminates requests exceeding physical bounds **prior** to router table resolution or downstream pipeline execution. Prevents oversized queries and headers from wasting CPU cycles in WAF regexes, access log formatters, or upstream backend connection pools.
 2. **CPDoS (Cache-Poisoned Denial of Service) Invariant**:
    All 414 (`URI Too Long`) and 431 (`Request Header Fields Too Large`) rejection responses strictly include immutable `Cache-Control: no-store` headers. This prevents forward reverse proxies and CDNs with normalized cache keys from caching client-induced limit rejections.
 3. **Single-Pass Branch-Minimized Header Loop**:

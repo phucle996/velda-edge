@@ -1,6 +1,6 @@
 //! IP / CIDR Subnet Access Filter Plugin (`ip_filter`).
 //!
-//! Evaluated during `pre_route` phase prior to routing trie lookups and body streaming.
+//! Evaluated during `pre_route` phase prior to router table lookups and body streaming.
 //! Enforces zero-allocation bitmask CIDR matching on IPv4/IPv6 addresses with allow/deny modes
 //! and exception precedence.
 //!

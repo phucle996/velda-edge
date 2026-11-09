@@ -1,6 +1,6 @@
 # CORS Preflight Interceptor Plugin (`cors_preflight`)
 
-High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Origin Resource Sharing (CORS) HTTP `OPTIONS` preflight requests at the edge, returning an RFC-compliant `204 No Content` response prior to route trie matching, authentication checks, body streaming, or upstream connection pool acquisition.
+High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Origin Resource Sharing (CORS) HTTP `OPTIONS` preflight requests at the edge, returning an RFC-compliant `204 No Content` response prior to router table matching, authentication checks, body streaming, or upstream connection pool acquisition.
 
 ---
 
@@ -120,7 +120,7 @@ High-performance L7 ingress short-circuiting gatekeeper that intercepts Cross-Or
 
 ## 5. Architectural Invariants & Hardware Optimizations
 
-1. **Short-Circuit Authority**: Returns [`Action::Respond`] with `204 No Content` immediately. Does not allocate router trie nodes, execute route matching, spawn body readers, or lease upstream connections.
+1. **Short-Circuit Authority**: Returns [`Action::Respond`] with `204 No Content` immediately. Does not execute router matching, spawn body readers, or lease upstream connections.
 2. **Pre-Baked Header Template (Zero-Branch Hot Path)**: Pre-computes all static response headers (`methods`, `credentials`, `max-age`, `vary`, `content-length`) at initialization. On request, simply clones the template into the response, eliminating 5+ runtime `if` checks.
 3. **Bitmask Method Validation**: Maps HTTP methods to a compact `u16` bitmask for $O(1)$ single-instruction bitwise validation (`AND`), replacing $O(N)$ linear scans and branching.
 4. **Branchless 256-Byte Subdomain LUT**: Enforces strict DNS label syntax via a static character lookup table resident in CPU L1 cache, rejecting CVE-2020-7662 wildcard injection probes without CPU pipeline stalls.

@@ -97,4 +97,4 @@ False Negatives:     0 (0.00%)
 2. **Loop-Unrolled Flattened Bitmask Scanning**:
    Replaced closure iterators (`.iter().any(...)`) with direct loop slices (`for &(net, mask) in &self.allow_v4`), allowing LLVM to emit SIMD/unrolled bitwise test sequences (`AND`, `CMP`) across contiguous memory cache lines.
 3. **Sub-Millisecond Attack Mitigation (97,444 RPS)**:
-   Hostile requests are short-circuited at the `pre_route` phase with pre-baked immutable static responses, preventing downstream route trie lookups and upstream backend connection leasing.
+   Hostile requests are short-circuited at the `pre_route` phase with pre-baked immutable static responses, preventing downstream router table lookups and upstream backend connection leasing.

@@ -16,7 +16,7 @@ The `std_http_access_log` plugin executes during the Layer 7 **`post_response`**
    - Symmetrically maps into 8 YMM registers (AVX2 256-bit), 16 NEON registers (ARM64 128-bit), or 32 64-bit general-purpose ALU registers.
    - Non-temporal streaming writes (`_mm256_stream_si256` / `_mm_stream_si128` + `_mm_sfence()`) write directly through Write-Combining Buffers to RAM, **bypassing L1/L2/L3 cache completely (Zero Cache Pollution)**.
    - `AlignedSlotBuffer` guarantees 4KB physical page alignment in RAM with `libc::MADV_SEQUENTIAL`.
-   - L3 Cache (LLC) is 100% preserved for `velda-router` (Path Trie) and `velda-connection-pool`.
+   - L3 Cache (LLC) is 100% preserved for `velda-router` (Flat Slash-Block Table) and `velda-connection-pool`.
 3. **Status-Aware Exact Sampling Contract (Zero Wildcards, Zero Default)**:
    - Configured strictly with exact 3-digit HTTP status codes (`"200": 0.05`, `"429": 1.0`, `"502": 1.0`).
    - Wildcard patterns (`"2xx"`, `"5xx"`) are strictly forbidden and rejected at configuration compile time.
@@ -117,7 +117,7 @@ In modern x86_64 superscalar Out-of-Order (OoO) processors (Intel Golden Cove/Ra
 
 ### 4.1 The Cache Pollution / Cache Thrashing Problem
 Edge gateways are memory-bound systems where request routing speed depends heavily on CPU Cache Hit ratios:
-- `velda-router`: Traverses Radix Trees / Path Tries in **$< 15\ \text{ns}$** when trie nodes reside in the L3 Last Level Cache (LLC).
+- `velda-router`: Traverses Flat Slash-Block tables in **$< 15\ \text{ns}$** when nodes reside in the L3 Last Level Cache (LLC) or L1D cache.
 - `velda-connection-pool` & `velda-lb`: Look up Maglev lookup arrays and sharded endpoint states in **$< 10\ \text{ns}$** when hot in L2/L3 cache.
 
 Under heavy edge traffic ($100,000\ \text{req/s}$), access logging produces:

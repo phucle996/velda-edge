@@ -9,7 +9,7 @@ This document specifies the internal engine design, bitwise CIDR prefix matching
 The `ip_filter` plugin operates at the ingress pre-route phase of Velda Edge, enforcing high-throughput Layer 7 access control at the edge perimeter before downstream route matching or upstream connection leasing. It adheres strictly to seven core architectural invariants:
 
 1. **Pre-Route Ingress Isolation & Authoritative Transport Enrichment**:
-   Evaluates incoming requests **prior** to router trie resolution, authentication plugins (`jwt_auth`, `oauth2_introspection`), payload streaming, or upstream pool connection leasing. Both HTTP/1.1 (`enrich_headers_cached`) and HTTP/2 (`enrich_headers_precomputed`) downstream pipelines execute authoritative transport peer IP enrichment **before** route matching and pre-route plugins, neutralizing direct client header spoofing.
+   Evaluates incoming requests **prior** to router table resolution, authentication plugins (`jwt_auth`, `oauth2_introspection`), payload streaming, or upstream pool connection leasing. Both HTTP/1.1 (`enrich_headers_cached`) and HTTP/2 (`enrich_headers_precomputed`) downstream pipelines execute authoritative transport peer IP enrichment **before** route matching and pre-route plugins, neutralizing direct client header spoofing.
 2. **Deterministic Bitwise Matching with Zero Heap Allocation**:
    Evaluates CIDR subnets using pure bitwise arithmetic: `(ip_bits & mask) == net_bits`. IPv4 evaluates in 1 CPU cycle on `u32`, and IPv6 evaluates on native `u128`. Once initialized, request evaluation incurs **0 heap allocations** and **0 dynamic dispatch overhead**.
 3. **Zero-Trust Stack-Allocated Multi-Hop Chain Verification (`ExtractedIps`)**:

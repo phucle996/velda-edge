@@ -5,7 +5,7 @@
 //!
 //! # Execution Invariants
 //! - **Fail-Fast**: Unauthorized or malicious requests must be rejected here to avoid
-//!   wasting router trie lookups, body streaming, or upstream connection leasing.
+//!   wasting router table lookups, body streaming, or upstream connection leasing.
 //! - **Bounded Authority**: Returns [`Action::Continue`], [`Action::Respond`] (401/403/429), or [`Action::Reject`].
 
 use std::sync::Arc;

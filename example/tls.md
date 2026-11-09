@@ -7,14 +7,14 @@ The `tls.json` file configures TLS termination, certificate keypairs, mutual TLS
 ## 1. Architectural Mindset & Zero-IO Invariant
 
 ### 1.1 In-Memory Pre-Compiled Hot Path
-In Velda Edge, TLS certificate parsing, ASN.1 decoding, and SNI trie indexing are strictly performed during compilation (`velda-sync`) or bootstrap (`velda-tls`). The request serving hot path never performs disk I/O, certificate decoding, or dynamic key parsing during connection handshakes.
+In Velda Edge, TLS certificate parsing, ASN.1 decoding, and SNI table indexing are strictly performed during compilation (`velda-sync`) or bootstrap (`velda-tls`). The request serving hot path never performs disk I/O, certificate decoding, or dynamic key parsing during connection handshakes.
 
 ### 1.2 Automatic SNI Extraction Invariant
 In `tls.json`, the `sni` field is **omitted from JSON declarations**. During compilation:
 1. `velda-sync` parses each X.509 certificate (`cert_pem`).
 2. Extracts Subject Alternative Names (`dNSName` SANs) and Common Name (`CN`).
 3. Compiles the verified SNI list directly into `tls.bin`.
-4. Edge runtime indexes certificates into a lock-free SNI lookup trie in RAM.
+4. Edge runtime indexes certificates into a lock-free SNI lookup table in RAM.
 
 This eliminates configuration drift between declared domain names and actual X.509 certificate identities.
 

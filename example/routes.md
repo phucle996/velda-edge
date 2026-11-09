@@ -16,7 +16,7 @@ The `routes.json` file configures the razor-thin in-memory routing waist of Veld
 | Field | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
 | `schema_version` | `integer` | Yes | Schema version. Must be `1`. |
-| `routes` | `array` | Yes | List of route configurations. Evaluated in order or via prefix trie. |
+| `routes` | `array` | Yes | List of route configurations. Evaluated via Tier 1 exact map or Tier 2 Flat Slash-Block SWAR table. |
 
 ---
 
@@ -48,7 +48,7 @@ The `routes.json` file configures the razor-thin in-memory routing waist of Veld
 | :--- | :--- | :---: | :--- |
 | `host` | `string` | No | Exact HTTP `Host` or `:authority` header match. |
 | `path` | `string` | No | Exact path match (e.g., `"/events"`, `"/healthz"`). |
-| `path_prefix` | `string` | No | Prefix path match using Radix Tree trie lookup (e.g., `"/api"`, `"/users."`). |
+| `path_prefix` | `string` | No | Prefix path match using Flat Slash-Block SWAR integer table lookup (e.g., `"/api"`, `"/users/"`). |
 | `protocol` | `string` | No | Strictly for `kind: "l4"` routes (`"tcp"` or `"udp"`). |
 
 ---

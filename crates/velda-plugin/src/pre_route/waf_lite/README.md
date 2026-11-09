@@ -159,7 +159,7 @@ Velda Edge ships with **119 built-in attack signatures** and **15 malicious scan
 
 ## 6. Architectural & Hot-Path Invariants
 
-1. **Pre-Route Ingress Isolation**: Executes before route trie resolution. Scanners probing non-existent or administrative endpoints are neutralized without executing router logic or touching upstream connection pools.
+1. **Pre-Route Ingress Isolation**: Executes before router table resolution. Scanners probing non-existent or administrative endpoints are neutralized without executing router logic or touching upstream connection pools.
 2. **Zero Regex Backtracking & ReDoS Immunity**: Uses SIMD multi-pattern Aho-Corasick matching (`AhoCorasick` automaton), guaranteeing deterministic $O(N)$ execution time regardless of payload complexity or length.
 3. **Zero Heap Allocation & Zero UTF-8 Validation on Hot Path**:
    - Clean and malicious requests traverse raw byte slices (`&[u8]`) directly.

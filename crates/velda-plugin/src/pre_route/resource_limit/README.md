@@ -1,6 +1,6 @@
 # Resource Limit Plugin (`resource_limit`)
 
-Ultra-low-latency ingress perimeter defense plugin that enforces strict physical bounds on URI lengths, header counts, cumulative header framing bytes, and individual header sizes at the edge before routing trie matching, body streaming, or upstream connection leasing.
+Ultra-low-latency ingress perimeter defense plugin that enforces strict physical bounds on URI lengths, header counts, cumulative header framing bytes, and individual header sizes at the edge before router table matching, body streaming, or upstream connection leasing.
 
 ---
 

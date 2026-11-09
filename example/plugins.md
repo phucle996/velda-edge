@@ -19,7 +19,7 @@ The `plugins.json` file configures the edge extensibility catalog. Plugins in Ve
         └── waf (Early pattern inspection)
         │
    ▼ [Router Match] (Razor-thin in-memory waist)
-        ├── Path Trie / Host / Method resolution
+        ├── Path / Host / Method resolution (Slash-Block SWAR table)
         └── Route selected
         │
    ▼ [2. pre_upstream phase] (Declared in routes.json -> plugins.pre_upstream)

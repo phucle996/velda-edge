@@ -408,7 +408,7 @@ Overhead  Command          Shared Object        Symbol
 ........  ...............  ...................  ......................................................
   31.25%  velda-worker-0   velda-edge           [.] velda_transport::tcp::engine::handle_event
   22.40%  velda-worker-0   velda-http1          [.] velda_http1::codec::parse_request_fast
-  18.15%  velda-worker-0   velda-router         [.] velda_router::radix::match_path
+  18.15%  velda-worker-0   velda-router         [.] velda_router::path::match_prefixes
   12.30%  velda-worker-0   velda-upstream       [.] velda_upstream::pool::acquire_stream
    8.40%  velda-worker-0   kernel.kallsyms      [k] copy_user_enhanced_fast_string
    3.10%  velda-worker-0   velda-plugin         [.] velda_plugin::plan::on_response

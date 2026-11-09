@@ -30,7 +30,7 @@ Multiplexed HTTP/2 (h2load)*   ─── [36,490.82 RPS]  ───────�
 ### 1.2 Key Performance Highlights
 
 1. **Sub-Microsecond Edge Short-Circuiting (> 101,000 RPS)**:
-   By terminating preflight `OPTIONS` requests during the `pre_route` phase prior to route trie traversal and upstream connection leasing, `cors_preflight` processes over **101,000 requests per second** with an average latency of **743.97 µs** and a P50 of **495 µs**.
+   By terminating preflight `OPTIONS` requests during the `pre_route` phase prior to router table traversal and upstream connection leasing, `cors_preflight` processes over **101,000 requests per second** with an average latency of **743.97 µs** and a P50 of **495 µs**.
 2. **Deterministic Adversarial Rejection (105,310 RPS)**:
    Malicious origin probes and unauthorized HTTP methods are dropped with `403 Forbidden` at **105,310 RPS** with sub-500µs median latency, shielding backend systems from DDoS and scanning floods.
 3. **Sub-2.2ms P99 Under Full TLSv1.3**:

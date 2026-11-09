@@ -57,7 +57,7 @@ High-performance L7 ingress gatekeeper enforcing zero-trust client IP address an
   - **HTTP/1.1 & HTTP/2 & HTTP/3**: Downstream engine formats a precompiled `403 Forbidden` early response frame with `Cache-Control: no-store`.
   - **gRPC**: Downstream engine terminates the RPC stream with canonical `PERMISSION_DENIED` status trailer.
 - **Information Disclosure Protection**: Automatically drops all Bit 0 internal/upstream headers from the error response, preventing header reflection or leak of sensitive routing/context tags.
-- **Short-circuiting**: Immediately halts the pipeline, preventing body streaming or router trie traversal.
+- **Short-circuiting**: Immediately halts the pipeline, preventing body streaming or router table traversal.
 
 ---
 

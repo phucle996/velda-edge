@@ -9,7 +9,7 @@ This document specifies the internal engine design, hardware-optimized execution
 The `waf_lite` plugin operates at the ingress pre-route phase of Velda Edge, enforcing high-throughput Layer 7 threat rejection at the edge perimeter before downstream route matching or upstream connection leasing. It adheres strictly to six core architectural invariants:
 
 1. **Pre-Route Ingress Isolation**:
-   Evaluates incoming requests **prior** to route trie resolution, authentication plugins (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing. Malicious scanners probing non-existent paths or admin interfaces are neutralized immediately, shielding backend connection pools.
+   Evaluates incoming requests **prior** to router table resolution, authentication plugins (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing. Malicious scanners probing non-existent paths or admin interfaces are neutralized immediately, shielding backend connection pools.
 2. **Deterministic $O(N)$ Zero-Regex Execution**:
    Replaces backtracking regular expressions (PCRE/regex) with SIMD multi-pattern Aho-Corasick automata (`aho_corasick::AhoCorasick`). Scanning latency is strictly linear with respect to input byte length, completely eliminating Regular Expression Denial of Service (ReDoS) vulnerabilities.
 3. **Zero Heap Allocation & Zero UTF-8 Validation on Hot Path**:

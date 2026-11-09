@@ -8,7 +8,7 @@ This document records the official testing methodology, adversarial attack scena
 
 The `cors_preflight` plugin operates at the ingress pre-route phase, acting as an ultra-high-throughput, zero-IO Layer 7 short-circuiting gatekeeper for web applications, SPAs, and cross-origin APIs. It enforces the following invariants:
 
-- **Pre-Route Short-Circuiting**: Intercepts and terminates preflight `OPTIONS` requests **before** route trie matching, authentication middleware (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing, returning an RFC-compliant `204 No Content` in sub-microsecond latency.
+- **Pre-Route Short-Circuiting**: Intercepts and terminates preflight `OPTIONS` requests **before** router table matching, authentication middleware (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing, returning an RFC-compliant `204 No Content` in sub-microsecond latency.
 - **Zero-IO Hot Path**: Never parses JSON, makes disk I/O, or executes RPC calls during request processing. Response templates, allowed method bitmasks, and origin patterns are pre-compiled into RAM at configuration time.
 - **Hardware-Accelerated Bitmask Validation**: Standard method validation ($O(N)$ linear scans) is replaced with a single CPU instruction bitmask check (`(allowed_mask & req_mask) != 0`).
 - **Adversarial Origin Filtering**: Neutralizes CVE-2020-7662 / CVE-2021-23440 subdomain bypass attacks via a 256-byte static lookup table (LUT) that strictly validates DNS label characters and rejects delimiter/credential injections.
@@ -28,7 +28,7 @@ flowchart LR
 
     subgraph GatewayHost["Azure VM1 (Velda Edge Gateway)"]
         pre["pre_route: cors_preflight\n(Bitmask + LUT Origin Check)"]
-        router["Router Trie\n(Route Matching)"]
+        router["Router Table\n(Route Matching)"]
         upstream["Upstream Dispatch\n(Connection Leasing)"]
     end
 
@@ -124,7 +124,7 @@ if (self.allowed_methods_mask & req_mask) == 0 {
 | `["GET", "POST", "OPTIONS"]` | `PUT` | `Action::Respond` | `403 Forbidden` | Body: `"403 Forbidden: CORS preflight disallowed\n"` |
 | `["GET", "POST", "OPTIONS"]` | `PATCH` | `Action::Respond` | `403 Forbidden` | Body: `"403 Forbidden: CORS preflight disallowed\n"` |
 | `["GET", "POST", "OPTIONS"]` | `CUSTOM_METHOD` | `Action::Respond` | `403 Forbidden` | Unknown method resolves to `MethodMask(0)`, rejected |
-| `["GET"]` | *(Missing Header)* | `Action::Continue` | *(Pass to Router)* | Preflight marker absent, passes to route trie |
+| `["GET"]` | *(Missing Header)* | `Action::Continue` | *(Pass to Router)* | Preflight marker absent, passes to route table |
 
 ---
 

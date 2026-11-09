@@ -503,9 +503,17 @@ pub fn starts_with_prefix_swar(s: &[u8], p: &[u8]) -> bool {
 
 /// A 64-byte, cache-line-aligned node in the flat slash-block prefix table.
 ///
-/// Precisely sized and aligned to 64 bytes (the hardware L1D cache line size on x86-64 and AArch64).
-/// When the CPU fetches a node, it loads the entire node in a single L1D cache line transaction,
-/// eliminating split-cache-line fetches and memory bus stalls.
+/// ### Microarchitectural Contrast: Eliminating Radix Trees
+/// Unlike traditional edge gateways (Envoy, Kong, Traefik, Pingora) that traverse pointer-chasing
+/// Radix/Patricia Trees (where each branch requires dereferencing scattered heap pointers, inducing
+/// 60-80ns DRAM stalls on L3 LLC cache misses), `SlashBlockNode` flattens routing into a contiguous arena:
+/// 1. **Zero Pointer Chasing**: Child nodes are referenced by contiguous integer offsets (`children_start: u32`),
+///    so child iteration is a linear vector scan streamable by CPU L1D hardware prefetchers.
+/// 2. **Single 64-Byte Cache Line Transaction**: Precisely sized and aligned to 64 bytes (`#[repr(C, align(64))]`).
+///    Loading a node fetches the entire descriptor (`head8`, `prefix_len`, `children_start`, `first_byte`, `has_route`)
+///    in a single L1D cache transaction with zero split loads.
+/// 3. **1-Cycle Integer Block Rejection**: `head8` packs the first 8 prefix bytes into a `u64`.
+///    Candidate mismatch is rejected in 1 ALU cycle via `path_u64 ^ head8 != 0` before any string scan occurs.
 #[repr(C, align(64))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashBlockNode {

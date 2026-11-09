@@ -59,7 +59,7 @@ Unlike traditional gateways that serialize JSON dynamically or invoke gRPC runti
 In superscalar Out-of-Order execution, the CPU's ALU and Vector Execution Units prepare the 256-byte vector data on stack and hand off `(address, data)` pairs to the hardware **Store Buffer (SB)**. The store instruction retires immediately at the Reorder Buffer (ROB). The ALU is liberated within 4 clock cycles to calculate downstream wire encodings for subsequent requests, completely decoupled from memory latency.
 
 ### 3.3 RAM Confinement: Protecting L3 Cache (Zero Cache Pollution)
-In an edge gateway processing 100,000 req/s, access logging generates over **$25.6\ \text{MB/s}$** of telemetry data. Under standard cache allocation, this telemetry stream would continuously evict the Radix Tree routing tables of `velda-router` and the connection state of `velda-connection-pool` from the Last Level Cache (L3 LLC).
+In an edge gateway processing 100,000 req/s, access logging generates over **$25.6\ \text{MB/s}$** of telemetry data. Under standard cache allocation, this telemetry stream would continuously evict the Flat Slash-Block routing tables of `velda-router` and the connection state of `velda-connection-pool` from the Last Level Cache (L3 LLC).
 
 `opentelemetry_logger` eliminates cache pollution by **confining log records to physical RAM**:
 1. **`AlignedSlotBuffer`**: Allocated with 4096-byte (4KB) page alignment directly in RAM, isolated from general heap structures, and hinted with `libc::MADV_SEQUENTIAL`.

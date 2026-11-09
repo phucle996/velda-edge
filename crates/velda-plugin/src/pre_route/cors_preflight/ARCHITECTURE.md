@@ -11,7 +11,7 @@ The `cors_preflight` plugin acts as an ultra-high-throughput, zero-IO Layer 7 sh
 1. **Zero-IO Hot-Path Invariant**:
    Serving paths **never** parse JSON, allocate dynamic memory, read from disk, or make RPC/network calls. All response templates, method bitmasks, and origin patterns are pre-compiled into RAM at configuration time.
 2. **Pre-Route Short-Circuiting Authority**:
-   Preflight `OPTIONS` requests are intercepted and terminated **prior** to route trie matching, authentication checks (`jwt_auth`, `api_key_auth`, `hmac_auth`), request body reading, or upstream connection leasing, returning an RFC-compliant `204 No Content` in sub-microsecond latency.
+   Preflight `OPTIONS` requests are intercepted and terminated **prior** to router table matching, authentication checks (`jwt_auth`, `api_key_auth`, `hmac_auth`), request body reading, or upstream connection leasing, returning an RFC-compliant `204 No Content` in sub-microsecond latency.
 3. **Branch-Free Hardware Execution**:
    Replaces runtime `if-else` branching on configuration with pre-baked immutable header templates and single-instruction bitmask matching (`u16`), saturating CPU superscalar execution pipelines.
 
@@ -23,7 +23,7 @@ The `cors_preflight` plugin acts as an ultra-high-throughput, zero-IO Layer 7 sh
 flowchart TD
     subgraph IngressFastPath["Phase 1: Ingress & Fast-Path Gate"]
         A["Incoming L7Request"] --> B{"1. Method Check\n(req.method == OPTIONS)"}
-        B -- "No" --> C["Action::Continue\n(Pass to Router Trie)"]
+        B -- "No" --> C["Action::Continue\n(Pass to Router)"]
         B -- "Yes" --> D{"2. Origin Header Present?\n(req.headers.get(ORIGIN))"}
         D -- "No" --> C
         D -- "Yes" --> E{"3. Access-Control-Request-Method Present?\n(Preflight Marker Check)"}

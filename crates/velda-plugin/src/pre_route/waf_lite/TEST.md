@@ -8,7 +8,7 @@ This document records the official testing methodology, adversarial attack scena
 
 The `waf_lite` plugin operates at the ingress pre-route phase, serving as an ultra-high-throughput, zero-IO Layer 7 short-circuiting gatekeeper for web applications, APIs, and edge microservices. It enforces the following invariants:
 
-- **Pre-Route Ingress Short-Circuiting**: Intercepts and terminates malicious requests **before** route trie matching, authentication middleware (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing, returning a standard `403 Forbidden` in sub-microsecond latency.
+- **Pre-Route Ingress Short-Circuiting**: Intercepts and terminates malicious requests **before** router table matching, authentication middleware (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing, returning a standard `403 Forbidden` in sub-microsecond latency.
 - **Zero-IO Hot Path**: Never parses JSON, makes disk I/O, or executes RPC calls during request processing. All attack signatures and scanner user-agents are pre-compiled into SIMD Aho-Corasick automata at bootstrap.
 - **Deterministic $O(N)$ ReDoS Immunity**: Regular expression backtracking is replaced with single-pass SIMD Aho-Corasick automata (`AhoCorasick`), guaranteeing linear time complexity regardless of attack complexity.
 - **Anti-Evasion & Anti-Smuggling Normalization**: Guarantees that attack signatures cannot evade detection through single/double/triple percent-encoding, query string `+` encoding, SQL comment fragmentation (`/**/`, `--...\n`, `#...\n`), comment-wrapping (`/*<script>*/`, `/*${jndi:...}*/`), cross-parameter comment smuggling (`?a=/*&id=union+select&b=*/`), unterminated `-- ` truncation, non-ASCII byte prefixing, or duplicate header smuggling.
@@ -28,7 +28,7 @@ flowchart LR
 
     subgraph GatewayHost["Azure VM1 (Velda Edge Gateway)"]
         pre["pre_route: waf_lite\n(Raw &[u8] SIMD Aho-Corasick)"]
-        router["Router Trie\n(Route Matching)"]
+        router["Router Table\n(Route Matching)"]
         upstream["Upstream Dispatch\n(Connection Pool)"]
     end
 
