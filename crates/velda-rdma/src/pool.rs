@@ -178,7 +178,6 @@ struct RdmaSlabArenaInner {
     large_hint: AtomicUsize,
     standard_used: AtomicUsize,
     large_used: AtomicUsize,
-    scan_fn: BitmapScanFn,
 }
 
 unsafe impl Send for RdmaSlabArenaInner {}
@@ -325,6 +324,7 @@ fn scan_swar_64(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<u
 // Universe 4: 32-bit SWAR Parallel Reduction (Quad 32-bit Sub-Word Lanes)
 // Evaluates 64-bit atomic words via 32-bit register pairs on narrow ALU hardware.
 // ============================================================================
+#[allow(dead_code)]
 fn scan_swar_32(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
     let len = words.len();
     for i in 0..len {
@@ -339,48 +339,41 @@ fn scan_swar_32(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<u
     None
 }
 
-/// Resolves the optimal bitmap scanning function pointer once at initialization
-/// via `velda_core::global_hardware_topology()` across all 4 register tiers.
-#[inline(always)]
-fn resolve_bitmap_scan_fn() -> BitmapScanFn {
-    use velda_core::hardware::RegisterWidth;
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                if std::is_x86_feature_detected!("avx2") {
-                    return scan_avx2_256;
-                }
-                scan_sse2_128
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                scan_swar_64
-            }
+/// Dispatches bitmap scanning directly through tiered vector/SWAR acceleration (AVX2 -> SSE2 -> SWAR).
+#[inline]
+pub fn scan_bitmap(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return scan_avx2_256(words, start, word_mask);
         }
-        RegisterWidth::Bits128 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                scan_sse2_128
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                scan_swar_64
-            }
-        }
-        RegisterWidth::Bits64 => scan_swar_64,
-        RegisterWidth::Bits32 => scan_swar_32,
+        scan_sse2_128(words, start, word_mask)
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        #[cfg(target_pointer_width = "64")]
+        {
+            scan_swar_64(words, start, word_mask)
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            scan_swar_32(words, start, word_mask)
+        }
+    }
+}
+
+/// Resolves the optimal bitmap scanning function pointer once at initialization.
+///
+/// Kept for crate API compatibility; internally delegates directly to inlined `scan_bitmap`.
+#[inline(always)]
+pub fn resolve_bitmap_scan_fn() -> BitmapScanFn {
+    scan_bitmap
 }
 
 impl RdmaSlabArenaInner {
     /// Allocates an available slot index from the atomic bitmask for the requested class.
     ///
-    /// Dispatches through a hardware-resolved function pointer (`scan_fn`) directly
-    /// without runtime CPU branching on the hot path, leveraging the CPU branch target buffer (BTB).
+    /// Dispatches directly through inlined tiered vector/SWAR acceleration on the hot path.
     fn alloc_slot(&self, class: RdmaSlabClass) -> Result<u32, RdmaError> {
         let (count, words, word_mask, hint_atom, used_atom) = match class {
             RdmaSlabClass::Standard2K => (
@@ -407,8 +400,8 @@ impl RdmaSlabArenaInner {
             std::mem::size_of_val(words).min(256),
         );
 
-        // Dispatches through cached hardware function pointer (AVX2, SSE2, or SWAR)
-        let candidate_start = (self.scan_fn)(words, start, word_mask);
+        // Dispatches directly through inlined tiered vector/SWAR acceleration
+        let candidate_start = scan_bitmap(words, start, word_mask);
 
         let search_start = match candidate_start {
             Some(w) => w,
@@ -679,7 +672,6 @@ impl RdmaSlabArena {
             large_hint: AtomicUsize::new(0),
             standard_used: AtomicUsize::new(0),
             large_used: AtomicUsize::new(0),
-            scan_fn: resolve_bitmap_scan_fn(),
         };
 
         Ok(Self {
@@ -829,7 +821,7 @@ impl Drop for RdmaSlabLease {
         // Uses Non-Temporal Streaming Zero (`vmovntdq` / `movntdq` / `movnti`) to flush zeros
         // directly through Write-Combining (WC) buffers to L3/RAM without triggering
         // Read-For-Ownership (RFO) or evicting the hot `velda-router` table from L1D/L2.
-        (*velda_core::ZERO_NON_TEMPORAL_FN)(self.as_mut_slice());
+        velda_core::zero_non_temporal(self.as_mut_slice());
         self.inner.free_slot(self.class, self.slot_idx);
     }
 }
@@ -866,7 +858,7 @@ impl RdmaSlabLease {
             return;
         }
         let dst = &mut self.as_mut_slice()[offset..offset + to_copy];
-        (*velda_core::COPY_NON_TEMPORAL_FN)(&src[..to_copy], dst);
+        velda_core::copy_non_temporal(&src[..to_copy], dst);
     }
 
     /// Prefetches `[offset .. offset + len)` of this RDMA slot into L3 Cache (`_MM_HINT_T2` / `pldl3keep`),

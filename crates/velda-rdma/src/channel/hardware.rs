@@ -128,7 +128,7 @@ impl HardwareSender {
             // and never dirty core L1D/L2 lines (eliminating PCIe DMA snoop stalls on the HCA).
             velda_core::prefetch_nta_range(data.as_ptr(), data.len().min(256));
             let dst_slice = unsafe { std::slice::from_raw_parts_mut(send_ptr, data.len()) };
-            (*velda_core::COPY_NON_TEMPORAL_FN)(data, dst_slice);
+            velda_core::copy_non_temporal(data, dst_slice);
 
             let sge = [ibv_sge {
                 addr: send_ptr as u64,
@@ -417,7 +417,7 @@ impl HardwareSender {
             let send_ptr = self.shared.raw_buf.add(send_offset);
             velda_core::prefetch_nta_range(data.as_ptr(), data.len().min(256));
             let dst_slice = std::slice::from_raw_parts_mut(send_ptr, data.len());
-            (*velda_core::COPY_NON_TEMPORAL_FN)(data, dst_slice);
+            velda_core::copy_non_temporal(data, dst_slice);
 
             let sge = [ibv_sge {
                 addr: send_ptr as u64,
