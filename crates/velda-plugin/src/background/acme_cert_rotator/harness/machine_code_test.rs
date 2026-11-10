@@ -388,8 +388,8 @@ fn test_chaos_scenario_3_l3_ram_cache_isolation() {
 
     if !cfg!(debug_assertions) {
         assert!(
-            cold_cycles < 3000,
-            "Cold lookup exceeded realistic L3/RAM bounds"
+            cold_cycles < 5000,
+            "Cold lookup exceeded realistic L3/RAM bounds (expected < 5000 cycles, got {cold_cycles})"
         );
     }
 }

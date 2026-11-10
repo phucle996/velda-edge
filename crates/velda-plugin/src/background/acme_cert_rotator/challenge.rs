@@ -185,6 +185,7 @@ struct Entry {
 /// Copy-on-write table of live challenges with hardware-bound prefix matcher.
 pub struct ChallengeStore {
     entries: ArcSwap<Vec<Arc<Entry>>>,
+    #[allow(dead_code)]
     prefix_matcher: PrefixMatcherFn,
 }
 
@@ -211,7 +212,18 @@ impl ChallengeStore {
     #[inline]
     pub fn lookup(&self, path: &str) -> Option<Bytes> {
         let path_bytes = path.as_bytes();
-        if path_bytes.len() < 28 || unsafe { !(self.prefix_matcher)(path_bytes) } {
+        if path_bytes.len() < 28 {
+            return None;
+        }
+
+        // On x86_64, directly call the 128-bit SIMD matcher to enable full compiler inlining,
+        // eliminating the indirect function pointer call `call [r12]` on the frontline hot path.
+        #[cfg(target_arch = "x86_64")]
+        let matches = unsafe { has_acme_prefix_128_simd(path_bytes) };
+        #[cfg(not(target_arch = "x86_64"))]
+        let matches = unsafe { (self.prefix_matcher)(path_bytes) };
+
+        if !matches {
             return None;
         }
 

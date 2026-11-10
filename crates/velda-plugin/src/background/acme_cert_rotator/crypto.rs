@@ -120,7 +120,18 @@ unsafe fn encode32_ssse3_impl(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
         );
         // Isolate sextets 0/2 and 1/3 with mask+multiply tricks (shift-by-lane without branches).
         let t0 = _mm_and_si128(spread, _mm_set1_epi32(0x0fc0_fc00));
-        let t1 = _mm_mulhi_epu16(t0, _mm_set1_epi32(0x0400_0040));
+        // Use inline asm for `pmulhuw` to prevent LLVM's DAGCombiner from decomposing
+        // `mulhu(x, 2^k)` into non-uniform 16-bit shifts (which x86 lacks, ballooning into 13 unpack/shift/pack ops).
+        let mut t1 = t0;
+        let mult = _mm_set1_epi32(0x0400_0040);
+        unsafe {
+            core::arch::asm!(
+                "pmulhuw {x}, {m}",
+                x = inout(xmm_reg) t1,
+                m = in(xmm_reg) mult,
+                options(pure, nomem, nostack)
+            );
+        }
         let t2 = _mm_and_si128(spread, _mm_set1_epi32(0x003f_03f0));
         let t3 = _mm_mullo_epi16(t2, _mm_set1_epi32(0x0100_0010));
         let idx = _mm_or_si128(t1, t3); // 16 sextets, each 0..=63
