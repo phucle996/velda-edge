@@ -95,19 +95,80 @@ impl ClientStream {
 }
 
 /// Lightweight HTTP/1.1 response representation.
+///
+/// The ACME protocol only ever consumes two response headers (RFC 8555 §6.5 `Replay-Nonce`
+/// and §7.3 `Location`), so only those are retained. Every other header is skipped during
+/// parsing without allocating a `String`/`Vec` entry for it.
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub replay_nonce: Option<String>,
+    pub location: Option<String>,
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
+    /// Returns the retained header value for `replay-nonce` or `location` (case-insensitive).
+    /// Any other header name yields `None` because it was never stored.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+        if name.eq_ignore_ascii_case("replay-nonce") {
+            self.replay_nonce.as_deref()
+        } else if name.eq_ignore_ascii_case("location") {
+            self.location.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+/// Which retained header (if any) a raw header name denotes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KnownHeader {
+    ReplayNonce,
+    Location,
+    Other,
+}
+
+/// SWAR case-insensitive classifier for `replay-nonce` (12 bytes) and `location` (8 bytes).
+///
+/// Loads the name into 64-bit/32-bit general-purpose registers and ORs `0x20` into every byte,
+/// which folds ASCII upper-case letters onto lower-case, then compares against constant
+/// registers: 1 load + 1 OR + 1 CMP per word, no per-byte loop and no allocation.
+/// The `| 0x20` fold also maps `0x0D` onto `-`, but `\r` can never occur inside an
+/// `httparse`-validated header token, so there is no false positive in practice.
+#[inline(always)]
+fn classify_header(name: &[u8]) -> KnownHeader {
+    const FOLD64: u64 = 0x2020_2020_2020_2020;
+    const FOLD32: u32 = 0x2020_2020;
+    const LOCATION: u64 = u64::from_ne_bytes(*b"location");
+    const REPLAY_HI: u64 = u64::from_ne_bytes(*b"replay-n");
+    const REPLAY_LO: u32 = u32::from_ne_bytes(*b"once");
+
+    match name.len() {
+        8 => {
+            // SAFETY: length checked == 8, unaligned read of exactly 8 bytes.
+            let w = unsafe { std::ptr::read_unaligned(name.as_ptr() as *const u64) };
+            if (w | FOLD64) == LOCATION {
+                KnownHeader::Location
+            } else {
+                KnownHeader::Other
+            }
+        }
+        12 => {
+            // SAFETY: length checked == 12, reads bytes [0..8) and [8..12).
+            let (hi, lo) = unsafe {
+                (
+                    std::ptr::read_unaligned(name.as_ptr() as *const u64),
+                    std::ptr::read_unaligned(name.as_ptr().add(8) as *const u32),
+                )
+            };
+            if (hi | FOLD64) == REPLAY_HI && (lo | FOLD32) == REPLAY_LO {
+                KnownHeader::ReplayNonce
+            } else {
+                KnownHeader::Other
+            }
+        }
+        _ => KnownHeader::Other,
     }
 }
 
@@ -685,10 +746,23 @@ impl AcmeClient {
         };
 
         let status = parsed.code.unwrap_or(0);
-        let mut resp_headers = Vec::with_capacity(parsed.headers.len());
-        for h in parsed.headers {
-            if let Ok(v) = std::str::from_utf8(h.value) {
-                resp_headers.push((h.name.to_ascii_lowercase(), v.to_string()));
+        // Only `Replay-Nonce` and `Location` are retained; all other headers are skipped
+        // by the SWAR classifier without any heap allocation.
+        let mut replay_nonce = None;
+        let mut location = None;
+        for h in parsed.headers.iter() {
+            match classify_header(h.name.as_bytes()) {
+                KnownHeader::ReplayNonce => {
+                    if let Ok(v) = std::str::from_utf8(h.value) {
+                        replay_nonce = Some(v.to_string());
+                    }
+                }
+                KnownHeader::Location => {
+                    if let Ok(v) = std::str::from_utf8(h.value) {
+                        location = Some(v.to_string());
+                    }
+                }
+                KnownHeader::Other => {}
             }
         }
 
@@ -696,8 +770,38 @@ impl AcmeClient {
 
         Ok(HttpResponse {
             status,
-            headers: resp_headers,
+            replay_nonce,
+            location,
             body,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swar_header_classifier_is_case_insensitive_and_exact() {
+        assert!(classify_header(b"replay-nonce") == KnownHeader::ReplayNonce);
+        assert!(classify_header(b"Replay-Nonce") == KnownHeader::ReplayNonce);
+        assert!(classify_header(b"REPLAY-NONCE") == KnownHeader::ReplayNonce);
+        assert!(classify_header(b"location") == KnownHeader::Location);
+        assert!(classify_header(b"Location") == KnownHeader::Location);
+        assert!(classify_header(b"replay-nonca") == KnownHeader::Other);
+        assert!(classify_header(b"locatioN2") == KnownHeader::Other);
+        assert!(classify_header(b"content-type") == KnownHeader::Other); // 12 bytes, wrong
+        assert!(classify_header(b"cache-ctl") == KnownHeader::Other);
+    }
+
+    #[test]
+    fn parse_keeps_only_nonce_and_location() {
+        let raw = b"HTTP/1.1 201 Created\r\nContent-Type: a\r\nREPLAY-NONCE: n1\r\nLocation: http://x/y\r\nX-Other: z\r\n\r\nbody";
+        let r = AcmeClient::parse_http_response(raw).unwrap();
+        assert_eq!(r.status, 201);
+        assert_eq!(r.header("replay-nonce"), Some("n1"));
+        assert_eq!(r.header("Location"), Some("http://x/y"));
+        assert_eq!(r.header("content-type"), None);
+        assert_eq!(r.body, b"body");
     }
 }
