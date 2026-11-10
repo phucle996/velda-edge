@@ -83,9 +83,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tokio::sync::watch;
+use velda_core::coarse_now_sec;
 use velda_router::Router;
 use velda_sync::AcmeCertRotatorConfig;
 
@@ -177,10 +178,7 @@ impl AcmeCertRotatorPlugin {
     /// Checks certificate status and triggers renewal with backoff if expired or nearing expiration.
     pub async fn check_and_renew(&self) -> Result<bool, PluginError> {
         let primary_domain = &self.config.domains[0];
-        let now_unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now_unix = coarse_now_sec() as i64;
 
         let needs_cert = match self.storage.read_fullchain_pem(primary_domain) {
             Some(cert_pem) => match not_after_unix(&cert_pem) {
@@ -428,12 +426,9 @@ impl AcmeCertRotatorPlugin {
             );
         }
 
-        // 2. Cron-driven scheduled maintenance loop
+        // 2. Cron-driven scheduled maintenance loop with integer coarse countdown
         loop {
-            let now_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now_unix = coarse_now_sec();
 
             let next_fire_unix = match self.cron.next_after(now_unix) {
                 Some(ts) => ts,
@@ -447,14 +442,14 @@ impl AcmeCertRotatorPlugin {
                 }
             };
 
-            let delay_secs = next_fire_unix.saturating_sub(now_unix);
-            let sleep_duration = Duration::from_secs(delay_secs);
+            let countdown_secs = next_fire_unix.saturating_sub(now_unix);
+            let sleep_duration = Duration::from_secs(countdown_secs);
 
             tracing::info!(
                 plugin_id = %self.id,
                 next_fire_unix = next_fire_unix,
-                sleep_secs = delay_secs,
-                "ACME certificate rotator scheduled for next cron tick"
+                countdown_secs = countdown_secs,
+                "ACME certificate rotator integer countdown initiated until next cron tick"
             );
 
             tokio::select! {

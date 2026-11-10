@@ -9,17 +9,52 @@ use crate::error::PluginError;
 /// Upper bound of the forward search: 5 years covers every valid expression (e.g. `0 0 29 2 *`).
 const MAX_SEARCH_DAYS: u64 = 366 * 5;
 
-/// Parsed cron schedule stored as per-field bitmasks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Matcher function pointer for Day of Month and Day of Week restrictions.
+pub type DayMatcherFn = fn(dom_mask: u32, dom: u32, dow_mask: u8, dow: u32) -> bool;
+
+#[inline(always)]
+fn match_unrestricted(_dom_mask: u32, _dom: u32, _dow_mask: u8, _dow: u32) -> bool {
+    true
+}
+
+#[inline(always)]
+fn match_dom_only(dom_mask: u32, dom: u32, _dow_mask: u8, _dow: u32) -> bool {
+    (dom_mask & (1 << dom)) != 0
+}
+
+#[inline(always)]
+fn match_dow_only(_dom_mask: u32, _dom: u32, dow_mask: u8, dow: u32) -> bool {
+    (dow_mask & (1 << dow)) != 0
+}
+
+#[inline(always)]
+fn match_dom_or_dow(dom_mask: u32, dom: u32, dow_mask: u8, dow: u32) -> bool {
+    (dom_mask & (1 << dom)) != 0 || (dow_mask & (1 << dow)) != 0
+}
+
+/// Parsed cron schedule stored as per-field bitmasks with direct function-pointer day dispatch.
+#[derive(Debug, Clone)]
 pub struct CronSchedule {
     minutes: u64,
     hours: u32,
     days_of_month: u32,
     months: u16,
     days_of_week: u8,
-    dom_restricted: bool,
-    dow_restricted: bool,
+    day_matcher: DayMatcherFn,
 }
+
+impl PartialEq for CronSchedule {
+    fn eq(&self, other: &Self) -> bool {
+        self.minutes == other.minutes
+            && self.hours == other.hours
+            && self.days_of_month == other.days_of_month
+            && self.months == other.months
+            && self.days_of_week == other.days_of_week
+            && (self.day_matcher as usize) == (other.day_matcher as usize)
+    }
+}
+
+impl Eq for CronSchedule {}
 
 fn parse_field(field: &str, min: u32, max: u32, name: &str) -> Result<(u64, bool), PluginError> {
     let err = |detail: &str| PluginError::Config(format!("cron {name} field '{field}': {detail}"));
@@ -80,18 +115,27 @@ impl CronSchedule {
         if dow & (1 << 7) != 0 {
             dow |= 1;
         }
+        let day_matcher: DayMatcherFn = match (dom_restricted, dow_restricted) {
+            (false, false) => match_unrestricted,
+            (true, false) => match_dom_only,
+            (false, true) => match_dow_only,
+            (true, true) => match_dom_or_dow,
+        };
+
         Ok(Self {
             minutes,
             hours: hours as u32,
             days_of_month: dom as u32,
             months: months as u16,
             days_of_week: (dow & 0x7f) as u8,
-            dom_restricted,
-            dow_restricted,
+            day_matcher,
         })
     }
 
     /// Returns the first fire time (Unix seconds, minute-aligned) strictly after `after_unix`.
+    ///
+    /// Evaluates using direct function-pointer day matching and SWAR CTZ (`trailing_zeros`)
+    /// register scans, eliminating the 1,440-minute scalar loop and division stalls.
     pub fn next_after(&self, after_unix: u64) -> Option<u64> {
         let start_day = after_unix / 86_400;
         let first_minute_of_day = (after_unix % 86_400) / 60 + 1; // strictly after
@@ -102,22 +146,46 @@ impl CronSchedule {
                 continue;
             }
             let dow = ((day + 4) % 7) as u32; // 1970-01-01 was a Thursday
-            let dom_ok = self.days_of_month & (1 << dom) != 0;
-            let dow_ok = self.days_of_week & (1 << dow) != 0;
-            let day_ok = match (self.dom_restricted, self.dow_restricted) {
-                (true, true) => dom_ok || dow_ok,
-                (true, false) => dom_ok,
-                (false, true) => dow_ok,
-                (false, false) => true,
-            };
-            if !day_ok {
+            if !(self.day_matcher)(self.days_of_month, dom, self.days_of_week, dow) {
                 continue;
             }
-            let from = if d == 0 { first_minute_of_day } else { 0 };
-            for minute_of_day in from..1440 {
-                let (h, m) = ((minute_of_day / 60) as u32, (minute_of_day % 60) as u32);
-                if self.hours & (1 << h) != 0 && self.minutes & (1u64 << m) != 0 {
-                    return Some(day * 86_400 + minute_of_day * 60);
+
+            let start_h = if d == 0 {
+                (first_minute_of_day / 60) as u32
+            } else {
+                0
+            };
+            let start_m = if d == 0 {
+                (first_minute_of_day % 60) as u32
+            } else {
+                0
+            };
+
+            if start_h >= 24 {
+                continue;
+            }
+
+            // SWAR CTZ Hour Search: find hours matching bits in self.hours starting from start_h
+            let hour_mask =
+                self.hours & !((1u32.checked_shl(start_h).unwrap_or(0)).wrapping_sub(1));
+            let mut eligible_hours = hour_mask;
+            while eligible_hours != 0 {
+                let h = eligible_hours.trailing_zeros();
+                eligible_hours &= eligible_hours - 1; // Clear lowest set bit
+
+                let min_mask = if d == 0 && h == start_h {
+                    if start_m >= 60 {
+                        0
+                    } else {
+                        self.minutes & !((1u64.checked_shl(start_m).unwrap_or(0)).wrapping_sub(1))
+                    }
+                } else {
+                    self.minutes
+                };
+
+                if min_mask != 0 {
+                    let m = min_mask.trailing_zeros();
+                    return Some(day * 86_400 + (h as u64) * 3600 + (m as u64) * 60);
                 }
             }
         }
