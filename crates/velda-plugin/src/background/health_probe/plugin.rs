@@ -107,9 +107,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::response::{
-    HealthProbeTokens, eval_probe_request, evaluate_path,
-};
+use super::response::{HealthProbeTokens, eval_probe_request, evaluate_path};
 use super::state::HealthState;
 use crate::background::BackgroundPlugin;
 use crate::error::PluginError;

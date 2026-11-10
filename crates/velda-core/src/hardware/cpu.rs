@@ -235,7 +235,8 @@ impl CpuProfile {
 pub type CopyBulkFn = fn(src: &[u8], dst: &mut [u8]);
 
 /// Pre-resolved static function pointer for bulk payload transfers.
-pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> = std::sync::LazyLock::new(|| copy_bulk_256);
+pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> =
+    std::sync::LazyLock::new(|| copy_bulk_256);
 
 /// Copies bulk byte payloads using workload-adaptive hardware register acceleration (up to 256-bit max).
 ///

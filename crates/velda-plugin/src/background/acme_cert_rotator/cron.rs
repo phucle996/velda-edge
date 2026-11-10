@@ -134,7 +134,10 @@ impl CronSchedule {
                 continue;
             }
             let dow = ((day + 4) % 7) as u32; // 1970-01-01 was a Thursday
-            if !self.day_strategy.matches(self.days_of_month, dom, self.days_of_week, dow) {
+            if !self
+                .day_strategy
+                .matches(self.days_of_month, dom, self.days_of_week, dow)
+            {
                 continue;
             }
 
