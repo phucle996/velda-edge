@@ -20,15 +20,56 @@ pub const CHALLENGE_PATH_PREFIX: &str = "/.well-known/acme-challenge/";
 const WIRE_HEADER_PREFIX: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: ";
 const WIRE_HEADER_PREFIX_LEN: usize = WIRE_HEADER_PREFIX.len(); // 103 bytes
 
-/// SWAR branchless 28-byte prefix matcher for `/.well-known/acme-challenge/`.
+/// Matcher function pointer contract for the 28-byte prefix `/.well-known/acme-challenge/`.
+pub type PrefixMatcherFn = unsafe fn(path: &[u8]) -> bool;
+
+/// Tier 1: 128-bit SIMD Dual-Overlapping Vector Matcher (SSE2 / Neon).
+///
+/// Exploits two 128-bit vector registers (`XMM0`, `XMM1` on x86_64) to scan all 28 bytes
+/// of `/.well-known/acme-challenge/` without consuming any general-purpose registers (GPRs).
+///
+/// # Hardware Register & Cache Invariant
+/// - Load 0 [0..16]: `b"/.well-known/acm"` into `XMM0`.
+/// - Load 1 [12..28]: `b"/acme-challenge/"` into `XMM1` (4-byte overlap at indices 12..16).
+/// - 100% of integer GPRs (`RAX`, `RCX`, `RDX`, `R8-R15`) remain unoccupied for downstream routing.
+///
+/// # Safety
+/// The caller must guarantee that `path` contains at least 28 valid bytes.
+#[inline(always)]
+pub unsafe fn has_acme_prefix_128_simd(path: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+
+        let p = path.as_ptr();
+        let v0 = _mm_loadu_si128(p as *const __m128i);
+        let v1 = _mm_loadu_si128(p.add(12) as *const __m128i);
+
+        let k0 = _mm_loadu_si128(b"/.well-known/acm".as_ptr() as *const __m128i);
+        let k1 = _mm_loadu_si128(b"/acme-challenge/".as_ptr() as *const __m128i);
+
+        let diff0 = _mm_xor_si128(v0, k0);
+        let diff1 = _mm_xor_si128(v1, k1);
+        let diff = _mm_or_si128(diff0, diff1);
+
+        let cmp = _mm_cmpeq_epi8(diff, _mm_setzero_si128());
+        _mm_movemask_epi8(cmp) as u32 == 0xFFFF
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        has_acme_prefix_64_swar(path)
+    }
+}
+
+/// Tier 2: 64-bit SWAR Multi-Word Register Matcher.
 ///
 /// Evaluates 3 x 64-bit words + 1 x 32-bit word using unaligned register XORs,
-/// completing prefix validation in ~2-3 CPU cycles without looping or byte branching.
+/// completing prefix validation in ~2-3 CPU cycles without vector execution pipelines.
+///
+/// # Safety
+/// The caller must guarantee that `path` contains at least 28 valid bytes.
 #[inline(always)]
-pub fn has_acme_challenge_prefix(path: &[u8]) -> bool {
-    if path.len() < 28 {
-        return false;
-    }
+pub unsafe fn has_acme_prefix_64_swar(path: &[u8]) -> bool {
     unsafe {
         let p = path.as_ptr();
         let w0 = std::ptr::read_unaligned(p as *const u64);
@@ -43,6 +84,72 @@ pub fn has_acme_challenge_prefix(path: &[u8]) -> bool {
 
         ((w0 ^ K0) | (w1 ^ K1) | (w2 ^ K2)) == 0 && (w3 ^ K3) == 0
     }
+}
+
+/// Tier 3: 32-bit SWAR Register Matcher (7 x u32).
+///
+/// Decomposes 28 bytes into 7 contiguous 32-bit words ($28 / 4 = 7$), suited for
+/// 32-bit architectures (ARMv7, x86-32) or when 64-bit GPRs are saturated.
+///
+/// # Safety
+/// The caller must guarantee that `path` contains at least 28 valid bytes.
+#[inline(always)]
+pub unsafe fn has_acme_prefix_32_swar(path: &[u8]) -> bool {
+    unsafe {
+        let p = path.as_ptr();
+        let w0 = std::ptr::read_unaligned(p as *const u32);
+        let w1 = std::ptr::read_unaligned(p.add(4) as *const u32);
+        let w2 = std::ptr::read_unaligned(p.add(8) as *const u32);
+        let w3 = std::ptr::read_unaligned(p.add(12) as *const u32);
+        let w4 = std::ptr::read_unaligned(p.add(16) as *const u32);
+        let w5 = std::ptr::read_unaligned(p.add(20) as *const u32);
+        let w6 = std::ptr::read_unaligned(p.add(24) as *const u32);
+
+        const K0: u32 = u32::from_ne_bytes(*b"/.we");
+        const K1: u32 = u32::from_ne_bytes(*b"ll-k");
+        const K2: u32 = u32::from_ne_bytes(*b"nown");
+        const K3: u32 = u32::from_ne_bytes(*b"/acm");
+        const K4: u32 = u32::from_ne_bytes(*b"e-ch");
+        const K5: u32 = u32::from_ne_bytes(*b"alle");
+        const K6: u32 = u32::from_ne_bytes(*b"nge/");
+
+        let diff =
+            (w0 ^ K0) | (w1 ^ K1) | (w2 ^ K2) | (w3 ^ K3) | (w4 ^ K4) | (w5 ^ K5) | (w6 ^ K6);
+        diff == 0
+    }
+}
+
+/// Resolves the optimal prefix matcher function pointer based on probed host CPU capabilities.
+///
+/// Bound once at gateway bootstrap via hardware topology inspection with zero runtime branching.
+pub fn resolve_optimal_prefix_matcher() -> PrefixMatcherFn {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // On x86_64, SSE2 is part of the baseline ABI, guaranteeing has_128 support.
+        has_acme_prefix_128_simd
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let caps = velda_core::global_hardware_topology()
+            .cpu
+            .register_capabilities;
+        if caps.has_128 {
+            has_acme_prefix_128_simd
+        } else if caps.has_64 {
+            has_acme_prefix_64_swar
+        } else {
+            has_acme_prefix_32_swar
+        }
+    }
+}
+
+/// Public API verifying whether a request path matches the 28-byte `/.well-known/acme-challenge/` prefix.
+#[inline(always)]
+pub fn has_acme_challenge_prefix(path: &[u8]) -> bool {
+    if path.len() < 28 {
+        return false;
+    }
+    unsafe { (resolve_optimal_prefix_matcher())(path) }
 }
 
 /// Explicitly invalidates and flushes a memory slice out of L1 and L2 CPU caches.
@@ -75,10 +182,19 @@ struct Entry {
     response: Bytes,
 }
 
-/// Copy-on-write table of live challenges.
-#[derive(Default)]
+/// Copy-on-write table of live challenges with hardware-bound prefix matcher.
 pub struct ChallengeStore {
     entries: ArcSwap<Vec<Arc<Entry>>>,
+    prefix_matcher: PrefixMatcherFn,
+}
+
+impl Default for ChallengeStore {
+    fn default() -> Self {
+        Self {
+            entries: ArcSwap::default(),
+            prefix_matcher: resolve_optimal_prefix_matcher(),
+        }
+    }
 }
 
 impl ChallengeStore {
@@ -89,12 +205,13 @@ impl ChallengeStore {
 
     /// Looks up the pre-baked response for an exact request path. Lock-free.
     ///
-    /// Evaluates prefix via SWAR register XORs, reads pre-baked response from L3/DRAM,
-    /// and immediately flushes lines from L1D/L2 to prevent cache line lingering.
+    /// Evaluates prefix via 3-tier hardware dispatch (128-bit SIMD / 64-bit / 32-bit SWAR),
+    /// reads pre-baked response from L3/DRAM, and immediately flushes lines from L1D/L2
+    /// to prevent cache line lingering.
     #[inline]
     pub fn lookup(&self, path: &str) -> Option<Bytes> {
         let path_bytes = path.as_bytes();
-        if !has_acme_challenge_prefix(path_bytes) {
+        if path_bytes.len() < 28 || unsafe { !(self.prefix_matcher)(path_bytes) } {
             return None;
         }
 
@@ -250,5 +367,36 @@ mod tests {
         assert!(store.lookup("/.well-known/acme-challenge/b").is_some());
         drop(b);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_tier_matchers_consistency() {
+        let valid_prefix = b"/.well-known/acme-challenge/";
+        let valid_with_token = b"/.well-known/acme-challenge/test-token-123";
+        let invalid_prefix = b"/.well-known/other-endpoint/";
+        let corrupted_tail = b"/.well-known/acme-challengeX";
+        let short_path = b"/short";
+
+        unsafe {
+            assert!(has_acme_prefix_128_simd(valid_prefix));
+            assert!(has_acme_prefix_128_simd(valid_with_token));
+            assert!(!has_acme_prefix_128_simd(invalid_prefix));
+            assert!(!has_acme_prefix_128_simd(corrupted_tail));
+
+            assert!(has_acme_prefix_64_swar(valid_prefix));
+            assert!(has_acme_prefix_64_swar(valid_with_token));
+            assert!(!has_acme_prefix_64_swar(invalid_prefix));
+            assert!(!has_acme_prefix_64_swar(corrupted_tail));
+
+            assert!(has_acme_prefix_32_swar(valid_prefix));
+            assert!(has_acme_prefix_32_swar(valid_with_token));
+            assert!(!has_acme_prefix_32_swar(invalid_prefix));
+            assert!(!has_acme_prefix_32_swar(corrupted_tail));
+        }
+
+        assert!(has_acme_challenge_prefix(valid_prefix));
+        assert!(has_acme_challenge_prefix(valid_with_token));
+        assert!(!has_acme_challenge_prefix(invalid_prefix));
+        assert!(!has_acme_challenge_prefix(short_path));
     }
 }
