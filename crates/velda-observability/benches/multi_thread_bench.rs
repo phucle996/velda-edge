@@ -12,9 +12,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
-use velda_observability::pool::EvictionReason;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
-use velda_observability::{MetricsStore, TOTAL_PIPELINE_SLOTS};
+use velda_observability::{
+    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
+    TOTAL_PIPELINE_SLOTS, UpstreamProto,
+};
 
 const OPS_PER_THREAD: u64 = 1_000_000;
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8, 16, 32];

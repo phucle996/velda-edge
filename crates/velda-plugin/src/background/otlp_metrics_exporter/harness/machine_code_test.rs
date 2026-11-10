@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use velda_observability::MetricsStore;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{
+    DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+};
 use velda_plugin::background::otlp_metrics_exporter::OtlpMetricsClient;
 use velda_plugin::background::otlp_metrics_exporter::format::{
     fast_format_u128_into, fast_write_i64, fast_write_u64, format_otlp_metrics_into,

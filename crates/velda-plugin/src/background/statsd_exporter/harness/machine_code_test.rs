@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
-use velda_observability::MetricsStore;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{
+    DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::formatter::{
     StatsdDialect, fast_write_i64, fast_write_u64, format_statsd_snapshot,

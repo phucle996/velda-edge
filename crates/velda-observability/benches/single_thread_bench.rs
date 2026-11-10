@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_duration, format_throughput};
-use velda_observability::pool::EvictionReason;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
-use velda_observability::{LiveTelemetry, MetricsStore, NoopTelemetry, Telemetry};
+use velda_observability::{
+    DownstreamProto, EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, PipeStrategy,
+    StreamCompletion, Telemetry, UpstreamProto,
+};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();

@@ -11,9 +11,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
-use velda_observability::MetricsStore;
-use velda_observability::pool::EvictionReason;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{
+    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+};
 
 // ============================================================================
 // Stage 1: HTTP/2 Rapid Reset Flood Attack Simulation

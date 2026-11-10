@@ -13,9 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
-use velda_observability::MetricsStore;
-use velda_observability::pool::EvictionReason;
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{
+    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();

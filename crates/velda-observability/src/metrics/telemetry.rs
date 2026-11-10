@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::store::MetricsStore;
-use crate::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use super::store::MetricsStore;
+use super::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
 
 /// Generic telemetry interface for stream and request processing pipelines.
 pub trait Telemetry: Send + Sync + 'static {

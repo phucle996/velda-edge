@@ -13,8 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
-use velda_observability::MetricsStore;
-use velda_observability::pool::EvictionReason;
+use velda_observability::{EvictionReason, MetricsStore};
 
 // ============================================================================
 // Stage 1: Heavy Concurrent Reader-Writer Chaos

@@ -15,17 +15,17 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::global::GlobalMetrics;
-use crate::pool::PoolMetrics;
-use crate::slot::{
+use super::global::GlobalMetrics;
+use super::pool::PoolMetrics;
+use super::slot::{
     IDX_BYTES_RX, IDX_BYTES_TX, IDX_DUR_1MS, IDX_DUR_5MS, IDX_DUR_10MS, IDX_DUR_50MS,
     IDX_DUR_250MS, IDX_DUR_1000MS, IDX_DUR_INF, IDX_REQ_2XX, IDX_REQ_3XX, IDX_REQ_4XX, IDX_REQ_5XX,
     IDX_REQ_OTHER, IDX_TTFB_1MS, IDX_TTFB_5MS, IDX_TTFB_10MS, IDX_TTFB_50MS, IDX_TTFB_250MS,
     IDX_TTFB_INF, PipelineSlot,
 };
-use crate::snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
-use crate::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
-use crate::vector::PIPELINE_COUNTERS_LEN;
+use super::snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
+use super::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use super::vector::PIPELINE_COUNTERS_LEN;
 
 /// Maximum number of hardware worker core shards supported.
 pub const MAX_METRIC_WORKERS: usize = 128;
@@ -64,7 +64,7 @@ pub const TOTAL_PIPELINE_SLOTS: usize =
 pub struct MetricsStore {
     core_slots: Vec<[PipelineSlot; TOTAL_PIPELINE_SLOTS]>,
     active_cores: usize,
-    accumulate_fn: crate::vector::AccumulateCountersFn,
+    accumulate_fn: super::vector::AccumulateCountersFn,
     global: GlobalMetrics,
     pool: PoolMetrics,
 }
@@ -88,7 +88,7 @@ impl MetricsStore {
         for _ in 0..active_cores {
             core_slots.push(std::array::from_fn(|_| PipelineSlot::new()));
         }
-        let accumulate_fn = crate::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
+        let accumulate_fn = super::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
 
         Self {
             core_slots,
@@ -106,7 +106,7 @@ impl MetricsStore {
         for _ in 0..cores {
             core_slots.push(std::array::from_fn(|_| PipelineSlot::new()));
         }
-        let accumulate_fn = crate::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
+        let accumulate_fn = super::vector::resolve_counters_fn_for_len(PIPELINE_COUNTERS_LEN);
 
         Self {
             core_slots,
@@ -120,7 +120,7 @@ impl MetricsStore {
     /// Creates a metrics store explicitly bounded to `active_cores` shards and a custom accumulation function pointer.
     pub fn with_cores_and_fn(
         active_cores: usize,
-        accumulate_fn: crate::vector::AccumulateCountersFn,
+        accumulate_fn: super::vector::AccumulateCountersFn,
     ) -> Self {
         let cores = active_cores.clamp(1, MAX_METRIC_WORKERS);
         let mut core_slots = Vec::with_capacity(cores);
@@ -139,7 +139,7 @@ impl MetricsStore {
 
     /// Returns the resolved accumulator function pointer.
     #[inline(always)]
-    pub fn accumulate_fn(&self) -> crate::vector::AccumulateCountersFn {
+    pub fn accumulate_fn(&self) -> super::vector::AccumulateCountersFn {
         self.accumulate_fn
     }
 

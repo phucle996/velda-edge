@@ -13,8 +13,8 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-use crate::types::{StatusClass, StreamCompletion};
-use crate::vector::PIPELINE_COUNTERS_LEN;
+use super::types::{StatusClass, StreamCompletion};
+use super::vector::PIPELINE_COUNTERS_LEN;
 
 // Canonical Counter Indices in the 20-counter array:
 pub const IDX_REQ_2XX: usize = 0;

@@ -6,7 +6,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_observability::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
 
 // ============================================================================
 // Memory Tracking Allocator

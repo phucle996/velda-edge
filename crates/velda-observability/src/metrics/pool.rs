@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::snapshot::PoolSnapshot;
+use super::snapshot::PoolSnapshot;
 
 /// Reason why an upstream connection was closed or evicted from the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

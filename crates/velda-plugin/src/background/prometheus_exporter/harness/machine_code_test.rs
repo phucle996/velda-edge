@@ -135,9 +135,7 @@ async fn test_ab_comparative_traffic_coexistence() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::watch;
-    use velda_observability::types::{
-        DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto,
-    };
+    use velda_observability::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
     use velda_plugin::PrometheusExporter;
     use velda_sync::{
         AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
