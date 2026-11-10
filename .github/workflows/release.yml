@@ -155,13 +155,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download edge artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-edge-linux-amd64-v3
           path: dist/edge
 
       - name: Download control-plane artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-control-plane-linux-amd64
           path: dist/cp
@@ -183,31 +183,31 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download edge artifacts (amd64-v3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-edge-linux-amd64-v3
           path: dist/edge-v3
 
       - name: Download edge artifacts (amd64-v2)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-edge-linux-amd64-v2
           path: dist/edge-v2
 
       - name: Download edge artifacts (arm64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-edge-linux-arm64
           path: dist/edge-arm64
 
       - name: Download control-plane artifacts (amd64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-control-plane-linux-amd64
           path: dist/cp-amd64
 
       - name: Download control-plane artifacts (arm64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: velda-control-plane-linux-arm64
           path: dist/cp-arm64
