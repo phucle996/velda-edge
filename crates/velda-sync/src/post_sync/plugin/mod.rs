@@ -41,6 +41,8 @@ pub mod statsd_exporter;
 pub use statsd_exporter::*;
 pub mod acme_cert_rotator;
 pub use acme_cert_rotator::*;
+pub mod loki_log_shipper;
+pub use loki_log_shipper::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
@@ -127,6 +129,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "otlp_metrics_exporter" => Some("background"),
         "statsd_exporter" => Some("background"),
         "acme_cert_rotator" => Some("background"),
+        "loki_log_shipper" => Some("background"),
         _ => None,
     }
 }
@@ -578,6 +581,15 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     });
                 }
                 acme_cert_rotator::validate_acme_cert_rotator_config(&plugin.id, &plugin.config)?;
+            }
+            "loki_log_shipper" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                loki_log_shipper::validate_loki_log_shipper_config(&plugin.id, &plugin.config)?;
             }
             "opentelemetry_logger" => {
                 if plugin.phase != "post_response" {

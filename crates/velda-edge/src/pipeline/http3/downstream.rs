@@ -242,7 +242,7 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
-            process_http3_request(req, &lid, &runtime, responder).await;
+            process_http3_request(req, peer, &lid, &runtime, responder).await;
         });
     }
 }
@@ -250,10 +250,12 @@ pub async fn handle_http3_udp(
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 async fn process_http3_request(
     mut req: L7Request,
+    peer: std::net::SocketAddr,
     listener_id: &str,
     runtime: &SharedRuntime,
     responder: super::engine::Http3Responder,
 ) {
+    let req_start = std::time::Instant::now();
     let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
     let mut http_req = Http3RouteRequest::new(req.path());
     if let Some(h) = host {
@@ -515,6 +517,81 @@ async fn process_http3_request(
             }
         },
     }
+
+    let (ua_family, ua_os, ua_major_version) = req
+        .headers
+        .get(http::header::USER_AGENT)
+        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
+        .unwrap_or((
+            velda_observability::UaFamily::None,
+            velda_observability::UaOs::Unknown,
+            0,
+        ));
+    let (up_proto, pipe_strat) = match upstream_target.as_ref() {
+        HttpUpstream::Http3(u) => (
+            velda_observability::LogProtocol::H3 as u8,
+            match u.strategy.effective(has_upload_body, is_sse) {
+                Http3PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                Http3PipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                Http3PipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                Http3PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+        HttpUpstream::Http2(u) => (
+            velda_observability::LogProtocol::H2 as u8,
+            match u.strategy.effective(has_upload_body, is_sse) {
+                Http2PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                Http2PipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                Http2PipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                Http2PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+        HttpUpstream::Http1(u) => (
+            velda_observability::LogProtocol::H1 as u8,
+            match u.strategy.effective(has_upload_body, is_sse) {
+                Http1PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                Http1PipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                Http1PipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                Http1PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+    };
+    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        request_id: req.state.request_id.entropy(),
+        timestamp_sec: velda_core::coarse_now_sec() as u32,
+        duration_us: req_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        bytes_rx: req.body.len() as u32,
+        bytes_tx: 0,
+        upstream_ip: 0,
+        peer_port: peer.port(),
+        upstream_port: 0,
+        status_code: 200,
+        route_id: route.id.0 as u16,
+        ua_major_version,
+        rpc_msgs_or_flags: 0,
+        downstream_proto: velda_observability::LogProtocol::H3 as u8,
+        upstream_proto: up_proto,
+        pipe_strategy: pipe_strat,
+        completion: velda_observability::LogCompletionReason::Complete as u8,
+        method: velda_observability::LogHttpMethod::from_bytes(req.method.as_str().as_bytes())
+            as u8,
+        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+        ua_family: ua_family as u8,
+        ua_os: ua_os as u8,
+    });
 }
 
 #[cfg(test)]

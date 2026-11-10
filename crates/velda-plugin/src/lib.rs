@@ -30,9 +30,9 @@ pub use background::prometheus_exporter::{
     PrometheusExporter, PrometheusExporterPlugin, format_snapshot,
 };
 pub use background::{
-    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, OtlpMetricsExporterConfig,
-    OtlpMetricsExporterPlugin, StatsdExporterConfig, StatsdExporterPlugin,
-    spawn_background_plugins,
+    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, LokiLogShipperConfig,
+    LokiLogShipperPlugin, OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin,
+    StatsdExporterConfig, StatsdExporterPlugin, format_loki_push_payload, spawn_background_plugins,
 };
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;

@@ -14,6 +14,7 @@
 //! 4. **Bounded Cardinality**: Organizes exactly 36 contiguous pipeline slots indexed directly via
 //!    $\mathcal{O}(1)$ register integer arithmetic (`(downstream * 12) + (upstream * 4) + pipe`).
 
+pub mod access_log;
 pub mod global;
 pub mod pool;
 pub mod slot;
@@ -24,6 +25,12 @@ pub mod types;
 pub mod vector;
 
 // Re-exports for convenient, canonical usage across the monorepo
+pub use access_log::{
+    AccessLogRecord, DEFAULT_CORE_RING_CAPACITY, LogCompletionReason, LogGrpcStatus, LogHttpMethod,
+    LogProtocol, LogStore, LogSubscriber, SpscLogRing, UaFamily, UaOs, classify_user_agent,
+    decode_ip_u128, encode_ip_u128, encode_upstream_ip_u32, global_log_store,
+    init_global_log_store,
+};
 pub use global::GlobalMetrics;
 pub use pool::{EvictionReason, PoolMetrics};
 pub use slot::PipelineSlot;

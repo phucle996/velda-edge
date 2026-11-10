@@ -307,9 +307,19 @@ pub fn spawn_shadow_worker(
                 let mut prewarm_interval = tokio::time::interval(std::time::Duration::from_secs(2));
                 prewarm_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+                let mut log_flush_interval =
+                    tokio::time::interval(std::time::Duration::from_millis(100));
+                log_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
+                        // Drain core-local SPSC access log ring into reference-counted Arc<[AccessLogRecord]>
+                        // batches for registered background exporter plugins.
+                        _ = log_flush_interval.tick() => {
+                            velda_observability::global_log_store().flush_lane(worker_id, 512);
+                        }
+
                         // Autonomous background upstream pre-warming & core-local buffer maintenance on SCHED_IDLE
                         _ = prewarm_interval.tick() => {
                             let rt = shared_runtime.load();
@@ -394,6 +404,10 @@ pub fn spawn_shadow_worker(
                         _ = shutdown.changed() => break,
                     }
                 }
+
+                // Drain any remaining access log records from this core's SPSC ring into
+                // registered background exporter queues before terminating background tasks.
+                velda_observability::global_log_store().flush_lane(worker_id, 4096);
 
                 // Gracefully cancel and flush all active tasks in both sets
                 shadow_tasks.shutdown().await;

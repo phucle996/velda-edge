@@ -331,6 +331,7 @@ pub async fn run_http2_loop<IO>(
                         http_upstreams: Arc::clone(&rt.upstreams.http),
                         plan: rt.plugins.get_plan(route.id).clone(),
                         request_id,
+                        route_id: route.id.0 as u16,
                     };
                     tokio::spawn(async move {
                         serve_http2_stream(req_head, receiver, responder, ctx).await;
@@ -378,6 +379,7 @@ struct Http2StreamContext {
     http_upstreams: Arc<crate::upstream::SubUpstreamTable<HttpUpstream>>,
     plan: Arc<RoutePluginPlan>,
     request_id: velda_core::RequestId,
+    route_id: u16,
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
@@ -396,8 +398,21 @@ async fn serve_http2_stream(
         http_upstreams,
         plan,
         request_id,
+        route_id,
     } = ctx;
     let mut target_upstream = default_upstream_id;
+    let peer = meta.peer;
+    let log_method =
+        velda_observability::LogHttpMethod::from_bytes(req_head.method.as_str().as_bytes());
+    let (ua_family, ua_os, ua_major_version) = req_head
+        .headers
+        .get(http::header::USER_AGENT)
+        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
+        .unwrap_or((
+            velda_observability::UaFamily::None,
+            velda_observability::UaOs::Unknown,
+            0,
+        ));
 
     // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
     // directly from downstream connection metadata BEFORE pre_route and pre_upstream plugins.
@@ -720,12 +735,36 @@ async fn serve_http2_stream(
         },
     }
 
+    let elapsed = req_start.elapsed();
     global_metrics().record_stream_completion(
         DownstreamProto::H2,
         up_proto,
         pipe_strat,
-        StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        StreamCompletion::new(200, 0, 0, elapsed, None),
     );
+    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        request_id: request_id.entropy(),
+        timestamp_sec: request_id.timestamp_secs() as u32,
+        duration_us: elapsed.as_micros().min(u32::MAX as u128) as u32,
+        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        bytes_rx: 0,
+        bytes_tx: 0,
+        upstream_ip: 0,
+        peer_port: peer.port(),
+        upstream_port: 0,
+        status_code: 200,
+        route_id,
+        ua_major_version,
+        rpc_msgs_or_flags: 0,
+        downstream_proto: velda_observability::LogProtocol::H2 as u8,
+        upstream_proto: up_proto as u8,
+        pipe_strategy: pipe_strat as u8,
+        completion: velda_observability::LogCompletionReason::Complete as u8,
+        method: log_method as u8,
+        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+        ua_family: ua_family as u8,
+        ua_os: ua_os as u8,
+    });
 }
 
 #[cfg(test)]

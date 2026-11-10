@@ -18,12 +18,14 @@ use crate::error::PluginError;
 
 pub mod acme_cert_rotator;
 pub mod health_probe;
+pub mod loki_log_shipper;
 pub mod otlp_metrics_exporter;
 pub mod prometheus_exporter;
 pub mod statsd_exporter;
 
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
+pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin, format_loki_push_payload};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
 pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
@@ -113,6 +115,10 @@ pub fn instantiate(
         "acme_cert_rotator" => {
             let rotator = AcmeCertRotatorPlugin::from_config(config)?;
             Ok(Arc::new(rotator))
+        }
+        "loki_log_shipper" => {
+            let shipper = LokiLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
         }
         other => Err(PluginError::Config(format!(
             "Unsupported background plugin '{other}' for plugin '{}'",

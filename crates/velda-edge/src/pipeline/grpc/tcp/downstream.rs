@@ -181,7 +181,18 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
+    let req_start = std::time::Instant::now();
     let mut target_upstream: UpstreamId = route.upstream_id;
+    let (ua_family, ua_os, ua_major_version) = server_stream
+        .parts
+        .headers
+        .get(http::header::USER_AGENT)
+        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
+        .unwrap_or((
+            velda_observability::UaFamily::None,
+            velda_observability::UaOs::Unknown,
+            0,
+        ));
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -387,6 +398,79 @@ async fn dispatch_grpc_tcp_request_stream(
             }
         },
     };
+
+    let (up_proto, pipe_strat) = match upstream_target.as_ref() {
+        GrpcUpstream::Tcp(u) => (
+            velda_observability::LogProtocol::GrpcTcp as u8,
+            match u.strategy {
+                GrpcPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                GrpcPipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                GrpcPipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                GrpcPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+        GrpcUpstream::Udp(u) => (
+            velda_observability::LogProtocol::GrpcUdp as u8,
+            match u.strategy {
+                GrpcUdpPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                GrpcUdpPipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                GrpcUdpPipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                GrpcUdpPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+        GrpcUpstream::Rdma(u) => (
+            velda_observability::LogProtocol::GrpcTcp as u8,
+            match u.strategy {
+                GrpcPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
+                GrpcPipeStrategy::ServerStream => {
+                    velda_observability::PipeStrategy::ServerStream as u8
+                }
+                GrpcPipeStrategy::ClientStream => {
+                    velda_observability::PipeStrategy::ClientStream as u8
+                }
+                GrpcPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
+            },
+        ),
+    };
+    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        request_id: request_id.entropy(),
+        timestamp_sec: request_id.timestamp_secs() as u32,
+        duration_us: req_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+        peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+        bytes_rx: 0,
+        bytes_tx: 0,
+        upstream_ip: 0,
+        peer_port: meta.peer.port(),
+        upstream_port: 0,
+        status_code: 200,
+        route_id: route.id.0 as u16,
+        ua_major_version,
+        rpc_msgs_or_flags: 1,
+        downstream_proto: velda_observability::LogProtocol::GrpcTcp as u8,
+        upstream_proto: up_proto,
+        pipe_strategy: pipe_strat,
+        completion: if pipe_res.is_ok() {
+            velda_observability::LogCompletionReason::Complete as u8
+        } else {
+            velda_observability::LogCompletionReason::UpstreamError as u8
+        },
+        method: velda_observability::LogHttpMethod::Post as u8,
+        grpc_status: if pipe_res.is_ok() {
+            velda_observability::LogGrpcStatus::Ok as u8
+        } else {
+            velda_observability::LogGrpcStatus::Unavailable as u8
+        },
+        ua_family: ua_family as u8,
+        ua_os: ua_os as u8,
+    });
 
     if let Err(e) = pipe_res {
         tracing::warn!(
