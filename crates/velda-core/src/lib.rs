@@ -45,9 +45,10 @@ pub use buffer::{
     KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, MAX_WIRE_HEADERS, NumericFmt,
     NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease, PayloadSlabPool,
     ShardedBufferPool, SlabClass, X_REQUEST_ID, ZERO_NON_TEMPORAL_FN, ZeroNonTemporalFn,
-    copy_non_temporal_32, copy_non_temporal_64, copy_non_temporal_128, copy_non_temporal_256,
-    header_key, prefetch_l2_range, prefetch_l3_range, prefetch_nta_range, resolve_u64_header_value,
-    zero_non_temporal_32, zero_non_temporal_64, zero_non_temporal_128, zero_non_temporal_256,
+    copy_non_temporal, copy_non_temporal_32, copy_non_temporal_64, copy_non_temporal_128,
+    copy_non_temporal_256, header_key, prefetch_l2_range, prefetch_l3_range, prefetch_nta_range,
+    resolve_u64_header_value, zero_non_temporal, zero_non_temporal_32, zero_non_temporal_64,
+    zero_non_temporal_128, zero_non_temporal_256,
 };
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 

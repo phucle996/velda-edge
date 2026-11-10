@@ -235,17 +235,7 @@ impl CpuProfile {
 pub type CopyBulkFn = fn(src: &[u8], dst: &mut [u8]);
 
 /// Pre-resolved static function pointer for bulk payload transfers.
-///
-/// Bound once at boot via `select_for_workload(RegisterWidth::Bits256)` with zero hot-path branching.
-pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> = std::sync::LazyLock::new(|| {
-    let caps = CpuRegisterCapabilities::detect();
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => copy_bulk_256,
-        RegisterWidth::Bits128 => copy_bulk_128,
-        RegisterWidth::Bits64 => copy_bulk_64,
-        RegisterWidth::Bits32 => copy_bulk_32,
-    }
-});
+pub static COPY_BULK_FN: std::sync::LazyLock<CopyBulkFn> = std::sync::LazyLock::new(|| copy_bulk_256);
 
 /// Copies bulk byte payloads using workload-adaptive hardware register acceleration (up to 256-bit max).
 ///
@@ -264,7 +254,7 @@ pub fn copy_bulk_payload(src: &[u8], dst: &mut [u8]) {
     } else if len < 32 {
         copy_bulk_128(&src[..len], &mut dst[..len]);
     } else {
-        (*COPY_BULK_FN)(&src[..len], &mut dst[..len]);
+        copy_bulk_256(&src[..len], &mut dst[..len]);
     }
 }
 
@@ -274,14 +264,14 @@ pub fn copy_bulk_256(src: &[u8], dst: &mut [u8]) {
     let len = src.len().min(dst.len());
     #[cfg(target_arch = "x86_64")]
     {
-        unsafe {
-            copy_bulk_256_x86_impl(&src[..len], &mut dst[..len]);
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                copy_bulk_256_x86_impl(&src[..len], &mut dst[..len]);
+            }
+            return;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        copy_bulk_128(&src[..len], &mut dst[..len]);
-    }
+    copy_bulk_128(&src[..len], &mut dst[..len]);
 }
 
 #[cfg(target_arch = "x86_64")]

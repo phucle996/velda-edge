@@ -56,8 +56,6 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::hardware::RegisterWidth;
-
 /// Physical page alignment boundary for edge buffer allocations.
 const PAGE_SIZE: usize = 4096;
 
@@ -350,7 +348,7 @@ impl PayloadSlab {
             return;
         }
         let dst_slice = &mut self.as_mut_slice()[offset..offset + to_copy];
-        (*COPY_NON_TEMPORAL_FN)(&src[..to_copy], dst_slice);
+        copy_non_temporal(&src[..to_copy], dst_slice);
     }
 
     /// Issues hardware Non-Temporal Read hints (`_MM_HINT_NTA` / `pldl1strm`) across the slab's memory.
@@ -403,7 +401,7 @@ impl PayloadSlab {
             return;
         }
         let dst_slice = &mut self.as_mut_slice()[offset..offset + to_zero];
-        (*ZERO_NON_TEMPORAL_FN)(dst_slice);
+        zero_non_temporal(dst_slice);
     }
 }
 
@@ -721,21 +719,17 @@ pub fn copy_non_temporal_32(src: &[u8], dst: &mut [u8]) {
     }
 }
 
+/// Copies payload using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit -> 32-bit).
+#[inline]
+pub fn copy_non_temporal(src: &[u8], dst: &mut [u8]) {
+    copy_non_temporal_256(src, dst);
+}
+
 /// Pre-resolved static function pointer for non-temporal streaming payload transfers.
 ///
 /// Bound once at startup via `global_hardware_topology().cpu.register_capabilities` with zero runtime branching ladders.
 pub static COPY_NON_TEMPORAL_FN: std::sync::LazyLock<CopyNonTemporalFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = crate::hardware::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-        match caps.select_for_workload(RegisterWidth::Bits256) {
-            RegisterWidth::Bits256 => copy_non_temporal_256,
-            RegisterWidth::Bits128 => copy_non_temporal_128,
-            RegisterWidth::Bits64 => copy_non_temporal_64,
-            RegisterWidth::Bits32 => copy_non_temporal_32,
-        }
-    });
+    std::sync::LazyLock::new(|| copy_non_temporal);
 
 /// Tier 1: 256-bit AVX2 non-temporal streaming zeroing (32 bytes per iteration, `vmovntdq` + `_mm_sfence`).
 ///
@@ -928,21 +922,17 @@ pub fn zero_non_temporal_32(dst: &mut [u8]) {
     }
 }
 
+/// Zeroes memory using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit -> 32-bit).
+#[inline]
+pub fn zero_non_temporal(dst: &mut [u8]) {
+    zero_non_temporal_256(dst);
+}
+
 /// Pre-resolved static function pointer for non-temporal streaming memory zeroing (CWE-226 safe).
 ///
 /// Bound once at startup via `global_hardware_topology().cpu.register_capabilities` with zero runtime branching ladders.
 pub static ZERO_NON_TEMPORAL_FN: std::sync::LazyLock<ZeroNonTemporalFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = crate::hardware::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-        match caps.select_for_workload(RegisterWidth::Bits256) {
-            RegisterWidth::Bits256 => zero_non_temporal_256,
-            RegisterWidth::Bits128 => zero_non_temporal_128,
-            RegisterWidth::Bits64 => zero_non_temporal_64,
-            RegisterWidth::Bits32 => zero_non_temporal_32,
-        }
-    });
+    std::sync::LazyLock::new(|| zero_non_temporal);
 
 /// Internal bucket segregating permanent baseline slabs from transient burst slabs.
 struct SlabBucket {
