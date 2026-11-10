@@ -119,14 +119,16 @@ pub unsafe fn has_acme_prefix_32_swar(path: &[u8]) -> bool {
     }
 }
 
-/// Resolves the optimal prefix matcher function pointer based on probed host CPU capabilities.
+/// Matches the standard ACME challenge HTTP prefix `/.well-known/acme-challenge/` (28 bytes).
 ///
-/// Bound once at gateway bootstrap via hardware topology inspection with zero runtime branching.
-pub fn resolve_optimal_prefix_matcher() -> PrefixMatcherFn {
+/// # Safety
+///
+/// `path_bytes` must be at least 28 bytes long when invoking raw hardware vector loaders.
+#[inline(always)]
+pub unsafe fn has_acme_prefix(path_bytes: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        // On x86_64, SSE2 is part of the baseline ABI, guaranteeing has_128 support.
-        has_acme_prefix_128_simd
+        unsafe { has_acme_prefix_128_simd(path_bytes) }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -134,13 +136,20 @@ pub fn resolve_optimal_prefix_matcher() -> PrefixMatcherFn {
             .cpu
             .register_capabilities;
         if caps.has_128 {
-            has_acme_prefix_128_simd
+            unsafe { has_acme_prefix_128_simd(path_bytes) }
         } else if caps.has_64 {
-            has_acme_prefix_64_swar
+            unsafe { has_acme_prefix_64_swar(path_bytes) }
         } else {
-            has_acme_prefix_32_swar
+            unsafe { has_acme_prefix_32_swar(path_bytes) }
         }
     }
+}
+
+/// Resolves the optimal prefix matcher function pointer based on probed host CPU capabilities.
+///
+/// Kept for crate API compatibility; internally delegates directly to inlined `has_acme_prefix`.
+pub fn resolve_optimal_prefix_matcher() -> PrefixMatcherFn {
+    has_acme_prefix
 }
 
 /// Public API verifying whether a request path matches the 28-byte `/.well-known/acme-challenge/` prefix.
@@ -149,7 +158,7 @@ pub fn has_acme_challenge_prefix(path: &[u8]) -> bool {
     if path.len() < 28 {
         return false;
     }
-    unsafe { (resolve_optimal_prefix_matcher())(path) }
+    unsafe { has_acme_prefix(path) }
 }
 
 /// Explicitly invalidates and flushes a memory slice out of L1 and L2 CPU caches.
@@ -214,19 +223,9 @@ struct Entry {
 }
 
 /// Copy-on-write table of live challenges with hardware-bound prefix matcher.
+#[derive(Default)]
 pub struct ChallengeStore {
     entries: ArcSwap<Vec<Arc<Entry>>>,
-    #[allow(dead_code)]
-    prefix_matcher: PrefixMatcherFn,
-}
-
-impl Default for ChallengeStore {
-    fn default() -> Self {
-        Self {
-            entries: ArcSwap::default(),
-            prefix_matcher: resolve_optimal_prefix_matcher(),
-        }
-    }
 }
 
 impl ChallengeStore {
@@ -249,10 +248,7 @@ impl ChallengeStore {
 
         // Fast-path inlined prefix check: if not matching, immediately returns None
         // with 0 callee-saved register pushes, 0 stack allocations, and 0 branch mispredictions.
-        #[cfg(target_arch = "x86_64")]
-        let matches = unsafe { has_acme_prefix_128_simd(path_bytes) };
-        #[cfg(not(target_arch = "x86_64"))]
-        let matches = unsafe { (self.prefix_matcher)(path_bytes) };
+        let matches = unsafe { has_acme_prefix(path_bytes) };
 
         if !matches {
             return None;

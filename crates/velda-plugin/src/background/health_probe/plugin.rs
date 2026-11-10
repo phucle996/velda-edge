@@ -108,7 +108,7 @@ use tokio::sync::watch;
 use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::response::{
-    HealthProbeTokens, ProbeEvalFn, eval_probe_request, evaluate_path, resolve_eval_fn,
+    HealthProbeTokens, eval_probe_request, evaluate_path,
 };
 use super::state::HealthState;
 use crate::background::BackgroundPlugin;
@@ -151,8 +151,6 @@ pub struct HealthProbePlugin {
     pub state: HealthState,
     /// Pre-computed SWAR matching tokens.
     pub tokens: HealthProbeTokens,
-    /// Fast evaluator function pointer resolved at bootstrap.
-    pub eval_fn: ProbeEvalFn,
 }
 
 impl HealthProbePlugin {
@@ -170,13 +168,11 @@ impl HealthProbePlugin {
     /// Constructs a new health probe service with full configuration and a fresh default state.
     pub fn with_config(id: impl Into<String>, config: HealthProbeConfig) -> Self {
         let tokens = HealthProbeTokens::from_paths(&config.liveness_path, &config.readiness_path);
-        let eval_fn = resolve_eval_fn(&tokens);
         Self {
             id: id.into(),
             config,
             state: HealthState::new(),
             tokens,
-            eval_fn,
         }
     }
 
@@ -187,13 +183,11 @@ impl HealthProbePlugin {
         state: HealthState,
     ) -> Self {
         let tokens = HealthProbeTokens::from_paths(&config.liveness_path, &config.readiness_path);
-        let eval_fn = resolve_eval_fn(&tokens);
         Self {
             id: id.into(),
             config,
             state,
             tokens,
-            eval_fn,
         }
     }
 
@@ -251,7 +245,6 @@ impl HealthProbePlugin {
         config: &HealthProbeConfig,
         state: &HealthState,
         tokens: &HealthProbeTokens,
-        _eval_fn: ProbeEvalFn,
         mut stream: tokio::net::TcpStream,
     ) {
         let mut buf = [0u8; 512];
@@ -321,7 +314,6 @@ impl BackgroundPlugin for HealthProbePlugin {
                                 &self.config,
                                 &self.state,
                                 &self.tokens,
-                                self.eval_fn,
                                 stream,
                             ),
                         ).await;

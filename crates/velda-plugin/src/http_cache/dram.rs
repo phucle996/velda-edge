@@ -12,36 +12,10 @@
 //! The hot-path store function pointer is resolved and cached in a zero-overhead [`OnceLock`],
 //! reducing hot-path dispatch to a direct function pointer jump.
 
-use std::sync::OnceLock;
-
 use bytes::Bytes;
-use velda_core::global_hardware_topology;
-use velda_core::hardware::RegisterWidth;
-
-/// Function signature for streaming payload memory transfer to DRAM.
-type StreamDramFn = unsafe fn(*mut u8, *const u8, usize);
-
-static STREAM_PAYLOAD_FN: OnceLock<StreamDramFn> = OnceLock::new();
-
-/// Resolves the optimal streaming store function based on detected CPU register widths.
-#[inline(always)]
-fn resolve_stream_fn() -> StreamDramFn {
-    *STREAM_PAYLOAD_FN.get_or_init(|| {
-        let width = global_hardware_topology()
-            .cpu
-            .register_capabilities
-            .max_width;
-        match width {
-            #[cfg(target_arch = "x86_64")]
-            RegisterWidth::Bits256 => stream_payload_avx2_dispatched,
-            #[cfg(target_arch = "x86_64")]
-            RegisterWidth::Bits128 => stream_payload_sse2_dispatched,
-            _ => stream_payload_scalar,
-        }
-    })
-}
 
 /// Fallback scalar memory transfer for platforms or payloads without vector SIMD support.
+#[allow(dead_code)]
 unsafe fn stream_payload_scalar(dst: *mut u8, src: *const u8, len: usize) {
     unsafe {
         std::ptr::copy_nonoverlapping(src, dst, len);
@@ -89,9 +63,23 @@ unsafe fn stream_payload_avx2_dispatched(dst: *mut u8, src: *const u8, len: usiz
 /// `src` must be valid for reads of `len` bytes.
 #[inline(always)]
 pub unsafe fn stream_payload_to_dram(dst: *mut u8, src: *const u8, len: usize) {
-    let f = resolve_stream_fn();
-    unsafe {
-        f(dst, src, len);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                stream_payload_avx2_dispatched(dst, src, len);
+            }
+            return;
+        }
+        unsafe {
+            stream_payload_sse2_dispatched(dst, src, len);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        unsafe {
+            stream_payload_scalar(dst, src, len);
+        }
     }
 }
 

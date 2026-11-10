@@ -12,49 +12,37 @@ const MAX_SEARCH_DAYS: u64 = 366 * 5;
 /// Matcher function pointer for Day of Month and Day of Week restrictions.
 pub type DayMatcherFn = fn(dom_mask: u32, dom: u32, dow_mask: u8, dow: u32) -> bool;
 
-#[inline(always)]
-fn match_unrestricted(_dom_mask: u32, _dom: u32, _dow_mask: u8, _dow: u32) -> bool {
-    true
+/// Day matching evaluation strategy for cron schedules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayMatchStrategy {
+    Unrestricted,
+    DomOnly,
+    DowOnly,
+    DomOrDow,
 }
 
-#[inline(always)]
-fn match_dom_only(dom_mask: u32, dom: u32, _dow_mask: u8, _dow: u32) -> bool {
-    (dom_mask & (1 << dom)) != 0
+impl DayMatchStrategy {
+    #[inline(always)]
+    pub fn matches(self, dom_mask: u32, dom: u32, dow_mask: u8, dow: u32) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::DomOnly => (dom_mask & (1 << dom)) != 0,
+            Self::DowOnly => (dow_mask & (1 << dow)) != 0,
+            Self::DomOrDow => (dom_mask & (1 << dom)) != 0 || (dow_mask & (1 << dow)) != 0,
+        }
+    }
 }
 
-#[inline(always)]
-fn match_dow_only(_dom_mask: u32, _dom: u32, dow_mask: u8, dow: u32) -> bool {
-    (dow_mask & (1 << dow)) != 0
-}
-
-#[inline(always)]
-fn match_dom_or_dow(dom_mask: u32, dom: u32, dow_mask: u8, dow: u32) -> bool {
-    (dom_mask & (1 << dom)) != 0 || (dow_mask & (1 << dow)) != 0
-}
-
-/// Parsed cron schedule stored as per-field bitmasks with direct function-pointer day dispatch.
-#[derive(Debug, Clone)]
+/// Parsed cron schedule stored as per-field bitmasks with direct enum-dispatched day evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronSchedule {
     minutes: u64,
     hours: u32,
     days_of_month: u32,
     months: u16,
     days_of_week: u8,
-    day_matcher: DayMatcherFn,
+    day_strategy: DayMatchStrategy,
 }
-
-impl PartialEq for CronSchedule {
-    fn eq(&self, other: &Self) -> bool {
-        self.minutes == other.minutes
-            && self.hours == other.hours
-            && self.days_of_month == other.days_of_month
-            && self.months == other.months
-            && self.days_of_week == other.days_of_week
-            && (self.day_matcher as usize) == (other.day_matcher as usize)
-    }
-}
-
-impl Eq for CronSchedule {}
 
 fn parse_field(field: &str, min: u32, max: u32, name: &str) -> Result<(u64, bool), PluginError> {
     let err = |detail: &str| PluginError::Config(format!("cron {name} field '{field}': {detail}"));
@@ -115,11 +103,11 @@ impl CronSchedule {
         if dow & (1 << 7) != 0 {
             dow |= 1;
         }
-        let day_matcher: DayMatcherFn = match (dom_restricted, dow_restricted) {
-            (false, false) => match_unrestricted,
-            (true, false) => match_dom_only,
-            (false, true) => match_dow_only,
-            (true, true) => match_dom_or_dow,
+        let day_strategy = match (dom_restricted, dow_restricted) {
+            (false, false) => DayMatchStrategy::Unrestricted,
+            (true, false) => DayMatchStrategy::DomOnly,
+            (false, true) => DayMatchStrategy::DowOnly,
+            (true, true) => DayMatchStrategy::DomOrDow,
         };
 
         Ok(Self {
@@ -128,7 +116,7 @@ impl CronSchedule {
             days_of_month: dom as u32,
             months: months as u16,
             days_of_week: (dow & 0x7f) as u8,
-            day_matcher,
+            day_strategy,
         })
     }
 
@@ -146,7 +134,7 @@ impl CronSchedule {
                 continue;
             }
             let dow = ((day + 4) % 7) as u32; // 1970-01-01 was a Thursday
-            if !(self.day_matcher)(self.days_of_month, dom, self.days_of_week, dow) {
+            if !self.day_strategy.matches(self.days_of_month, dom, self.days_of_week, dow) {
                 continue;
             }
 
