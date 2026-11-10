@@ -271,7 +271,60 @@ pub fn least_req_sse2(metrics: &[EndpointMetrics], limit: usize) -> usize {
 /// Chooses the endpoint with the smallest number of active connections.
 #[derive(Debug, Clone, Copy)]
 pub struct LeastConnections {
+    #[allow(dead_code)]
     metrics_fn: LeastConnMetricsFn,
+}
+
+/// Evaluates minimum active connections index across contiguous metrics slice.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn least_conn_eval(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_conn_scalar(metrics, limit);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            least_conn_avx2(metrics, limit)
+        } else {
+            least_conn_sse2(metrics, limit)
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        least_conn_sse2(metrics, limit)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        least_conn_scalar(metrics, limit)
+    }
+}
+
+/// Evaluates minimum in-flight requests index across contiguous metrics slice.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn least_req_eval(metrics: &[EndpointMetrics], limit: usize) -> usize {
+    if limit <= 4 {
+        return least_req_scalar(metrics, limit);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            least_req_avx2(metrics, limit)
+        } else {
+            least_req_sse2(metrics, limit)
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        least_req_sse2(metrics, limit)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        least_req_scalar(metrics, limit)
+    }
 }
 
 impl Default for LeastConnections {
@@ -344,7 +397,7 @@ impl LoadBalancer for LeastConnections {
             if limit == 0 {
                 return Some(0);
             }
-            return Some((self.metrics_fn)(metrics, limit));
+            return Some(least_conn_eval(metrics, limit));
         }
 
         let Some(metrics_map) = ctx.metrics_map else {
@@ -376,6 +429,7 @@ impl LoadBalancer for LeastConnections {
 /// Chooses the endpoint with the smallest number of currently in-flight requests.
 #[derive(Debug, Clone, Copy)]
 pub struct LeastRequests {
+    #[allow(dead_code)]
     metrics_fn: LeastReqMetricsFn,
 }
 
@@ -445,7 +499,7 @@ impl LoadBalancer for LeastRequests {
             if limit == 0 {
                 return Some(0);
             }
-            return Some((self.metrics_fn)(metrics, limit));
+            return Some(least_req_eval(metrics, limit));
         }
 
         let Some(metrics_map) = ctx.metrics_map else {

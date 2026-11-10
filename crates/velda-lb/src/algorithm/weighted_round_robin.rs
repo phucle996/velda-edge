@@ -116,6 +116,7 @@ pub struct WeightedRoundRobin {
     // Thread-sharded Mutex array padded to 64-byte cache lines completely eliminates
     // cross-core false sharing and lock contention across worker threads.
     shards: Box<[SwrrShard]>,
+    #[allow(dead_code)]
     update_fn: SwrrUpdateFn,
 }
 
@@ -204,7 +205,11 @@ impl LoadBalancer for WeightedRoundRobin {
             return Some(FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed) % endpoints.len());
         }
 
-        let best_idx = (self.update_fn)(&mut lock.current_weights, endpoints);
+        let best_idx = if endpoints.len() <= 4 {
+            swrr_update_scalar(&mut lock.current_weights, endpoints)
+        } else {
+            swrr_update_vector(&mut lock.current_weights, endpoints)
+        };
         lock.current_weights[best_idx] -= total_weight;
         Some(best_idx)
     }

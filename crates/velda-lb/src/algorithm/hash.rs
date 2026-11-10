@@ -6,21 +6,6 @@ use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
 
-type HashBytesFn = fn(&[u8]) -> u64;
-
-static HASH_BYTES_FN: std::sync::LazyLock<HashBytesFn> = std::sync::LazyLock::new(|| {
-    let width = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities
-        .select_for_workload(velda_core::hardware::RegisterWidth::Bits64);
-    match width {
-        velda_core::hardware::RegisterWidth::Bits64
-        | velda_core::hardware::RegisterWidth::Bits128
-        | velda_core::hardware::RegisterWidth::Bits256 => hash_bytes_64,
-        velda_core::hardware::RegisterWidth::Bits32 => hash_bytes_32,
-    }
-});
-
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -49,6 +34,7 @@ fn hash_bytes_64(data: &[u8]) -> u64 {
 }
 
 /// 32-bit register word-accelerated FNV-1a mixer (processes 4 bytes per multiplication).
+#[allow(dead_code)]
 #[inline]
 fn hash_bytes_32(data: &[u8]) -> u64 {
     let mut hash: u64 = FNV_OFFSET;
@@ -73,9 +59,18 @@ fn hash_bytes_32(data: &[u8]) -> u64 {
 }
 
 /// High-speed register-dispatched 64-bit hash function (`Bits64` -> `Bits32`) with zero external dependencies.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn fnv1a_hash(data: &[u8]) -> u64 {
-    (HASH_BYTES_FN)(data)
+    #[cfg(target_pointer_width = "64")]
+    {
+        hash_bytes_64(data)
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        hash_bytes_32(data)
+    }
 }
 
 /// Hashes the client's IP address to map them consistently to a backend.
