@@ -241,48 +241,34 @@ pub fn scan_swar_32(words: &[AtomicU64], start: usize) -> Option<usize> {
     None
 }
 
-/// Pre-resolved static function pointer for 4-tier bitmask scanning.
-///
-/// Bound once at bootstrap via `velda_core::global_hardware_topology().cpu.register_capabilities`.
-pub static SCAN_AVAILABLE_WORD_FN: std::sync::LazyLock<ScanFn> = std::sync::LazyLock::new(|| {
-    use velda_core::hardware::RegisterWidth;
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                if std::is_x86_feature_detected!("avx2") {
-                    return scan_avx2_256;
-                }
-                scan_sse2_128
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                scan_swar_64
-            }
-        }
-        RegisterWidth::Bits128 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                scan_sse2_128
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                scan_swar_64
-            }
-        }
-        RegisterWidth::Bits64 => scan_swar_64,
-        RegisterWidth::Bits32 => scan_swar_32,
-    }
-});
-
-/// Dispatches bitmask word scanning through the hardware-resolved function pointer.
+/// Dispatches bitmask word scanning directly through tiered vector/SWAR acceleration.
 #[inline]
 pub fn scan_available_word(words: &[AtomicU64], start: usize) -> Option<usize> {
-    (*SCAN_AVAILABLE_WORD_FN)(words, start)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return scan_avx2_256(words, start);
+        }
+        scan_sse2_128(words, start)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        #[cfg(target_pointer_width = "64")]
+        {
+            scan_swar_64(words, start)
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            scan_swar_32(words, start)
+        }
+    }
 }
+
+/// Pre-resolved static function pointer for 4-tier bitmask scanning.
+///
+/// Kept for crate API compatibility; internally delegates directly to inlined `scan_available_word`.
+pub static SCAN_AVAILABLE_WORD_FN: std::sync::LazyLock<ScanFn> =
+    std::sync::LazyLock::new(|| scan_available_word);
 
 impl XdpSlabArena {
     /// Allocates and page-aligns a contiguous host memory block for UMEM registration.
@@ -642,7 +628,7 @@ impl XdpSlabLease {
             return;
         }
         let dst = self.payload_mut();
-        (*velda_core::COPY_NON_TEMPORAL_FN)(&src[..len], dst);
+        velda_core::copy_non_temporal(&src[..len], dst);
     }
 }
 

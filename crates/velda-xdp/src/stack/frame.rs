@@ -443,57 +443,35 @@ pub fn checksum_swar_32(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// Hardware-accelerated RFC 1071 one's complement Internet checksum function pointer.
-///
-/// Bound once at bootstrap via `velda_core::global_hardware_topology().cpu.register_capabilities`
-/// with zero runtime branching ladders on the serving hot path.
-pub static CHECKSUM_FN: std::sync::LazyLock<ChecksumFn> = std::sync::LazyLock::new(|| {
-    use velda_core::hardware::RegisterWidth;
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                if std::is_x86_feature_detected!("avx2") {
-                    return checksum_avx2_256;
-                }
-                checksum_sse2_128
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                checksum_neon_128
-            }
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            {
-                checksum_swar_64
-            }
-        }
-        RegisterWidth::Bits128 => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                checksum_sse2_128
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                checksum_neon_128
-            }
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            {
-                checksum_swar_64
-            }
-        }
-        RegisterWidth::Bits64 => checksum_swar_64,
-        RegisterWidth::Bits32 => checksum_swar_32,
-    }
-});
-
 /// Computes the standard RFC 1071 one's complement Internet checksum across byte slices.
 #[inline]
 pub fn compute_internet_checksum(data: &[u8]) -> u16 {
-    (*CHECKSUM_FN)(data)
+    #[cfg(target_arch = "x86_64")]
+    {
+        checksum_avx2_256(data)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        checksum_neon_128(data)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        #[cfg(target_pointer_width = "64")]
+        {
+            checksum_swar_64(data)
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            checksum_swar_32(data)
+        }
+    }
 }
+
+/// Hardware-accelerated RFC 1071 one's complement Internet checksum function pointer.
+///
+/// Kept for crate API compatibility; internally delegates directly to inlined `compute_internet_checksum`.
+pub static CHECKSUM_FN: std::sync::LazyLock<ChecksumFn> =
+    std::sync::LazyLock::new(|| compute_internet_checksum);
 
 #[cfg(test)]
 mod tests {
