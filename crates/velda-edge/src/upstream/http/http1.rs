@@ -323,6 +323,18 @@ impl Http1Upstream {
         self.inner.health().is_healthy(addr)
     }
 
+    /// Records a client-traffic passive success for an endpoint.
+    #[inline]
+    pub fn record_success(&self, addr: &SocketAddr) {
+        self.inner.health().record_success(addr);
+    }
+
+    /// Records a client-traffic passive failure for an endpoint.
+    #[inline]
+    pub fn record_failure(&self, addr: &SocketAddr) {
+        self.inner.health().record_failure(addr);
+    }
+
     /// Returns the request timeout for upstream HTTP/1.1 exchanges (defaults to 60s if unspecified).
     #[inline]
     pub fn request_timeout(&self) -> std::time::Duration {

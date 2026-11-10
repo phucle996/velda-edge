@@ -247,7 +247,10 @@ impl HealthTracker {
             } else {
                 let since = record.unhealthy_since_ms.load(Ordering::Relaxed);
                 let active_healthy = record.active_healthy.load(Ordering::Relaxed);
-                if since > 0 || !active_healthy {
+                if since > 0 {
+                    removed_unhealthy += 1;
+                }
+                if !active_healthy {
                     removed_unhealthy += 1;
                 }
             }
@@ -333,9 +336,25 @@ impl HealthTracker {
                 .fetch_add(1, Ordering::AcqRel)
                 + 1;
             if succ >= active_cfg.healthy_threshold {
+                let mut state_changed = false;
                 let was_healthy = record.active_healthy.swap(true, Ordering::AcqRel);
                 if !was_healthy {
                     self.decrement_unhealthy();
+                    state_changed = true;
+                }
+
+                // Coordinate with passive circuit breaking:
+                // If active probe affirmatively confirms the endpoint is alive and responsive,
+                // clear any passive failure state so the endpoint can immediately re-enter rotation
+                // without waiting out passive cooldown.
+                record.consecutive_failures.store(0, Ordering::Release);
+                let prev_since = record.unhealthy_since_ms.swap(0, Ordering::AcqRel);
+                if prev_since > 0 {
+                    self.decrement_unhealthy();
+                    state_changed = true;
+                }
+
+                if state_changed {
                     self.epoch.fetch_add(1, Ordering::Release);
                 }
             }
@@ -496,6 +515,59 @@ mod tests {
         tracker.record_success(&ep2);
         tracker.record_success(&ep2);
         assert_eq!(tracker.unhealthy_count.load(Ordering::Relaxed), 0);
+        assert!(!tracker.has_unhealthy());
+    }
+
+    #[test]
+    fn test_active_passive_coordination() {
+        let config = HealthConfig {
+            passive: Some(PassiveHealthConfig {
+                enabled: true,
+                max_consecutive_failures: 2,
+                cooldown: Duration::from_secs(60), // long 60s cooldown
+            }),
+            active: Some(ActiveHealthConfig {
+                enabled: true,
+                interval: Duration::from_secs(1),
+                timeout: Duration::from_millis(500),
+                unhealthy_threshold: 1,
+                healthy_threshold: 1,
+                check_type: "http".into(),
+                path: Some("/healthz".into()),
+                expected_statuses: vec![200],
+            }),
+        };
+        let tracker = HealthTracker::new(config);
+        let ep: SocketAddr = "127.0.0.1:8085".parse().unwrap();
+
+        assert!(tracker.is_healthy(&ep));
+        assert!(!tracker.has_unhealthy());
+
+        // 1. Client failures trigger passive circuit breaker immediately
+        tracker.record_failure(&ep);
+        assert!(tracker.is_healthy(&ep)); // 1 fail < threshold (2)
+        tracker.record_failure(&ep);
+        assert!(!tracker.is_healthy(&ep)); // 2 fails == threshold -> tripped!
+        assert!(tracker.has_unhealthy());
+
+        // 2. Cooldown is 60s, so without active probe it would stay dead for 60s
+        assert!(!tracker.is_healthy(&ep));
+
+        // 3. Shadow worker active probe succeeds (backend has recovered)
+        tracker.record_active_result(&ep, true);
+
+        // 4. Active probe affirmatively clears the passive trip instantly!
+        assert!(tracker.is_healthy(&ep));
+        assert!(!tracker.has_unhealthy());
+
+        // 5. Conversely: active probe detects failure while passive has 0 client errors
+        tracker.record_active_result(&ep, false);
+        assert!(!tracker.is_healthy(&ep));
+        assert!(tracker.has_unhealthy());
+
+        // 6. Active probe succeeds again -> recovers
+        tracker.record_active_result(&ep, true);
+        assert!(tracker.is_healthy(&ep));
         assert!(!tracker.has_unhealthy());
     }
 }
