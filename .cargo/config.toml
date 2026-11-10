@@ -3,11 +3,14 @@
 # For complete details on the Multi-Edition architecture and compatibility matrix,
 # see docs/EDITIONS_AND_RELEASES.md.
 #
-# Default configuration: Performance Edition (x86-64-v3)
+# Default configuration: Performance Edition (x86-64-v3) for x86_64 Linux
 # Enables 256-bit AVX2, FMA, and BMI1/BMI2 instructions across all modern cloud instances
 # (AWS EC2 c5/m5/t3+, Azure Dv3+, GCP N2/C2, Hetzner, modern dedicated bare-metal).
-[build]
+[target.'cfg(all(target_arch = "x86_64", target_os = "linux"))']
 rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
 
 # ── Available Microarchitecture Profiles ─────────────────────────────────────
 #
