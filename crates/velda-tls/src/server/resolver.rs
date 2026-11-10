@@ -13,12 +13,6 @@ use rustls::sign::CertifiedKey;
 
 use crate::error::TlsError;
 
-/// Pre-resolved function pointer for hardware-accelerated SNI dot search (RFC 6125 wildcard prefix extraction).
-pub type FindDotFn = fn(bytes: &[u8]) -> Option<usize>;
-
-/// Pre-resolved function pointer for hardware-accelerated domain byte comparison.
-pub type DomainEqFn = fn(a: &[u8], b: &[u8]) -> bool;
-
 /// Ultra-fast non-cryptographic hasher for in-memory SNI hash tables.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FastBuildHasher;
@@ -93,8 +87,6 @@ pub struct SniResolver {
     exact_matches: HashMap<String, Arc<CertifiedKey>, FastBuildHasher>,
     wildcard_matches: HashMap<String, Arc<CertifiedKey>, FastBuildHasher>,
     default_key: Option<Arc<CertifiedKey>>,
-    find_dot_fn: FindDotFn,
-    domain_eq_fn: DomainEqFn,
 }
 
 impl fmt::Debug for SniResolver {
@@ -117,15 +109,12 @@ impl Default for SniResolver {
 pub const WILDCARD_PREFIX: &str = "*.";
 
 impl SniResolver {
-    /// Creates a new empty `SniResolver` resolving optimal hardware register dispatch at bootstrap.
+    /// Creates a new empty `SniResolver`.
     pub fn new() -> Self {
-        let (find_dot_fn, domain_eq_fn) = resolve_hardware_dispatch();
         Self {
             exact_matches: HashMap::with_hasher(FastBuildHasher),
             wildcard_matches: HashMap::with_hasher(FastBuildHasher),
             default_key: None,
-            find_dot_fn,
-            domain_eq_fn,
         }
     }
 
@@ -168,7 +157,7 @@ impl SniResolver {
     /// Performs strictly case-sensitive matching on the exact target domain name,
     /// falling back to single-label wildcard subdomain match (RFC 6125 Section 6.4.3).
     ///
-    /// Executes directly through pre-resolved hardware function pointers on the hot path.
+    /// Executes directly through hardware-vectorized inlined routines on the hot path.
     pub fn lookup(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
         let trimmed = sni.trim();
 
@@ -178,8 +167,8 @@ impl SniResolver {
         }
 
         // 2. Wildcard match (RFC 6125 Section 6.4.3: single-label subdomain only)
-        // Direct execution via pre-resolved function pointer (0 runtime branching ladder)
-        if let Some(idx) = (self.find_dot_fn)(trimmed.as_bytes()) {
+        // Direct execution via inlined hardware vector / SWAR scan (0 indirect function calls)
+        if let Some(idx) = find_dot(trimmed.as_bytes()) {
             let parent_domain = &trimmed[idx + 1..];
             if let Some(key) = self.wildcard_matches.get(parent_domain) {
                 return Some(key.clone());
@@ -192,13 +181,13 @@ impl SniResolver {
     /// Scans for the first dot '.' using the hardware-accelerated register tier.
     #[inline(always)]
     pub fn find_dot(&self, bytes: &[u8]) -> Option<usize> {
-        (self.find_dot_fn)(bytes)
+        find_dot(bytes)
     }
 
     /// Evaluates domain byte equality using the hardware-accelerated register tier.
     #[inline(always)]
     pub fn domain_eq(&self, a: &[u8], b: &[u8]) -> bool {
-        (self.domain_eq_fn)(a, b)
+        domain_eq(a, b)
     }
 
     /// Returns the number of unique exact SNI mappings.
@@ -227,20 +216,15 @@ pub struct SniConfigResolver {
     exact_configs: HashMap<String, Arc<rustls::ServerConfig>, FastBuildHasher>,
     wildcard_configs: HashMap<String, Arc<rustls::ServerConfig>, FastBuildHasher>,
     pub default_config: Arc<rustls::ServerConfig>,
-    find_dot_fn: FindDotFn,
-    domain_eq_fn: DomainEqFn,
 }
 
 impl SniConfigResolver {
     /// Creates a new `SniConfigResolver` with a fallback default configuration.
     pub fn new(default_config: Arc<rustls::ServerConfig>) -> Self {
-        let (find_dot_fn, domain_eq_fn) = resolve_hardware_dispatch();
         Self {
             exact_configs: HashMap::with_hasher(FastBuildHasher),
             wildcard_configs: HashMap::with_hasher(FastBuildHasher),
             default_config,
-            find_dot_fn,
-            domain_eq_fn,
         }
     }
 
@@ -269,7 +253,7 @@ impl SniConfigResolver {
         if let Some(cfg) = self.exact_configs.get(trimmed) {
             return Some(cfg);
         }
-        if let Some(idx) = (self.find_dot_fn)(trimmed.as_bytes()) {
+        if let Some(idx) = find_dot(trimmed.as_bytes()) {
             let parent = &trimmed[idx + 1..];
             if let Some(cfg) = self.wildcard_configs.get(parent) {
                 return Some(cfg);
@@ -288,13 +272,13 @@ impl SniConfigResolver {
     /// Scans for the first dot '.' using the hardware-accelerated register tier.
     #[inline(always)]
     pub fn find_dot(&self, bytes: &[u8]) -> Option<usize> {
-        (self.find_dot_fn)(bytes)
+        find_dot(bytes)
     }
 
     /// Evaluates domain byte equality using the hardware-accelerated register tier.
     #[inline(always)]
     pub fn domain_eq(&self, a: &[u8], b: &[u8]) -> bool {
-        (self.domain_eq_fn)(a, b)
+        domain_eq(a, b)
     }
 
     /// Returns the number of exact configurations.
@@ -312,19 +296,61 @@ impl SniConfigResolver {
 // Multi-Version Hardware Vector & SWAR Core
 // ============================================================================
 
-/// Resolves pre-compiled multi-version function pointers once during bootstrap.
+/// Scans for the first dot `.` using vector registers (AVX2 / SSE4.2 / NEON) or SWAR fallback.
 ///
-/// Avoids dynamic branch ladders on the serving hot path.
-fn resolve_hardware_dispatch() -> (FindDotFn, DomainEqFn) {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
+/// Inlines direct machine instructions without indirect function pointer dispatch overhead.
+#[inline(always)]
+pub fn find_dot(bytes: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return unsafe { find_dot_256_impl(bytes) };
+        }
+        if std::is_x86_feature_detected!("sse4.2") {
+            return unsafe { find_dot_128_x86_impl(bytes) };
+        }
+        find_dot_dual_64(bytes)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        find_dot_128(bytes)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            find_dot_dual_64(bytes)
+        } else {
+            find_dot_quad_32(bytes)
+        }
+    }
+}
 
-    match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
-        velda_core::hardware::RegisterWidth::Bits256 => (find_dot_256, domain_eq_256),
-        velda_core::hardware::RegisterWidth::Bits128 => (find_dot_128, domain_eq_128),
-        velda_core::hardware::RegisterWidth::Bits64 => (find_dot_dual_64, domain_eq_dual_64),
-        velda_core::hardware::RegisterWidth::Bits32 => (find_dot_quad_32, domain_eq_quad_32),
+/// Evaluates domain byte equality using vector registers (AVX2 / SSE4.2 / NEON) or SWAR fallback.
+///
+/// Inlines direct machine instructions without indirect function pointer dispatch overhead.
+#[inline(always)]
+pub fn domain_eq(a: &[u8], b: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return unsafe { domain_eq_256_impl(a, b) };
+        }
+        if std::is_x86_feature_detected!("sse4.2") {
+            return unsafe { domain_eq_128_x86_impl(a, b) };
+        }
+        domain_eq_dual_64(a, b)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        domain_eq_128(a, b)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            domain_eq_dual_64(a, b)
+        } else {
+            domain_eq_quad_32(a, b)
+        }
     }
 }
 
@@ -332,6 +358,7 @@ fn resolve_hardware_dispatch() -> (FindDotFn, DomainEqFn) {
 // Tier 1: 256-bit Vector (AVX2)
 // ----------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[inline]
 pub fn find_dot_256(bytes: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
@@ -371,6 +398,7 @@ unsafe fn find_dot_256_impl(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn domain_eq_256(a: &[u8], b: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -418,6 +446,7 @@ unsafe fn domain_eq_256_impl(a: &[u8], b: &[u8]) -> bool {
 // Tier 2: 128-bit Vector (SSE4.2 / NEON)
 // ----------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[inline]
 pub fn find_dot_128(bytes: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
@@ -493,6 +522,7 @@ unsafe fn find_dot_128_neon_impl(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn domain_eq_128(a: &[u8], b: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -647,11 +677,15 @@ pub fn domain_eq_dual_64(a: &[u8], b: &[u8]) -> bool {
 // Tier 4: Quad 32-bit SWAR (4x u32 parallel evaluation on 4 superscalar ALU ports)
 // ----------------------------------------------------------------------------
 
+#[allow(dead_code)]
 const DOT_32: u32 = 0x2e2e2e2e;
+#[allow(dead_code)]
 const LOB_32: u32 = 0x01010101;
+#[allow(dead_code)]
 const HIB_32: u32 = 0x80808080;
 
 /// Evaluates 16 bytes per cycle across four 32-bit general-purpose registers concurrently.
+#[allow(dead_code)]
 pub fn find_dot_quad_32(bytes: &[u8]) -> Option<usize> {
     let len = bytes.len();
     let mut i = 0;
@@ -704,6 +738,7 @@ pub fn find_dot_quad_32(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Evaluates domain equality 16 bytes per cycle across four 32-bit registers concurrently.
+#[allow(dead_code)]
 pub fn domain_eq_quad_32(a: &[u8], b: &[u8]) -> bool {
     let len = a.len();
     if len != b.len() {
@@ -795,6 +830,7 @@ mod tests {
 
         for (domain, expected) in samples {
             let bytes = domain.as_bytes();
+            assert_eq!(find_dot(bytes), expected, "find_dot failed on '{domain}'");
             assert_eq!(
                 find_dot_256(bytes),
                 expected,
@@ -832,6 +868,7 @@ mod tests {
             (b"equal".as_slice(), b"equal".as_slice(), true),
             (b"equal".as_slice(), b"equaL".as_slice(), false),
         ] {
+            assert_eq!(domain_eq(a, b), expected);
             assert_eq!(domain_eq_256(a, b), expected);
             assert_eq!(domain_eq_128(a, b), expected);
             assert_eq!(domain_eq_dual_64(a, b), expected);
