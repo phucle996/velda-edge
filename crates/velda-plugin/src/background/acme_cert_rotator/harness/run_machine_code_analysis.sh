@@ -48,7 +48,7 @@ echo " 3. Disassembly & Symbol Verification Check"
 echo "======================================================================"
 if command -v objdump >/dev/null 2>&1; then
     echo "Dumping Assembly Snippet of Ephemeral Route Lookup & Challenge Store:"
-    objdump -d -M intel --demangle "${TEST_BIN}" | grep -A 35 "<velda_plugin::background::acme_cert_rotator::challenge::ChallengeStore>::lookup" | head -n 40 || true
+    objdump -d -M intel --demangle "${TEST_BIN}" | grep -A 40 "<velda_plugin::background::acme_cert_rotator::challenge::ChallengeStore>::lookup_matched>:" | head -n 45 || true
 fi
 
 echo ""

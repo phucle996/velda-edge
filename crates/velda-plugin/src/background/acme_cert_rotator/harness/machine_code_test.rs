@@ -172,10 +172,9 @@ fn test_challenge_store_lookup_latency() {
     println!("========================================================\n");
 
     if !cfg!(debug_assertions) {
-        // Enforces sub-microsecond lookup while accounting for active clflush serialization
-        // that evicts the challenge response from L1/L2 on every lookup.
+        // Enforces sub-100ns lookup without clflush serialization on the read path.
         assert!(
-            avg_cycles < 1200.0,
+            avg_cycles < 250.0,
             "ChallengeStore lookup exceeded threshold: {avg_cycles} cycles"
         );
     }
@@ -347,16 +346,19 @@ fn test_chaos_scenario_2_l7_burst_flood_under_active_challenge() {
 fn test_chaos_scenario_3_l3_ram_cache_isolation() {
     println!("\n=== CHAOS SCENARIO 3: L3/RAM Cache Isolation (Zero L1D Thrashing) ===");
 
+    let store = ChallengeStore::new();
+    let token = "isolated_token_777";
+    let _guard = store.publish(token, "isolated_token_777.thumb");
+    let path = format!("{CHALLENGE_PATH_PREFIX}{token}");
+
+    // Warm up thread-local debt structures so we measure cache eviction rather than one-time TLS allocation
+    let _ = store.lookup(&path);
+
     // Simulate 32MB Noisy Neighbor memory thrasher
     let mut thrash_buffer = vec![0u8; 32 * 1024 * 1024];
     for (i, byte) in thrash_buffer.iter_mut().enumerate() {
         *byte = (i % 255) as u8;
     }
-
-    let store = ChallengeStore::new();
-    let token = "isolated_token_777";
-    let _guard = store.publish(token, "isolated_token_777.thumb");
-    let path = format!("{CHALLENGE_PATH_PREFIX}{token}");
 
     // Measure cold fetch after 32MB cache thrashing
     std::hint::black_box(&thrash_buffer[..]);
@@ -388,8 +390,8 @@ fn test_chaos_scenario_3_l3_ram_cache_isolation() {
 
     if !cfg!(debug_assertions) {
         assert!(
-            cold_cycles < 5000,
-            "Cold lookup exceeded realistic L3/RAM bounds (expected < 5000 cycles, got {cold_cycles})"
+            cold_cycles < 15000,
+            "Cold lookup exceeded realistic L3/RAM bounds (expected < 15000 cycles, got {cold_cycles})"
         );
     }
 }

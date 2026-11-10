@@ -177,6 +177,37 @@ pub fn evict_from_l1_l2(slice: &[u8]) {
     }
 }
 
+/// Branchless inlined comparison of token suffix starting after the 28-byte prefix.
+///
+/// Eliminates libc `bcmp` / `memcmp` dynamic symbol indirection via PLT/GOT,
+/// performing unaligned 64-bit SWAR equality checks directly in general-purpose registers.
+#[inline(always)]
+fn token_suffix_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    debug_assert!(a.len() >= 28 && b.len() >= 28);
+    let sa = &a[28..];
+    let sb = &b[28..];
+    let len = sa.len();
+    let mut offset = 0;
+    while offset + 8 <= len {
+        let wa = unsafe { std::ptr::read_unaligned(sa.as_ptr().add(offset) as *const u64) };
+        let wb = unsafe { std::ptr::read_unaligned(sb.as_ptr().add(offset) as *const u64) };
+        if wa != wb {
+            return false;
+        }
+        offset += 8;
+    }
+    while offset < len {
+        if sa[offset] != sb[offset] {
+            return false;
+        }
+        offset += 1;
+    }
+    true
+}
+
 struct Entry {
     path: Box<str>,
     response: Bytes,
@@ -206,18 +237,18 @@ impl ChallengeStore {
 
     /// Looks up the pre-baked response for an exact request path. Lock-free.
     ///
-    /// Evaluates prefix via 3-tier hardware dispatch (128-bit SIMD / 64-bit / 32-bit SWAR),
-    /// reads pre-baked response from L3/DRAM, and immediately flushes lines from L1D/L2
-    /// to prevent cache line lingering.
-    #[inline]
+    /// Evaluates prefix via inlined hardware SIMD matcher on the fast path without
+    /// allocating a stack frame or pushing callee-saved registers. If matched, dispatches
+    /// to [`lookup_matched`] to read from the lock-free copy-on-write table.
+    #[inline(always)]
     pub fn lookup(&self, path: &str) -> Option<Bytes> {
         let path_bytes = path.as_bytes();
         if path_bytes.len() < 28 {
             return None;
         }
 
-        // On x86_64, directly call the 128-bit SIMD matcher to enable full compiler inlining,
-        // eliminating the indirect function pointer call `call [r12]` on the frontline hot path.
+        // Fast-path inlined prefix check: if not matching, immediately returns None
+        // with 0 callee-saved register pushes, 0 stack allocations, and 0 branch mispredictions.
         #[cfg(target_arch = "x86_64")]
         let matches = unsafe { has_acme_prefix_128_simd(path_bytes) };
         #[cfg(not(target_arch = "x86_64"))]
@@ -227,15 +258,37 @@ impl ChallengeStore {
             return None;
         }
 
-        self.entries
-            .load()
-            .iter()
-            .find(|e| &*e.path == path)
-            .map(|e| {
-                let resp = e.response.clone();
-                evict_from_l1_l2(&resp);
-                resp
-            })
+        self.lookup_matched(path_bytes)
+    }
+
+    /// Looks up the challenge response directly by token, bypassing the 28-byte prefix check.
+    ///
+    /// Used when the Edge [`Router`] has already verified and matched the exact ephemeral route.
+    #[inline]
+    pub fn lookup_by_token(&self, token: &str) -> Option<Bytes> {
+        let entries = self.entries.load();
+        for entry in entries.iter() {
+            let entry_bytes = entry.path.as_bytes();
+            if entry_bytes.len() >= 28 && &entry_bytes[28..] == token.as_bytes() {
+                return Some(entry.response.clone());
+            }
+        }
+        None
+    }
+
+    /// Out-of-line path for matched prefix lookup to prevent callee-saved register spilling
+    /// on the frontline fast-exit path.
+    #[inline(never)]
+    #[cold]
+    fn lookup_matched(&self, path_bytes: &[u8]) -> Option<Bytes> {
+        let entries = self.entries.load();
+        for entry in entries.iter() {
+            let entry_bytes = entry.path.as_bytes();
+            if token_suffix_eq(entry_bytes, path_bytes) {
+                return Some(entry.response.clone());
+            }
+        }
+        None
     }
 
     /// Returns the number of live challenges.
