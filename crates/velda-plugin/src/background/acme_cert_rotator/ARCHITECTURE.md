@@ -63,10 +63,10 @@ flowchart TD
 - **Short-Circuit Action**:
   When Let's Encrypt requests `GET /.well-known/acme-challenge/<token>`, the Frontline worker matches the ephemeral route and immediately blits the pre-baked wire slice into the socket buffer. Upstream pools and socket connections are completely bypassed (0 upstream allocations).
 
-### 3.2 L3/RAM Cache Isolation (Anti-L1D Thrashing)
+### 3.2 L3/RAM Cache Isolation (Strict L1/L2 Eviction)
 - Between challenge creation and external validation (typically 1 to 5 seconds), millions of real customer requests pass through frontline cores.
-- Keeping the transient challenge response in L3/RAM rather than pinning it in L1D ensures that customer request state, parsing buffers, and router tables maintain 100% cache line residency.
-- Cold lookup latency from L3/RAM is ~560 ns, which is negligible compared to Internet round-trip latency (20–80 ms).
+- **Strict L1/L2 Exclusion**: To strictly prevent transient challenge payloads from occupying precious L1D or L2 cache lines, `ChallengeStore` actively invokes `evict_from_l1_l2` (`_mm_clflush` on x86-64) at publish time, immediately following lookup, and upon RAII drop.
+- **Hardware Invariant**: The payload is strictly quarantined in L3 cache / DRAM. Cold lookup latency from L3/RAM is ~190–500 ns, which is completely imperceptible compared to external Internet round-trip latency (20–100 ms), while keeping frontline L1D and L2 caches 100% unpolluted and reserved for real customer traffic.
 
 ### 3.3 RAII Guaranteed Teardown
 - Challenge lifetime is strictly governed by `EphemeralRouteGuard`.

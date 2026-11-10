@@ -172,8 +172,10 @@ fn test_challenge_store_lookup_latency() {
     println!("========================================================\n");
 
     if !cfg!(debug_assertions) {
+        // Enforces sub-microsecond lookup while accounting for active clflush serialization
+        // that evicts the challenge response from L1/L2 on every lookup.
         assert!(
-            avg_cycles < 250.0,
+            avg_cycles < 1200.0,
             "ChallengeStore lookup exceeded threshold: {avg_cycles} cycles"
         );
     }

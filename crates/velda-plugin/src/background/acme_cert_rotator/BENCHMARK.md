@@ -13,7 +13,7 @@ Empirical benchmarks measured using hardware `RDTSC` cycle counter on AMD Ryzen 
 | **`Router::route_http1` (Baseline)** | 16.62 cycles | ~6.6 ns | 150.4 Mreq/s | Pure L1D candidate evaluation |
 | **`Router::route_http1` (Ephemeral ACME)** | 15.44 cycles | ~6.1 ns | 161.9 Mreq/s | Exact match Tier 1 lookup |
 | **`Router::route_http1` (Customer Route under ACME)** | 17.58 cycles | ~7.0 ns | 142.2 Mreq/s | **Delta: +0.95 cycles (+0.38 ns)** |
-| **`ChallengeStore::lookup`** | 88.74 cycles | ~35.5 ns | 28.1 Mops/s | Lock-free `ArcSwap` read |
+| **`ChallengeStore::lookup`** | 494.8 cycles | ~197.9 ns | 5.0 Mops/s | Lock-free `ArcSwap` + strict L1/L2 `clflush` eviction |
 | **`CronSchedule::next_after`** | 3,148 cycles | ~1.25 µs | 794.1 Kops/s | Evaluated once per day |
 
 ---

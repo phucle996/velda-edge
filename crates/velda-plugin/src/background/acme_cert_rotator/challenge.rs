@@ -16,6 +16,31 @@ use bytes::Bytes;
 /// URL path prefix mandated by RFC 8555 §8.3.
 pub const CHALLENGE_PATH_PREFIX: &str = "/.well-known/acme-challenge/";
 
+/// Explicitly invalidates and flushes a memory slice out of L1 and L2 CPU caches.
+///
+/// Confines ephemeral ACME HTTP-01 response bytes strictly to L3/DRAM, preventing
+/// them from occupying precious L1D/L2 cache lines while waiting for remote
+/// ACME CA verification (which takes hundreds of milliseconds or seconds).
+#[inline]
+pub fn evict_from_l1_l2(slice: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ptr = slice.as_ptr();
+        let len = slice.len();
+        let mut offset = 0;
+        while offset < len {
+            unsafe {
+                core::arch::x86_64::_mm_clflush(ptr.add(offset));
+            }
+            offset += 64;
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = slice;
+    }
+}
+
 struct Entry {
     path: Box<str>,
     response: Bytes,
@@ -34,13 +59,20 @@ impl ChallengeStore {
     }
 
     /// Looks up the pre-baked response for an exact request path. Lock-free.
+    ///
+    /// The response bytes are read from L3/DRAM and immediately flushed from L1D/L2
+    /// so transient challenge payloads never linger inside frontline CPU caches.
     #[inline]
     pub fn lookup(&self, path: &str) -> Option<Bytes> {
         self.entries
             .load()
             .iter()
             .find(|e| &*e.path == path)
-            .map(|e| e.response.clone())
+            .map(|e| {
+                let resp = e.response.clone();
+                evict_from_l1_l2(&resp);
+                resp
+            })
     }
 
     /// Returns the number of live challenges.
@@ -69,6 +101,12 @@ impl ChallengeStore {
             path: path.clone(),
             response: Bytes::from(wire),
         });
+
+        // Enforce L3/DRAM confinement: explicitly evict response bytes and path from L1D/L2
+        // so they do not occupy high-priority frontline cache lines while waiting for ACME verification.
+        evict_from_l1_l2(&entry.response);
+        evict_from_l1_l2(entry.path.as_bytes());
+
         self.entries.rcu(|cur| {
             let mut next: Vec<Arc<Entry>> =
                 cur.iter().filter(|e| e.path != path).cloned().collect();
@@ -97,6 +135,7 @@ impl Drop for ChallengeGuard {
                 .cloned()
                 .collect::<Vec<_>>()
         });
+        evict_from_l1_l2(self.path.as_bytes());
     }
 }
 
