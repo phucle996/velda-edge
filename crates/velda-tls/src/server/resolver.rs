@@ -317,11 +317,7 @@ pub fn find_dot(bytes: &[u8]) -> Option<usize> {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            find_dot_dual_64(bytes)
-        } else {
-            find_dot_quad_32(bytes)
-        }
+        find_dot_dual_64(bytes)
     }
 }
 
@@ -346,11 +342,7 @@ pub fn domain_eq(a: &[u8], b: &[u8]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            domain_eq_dual_64(a, b)
-        } else {
-            domain_eq_quad_32(a, b)
-        }
+        domain_eq_dual_64(a, b)
     }
 }
 
@@ -358,7 +350,7 @@ pub fn domain_eq(a: &[u8], b: &[u8]) -> bool {
 // Tier 1: 256-bit Vector (AVX2)
 // ----------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[inline]
 pub fn find_dot_256(bytes: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
@@ -398,7 +390,7 @@ unsafe fn find_dot_256_impl(bytes: &[u8]) -> Option<usize> {
     None
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[inline]
 pub fn domain_eq_256(a: &[u8], b: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -446,7 +438,7 @@ unsafe fn domain_eq_256_impl(a: &[u8], b: &[u8]) -> bool {
 // Tier 2: 128-bit Vector (SSE4.2 / NEON)
 // ----------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[inline]
 pub fn find_dot_128(bytes: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
@@ -522,7 +514,7 @@ unsafe fn find_dot_128_neon_impl(bytes: &[u8]) -> Option<usize> {
     None
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[inline]
 pub fn domain_eq_128(a: &[u8], b: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -673,106 +665,6 @@ pub fn domain_eq_dual_64(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-// ----------------------------------------------------------------------------
-// Tier 4: Quad 32-bit SWAR (4x u32 parallel evaluation on 4 superscalar ALU ports)
-// ----------------------------------------------------------------------------
-
-#[allow(dead_code)]
-const DOT_32: u32 = 0x2e2e2e2e;
-#[allow(dead_code)]
-const LOB_32: u32 = 0x01010101;
-#[allow(dead_code)]
-const HIB_32: u32 = 0x80808080;
-
-/// Evaluates 16 bytes per cycle across four 32-bit general-purpose registers concurrently.
-#[allow(dead_code)]
-pub fn find_dot_quad_32(bytes: &[u8]) -> Option<usize> {
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i + 16 <= len {
-        let w0 = unsafe {
-            (bytes.as_ptr().add(i) as *const u32)
-                .read_unaligned()
-                .to_le()
-        } ^ DOT_32;
-        let w1 = unsafe {
-            (bytes.as_ptr().add(i + 4) as *const u32)
-                .read_unaligned()
-                .to_le()
-        } ^ DOT_32;
-        let w2 = unsafe {
-            (bytes.as_ptr().add(i + 8) as *const u32)
-                .read_unaligned()
-                .to_le()
-        } ^ DOT_32;
-        let w3 = unsafe {
-            (bytes.as_ptr().add(i + 12) as *const u32)
-                .read_unaligned()
-                .to_le()
-        } ^ DOT_32;
-
-        // Four independent 32-bit ALU channels computed concurrently:
-        let z0 = (w0.wrapping_sub(LOB_32)) & (!w0) & HIB_32;
-        let z1 = (w1.wrapping_sub(LOB_32)) & (!w1) & HIB_32;
-        let z2 = (w2.wrapping_sub(LOB_32)) & (!w2) & HIB_32;
-        let z3 = (w3.wrapping_sub(LOB_32)) & (!w3) & HIB_32;
-
-        if (z0 | z1 | z2 | z3) != 0 {
-            for j in 0..16 {
-                if bytes[i + j] == b'.' {
-                    return Some(i + j);
-                }
-            }
-        }
-        i += 16;
-    }
-
-    while i < len {
-        if bytes[i] == b'.' {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Evaluates domain equality 16 bytes per cycle across four 32-bit registers concurrently.
-#[allow(dead_code)]
-pub fn domain_eq_quad_32(a: &[u8], b: &[u8]) -> bool {
-    let len = a.len();
-    if len != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i + 16 <= len {
-        let a0 = unsafe { (a.as_ptr().add(i) as *const u32).read_unaligned() };
-        let b0 = unsafe { (b.as_ptr().add(i) as *const u32).read_unaligned() };
-        let a1 = unsafe { (a.as_ptr().add(i + 4) as *const u32).read_unaligned() };
-        let b1 = unsafe { (b.as_ptr().add(i + 4) as *const u32).read_unaligned() };
-        let a2 = unsafe { (a.as_ptr().add(i + 8) as *const u32).read_unaligned() };
-        let b2 = unsafe { (b.as_ptr().add(i + 8) as *const u32).read_unaligned() };
-        let a3 = unsafe { (a.as_ptr().add(i + 12) as *const u32).read_unaligned() };
-        let b3 = unsafe { (b.as_ptr().add(i + 12) as *const u32).read_unaligned() };
-
-        let d0 = a0 ^ b0;
-        let d1 = a1 ^ b1;
-        let d2 = a2 ^ b2;
-        let d3 = a3 ^ b3;
-        if (d0 | d1 | d2 | d3) != 0 {
-            return false;
-        }
-        i += 16;
-    }
-    while i < len {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,11 +738,6 @@ mod tests {
                 expected,
                 "find_dot_dual_64 failed on '{domain}'"
             );
-            assert_eq!(
-                find_dot_quad_32(bytes),
-                expected,
-                "find_dot_quad_32 failed on '{domain}'"
-            );
         }
     }
 
@@ -872,7 +759,6 @@ mod tests {
             assert_eq!(domain_eq_256(a, b), expected);
             assert_eq!(domain_eq_128(a, b), expected);
             assert_eq!(domain_eq_dual_64(a, b), expected);
-            assert_eq!(domain_eq_quad_32(a, b), expected);
         }
     }
 }

@@ -14,10 +14,6 @@
 
 use super::record::PackedLogRecord;
 
-/// Function pointer signature for copying a 256-byte aligned `PackedLogRecord`.
-#[allow(dead_code)]
-pub type CopyRecordFn = fn(dst: &mut PackedLogRecord, src: &PackedLogRecord);
-
 /// Transfers a 256-byte `PackedLogRecord` using the optimal CPU register width.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -37,17 +33,9 @@ pub fn copy_record(dst: &mut PackedLogRecord, src: &PackedLogRecord) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            copy_record_64(dst, src);
-        } else {
-            copy_record_portable(dst, src);
-        }
+        copy_record_64(dst, src);
     }
 }
-
-/// Function pointer signature for non-temporal streaming store of a 256-byte `PackedLogRecord`.
-#[allow(dead_code)]
-pub type StreamRecordFn = fn(dst: &mut PackedLogRecord, src: &PackedLogRecord);
 
 /// Non-temporal streaming store: writes a 256-byte `PackedLogRecord` directly into RAM via
 /// Write-Combining Buffers, bypassing CPU cache levels (L1/L2/L3) to prevent cache pollution.
@@ -69,11 +57,7 @@ pub fn stream_record(dst: &mut PackedLogRecord, src: &PackedLogRecord) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            stream_record_64(dst, src);
-        } else {
-            stream_record_portable(dst, src);
-        }
+        stream_record_64(dst, src);
     }
 }
 

@@ -269,10 +269,6 @@ impl PreRoutePlugin for IpFilterPlugin {
     }
 }
 
-/// Signature for register-width-specific IPv4 CIDR matching functions.
-#[allow(dead_code)]
-pub type MatchCidrV4Fn = fn(ip: u32, nets: &[u32], masks: &[u32]) -> bool;
-
 /// Evaluates IPv4 CIDR rules using hardware vector registers.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -292,24 +288,7 @@ pub fn match_cidr_v4(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            match_cidr_v4_64(ip, nets, masks)
-        } else {
-            match_cidr_v4_32(ip, nets, masks)
-        }
-    }
-}
-
-/// Evaluates 8 IPv4 CIDR rules per cycle using 256-bit vector registers.
-#[inline]
-pub fn match_cidr_v4_256(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { match_cidr_v4_256_x86_impl(ip, nets, masks) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        match_cidr_v4_128(ip, nets, masks)
+        match_cidr_v4_64(ip, nets, masks)
     }
 }
 
@@ -344,23 +323,6 @@ unsafe fn match_cidr_v4_256_x86_impl(ip: u32, nets: &[u32], masks: &[u32]) -> bo
         i += 1;
     }
     false
-}
-
-/// Evaluates 4 IPv4 CIDR rules per cycle using 128-bit vector registers.
-#[inline]
-pub fn match_cidr_v4_128(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { match_cidr_v4_128_x86_impl(ip, nets, masks) }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe { match_cidr_v4_128_neon_impl(ip, nets, masks) }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        match_cidr_v4_64(ip, nets, masks)
-    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -449,18 +411,6 @@ pub fn match_cidr_v4_64(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
 
     if i < len && (ip & masks[i]) == nets[i] {
         return true;
-    }
-    false
-}
-
-/// Evaluates IPv4 CIDR rules using standard 32-bit registers.
-#[inline]
-pub fn match_cidr_v4_32(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
-    let len = nets.len().min(masks.len());
-    for i in 0..len {
-        if (ip & masks[i]) == nets[i] {
-            return true;
-        }
     }
     false
 }
@@ -940,15 +890,12 @@ mod tests {
         let first_ip = u32::from(std::net::Ipv4Addr::new(10, 25, 1, 1));
         let miss_ip = u32::from(std::net::Ipv4Addr::new(8, 8, 8, 8));
 
-        for match_fn in [
-            match_cidr_v4_256,
-            match_cidr_v4_128,
-            match_cidr_v4_64,
-            match_cidr_v4_32,
-        ] {
-            assert!(match_fn(match_ip, &nets, &masks));
-            assert!(match_fn(first_ip, &nets, &masks));
-            assert!(!match_fn(miss_ip, &nets, &masks));
-        }
+        assert!(match_cidr_v4(match_ip, &nets, &masks));
+        assert!(match_cidr_v4(first_ip, &nets, &masks));
+        assert!(!match_cidr_v4(miss_ip, &nets, &masks));
+
+        assert!(match_cidr_v4_64(match_ip, &nets, &masks));
+        assert!(match_cidr_v4_64(first_ip, &nets, &masks));
+        assert!(!match_cidr_v4_64(miss_ip, &nets, &masks));
     }
 }

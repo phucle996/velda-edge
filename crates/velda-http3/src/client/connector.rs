@@ -192,19 +192,6 @@ impl Http3Client {
     pub async fn close(&self) {
         let _ = self.command_tx.send(ClientCommand::Close).await;
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn mock_for_test(target: SocketAddr) -> (Self, mpsc::Receiver<ClientCommand>) {
-        let (cmd_tx, cmd_rx) = mpsc::channel(1);
-        (
-            Self {
-                command_tx: cmd_tx,
-                target,
-            },
-            cmd_rx,
-        )
-    }
 }
 
 /// Configures tuned kernel buffers and opportunistic acceleration flags on an egress UDP socket.

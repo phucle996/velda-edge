@@ -19,14 +19,6 @@ pub fn compute_header_fingerprint(name: &HeaderName) -> u8 {
     }
 }
 
-/// Function signature for SIMD RFC 9110 header value validation.
-#[allow(dead_code)]
-pub type ValidateHeaderValFn = fn(val: &[u8]) -> bool;
-
-/// Function signature for SIMD 32-slot fingerprint vector matching.
-#[allow(dead_code)]
-pub type FingerprintMatchFn = fn(fingerprints: &[u8; 32], fp_len: usize, target: u8) -> bool;
-
 // ── 1. RFC 9110 Header Value Validation ──────────────────────────────
 
 /// Scalar fallback for validating RFC 9110 header values.

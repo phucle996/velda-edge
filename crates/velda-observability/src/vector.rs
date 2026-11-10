@@ -157,23 +157,6 @@ pub fn add_counters_64(dst: &mut [u64], src: &[u64]) {
     }
 }
 
-/// Aggregates counter slices using 32-bit SWAR arithmetic with carry propagation.
-#[inline]
-pub fn add_counters_32(dst: &mut [u64], src: &[u64]) {
-    let len = dst.len().min(src.len());
-    for i in 0..len {
-        let d_lo = dst[i] as u32;
-        let d_hi = (dst[i] >> 32) as u32;
-        let s_lo = src[i] as u32;
-        let s_hi = (src[i] >> 32) as u32;
-
-        let (res_lo, carry) = d_lo.overflowing_add(s_lo);
-        let res_hi = d_hi.wrapping_add(s_hi).wrapping_add(carry as u32);
-
-        dst[i] = ((res_hi as u64) << 32) | (res_lo as u64);
-    }
-}
-
 /// Selects the appropriate counter accumulation function pointer for a workload target width.
 pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
     let caps = velda_core::global_hardware_topology()
@@ -183,7 +166,6 @@ pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
         RegisterWidth::Bits256 => add_counters_256,
         RegisterWidth::Bits128 => add_counters_128,
         RegisterWidth::Bits64 => add_counters_64,
-        RegisterWidth::Bits32 => add_counters_32,
     }
 }
 
@@ -193,8 +175,7 @@ pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
 /// Prevents wasteful wide vector register setup when the workload is smaller than the register chunk:
 /// - `len >= 4`: Qualifies for 256-bit registers (stride 4, 32 bytes per iteration).
 /// - `2 <= len < 4`: Adapts to 128-bit registers (stride 2, 16 bytes per iteration).
-/// - `len == 1`: Adapts directly to 64-bit scalar ALU (zero SIMD setup waste).
-/// - `len == 0`: Minimal scalar.
+/// - `len < 2`: Adapts directly to 64-bit scalar ALU (zero SIMD setup waste).
 #[inline]
 pub fn resolve_counters_fn_for_len(len: usize) -> AccumulateCountersFn {
     let caps = velda_core::global_hardware_topology()
@@ -204,7 +185,6 @@ pub fn resolve_counters_fn_for_len(len: usize) -> AccumulateCountersFn {
         RegisterWidth::Bits256 => add_counters_256,
         RegisterWidth::Bits128 => add_counters_128,
         RegisterWidth::Bits64 => add_counters_64,
-        RegisterWidth::Bits32 => add_counters_32,
     }
 }
 
@@ -227,11 +207,7 @@ pub fn add_counters(dst: &mut [u64], src: &[u64]) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            add_counters_64(dst, src);
-        } else {
-            add_counters_32(dst, src);
-        }
+        add_counters_64(dst, src);
     }
 }
 
@@ -372,11 +348,6 @@ mod tests {
             let mut res_64 = a.clone();
             add_counters_64(&mut res_64, &b);
 
-            // 32-bit SWAR
-            let mut res_32 = a.clone();
-            add_counters_32(&mut res_32, &b);
-            assert_eq!(res_64, res_32, "32-bit SWAR mismatch at size {}", size);
-
             // 128-bit vector
             let mut res_128 = a.clone();
             add_counters_128(&mut res_128, &b);
@@ -396,22 +367,5 @@ mod tests {
                 size
             );
         }
-    }
-
-    #[test]
-    fn test_large_integer_swar_carry() {
-        let mut a = vec![0u64; 4];
-        let mut b = vec![0u64; 4];
-        // Set values that trigger 32-bit overflow and carry into upper 32 bits
-        a[0] = 0x0000_0001_FFFF_FFFF;
-        b[0] = 0x0000_0002_0000_0001;
-
-        let mut res_64 = a.clone();
-        add_counters_64(&mut res_64, &b);
-
-        let mut res_32 = a.clone();
-        add_counters_32(&mut res_32, &b);
-        assert_eq!(res_64, res_32);
-        assert_eq!(res_32[0], 0x0000_0004_0000_0000);
     }
 }

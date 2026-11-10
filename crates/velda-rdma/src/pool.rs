@@ -320,25 +320,6 @@ fn scan_swar_64(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<u
     }
 }
 
-// ============================================================================
-// Universe 4: 32-bit SWAR Parallel Reduction (Quad 32-bit Sub-Word Lanes)
-// Evaluates 64-bit atomic words via 32-bit register pairs on narrow ALU hardware.
-// ============================================================================
-#[allow(dead_code)]
-fn scan_swar_32(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
-    let len = words.len();
-    for i in 0..len {
-        let idx = (start + i) & word_mask;
-        let w = words[idx].load(Ordering::Relaxed);
-        let lo = w as u32;
-        let hi = (w >> 32) as u32;
-        if (lo & hi) != !0u32 {
-            return Some(idx);
-        }
-    }
-    None
-}
-
 /// Dispatches bitmap scanning directly through tiered vector/SWAR acceleration (AVX2 -> SSE2 -> SWAR).
 #[inline]
 pub fn scan_bitmap(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
@@ -351,23 +332,8 @@ pub fn scan_bitmap(words: &[AtomicU64], start: usize, word_mask: usize) -> Optio
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        #[cfg(target_pointer_width = "64")]
-        {
-            scan_swar_64(words, start, word_mask)
-        }
-        #[cfg(not(target_pointer_width = "64"))]
-        {
-            scan_swar_32(words, start, word_mask)
-        }
+        scan_swar_64(words, start, word_mask)
     }
-}
-
-/// Resolves the optimal bitmap scanning function pointer once at initialization.
-///
-/// Kept for crate API compatibility; internally delegates directly to inlined `scan_bitmap`.
-#[inline(always)]
-pub fn resolve_bitmap_scan_fn() -> BitmapScanFn {
-    scan_bitmap
 }
 
 impl RdmaSlabArenaInner {

@@ -14,10 +14,6 @@
 
 use super::span::PackedOtlpSpan;
 
-/// Function pointer signature for copying a 256-byte aligned `PackedOtlpSpan`.
-#[allow(dead_code)]
-pub type CopySpanFn = fn(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan);
-
 /// Transfers a 256-byte `PackedOtlpSpan` using the optimal CPU register width.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -37,17 +33,9 @@ pub fn copy_span(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            copy_span_64(dst, src);
-        } else {
-            copy_span_portable(dst, src);
-        }
+        copy_span_64(dst, src);
     }
 }
-
-/// Function pointer signature for non-temporal streaming store of a 256-byte `PackedOtlpSpan`.
-#[allow(dead_code)]
-pub type StreamSpanFn = fn(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan);
 
 /// Non-temporal streaming store: writes a 256-byte `PackedOtlpSpan` directly into RAM via
 /// Write-Combining Buffers, bypassing CPU cache levels (L1/L2/L3) to prevent cache pollution.
@@ -69,11 +57,7 @@ pub fn stream_span(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            stream_span_64(dst, src);
-        } else {
-            stream_span_portable(dst, src);
-        }
+        stream_span_64(dst, src);
     }
 }
 

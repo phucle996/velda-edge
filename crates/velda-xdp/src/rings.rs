@@ -369,7 +369,6 @@ pub struct CompletionRing {
     producer: *const u32,
     consumer: *mut u32,
     ring: *const u64,
-    #[allow(dead_code)]
     flags: *const u32,
     size: u32,
     mask: u32,
@@ -466,6 +465,12 @@ impl CompletionRing {
         }
 
         count
+    }
+
+    /// Checks if the kernel demands a wakeup via poll/syscall.
+    #[inline]
+    pub fn needs_wakeup(&self) -> bool {
+        (unsafe { std::ptr::read_volatile(self.flags) } & XDP_RING_NEED_WAKEUP) != 0
     }
 }
 

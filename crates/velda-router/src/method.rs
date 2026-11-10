@@ -13,11 +13,6 @@
 //!   into a single 64-bit integer (`u64`). A broadcast multiplication and bitwise AND evaluates
 //!   all 4 candidates simultaneously in 1 cycle. Trailing zeros (`tzcnt`) gives the matching
 //!   candidate index with zero branches.
-//! - **Register-Adaptive Hardware Multi-Versioning**: Hardware capabilities probe CPU topology
-//!   once at boot via [`global_hardware_topology()`], resolving function pointers down to 32-bit
-//!   hardware (`Bits64`, `Bits32`) with zero branching ladders on the serving hot path.
-
-use velda_core::hardware::{RegisterWidth, global_hardware_topology};
 
 /// Compact 16-bit integer bitmask representing HTTP request methods.
 ///
@@ -119,15 +114,7 @@ pub type MatchPackedMethodsFn = fn(packed_masks: u64, req_mask: u16) -> u64;
 
 /// Pre-resolved static function pointer for packed multi-route method evaluation.
 pub static MATCH_PACKED_METHODS_FN: std::sync::LazyLock<MatchPackedMethodsFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = global_hardware_topology().cpu.register_capabilities;
-        match caps.select_for_workload(RegisterWidth::Bits64) {
-            RegisterWidth::Bits64 | RegisterWidth::Bits128 | RegisterWidth::Bits256 => {
-                match_packed_methods_64
-            }
-            RegisterWidth::Bits32 => match_packed_methods_32,
-        }
-    });
+    std::sync::LazyLock::new(|| match_packed_methods_64);
 
 /// Matches 4 packed route method masks in parallel using 64-bit integer multiplication broadcast.
 #[inline(always)]
@@ -136,29 +123,13 @@ pub fn match_packed_methods_64(packed_masks: u64, req_mask: u16) -> u64 {
     packed_masks & broadcast
 }
 
-/// Matches 4 packed route method masks across dual 32-bit registers for 32-bit hardware.
-#[inline(always)]
-pub fn match_packed_methods_32(packed_masks: u64, req_mask: u16) -> u64 {
-    let broadcast = (req_mask as u32) | ((req_mask as u32) << 16);
-    let lo = (packed_masks as u32) & broadcast;
-    let hi = ((packed_masks >> 32) as u32) & broadcast;
-    ((hi as u64) << 32) | (lo as u64)
-}
-
 /// Evaluates 4 packed route method masks in parallel with zero indirect call overhead.
 ///
 /// Inlines directly at caller sites, compiling down to 2 instructions (`imul` + `and`)
 /// on 64-bit targets with zero heap, zero stack allocation, and zero function call penalty.
 #[inline(always)]
 pub fn match_packed_methods(packed_masks: u64, req: MethodMask) -> u64 {
-    #[cfg(target_pointer_width = "64")]
-    {
-        match_packed_methods_64(packed_masks, req.0)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        match_packed_methods_32(packed_masks, req.0)
-    }
+    match_packed_methods_64(packed_masks, req.0)
 }
 
 #[cfg(test)]

@@ -34,10 +34,6 @@ pub const HEX_LUT: [u8; 256] = {
     lut
 };
 
-/// Signature for register-width-specific 64-byte constant-time signature comparison.
-#[allow(dead_code)]
-pub type ConstantTimeEq64Fn = fn(a: &[u8; 64], b: &[u8; 64]) -> bool;
-
 /// Branchless 64-byte constant-time comparison using hardware vector registers (up to 256-bit max).
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -57,11 +53,7 @@ pub fn constant_time_eq_64(a: &[u8; 64], b: &[u8; 64]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            constant_time_eq_64_64bit(a, b)
-        } else {
-            constant_time_eq_64_32bit(a, b)
-        }
+        constant_time_eq_64_64bit(a, b)
     }
 }
 
@@ -157,18 +149,6 @@ pub fn constant_time_eq_64_64bit(a: &[u8; 64], b: &[u8; 64]) -> bool {
     for i in (0..64).step_by(8) {
         let wa = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
         let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
-        diff |= wa ^ wb;
-    }
-    diff == 0
-}
-
-/// 64-byte constant-time comparison using sixteen 32-bit scalar registers.
-#[inline]
-pub fn constant_time_eq_64_32bit(a: &[u8; 64], b: &[u8; 64]) -> bool {
-    let mut diff = 0u32;
-    for i in (0..64).step_by(4) {
-        let wa = u32::from_ne_bytes(a[i..i + 4].try_into().unwrap());
-        let wb = u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
         diff |= wa ^ wb;
     }
     diff == 0
@@ -326,7 +306,6 @@ mod tests {
             constant_time_eq_64_256,
             constant_time_eq_64_128,
             constant_time_eq_64_64bit,
-            constant_time_eq_64_32bit,
         ] {
             assert!(eq_fn(&a, &b));
             assert!(!eq_fn(&a, &c));

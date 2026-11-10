@@ -56,12 +56,6 @@ unsafe fn validate_hex_32_avx2_inner(buf: &[u8; 32]) -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
-fn validate_hex_32_256(buf: &[u8; 32]) -> bool {
-    unsafe { validate_hex_32_avx2_inner(buf) }
-}
-
-#[cfg(target_arch = "x86_64")]
 fn validate_hex_16_128(buf: &[u8; 16]) -> bool {
     use core::arch::x86_64::*;
     unsafe {
@@ -158,7 +152,7 @@ fn validate_hex_only_16_128(buf: &[u8; 16]) -> bool {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 fn validate_hex_16_64(buf: &[u8; 16]) -> bool {
     const ZERO_8: u64 = 0x3030_3030_3030_3030;
     let w0 = unsafe { (buf.as_ptr() as *const u64).read_unaligned() };
@@ -173,25 +167,7 @@ fn validate_hex_16_64(buf: &[u8; 16]) -> bool {
     ok
 }
 
-#[allow(dead_code)]
-fn validate_hex_16_32(buf: &[u8; 16]) -> bool {
-    const ZERO_4: u32 = 0x3030_3030;
-    let ptr = buf.as_ptr();
-    let d0 = unsafe { (ptr as *const u32).read_unaligned() } ^ ZERO_4;
-    let d1 = unsafe { (ptr.add(4) as *const u32).read_unaligned() } ^ ZERO_4;
-    let d2 = unsafe { (ptr.add(8) as *const u32).read_unaligned() } ^ ZERO_4;
-    let d3 = unsafe { (ptr.add(12) as *const u32).read_unaligned() } ^ ZERO_4;
-    if (d0 | d1 | d2 | d3) == 0 {
-        return false;
-    }
-    let mut ok = true;
-    for &b in buf {
-        ok &= HEX_VALID_TABLE[b as usize];
-    }
-    ok
-}
-
-#[allow(dead_code)]
+#[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 fn validate_hex_32_64(buf: &[u8; 32]) -> bool {
     const ZERO_8: u64 = 0x3030_3030_3030_3030;
     let ptr = buf.as_ptr();
@@ -204,27 +180,6 @@ fn validate_hex_32_64(buf: &[u8; 32]) -> bool {
     }
     let mut ok = true;
     for &b in buf {
-        ok &= HEX_VALID_TABLE[b as usize];
-    }
-    ok
-}
-
-#[allow(dead_code)]
-fn validate_hex_32_32(buf: &[u8; 32]) -> bool {
-    let lo: &[u8; 16] = buf[0..16].try_into().unwrap();
-    let hi: &[u8; 16] = buf[16..32].try_into().unwrap();
-    let mut non_zero = false;
-    for &b in buf {
-        if b != b'0' {
-            non_zero = true;
-            break;
-        }
-    }
-    if !non_zero {
-        return false;
-    }
-    let mut ok = true;
-    for &b in lo.iter().chain(hi.iter()) {
         ok &= HEX_VALID_TABLE[b as usize];
     }
     ok
@@ -249,11 +204,7 @@ pub fn is_valid_nonzero_hex_32(buf: &[u8; 32]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            validate_hex_32_64(buf)
-        } else {
-            validate_hex_32_32(buf)
-        }
+        validate_hex_32_64(buf)
     }
 }
 
@@ -272,11 +223,7 @@ pub fn is_valid_nonzero_hex_16(buf: &[u8; 16]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            validate_hex_16_64(buf)
-        } else {
-            validate_hex_16_32(buf)
-        }
+        validate_hex_16_64(buf)
     }
 }
 
@@ -429,22 +376,22 @@ mod tests {
         let bad_32: &[u8; 32] = b"4bf92f3577b34da6a3ce929d0e0e473z";
 
         assert!(validate_hex_32_64(valid_32));
-        assert!(validate_hex_32_32(valid_32));
+        assert!(is_valid_nonzero_hex_32(valid_32));
         assert!(!validate_hex_32_64(zero_32));
-        assert!(!validate_hex_32_32(zero_32));
+        assert!(!is_valid_nonzero_hex_32(zero_32));
         assert!(!validate_hex_32_64(bad_32));
-        assert!(!validate_hex_32_32(bad_32));
+        assert!(!is_valid_nonzero_hex_32(bad_32));
 
         let valid_16: &[u8; 16] = b"00f067aa0ba902b7";
         let zero_16: &[u8; 16] = b"0000000000000000";
         let bad_16: &[u8; 16] = b"00f067aa0ba902b/";
 
         assert!(validate_hex_16_64(valid_16));
-        assert!(validate_hex_16_32(valid_16));
+        assert!(is_valid_nonzero_hex_16(valid_16));
         assert!(!validate_hex_16_64(zero_16));
-        assert!(!validate_hex_16_32(zero_16));
+        assert!(!is_valid_nonzero_hex_16(zero_16));
         assert!(!validate_hex_16_64(bad_16));
-        assert!(!validate_hex_16_32(bad_16));
+        assert!(!is_valid_nonzero_hex_16(bad_16));
     }
 
     #[test]

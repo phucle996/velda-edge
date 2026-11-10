@@ -5,12 +5,6 @@ use crate::context::SelectionContext;
 use crate::metrics::EndpointMetrics;
 use velda_core::Endpoint;
 
-/// Function pointer signature for least-connections metrics evaluation.
-pub type LeastConnMetricsFn = fn(&[EndpointMetrics], usize) -> usize;
-
-/// Function pointer signature for least-requests metrics evaluation.
-pub type LeastReqMetricsFn = fn(&[EndpointMetrics], usize) -> usize;
-
 /// Scalar unrolled loop for small workloads (<= 4 endpoints) executing entirely in GPRs (%rax, %rcx, %rdx).
 #[inline]
 pub fn least_conn_scalar(metrics: &[EndpointMetrics], limit: usize) -> usize {
@@ -139,26 +133,28 @@ unsafe fn find_min_index_u32_neon(loads: &[u32]) -> usize {
         return 0;
     }
     let ptr = loads.as_ptr();
-    let mut min_vec = vdupq_n_u32(u32::MAX);
-    let chunks = len / 4;
-    for i in 0..chunks {
-        let v = vld1q_u32(ptr.add(i * 4));
-        min_vec = vminq_u32(min_vec, v);
-    }
-    let mut min_val = vminvq_u32(min_vec);
-    let remainder_start = chunks * 4;
-    for i in remainder_start..len {
-        let val = *ptr.add(i);
-        if val < min_val {
-            min_val = val;
+    unsafe {
+        let mut min_vec = vdupq_n_u32(u32::MAX);
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let v = vld1q_u32(ptr.add(i * 4));
+            min_vec = vminq_u32(min_vec, v);
         }
-    }
-    for i in 0..len {
-        if *ptr.add(i) == min_val {
-            return i;
+        let mut min_val = vminvq_u32(min_vec);
+        let remainder_start = chunks * 4;
+        for i in remainder_start..len {
+            let val = *ptr.add(i);
+            if val < min_val {
+                min_val = val;
+            }
         }
+        for i in 0..len {
+            if *ptr.add(i) == min_val {
+                return i;
+            }
+        }
+        0
     }
-    0
 }
 
 /// 256-bit AVX2-accelerated minimum search across active connection counters.
@@ -269,11 +265,8 @@ pub fn least_req_sse2(metrics: &[EndpointMetrics], limit: usize) -> usize {
 }
 
 /// Chooses the endpoint with the smallest number of active connections.
-#[derive(Debug, Clone, Copy)]
-pub struct LeastConnections {
-    #[allow(dead_code)]
-    metrics_fn: LeastConnMetricsFn,
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LeastConnections;
 
 /// Evaluates minimum active connections index across contiguous metrics slice.
 ///
@@ -327,61 +320,15 @@ pub fn least_req_eval(metrics: &[EndpointMetrics], limit: usize) -> usize {
     }
 }
 
-impl Default for LeastConnections {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl LeastConnections {
     /// Creates a new least-connections load balancer with host default width.
-    pub fn new() -> Self {
-        Self::for_workload(0)
+    pub const fn new() -> Self {
+        Self
     }
 
-    /// Selects optimal register width and matching function pointer for the given endpoint count.
-    ///
-    /// - `count <= 4`: Bound to scalar unrolled loop ([`least_conn_scalar`]) in GPRs.
-    /// - `count > 4`: Bound to hardware vector SIMD ([`least_conn_avx2`] or [`least_conn_sse2`])
-    ///   probed via `velda_core::global_hardware_topology().cpu.register_capabilities`.
-    pub fn for_workload(count: usize) -> Self {
-        if count != 0 && count <= 4 {
-            return Self {
-                metrics_fn: least_conn_scalar,
-            };
-        }
-
-        use velda_core::hardware::RegisterWidth;
-        let caps = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-
-        let width = if count == 0 {
-            caps.select_for_workload(RegisterWidth::Bits256)
-        } else {
-            caps.select_for_workload_size(count / 2)
-        };
-
-        let metrics_fn = match width {
-            RegisterWidth::Bits256 => {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if std::is_x86_feature_detected!("avx2") {
-                        least_conn_avx2
-                    } else {
-                        least_conn_sse2
-                    }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    least_conn_sse2
-                }
-            }
-            RegisterWidth::Bits128 => least_conn_sse2,
-            _ => least_conn_scalar,
-        };
-
-        Self { metrics_fn }
+    /// Creates a new least-connections load balancer for the given workload.
+    pub const fn for_workload(_count: usize) -> Self {
+        Self
     }
 }
 
@@ -427,63 +374,18 @@ impl LoadBalancer for LeastConnections {
 }
 
 /// Chooses the endpoint with the smallest number of currently in-flight requests.
-#[derive(Debug, Clone, Copy)]
-pub struct LeastRequests {
-    #[allow(dead_code)]
-    metrics_fn: LeastReqMetricsFn,
-}
-
-impl Default for LeastRequests {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LeastRequests;
 
 impl LeastRequests {
     /// Creates a new least-requests load balancer.
-    pub fn new() -> Self {
-        Self::for_workload(0)
+    pub const fn new() -> Self {
+        Self
     }
 
-    /// Selects optimal register width and matching function pointer for the given endpoint count.
-    pub fn for_workload(count: usize) -> Self {
-        if count != 0 && count <= 4 {
-            return Self {
-                metrics_fn: least_req_scalar,
-            };
-        }
-
-        use velda_core::hardware::RegisterWidth;
-        let caps = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-
-        let width = if count == 0 {
-            caps.select_for_workload(RegisterWidth::Bits256)
-        } else {
-            caps.select_for_workload_size(count / 2)
-        };
-
-        let metrics_fn = match width {
-            RegisterWidth::Bits256 => {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if std::is_x86_feature_detected!("avx2") {
-                        least_req_avx2
-                    } else {
-                        least_req_sse2
-                    }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    least_req_sse2
-                }
-            }
-            RegisterWidth::Bits128 => least_req_sse2,
-            _ => least_req_scalar,
-        };
-
-        Self { metrics_fn }
+    /// Creates a new least-requests load balancer for the given workload.
+    pub const fn for_workload(_count: usize) -> Self {
+        Self
     }
 }
 

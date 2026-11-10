@@ -19,7 +19,5 @@ pub use pool::{
 pub use slab::{
     AdaptiveSlabLimits, COPY_NON_TEMPORAL_FN, CopyNonTemporalFn, PayloadSlab, PayloadSlabLease,
     PayloadSlabPool, SlabClass, ZERO_NON_TEMPORAL_FN, ZeroNonTemporalFn, copy_non_temporal,
-    copy_non_temporal_32, copy_non_temporal_64, copy_non_temporal_128, copy_non_temporal_256,
     prefetch_l2_range, prefetch_l3_range, prefetch_nta_range, zero_non_temporal,
-    zero_non_temporal_32, zero_non_temporal_64, zero_non_temporal_128, zero_non_temporal_256,
 };

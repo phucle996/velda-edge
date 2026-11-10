@@ -340,10 +340,6 @@ pub fn to_base64(bytes: &[u8]) -> String {
     BASE64_STANDARD.encode(bytes)
 }
 
-/// Signature for register-width-specific constant-time byte comparison functions.
-#[allow(dead_code)]
-pub type ConstantTimeEqFn = fn(a: &[u8], b: &[u8]) -> bool;
-
 /// Constant-time byte slice comparison using hardware vector registers (up to 256-bit max)
 /// to eliminate timing side-channel attacks.
 ///
@@ -367,11 +363,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            constant_time_eq_64bit(a, b)
-        } else {
-            constant_time_eq_32bit(a, b)
-        }
+        constant_time_eq_64bit(a, b)
     }
 }
 
@@ -506,31 +498,6 @@ pub fn constant_time_eq_64bit(a: &[u8], b: &[u8]) -> bool {
         let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
         diff |= wa ^ wb;
         i += 8;
-    }
-
-    let mut rem_diff = 0u8;
-    for j in word_len..len {
-        rem_diff |= a[j] ^ b[j];
-    }
-    diff == 0 && rem_diff == 0
-}
-
-/// Constant-time comparison using 32-bit scalar registers (4 bytes per iteration).
-#[inline]
-pub fn constant_time_eq_32bit(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let len = a.len();
-    let word_len = len & !3;
-    let mut diff = 0u32;
-    let mut i = 0;
-
-    while i < word_len {
-        let wa = u32::from_ne_bytes(a[i..i + 4].try_into().unwrap());
-        let wb = u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
-        diff |= wa ^ wb;
-        i += 4;
     }
 
     let mut rem_diff = 0u8;
@@ -732,7 +699,6 @@ mod tests {
             constant_time_eq_256,
             constant_time_eq_128,
             constant_time_eq_64bit,
-            constant_time_eq_32bit,
         ] {
             assert!(eq_fn(a, b));
             assert!(!eq_fn(a, c));

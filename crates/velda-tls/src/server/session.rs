@@ -68,43 +68,10 @@ fn hash_session_key_64(bytes: &[u8]) -> usize {
     (h ^ (h >> 32)) as usize
 }
 
-#[allow(dead_code)]
-#[inline]
-fn hash_session_key_32(bytes: &[u8]) -> usize {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-    let mut h: u64 = OFFSET;
-    let len = bytes.len();
-    let aligned = len & !3;
-    let ptr = bytes.as_ptr();
-    let mut i = 0;
-
-    while i < aligned {
-        let word = unsafe { (ptr.add(i) as *const u32).read_unaligned() }.to_le() as u64;
-        h ^= word;
-        h = h.wrapping_mul(PRIME);
-        i += 4;
-    }
-
-    while i < len {
-        h ^= bytes[i] as u64;
-        h = h.wrapping_mul(PRIME);
-        i += 1;
-    }
-    (h ^ (h >> 32)) as usize
-}
-
 /// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 fn hash_session_key(bytes: &[u8]) -> usize {
-    #[cfg(target_pointer_width = "64")]
-    {
-        hash_session_key_64(bytes)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        hash_session_key_32(bytes)
-    }
+    hash_session_key_64(bytes)
 }
 
 impl ShardedServerSessionCache {

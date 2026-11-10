@@ -62,10 +62,6 @@ pub const ID_POOL_CAPACITY: usize = 64;
 /// Low watermark threshold. When available IDs fall below this count, a batch refill is triggered.
 pub const ID_POOL_LOW_WATERMARK: usize = 16;
 
-/// Lookup table for fast 2-digit hex encoding on 32-bit registers.
-#[allow(dead_code)]
-static HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
 /// 128-bit vector register hex formatter: unpacks 16 nibbles and translates to ASCII in a single 128-bit store.
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -108,7 +104,7 @@ fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
 }
 
 /// 64-bit SWAR branchless hex formatter: converts 8 nibbles at a time inside 64-bit integer registers.
-#[allow(dead_code)]
+#[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 #[inline]
 fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
     #[inline(always)]
@@ -128,30 +124,6 @@ fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
     out[8..16].copy_from_slice(&lo_ascii.to_ne_bytes());
 }
 
-/// 32-bit register fallback hex formatter.
-#[allow(dead_code)]
-#[inline]
-fn format_hex_16_32(val: u64, out: &mut [u8; 16]) {
-    let hi = (val >> 32) as u32;
-    let lo = val as u32;
-    out[0] = HEX_DIGITS[((hi >> 28) & 0x0f) as usize];
-    out[1] = HEX_DIGITS[((hi >> 24) & 0x0f) as usize];
-    out[2] = HEX_DIGITS[((hi >> 20) & 0x0f) as usize];
-    out[3] = HEX_DIGITS[((hi >> 16) & 0x0f) as usize];
-    out[4] = HEX_DIGITS[((hi >> 12) & 0x0f) as usize];
-    out[5] = HEX_DIGITS[((hi >> 8) & 0x0f) as usize];
-    out[6] = HEX_DIGITS[((hi >> 4) & 0x0f) as usize];
-    out[7] = HEX_DIGITS[(hi & 0x0f) as usize];
-    out[8] = HEX_DIGITS[((lo >> 28) & 0x0f) as usize];
-    out[9] = HEX_DIGITS[((lo >> 24) & 0x0f) as usize];
-    out[10] = HEX_DIGITS[((lo >> 20) & 0x0f) as usize];
-    out[11] = HEX_DIGITS[((lo >> 16) & 0x0f) as usize];
-    out[12] = HEX_DIGITS[((lo >> 12) & 0x0f) as usize];
-    out[13] = HEX_DIGITS[((lo >> 8) & 0x0f) as usize];
-    out[14] = HEX_DIGITS[((lo >> 4) & 0x0f) as usize];
-    out[15] = HEX_DIGITS[(lo & 0x0f) as usize];
-}
-
 /// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes.
 ///
 /// Uses SSE2 on x86_64 or NEON on AArch64 (single vector register unpack + store),
@@ -168,11 +140,7 @@ pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        if usize::BITS == 64 {
-            format_hex_16_64(val, out);
-        } else {
-            format_hex_16_32(val, out);
-        }
+        format_hex_16_64(val, out);
     }
 }
 
@@ -325,13 +293,10 @@ mod tests {
             let expected = format!("{val:016x}");
             let mut out_dispatch = [0u8; 16];
             let mut out_64 = [0u8; 16];
-            let mut out_32 = [0u8; 16];
             format_hex_16(val, &mut out_dispatch);
             format_hex_16_64(val, &mut out_64);
-            format_hex_16_32(val, &mut out_32);
             assert_eq!(&out_dispatch, expected.as_bytes());
             assert_eq!(&out_64, expected.as_bytes());
-            assert_eq!(&out_32, expected.as_bytes());
         }
     }
 

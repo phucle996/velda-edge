@@ -20,9 +20,6 @@ pub const CHALLENGE_PATH_PREFIX: &str = "/.well-known/acme-challenge/";
 const WIRE_HEADER_PREFIX: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: ";
 const WIRE_HEADER_PREFIX_LEN: usize = WIRE_HEADER_PREFIX.len(); // 103 bytes
 
-/// Matcher function pointer contract for the 28-byte prefix `/.well-known/acme-challenge/`.
-pub type PrefixMatcherFn = unsafe fn(path: &[u8]) -> bool;
-
 /// Tier 1: 128-bit SIMD Dual-Overlapping Vector Matcher (SSE2 / Neon).
 ///
 /// Exploits two 128-bit vector registers (`XMM0`, `XMM1` on x86_64) to scan all 28 bytes
@@ -85,40 +82,6 @@ pub unsafe fn has_acme_prefix_64_swar(path: &[u8]) -> bool {
         ((w0 ^ K0) | (w1 ^ K1) | (w2 ^ K2)) == 0 && (w3 ^ K3) == 0
     }
 }
-
-/// Tier 3: 32-bit SWAR Register Matcher (7 x u32).
-///
-/// Decomposes 28 bytes into 7 contiguous 32-bit words ($28 / 4 = 7$), suited for
-/// 32-bit architectures (ARMv7, x86-32) or when 64-bit GPRs are saturated.
-///
-/// # Safety
-/// The caller must guarantee that `path` contains at least 28 valid bytes.
-#[inline(always)]
-pub unsafe fn has_acme_prefix_32_swar(path: &[u8]) -> bool {
-    unsafe {
-        let p = path.as_ptr();
-        let w0 = std::ptr::read_unaligned(p as *const u32);
-        let w1 = std::ptr::read_unaligned(p.add(4) as *const u32);
-        let w2 = std::ptr::read_unaligned(p.add(8) as *const u32);
-        let w3 = std::ptr::read_unaligned(p.add(12) as *const u32);
-        let w4 = std::ptr::read_unaligned(p.add(16) as *const u32);
-        let w5 = std::ptr::read_unaligned(p.add(20) as *const u32);
-        let w6 = std::ptr::read_unaligned(p.add(24) as *const u32);
-
-        const K0: u32 = u32::from_ne_bytes(*b"/.we");
-        const K1: u32 = u32::from_ne_bytes(*b"ll-k");
-        const K2: u32 = u32::from_ne_bytes(*b"nown");
-        const K3: u32 = u32::from_ne_bytes(*b"/acm");
-        const K4: u32 = u32::from_ne_bytes(*b"e-ch");
-        const K5: u32 = u32::from_ne_bytes(*b"alle");
-        const K6: u32 = u32::from_ne_bytes(*b"nge/");
-
-        let diff =
-            (w0 ^ K0) | (w1 ^ K1) | (w2 ^ K2) | (w3 ^ K3) | (w4 ^ K4) | (w5 ^ K5) | (w6 ^ K6);
-        diff == 0
-    }
-}
-
 /// Matches the standard ACME challenge HTTP prefix `/.well-known/acme-challenge/` (28 bytes).
 ///
 /// # Safety
@@ -132,24 +95,8 @@ pub unsafe fn has_acme_prefix(path_bytes: &[u8]) -> bool {
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        let caps = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-        if caps.has_128 {
-            unsafe { has_acme_prefix_128_simd(path_bytes) }
-        } else if caps.has_64 {
-            unsafe { has_acme_prefix_64_swar(path_bytes) }
-        } else {
-            unsafe { has_acme_prefix_32_swar(path_bytes) }
-        }
+        unsafe { has_acme_prefix_64_swar(path_bytes) }
     }
-}
-
-/// Resolves the optimal prefix matcher function pointer based on probed host CPU capabilities.
-///
-/// Kept for crate API compatibility; internally delegates directly to inlined `has_acme_prefix`.
-pub fn resolve_optimal_prefix_matcher() -> PrefixMatcherFn {
-    has_acme_prefix
 }
 
 /// Public API verifying whether a request path matches the 28-byte `/.well-known/acme-challenge/` prefix.
@@ -448,11 +395,6 @@ mod tests {
             assert!(has_acme_prefix_64_swar(valid_with_token));
             assert!(!has_acme_prefix_64_swar(invalid_prefix));
             assert!(!has_acme_prefix_64_swar(corrupted_tail));
-
-            assert!(has_acme_prefix_32_swar(valid_prefix));
-            assert!(has_acme_prefix_32_swar(valid_with_token));
-            assert!(!has_acme_prefix_32_swar(invalid_prefix));
-            assert!(!has_acme_prefix_32_swar(corrupted_tail));
         }
 
         assert!(has_acme_challenge_prefix(valid_prefix));

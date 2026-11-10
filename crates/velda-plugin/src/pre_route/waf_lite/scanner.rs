@@ -394,10 +394,6 @@ fn compact_whitespace_and_comments(buf: &mut [u8], len: usize) -> usize {
     w
 }
 
-/// Signature for register-width-specific fast-path normalization inspection.
-#[allow(dead_code)]
-pub type NeedsNormalizationFn = fn(bytes: &[u8], convert_plus: bool) -> bool;
-
 /// Fast-path inspector checking whether input bytes require any normalization.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -418,19 +414,6 @@ pub fn needs_normalization(bytes: &[u8], convert_plus: bool) -> bool {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         needs_normalization_scalar(bytes, convert_plus)
-    }
-}
-
-/// 256-bit SIMD inspector scanning 32 bytes per cycle for uppercase, `%`, `#`, `+`, whitespace, `/*`, `--`, `  `.
-#[inline]
-pub fn needs_normalization_256(bytes: &[u8], convert_plus: bool) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { needs_normalization_256_x86_impl(bytes, convert_plus) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        needs_normalization_128(bytes, convert_plus)
     }
 }
 
@@ -504,19 +487,6 @@ unsafe fn needs_normalization_256_x86_impl(bytes: &[u8], convert_plus: bool) -> 
     }
 
     needs_normalization_scalar_from(bytes, convert_plus, i)
-}
-
-/// 128-bit SIMD inspector scanning 16 bytes per cycle.
-#[inline]
-pub fn needs_normalization_128(bytes: &[u8], convert_plus: bool) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { needs_normalization_128_x86_impl(bytes, convert_plus) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        needs_normalization_scalar(bytes, convert_plus)
-    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -953,8 +923,6 @@ mod tests {
 
         for &(input, convert_plus, expected) in cases {
             assert_eq!(needs_normalization(input, convert_plus), expected);
-            assert_eq!(needs_normalization_256(input, convert_plus), expected);
-            assert_eq!(needs_normalization_128(input, convert_plus), expected);
             assert_eq!(needs_normalization_scalar(input, convert_plus), expected);
         }
     }

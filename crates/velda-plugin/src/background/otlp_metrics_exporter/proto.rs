@@ -191,8 +191,6 @@ fn make_tx_marker(idx: usize) -> i64 {
 /// On every export cycle, `update_and_encode` copies the pre-rendered base wire skeleton
 /// and fills in the blanks (in-place byte patching) with zero AST traversal and zero Prost re-encoding.
 pub struct OtlpProtoTemplate {
-    #[allow(dead_code)]
-    request: ExportMetricsServiceRequest,
     base_wire: Vec<u8>,
     timestamp_offsets: Vec<usize>,
     requests_offsets: Vec<usize>,
@@ -434,7 +432,6 @@ impl OtlpProtoTemplate {
         }
 
         Self {
-            request,
             base_wire,
             timestamp_offsets,
             requests_offsets,

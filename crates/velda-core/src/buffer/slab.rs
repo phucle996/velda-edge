@@ -514,18 +514,18 @@ pub fn prefetch_nta_range(ptr: *const u8, len: usize) {
 /// streaming stores + `_mm_sfence()`. Below 256 bytes, direct register copy avoids `sfence` pipeline stalls.
 const NON_TEMPORAL_THRESHOLD: usize = 256;
 
-/// Signature for register-adaptive non-temporal streaming copy functions.
+/// Signature for non-temporal streaming copy functions.
 pub type CopyNonTemporalFn = fn(src: &[u8], dst: &mut [u8]);
 
-/// Signature for register-adaptive non-temporal streaming zeroing functions (CWE-226 safe).
+/// Signature for non-temporal streaming zeroing functions (CWE-226 safe).
 pub type ZeroNonTemporalFn = fn(dst: &mut [u8]);
 
-/// Tier 1: 256-bit AVX2 non-temporal streaming copy (32 bytes per iteration, `vmovntdq` + `_mm_sfence`).
+/// Copies payload using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit).
 ///
-/// Self-contained contiguous workflow: small payloads (`< 256` bytes) copy directly without `sfence` stall;
-/// larger payloads align to 32 bytes and stream through Write-Combining (WC) buffers bypassing L1D/L2.
+/// Small payloads (`< 256` bytes) copy directly to avoid `sfence` pipeline stalls;
+/// larger payloads stream through Write-Combining (WC) buffers bypassing L1D/L2 caches.
 #[inline]
-pub fn copy_non_temporal_256(src: &[u8], dst: &mut [u8]) {
+pub fn copy_non_temporal(src: &[u8], dst: &mut [u8]) {
     let len = src.len().min(dst.len());
     if len < NON_TEMPORAL_THRESHOLD {
         dst[..len].copy_from_slice(&src[..len]);
@@ -533,50 +533,37 @@ pub fn copy_non_temporal_256(src: &[u8], dst: &mut [u8]) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        #[target_feature(enable = "avx2")]
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe fn stream_avx2(src: &[u8], dst: &mut [u8], len: usize) {
-            use std::arch::x86_64::*;
-            let dst_addr = dst.as_mut_ptr() as usize;
-            let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
-            if lead > 0 {
-                dst[..lead].copy_from_slice(&src[..lead]);
-            }
-            let stream_bytes = ((len - lead) / 32) * 32;
-            let end_stream = lead + stream_bytes;
-            let mut offset = lead;
-            while offset < end_stream {
-                unsafe {
-                    let v = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
-                    _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, v);
-                }
-                offset += 32;
-            }
-            if end_stream < len {
-                dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
-            }
-            _mm_sfence();
-        }
         if is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            #[allow(clippy::cast_ptr_alignment)]
+            unsafe fn stream_avx2(src: &[u8], dst: &mut [u8], len: usize) {
+                use std::arch::x86_64::*;
+                let dst_addr = dst.as_mut_ptr() as usize;
+                let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
+                if lead > 0 {
+                    dst[..lead].copy_from_slice(&src[..lead]);
+                }
+                let stream_bytes = ((len - lead) / 32) * 32;
+                let end_stream = lead + stream_bytes;
+                let mut offset = lead;
+                while offset < end_stream {
+                    unsafe {
+                        let v = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+                        _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, v);
+                    }
+                    offset += 32;
+                }
+                if end_stream < len {
+                    dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
+                }
+                _mm_sfence();
+            }
             unsafe {
                 stream_avx2(src, dst, len);
             }
             return;
         }
-    }
-    copy_non_temporal_128(src, dst);
-}
 
-/// Tier 2: 128-bit SSE2 non-temporal streaming copy (16 bytes per iteration, `movntdq` + `_mm_sfence`).
-#[inline]
-pub fn copy_non_temporal_128(src: &[u8], dst: &mut [u8]) {
-    let len = src.len().min(dst.len());
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst[..len].copy_from_slice(&src[..len]);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
         #[target_feature(enable = "sse2")]
         #[allow(clippy::cast_ptr_alignment)]
         unsafe fn stream_sse2(src: &[u8], dst: &mut [u8], len: usize) {
@@ -605,46 +592,7 @@ pub fn copy_non_temporal_128(src: &[u8], dst: &mut [u8]) {
             stream_sse2(src, dst, len);
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        copy_non_temporal_64(src, dst);
-    }
-}
 
-/// Tier 3: 64-bit non-temporal streaming copy (8 bytes per iteration, `movnti` on x86_64; Dual-64 unrolled on other arches).
-#[inline]
-pub fn copy_non_temporal_64(src: &[u8], dst: &mut [u8]) {
-    let len = src.len().min(dst.len());
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst[..len].copy_from_slice(&src[..len]);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let dst_addr = dst.as_mut_ptr() as usize;
-        let lead = (8usize.wrapping_sub(dst_addr & 7)) & 7;
-        if lead > 0 {
-            dst[..lead].copy_from_slice(&src[..lead]);
-        }
-        let stream_bytes = ((len - lead) / 8) * 8;
-        let end_stream = lead + stream_bytes;
-        let mut offset = lead;
-        while offset < end_stream {
-            unsafe {
-                let w = std::ptr::read_unaligned(src.as_ptr().add(offset) as *const i64);
-                #[allow(clippy::cast_ptr_alignment)]
-                _mm_stream_si64(dst.as_mut_ptr().add(offset) as *mut i64, w);
-            }
-            offset += 8;
-        }
-        if end_stream < len {
-            dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
-        }
-        unsafe {
-            _mm_sfence();
-        }
-    }
     #[cfg(not(target_arch = "x86_64"))]
     {
         let mut i = 0;
@@ -663,80 +611,16 @@ pub fn copy_non_temporal_64(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Tier 4: 32-bit non-temporal streaming copy (4 bytes per iteration, `_mm_stream_si32` on x86_64; Quad-32 unrolled on other arches).
-#[inline]
-pub fn copy_non_temporal_32(src: &[u8], dst: &mut [u8]) {
-    let len = src.len().min(dst.len());
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst[..len].copy_from_slice(&src[..len]);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let dst_addr = dst.as_mut_ptr() as usize;
-        let lead = (4usize.wrapping_sub(dst_addr & 3)) & 3;
-        if lead > 0 {
-            dst[..lead].copy_from_slice(&src[..lead]);
-        }
-        let stream_bytes = ((len - lead) / 4) * 4;
-        let end_stream = lead + stream_bytes;
-        let mut offset = lead;
-        while offset < end_stream {
-            unsafe {
-                let w = std::ptr::read_unaligned(src.as_ptr().add(offset) as *const i32);
-                #[allow(clippy::cast_ptr_alignment)]
-                _mm_stream_si32(dst.as_mut_ptr().add(offset) as *mut i32, w);
-            }
-            offset += 4;
-        }
-        if end_stream < len {
-            dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
-        }
-        unsafe {
-            _mm_sfence();
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let mut i = 0;
-        while i + 16 <= len {
-            unsafe {
-                let w0 = std::ptr::read_unaligned(src.as_ptr().add(i) as *const u32);
-                let w1 = std::ptr::read_unaligned(src.as_ptr().add(i + 4) as *const u32);
-                let w2 = std::ptr::read_unaligned(src.as_ptr().add(i + 8) as *const u32);
-                let w3 = std::ptr::read_unaligned(src.as_ptr().add(i + 12) as *const u32);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i) as *mut u32, w0);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 4) as *mut u32, w1);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 8) as *mut u32, w2);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 12) as *mut u32, w3);
-            }
-            i += 16;
-        }
-        if i < len {
-            dst[i..len].copy_from_slice(&src[i..len]);
-        }
-    }
-}
-
-/// Copies payload using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit -> 32-bit).
-#[inline]
-pub fn copy_non_temporal(src: &[u8], dst: &mut [u8]) {
-    copy_non_temporal_256(src, dst);
-}
-
 /// Pre-resolved static function pointer for non-temporal streaming payload transfers.
-///
-/// Bound once at startup via `global_hardware_topology().cpu.register_capabilities` with zero runtime branching ladders.
 pub static COPY_NON_TEMPORAL_FN: std::sync::LazyLock<CopyNonTemporalFn> =
     std::sync::LazyLock::new(|| copy_non_temporal);
 
-/// Tier 1: 256-bit AVX2 non-temporal streaming zeroing (32 bytes per iteration, `vmovntdq` + `_mm_sfence`).
+/// Zeroes memory using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit).
 ///
 /// Clears sensitive memory (CWE-226) directly through Write-Combining (WC) buffers to L3/RAM
 /// without triggering Read-For-Ownership (RFO) or polluting L1D/L2 caches.
 #[inline]
-pub fn zero_non_temporal_256(dst: &mut [u8]) {
+pub fn zero_non_temporal(dst: &mut [u8]) {
     let len = dst.len();
     if len < NON_TEMPORAL_THRESHOLD {
         dst.fill(0);
@@ -744,50 +628,37 @@ pub fn zero_non_temporal_256(dst: &mut [u8]) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        #[target_feature(enable = "avx2")]
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe fn zero_avx2(dst: &mut [u8], len: usize) {
-            use std::arch::x86_64::*;
-            let dst_addr = dst.as_mut_ptr() as usize;
-            let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
-            if lead > 0 {
-                dst[..lead].fill(0);
-            }
-            let stream_bytes = ((len - lead) / 32) * 32;
-            let end_stream = lead + stream_bytes;
-            let zero = _mm256_setzero_si256();
-            let mut offset = lead;
-            while offset < end_stream {
-                unsafe {
-                    _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, zero);
-                }
-                offset += 32;
-            }
-            if end_stream < len {
-                dst[end_stream..len].fill(0);
-            }
-            _mm_sfence();
-        }
         if is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            #[allow(clippy::cast_ptr_alignment)]
+            unsafe fn zero_avx2(dst: &mut [u8], len: usize) {
+                use std::arch::x86_64::*;
+                let dst_addr = dst.as_mut_ptr() as usize;
+                let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
+                if lead > 0 {
+                    dst[..lead].fill(0);
+                }
+                let stream_bytes = ((len - lead) / 32) * 32;
+                let end_stream = lead + stream_bytes;
+                unsafe {
+                    let zero = _mm256_setzero_si256();
+                    let mut offset = lead;
+                    while offset < end_stream {
+                        _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, zero);
+                        offset += 32;
+                    }
+                }
+                if end_stream < len {
+                    dst[end_stream..len].fill(0);
+                }
+                _mm_sfence();
+            }
             unsafe {
                 zero_avx2(dst, len);
             }
             return;
         }
-    }
-    zero_non_temporal_128(dst);
-}
 
-/// Tier 2: 128-bit SSE2 non-temporal streaming zeroing (16 bytes per iteration, `movntdq` + `_mm_sfence`).
-#[inline]
-pub fn zero_non_temporal_128(dst: &mut [u8]) {
-    let len = dst.len();
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst.fill(0);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
         #[target_feature(enable = "sse2")]
         #[allow(clippy::cast_ptr_alignment)]
         unsafe fn zero_sse2(dst: &mut [u8], len: usize) {
@@ -799,13 +670,13 @@ pub fn zero_non_temporal_128(dst: &mut [u8]) {
             }
             let stream_bytes = ((len - lead) / 16) * 16;
             let end_stream = lead + stream_bytes;
-            let zero = _mm_setzero_si128();
-            let mut offset = lead;
-            while offset < end_stream {
-                unsafe {
+            unsafe {
+                let zero = _mm_setzero_si128();
+                let mut offset = lead;
+                while offset < end_stream {
                     _mm_stream_si128(dst.as_mut_ptr().add(offset) as *mut __m128i, zero);
+                    offset += 16;
                 }
-                offset += 16;
             }
             if end_stream < len {
                 dst[end_stream..len].fill(0);
@@ -816,45 +687,7 @@ pub fn zero_non_temporal_128(dst: &mut [u8]) {
             zero_sse2(dst, len);
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        zero_non_temporal_64(dst);
-    }
-}
 
-/// Tier 3: 64-bit non-temporal streaming zeroing (`movnti` on x86_64; Dual-64 unrolled on other arches).
-#[inline]
-pub fn zero_non_temporal_64(dst: &mut [u8]) {
-    let len = dst.len();
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst.fill(0);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let dst_addr = dst.as_mut_ptr() as usize;
-        let lead = (8usize.wrapping_sub(dst_addr & 7)) & 7;
-        if lead > 0 {
-            dst[..lead].fill(0);
-        }
-        let stream_bytes = ((len - lead) / 8) * 8;
-        let end_stream = lead + stream_bytes;
-        let mut offset = lead;
-        while offset < end_stream {
-            unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                _mm_stream_si64(dst.as_mut_ptr().add(offset) as *mut i64, 0);
-            }
-            offset += 8;
-        }
-        if end_stream < len {
-            dst[end_stream..len].fill(0);
-        }
-        unsafe {
-            _mm_sfence();
-        }
-    }
     #[cfg(not(target_arch = "x86_64"))]
     {
         let mut i = 0;
@@ -871,66 +704,7 @@ pub fn zero_non_temporal_64(dst: &mut [u8]) {
     }
 }
 
-/// Tier 4: 32-bit non-temporal streaming zeroing (`_mm_stream_si32` on x86_64; Quad-32 unrolled on other arches).
-#[inline]
-pub fn zero_non_temporal_32(dst: &mut [u8]) {
-    let len = dst.len();
-    if len < NON_TEMPORAL_THRESHOLD {
-        dst.fill(0);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let dst_addr = dst.as_mut_ptr() as usize;
-        let lead = (4usize.wrapping_sub(dst_addr & 3)) & 3;
-        if lead > 0 {
-            dst[..lead].fill(0);
-        }
-        let stream_bytes = ((len - lead) / 4) * 4;
-        let end_stream = lead + stream_bytes;
-        let mut offset = lead;
-        while offset < end_stream {
-            unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                _mm_stream_si32(dst.as_mut_ptr().add(offset) as *mut i32, 0);
-            }
-            offset += 4;
-        }
-        if end_stream < len {
-            dst[end_stream..len].fill(0);
-        }
-        unsafe {
-            _mm_sfence();
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let mut i = 0;
-        while i + 16 <= len {
-            unsafe {
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i) as *mut u32, 0);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 4) as *mut u32, 0);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 8) as *mut u32, 0);
-                std::ptr::write_unaligned(dst.as_mut_ptr().add(i + 12) as *mut u32, 0);
-            }
-            i += 16;
-        }
-        if i < len {
-            dst[i..len].fill(0);
-        }
-    }
-}
-
-/// Zeroes memory using streaming non-temporal stores with tiered hardware vector acceleration (AVX2 -> SSE2 -> 64-bit -> 32-bit).
-#[inline]
-pub fn zero_non_temporal(dst: &mut [u8]) {
-    zero_non_temporal_256(dst);
-}
-
 /// Pre-resolved static function pointer for non-temporal streaming memory zeroing (CWE-226 safe).
-///
-/// Bound once at startup via `global_hardware_topology().cpu.register_capabilities` with zero runtime branching ladders.
 pub static ZERO_NON_TEMPORAL_FN: std::sync::LazyLock<ZeroNonTemporalFn> =
     std::sync::LazyLock::new(|| zero_non_temporal);
 
@@ -2031,34 +1805,24 @@ mod tests {
     }
 
     #[test]
-    fn test_non_temporal_copy_and_zero_all_4_register_tiers() {
+    fn test_non_temporal_copy_and_zero_alignment() {
         let mut src = vec![0u8; 4137];
         for (i, b) in src.iter_mut().enumerate() {
             *b = ((i * 31 + 17) & 0xFF) as u8;
         }
 
-        // Test all 4 register tiers across aligned and unaligned offsets (0, 1, 3, 7, 15, 31)
+        // Test non-temporal streaming copy and zeroing across aligned and unaligned offsets (0, 1, 3, 7, 15, 31)
         for &offset in &[0usize, 1, 3, 7, 15, 31] {
-            for &(copy_fn, zero_fn) in &[
-                (
-                    copy_non_temporal_256 as CopyNonTemporalFn,
-                    zero_non_temporal_256 as ZeroNonTemporalFn,
-                ),
-                (copy_non_temporal_128, zero_non_temporal_128),
-                (copy_non_temporal_64, zero_non_temporal_64),
-                (copy_non_temporal_32, zero_non_temporal_32),
-            ] {
-                let mut dst = vec![0xEEu8; src.len() + 64];
-                copy_fn(&src, &mut dst[offset..offset + src.len()]);
-                assert_eq!(&dst[offset..offset + src.len()], &src[..]);
-                assert!(dst[..offset].iter().all(|&b| b == 0xEE));
-                assert!(dst[offset + src.len()..].iter().all(|&b| b == 0xEE));
+            let mut dst = vec![0xEEu8; src.len() + 64];
+            copy_non_temporal(&src, &mut dst[offset..offset + src.len()]);
+            assert_eq!(&dst[offset..offset + src.len()], &src[..]);
+            assert!(dst[..offset].iter().all(|&b| b == 0xEE));
+            assert!(dst[offset + src.len()..].iter().all(|&b| b == 0xEE));
 
-                zero_fn(&mut dst[offset..offset + src.len()]);
-                assert!(dst[offset..offset + src.len()].iter().all(|&b| b == 0));
-                assert!(dst[..offset].iter().all(|&b| b == 0xEE));
-                assert!(dst[offset + src.len()..].iter().all(|&b| b == 0xEE));
-            }
+            zero_non_temporal(&mut dst[offset..offset + src.len()]);
+            assert!(dst[offset..offset + src.len()].iter().all(|&b| b == 0));
+            assert!(dst[..offset].iter().all(|&b| b == 0xEE));
+            assert!(dst[offset + src.len()..].iter().all(|&b| b == 0xEE));
         }
 
         // Also test via PayloadSlabLease API

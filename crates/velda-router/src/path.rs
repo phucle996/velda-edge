@@ -174,7 +174,7 @@ pub type CommonPrefixLenFn = fn(a: &[u8], b: &[u8]) -> usize;
 
 /// Pre-resolved static function pointer for hardware register-adaptive prefix matching.
 ///
-/// Probed and bound once at boot across all 4 tiers (`Bits256`, `Bits128`, `Bits64`, `Bits32`)
+/// Probed and bound once at boot across all tiers (`Bits256`, `Bits128`, `Bits64`)
 /// with zero hot-path branching.
 pub static COMMON_PREFIX_LEN_FN: std::sync::LazyLock<CommonPrefixLenFn> =
     std::sync::LazyLock::new(|| {
@@ -183,7 +183,6 @@ pub static COMMON_PREFIX_LEN_FN: std::sync::LazyLock<CommonPrefixLenFn> =
             RegisterWidth::Bits256 => common_prefix_len_256,
             RegisterWidth::Bits128 => common_prefix_len_128,
             RegisterWidth::Bits64 => common_prefix_len_64,
-            RegisterWidth::Bits32 => common_prefix_len_32,
         }
     });
 
@@ -209,14 +208,7 @@ pub fn common_prefix_len(a: &str, b: &str) -> usize {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        #[cfg(target_pointer_width = "64")]
-        {
-            common_prefix_len_64(ab, bb)
-        }
-        #[cfg(not(target_pointer_width = "64"))]
-        {
-            common_prefix_len_32(ab, bb)
-        }
+        common_prefix_len_64(ab, bb)
     }
 }
 
@@ -371,78 +363,6 @@ pub fn common_prefix_len_64(a: &[u8], b: &[u8]) -> usize {
             return i + (diff.trailing_zeros() / 8) as usize;
         }
         i += 8;
-    }
-
-    while i < len && a[i] == b[i] {
-        i += 1;
-    }
-    i
-}
-
-/// Computes common prefix length using Quad 32-bit SWAR registers (16 bytes per iteration
-/// across four 32-bit registers concurrently across 4 ALU ports).
-#[inline]
-pub fn common_prefix_len_32(a: &[u8], b: &[u8]) -> usize {
-    let len = a.len().min(b.len());
-    let quad_len = len & !15;
-    let mut i = 0;
-
-    while i < quad_len {
-        let wa0 = u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
-        let wb0 = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-        let wa1 = u32::from_le_bytes(a[i + 4..i + 8].try_into().unwrap());
-        let wb1 = u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap());
-        let wa2 = u32::from_le_bytes(a[i + 8..i + 12].try_into().unwrap());
-        let wb2 = u32::from_le_bytes(b[i + 8..i + 12].try_into().unwrap());
-        let wa3 = u32::from_le_bytes(a[i + 12..i + 16].try_into().unwrap());
-        let wb3 = u32::from_le_bytes(b[i + 12..i + 16].try_into().unwrap());
-
-        let d0 = wa0 ^ wb0;
-        let d1 = wa1 ^ wb1;
-        let d2 = wa2 ^ wb2;
-        let d3 = wa3 ^ wb3;
-
-        if d0 != 0 {
-            return i + (d0.trailing_zeros() / 8) as usize;
-        }
-        if d1 != 0 {
-            return i + 4 + (d1.trailing_zeros() / 8) as usize;
-        }
-        if d2 != 0 {
-            return i + 8 + (d2.trailing_zeros() / 8) as usize;
-        }
-        if d3 != 0 {
-            return i + 12 + (d3.trailing_zeros() / 8) as usize;
-        }
-        i += 16;
-    }
-
-    if i + 8 <= len {
-        let wa0 = u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
-        let wb0 = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-        let wa1 = u32::from_le_bytes(a[i + 4..i + 8].try_into().unwrap());
-        let wb1 = u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap());
-
-        let d0 = wa0 ^ wb0;
-        let d1 = wa1 ^ wb1;
-
-        if d0 != 0 {
-            return i + (d0.trailing_zeros() / 8) as usize;
-        }
-        if d1 != 0 {
-            return i + 4 + (d1.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-
-    if i + 4 <= len {
-        let wa = u32::from_le_bytes(a[i..i + 4].try_into().unwrap());
-        let wb = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-        let diff = wa ^ wb;
-        if diff != 0 {
-            return i + (diff.trailing_zeros() / 8) as usize;
-        }
-        i += 4;
     }
 
     while i < len && a[i] == b[i] {
@@ -906,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swar_common_prefix_len_64_and_32_equivalence() {
+    fn test_swar_common_prefix_len_equivalence() {
         let cases = [
             ("", "", 0),
             ("/api/v1/users", "/api/v1/orders", 8),
@@ -952,11 +872,6 @@ mod tests {
                 common_prefix_len_64(a.as_bytes(), b.as_bytes()),
                 expected,
                 "64-bit mismatch for ({a}, {b})"
-            );
-            assert_eq!(
-                common_prefix_len_32(a.as_bytes(), b.as_bytes()),
-                expected,
-                "32-bit mismatch for ({a}, {b})"
             );
         }
     }

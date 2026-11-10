@@ -34,9 +34,6 @@ struct SwrrShard {
     mutex: Mutex<SwrrState>,
 }
 
-/// Function pointer signature for Smooth Weighted Round-Robin weight update and max selection.
-pub type SwrrUpdateFn = fn(&mut [i64], &[Endpoint]) -> usize;
-
 /// Scalar unrolled loop for small workloads (<= 4 endpoints) executing in GPRs.
 #[inline]
 pub fn swrr_update_scalar(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
@@ -116,8 +113,6 @@ pub struct WeightedRoundRobin {
     // Thread-sharded Mutex array padded to 64-byte cache lines completely eliminates
     // cross-core false sharing and lock contention across worker threads.
     shards: Box<[SwrrShard]>,
-    #[allow(dead_code)]
-    update_fn: SwrrUpdateFn,
 }
 
 #[derive(Default)]
@@ -143,11 +138,8 @@ impl WeightedRoundRobin {
         Self::for_workload(workers, 0)
     }
 
-    /// Creates a new weighted round-robin balancer with workload-adaptive register binding.
-    ///
-    /// - `endpoint_count <= 4`: Bound to scalar unrolled loop in GPRs.
-    /// - `endpoint_count > 4`: Bound to 256-bit AVX2 vector SIMD weight accumulator.
-    pub fn for_workload(workers: usize, endpoint_count: usize) -> Self {
+    /// Creates a new weighted round-robin balancer for the specified worker count and workload.
+    pub fn for_workload(workers: usize, _endpoint_count: usize) -> Self {
         let count = workers.max(1).next_power_of_two();
         let shards = (0..count)
             .map(|_| SwrrShard {
@@ -156,25 +148,7 @@ impl WeightedRoundRobin {
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
-        let update_fn = if endpoint_count != 0 && endpoint_count <= 4 {
-            swrr_update_scalar
-        } else {
-            use velda_core::hardware::RegisterWidth;
-            let caps = velda_core::global_hardware_topology()
-                .cpu
-                .register_capabilities;
-            let width = if endpoint_count == 0 {
-                caps.select_for_workload(RegisterWidth::Bits256)
-            } else {
-                caps.select_for_workload_size(endpoint_count)
-            };
-            match width {
-                RegisterWidth::Bits256 => swrr_update_vector,
-                _ => swrr_update_scalar,
-            }
-        };
-
-        Self { shards, update_fn }
+        Self { shards }
     }
 }
 

@@ -407,42 +407,6 @@ pub fn checksum_swar_64(data: &[u8]) -> u16 {
     finalize_checksum(sum)
 }
 
-// ----------------------------------------------------------------------------
-// Tier 4: 32-bit Quad-SWAR Checksum Kernel (4 bytes per iteration)
-// ----------------------------------------------------------------------------
-/// Tier 4 (32-bit Quad-SWAR): Loads 4-byte chunks and accumulates into a 32-bit sum.
-pub fn checksum_swar_32(data: &[u8]) -> u16 {
-    let len = data.len();
-    let mut offset = 0;
-    let mut sum: u32 = 0;
-
-    while offset + 4 <= len {
-        let chunk: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
-        let w = u32::from_be_bytes(chunk);
-        let (new_sum, overflow) = sum.overflowing_add(w);
-        sum = new_sum.wrapping_add(overflow as u32);
-        offset += 4;
-    }
-
-    while offset + 2 <= len {
-        let word = u16::from_be_bytes([data[offset], data[offset + 1]]) as u32;
-        let (new_sum, overflow) = sum.overflowing_add(word);
-        sum = new_sum.wrapping_add(overflow as u32);
-        offset += 2;
-    }
-
-    if offset < len {
-        let word = (data[offset] as u32) << 8;
-        let (new_sum, overflow) = sum.overflowing_add(word);
-        sum = new_sum.wrapping_add(overflow as u32);
-    }
-
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 /// Computes the standard RFC 1071 one's complement Internet checksum across byte slices.
 #[inline]
 pub fn compute_internet_checksum(data: &[u8]) -> u16 {
@@ -456,14 +420,7 @@ pub fn compute_internet_checksum(data: &[u8]) -> u16 {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        #[cfg(target_pointer_width = "64")]
-        {
-            checksum_swar_64(data)
-        }
-        #[cfg(not(target_pointer_width = "64"))]
-        {
-            checksum_swar_32(data)
-        }
+        checksum_swar_64(data)
     }
 }
 
@@ -511,12 +468,7 @@ mod tests {
         let edge_lengths = [0, 1, 2, 3, 14, 20, 34, 1500];
         for &len in &edge_lengths {
             let buffer: Vec<u8> = (0..len).map(|i| ((i * 37 + 13) & 0xFF) as u8).collect();
-            let c_swar32 = checksum_swar_32(&buffer);
             let c_swar64 = checksum_swar_64(&buffer);
-            assert_eq!(
-                c_swar32, c_swar64,
-                "Mismatch between SWAR-32 and SWAR-64 at length {len}"
-            );
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -586,9 +538,7 @@ mod tests {
                 *byte = (lcg >> 33) as u8;
             }
 
-            let s32 = checksum_swar_32(&data);
             let s64 = checksum_swar_64(&data);
-            assert_eq!(s32, s64, "SWAR-32 vs SWAR-64 mismatch for size {size}");
 
             #[cfg(target_arch = "x86_64")]
             {

@@ -33,44 +33,12 @@ fn hash_bytes_64(data: &[u8]) -> u64 {
     hash ^ (hash >> 32)
 }
 
-/// 32-bit register word-accelerated FNV-1a mixer (processes 4 bytes per multiplication).
-#[allow(dead_code)]
-#[inline]
-fn hash_bytes_32(data: &[u8]) -> u64 {
-    let mut hash: u64 = FNV_OFFSET;
-    let len = data.len();
-    let aligned = len & !3;
-    let ptr = data.as_ptr();
-    let mut i = 0;
-
-    while i < aligned {
-        let word = unsafe { (ptr.add(i) as *const u32).read_unaligned() }.to_le() as u64;
-        hash ^= word;
-        hash = hash.wrapping_mul(FNV_PRIME);
-        i += 4;
-    }
-
-    while i < len {
-        hash ^= data[i] as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-        i += 1;
-    }
-    hash ^ (hash >> 32)
-}
-
-/// High-speed register-dispatched 64-bit hash function (`Bits64` -> `Bits32`) with zero external dependencies.
+/// High-speed 64-bit hash function with zero external dependencies.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn fnv1a_hash(data: &[u8]) -> u64 {
-    #[cfg(target_pointer_width = "64")]
-    {
-        hash_bytes_64(data)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        hash_bytes_32(data)
-    }
+    hash_bytes_64(data)
 }
 
 /// Hashes the client's IP address to map them consistently to a backend.

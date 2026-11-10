@@ -18,8 +18,6 @@
 //! - **SWAR Colon Scanning (`swar_find_colon`)**: Scans 8 bytes per iteration for port colons
 //!   using 64-bit bitwise magic arithmetic, stripping ports in 1-2 CPU cycles without branch loops.
 
-use velda_core::hardware::{RegisterWidth, global_hardware_topology};
-
 // ============================================================================
 // 1. Reverse Block-by-Block Host Matching (Right-to-Left Label Matching)
 // ============================================================================
@@ -161,36 +159,12 @@ pub type CompareLabelsDualFn = fn(e0: u64, e1: u64, a0: u64, a1: u64) -> bool;
 
 /// Pre-resolved static function pointer for Dual-64 label comparison.
 pub static COMPARE_LABELS_DUAL_FN: std::sync::LazyLock<CompareLabelsDualFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = global_hardware_topology().cpu.register_capabilities;
-        match caps.select_for_workload(RegisterWidth::Bits64) {
-            RegisterWidth::Bits64 | RegisterWidth::Bits128 | RegisterWidth::Bits256 => {
-                compare_labels_dual_64
-            }
-            RegisterWidth::Bits32 => compare_labels_quad_32,
-        }
-    });
+    std::sync::LazyLock::new(|| compare_labels_dual_64);
 
 /// Compares two label words simultaneously using Dual-64 SWAR on 64-bit/vector hardware.
 #[inline(always)]
 pub fn compare_labels_dual_64(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
     ((e0 ^ a0) | (e1 ^ a1)) == 0
-}
-
-/// Compares two label words across four 32-bit registers for 32-bit hardware compatibility.
-#[inline(always)]
-pub fn compare_labels_quad_32(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
-    let e0_lo = e0 as u32;
-    let e0_hi = (e0 >> 32) as u32;
-    let a0_lo = a0 as u32;
-    let a0_hi = (a0 >> 32) as u32;
-
-    let e1_lo = e1 as u32;
-    let e1_hi = (e1 >> 32) as u32;
-    let a1_lo = a1 as u32;
-    let a1_hi = (a1 >> 32) as u32;
-
-    ((e0_lo ^ a0_lo) | (e0_hi ^ a0_hi) | (e1_lo ^ a1_lo) | (e1_hi ^ a1_hi)) == 0
 }
 
 /// Compares two label words simultaneously with zero indirect call overhead.
@@ -199,14 +173,7 @@ pub fn compare_labels_quad_32(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
 /// on 64-bit targets with zero stack allocations and zero function call penalty.
 #[inline(always)]
 pub fn compare_labels_dual(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
-    #[cfg(target_pointer_width = "64")]
-    {
-        compare_labels_dual_64(e0, e1, a0, a1)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        compare_labels_quad_32(e0, e1, a0, a1)
-    }
+    compare_labels_dual_64(e0, e1, a0, a1)
 }
 
 /// Pre-compiled, zero-allocation host routing rule.

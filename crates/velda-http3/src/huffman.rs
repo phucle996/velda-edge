@@ -265,10 +265,10 @@ pub static HUFFMAN_CODES: [(u32, u8); 257] = [
     (0x3fffffff, 30), // 256
 ];
 
-/// 64-bit register Huffman encoder: packs codes into a 64-bit bit-buffer and flushes 32 bits (4 bytes)
-/// at a single instruction (`put_u32`) whenever `bits >= 32`.
-#[allow(dead_code)]
-fn encode_huffman_64(input: &[u8], dst: &mut bytes::BytesMut) {
+/// Encodes raw bytes using RFC 7541 Huffman coding: packs codes into a 64-bit bit-buffer
+/// and flushes 32 bits (4 bytes) at a single instruction whenever `bits >= 32`.
+#[inline]
+pub fn encode_huffman(input: &[u8], dst: &mut bytes::BytesMut) {
     use bytes::BufMut;
     dst.reserve(input.len());
 
@@ -296,53 +296,6 @@ fn encode_huffman_64(input: &[u8], dst: &mut bytes::BytesMut) {
         let pad = 8 - bits;
         current = (current << pad) | ((1u64 << pad) - 1);
         dst.put_u8(current as u8);
-    }
-}
-
-/// Dual 32-bit register Huffman encoder for 32-bit targets.
-#[allow(dead_code)]
-fn encode_huffman_32(input: &[u8], dst: &mut bytes::BytesMut) {
-    use bytes::BufMut;
-    dst.reserve(input.len());
-
-    let mut acc: u32 = 0;
-    let mut bits: u8 = 0;
-
-    for &byte in input {
-        let (code, len) = HUFFMAN_CODES[byte as usize];
-        // Since max code len is 30 bits, flush bytes first so `bits + len <= 32`
-        while bits + len > 32 {
-            bits -= 8;
-            dst.put_u8((acc >> bits) as u8);
-        }
-        acc = acc.checked_shl(len as u32).unwrap_or(0) | code;
-        bits += len;
-
-        while bits >= 8 {
-            bits -= 8;
-            dst.put_u8((acc >> bits) as u8);
-        }
-    }
-
-    if bits > 0 {
-        let pad = 8 - bits;
-        acc = (acc << pad) | ((1u32 << pad) - 1);
-        dst.put_u8(acc as u8);
-    }
-}
-
-/// Encodes raw bytes using RFC 7541 Huffman coding.
-///
-/// Inlined direct execution eliminating indirect function pointer overhead.
-#[inline(always)]
-pub fn encode_huffman(input: &[u8], dst: &mut bytes::BytesMut) {
-    #[cfg(target_pointer_width = "64")]
-    {
-        encode_huffman_64(input, dst);
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        encode_huffman_32(input, dst);
     }
 }
 

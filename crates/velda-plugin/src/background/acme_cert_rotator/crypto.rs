@@ -61,9 +61,6 @@ const CANONICAL_JWK_LEN: usize =
     JWK_PREFIX.len() + B64_32_LEN + JWK_INFIX.len() + B64_32_LEN + JWK_SUFFIX.len();
 const _: () = assert!(CANONICAL_JWK_LEN == 126);
 
-/// Encoder contract: 32 raw bytes in, 43 base64url ASCII bytes out.
-pub type B64Encode32Fn = fn(src: &[u8; 32], out: &mut [u8; B64_32_LEN]);
-
 /// Encodes 32 raw bytes into 43 base64url ASCII bytes using the best CPU instruction set.
 ///
 /// Inlined direct execution eliminating indirect function pointer overhead.
@@ -79,36 +76,10 @@ pub fn b64url_encode32(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     b64url_encode32_scalar(src, out);
 }
 
-/// Resolves the best encoder for the host CPU.
-///
-/// Kept for crate API compatibility; internally delegates directly to inlined `b64url_encode32`.
-pub fn resolve_b64url_encode32() -> B64Encode32Fn {
-    b64url_encode32
-}
-
 /// Portable fallback: delegates to the `base64` crate, writing into the caller's stack buffer.
 fn b64url_encode32_scalar(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     // `encode_slice` into an exactly-sized buffer cannot fail for 32 input bytes.
     let _ = URL_SAFE_NO_PAD.encode_slice(src, out);
-}
-
-/// SSSE3 path (Muła/Lemire vector base64): each iteration turns 12 input bytes into 16 chars
-/// held entirely in one XMM register.
-///
-/// Layout for 32 bytes: two vector blocks cover input `[0..12)` and `[12..24)` -> chars
-/// `[0..32)`; the remaining 8 input bytes (`[24..32)`, 11 chars) go through the scalar path.
-/// 24 is a multiple of 3, so the concatenation is exactly the unpadded base64url string.
-#[allow(dead_code)]
-fn b64url_encode32_ssse3(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: only reachable after `is_x86_feature_detected!("ssse3")` in the resolver.
-        unsafe { encode32_ssse3_impl(src, out) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        b64url_encode32_scalar(src, out)
-    }
 }
 
 #[cfg(target_arch = "x86_64")]

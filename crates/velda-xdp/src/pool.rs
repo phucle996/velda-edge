@@ -223,24 +223,6 @@ pub fn scan_swar_64(words: &[AtomicU64], start: usize) -> Option<usize> {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Tier 4: 32-bit Quad-SWAR Sub-Word Scanner
-// ----------------------------------------------------------------------------
-/// Tier 4 (32-bit Quad-SWAR): Evaluates 64-bit atomic words via 32-bit sub-word halves.
-pub fn scan_swar_32(words: &[AtomicU64], start: usize) -> Option<usize> {
-    let len = words.len();
-    for i in 0..len {
-        let idx = (start + i) % len;
-        let w = words[idx].load(Ordering::Relaxed);
-        let lo = w as u32;
-        let hi = (w >> 32) as u32;
-        if (lo & hi) != !0u32 {
-            return Some(idx);
-        }
-    }
-    None
-}
-
 /// Dispatches bitmask word scanning directly through tiered vector/SWAR acceleration.
 #[inline]
 pub fn scan_available_word(words: &[AtomicU64], start: usize) -> Option<usize> {
@@ -253,14 +235,7 @@ pub fn scan_available_word(words: &[AtomicU64], start: usize) -> Option<usize> {
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        #[cfg(target_pointer_width = "64")]
-        {
-            scan_swar_64(words, start)
-        }
-        #[cfg(not(target_pointer_width = "64"))]
-        {
-            scan_swar_32(words, start)
-        }
+        scan_swar_64(words, start)
     }
 }
 
@@ -704,7 +679,6 @@ mod tests {
     fn test_scan_available_word_all_tiers_consistency() {
         let words: Vec<AtomicU64> = (0..8).map(|_| AtomicU64::new(!0u64)).collect();
         // All words are completely full
-        assert_eq!(scan_swar_32(&words, 0), None);
         assert_eq!(scan_swar_64(&words, 0), None);
         #[cfg(target_arch = "x86_64")]
         {
@@ -715,7 +689,6 @@ mod tests {
 
         // Make word 5 have one free bit
         words[5].store(!(1u64 << 17), Ordering::Release);
-        assert_eq!(scan_swar_32(&words, 0), Some(5));
         assert_eq!(scan_swar_64(&words, 0), Some(5));
         #[cfg(target_arch = "x86_64")]
         {
@@ -727,7 +700,6 @@ mod tests {
         // Start scanning after word 5 with wrap-around
         words[5].store(!0u64, Ordering::Release);
         words[2].store(!(1u64 << 3), Ordering::Release);
-        assert_eq!(scan_swar_32(&words, 6), Some(2));
         assert_eq!(scan_swar_64(&words, 6), Some(2));
         #[cfg(target_arch = "x86_64")]
         {

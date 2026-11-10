@@ -14,14 +14,6 @@
 
 use bytes::Bytes;
 
-/// Fallback scalar memory transfer for platforms or payloads without vector SIMD support.
-#[allow(dead_code)]
-unsafe fn stream_payload_scalar(dst: *mut u8, src: *const u8, len: usize) {
-    unsafe {
-        std::ptr::copy_nonoverlapping(src, dst, len);
-    }
-}
-
 /// 128-bit vector streaming store using SSE2 `_mm_stream_si128`.
 #[cfg(target_arch = "x86_64")]
 unsafe fn stream_payload_sse2_dispatched(dst: *mut u8, src: *const u8, len: usize) {
@@ -78,7 +70,7 @@ pub unsafe fn stream_payload_to_dram(dst: *mut u8, src: *const u8, len: usize) {
     #[cfg(not(target_arch = "x86_64"))]
     {
         unsafe {
-            stream_payload_scalar(dst, src, len);
+            std::ptr::copy_nonoverlapping(src, dst, len);
         }
     }
 }

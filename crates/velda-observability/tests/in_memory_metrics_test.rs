@@ -543,14 +543,13 @@ fn test_per_core_sharded_simd_aggregation() {
 
 #[test]
 fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
-    // Instantiate 4 sharded stores bound explicitly to 4 distinct hardware widths:
-    // 256-bit (AVX2), 128-bit (SSE2 / NEON), 64-bit (Scalar ALU), and 32-bit (SWAR)
+    // Instantiate 3 sharded stores bound explicitly to 3 distinct hardware widths:
+    // 256-bit (AVX2), 128-bit (SSE2 / NEON), and 64-bit (Scalar ALU)
     let store_256 = MetricsStore::with_cores_and_fn(4, add_counters_256);
     let store_128 = MetricsStore::with_cores_and_fn(4, add_counters_128);
     let store_64 = MetricsStore::with_cores_and_fn(4, add_counters_64);
-    let store_32 = MetricsStore::with_cores_and_fn(4, add_counters_32);
 
-    let stores = [&store_256, &store_128, &store_64, &store_32];
+    let stores = [&store_256, &store_128, &store_64];
 
     // Seed diverse completions across all 4 core shards
     let test_cases = [
@@ -665,19 +664,16 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
     let snap_256 = store_256.snapshot();
     let snap_128 = store_128.snapshot();
     let snap_64 = store_64.snapshot();
-    let snap_32 = store_32.snapshot();
 
     // Verify bit-for-bit equivalence across all 36 pipeline snapshots
     assert_eq!(snap_256.pipelines.len(), 36);
     assert_eq!(snap_128.pipelines.len(), 36);
     assert_eq!(snap_64.pipelines.len(), 36);
-    assert_eq!(snap_32.pipelines.len(), 36);
 
     for i in 0..36 {
         let p_256 = &snap_256.pipelines[i];
         let p_128 = &snap_128.pipelines[i];
         let p_64 = &snap_64.pipelines[i];
-        let p_32 = &snap_32.pipelines[i];
 
         assert_eq!(
             p_256, p_128,
@@ -689,22 +685,15 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             "Pipeline slot {} mismatch between 256 and 64",
             i
         );
-        assert_eq!(
-            p_256, p_32,
-            "Pipeline slot {} mismatch between 256 and 32",
-            i
-        );
     }
 
     // Verify bit-for-bit equivalence across aggregate totals
     let tot_256 = snap_256.aggregate_pipelines();
     let tot_128 = snap_128.aggregate_pipelines();
     let tot_64 = snap_64.aggregate_pipelines();
-    let tot_32 = snap_32.aggregate_pipelines();
 
     assert_eq!(tot_256, tot_128);
     assert_eq!(tot_256, tot_64);
-    assert_eq!(tot_256, tot_32);
 
     assert_eq!(tot_256.total_requests(), 8);
     assert_eq!(tot_256.requests_2xx, 4);
@@ -732,15 +721,13 @@ fn test_aggregate_pipelines_with_explicit_function_pointers() {
 
     let snap = store.snapshot();
 
-    // Call aggregate_pipelines_with with all 4 function pointers explicitly
+    // Call aggregate_pipelines_with with all function pointers explicitly
     let res_256 = snap.aggregate_pipelines_with(add_counters_256);
     let res_128 = snap.aggregate_pipelines_with(add_counters_128);
     let res_64 = snap.aggregate_pipelines_with(add_counters_64);
-    let res_32 = snap.aggregate_pipelines_with(add_counters_32);
 
     assert_eq!(res_256, res_128);
     assert_eq!(res_256, res_64);
-    assert_eq!(res_256, res_32);
     assert_eq!(res_256.total_requests(), 1);
     assert_eq!(res_256.requests_2xx, 1);
     assert_eq!(res_256.bytes_rx, 200);
@@ -754,7 +741,6 @@ fn test_resolve_counters_fn_returns_callable_pointer() {
     let fn_256 = resolve_counters_fn(RegisterWidth::Bits256);
     let fn_128 = resolve_counters_fn(RegisterWidth::Bits128);
     let fn_64 = resolve_counters_fn(RegisterWidth::Bits64);
-    let fn_32 = resolve_counters_fn(RegisterWidth::Bits32);
 
     let mut dst = [10u64; 20];
     let src = [5u64; 20];
@@ -768,9 +754,6 @@ fn test_resolve_counters_fn_returns_callable_pointer() {
 
     fn_64(&mut dst, &src);
     assert_eq!(dst[0], 25);
-
-    fn_32(&mut dst, &src);
-    assert_eq!(dst[0], 30);
 }
 
 #[test]
