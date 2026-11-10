@@ -63,24 +63,8 @@ pub const ID_POOL_CAPACITY: usize = 64;
 pub const ID_POOL_LOW_WATERMARK: usize = 16;
 
 /// Lookup table for fast 2-digit hex encoding on 32-bit registers.
+#[allow(dead_code)]
 static HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-type FormatHex16Fn = fn(u64, &mut [u8; 16]);
-
-static FORMAT_HEX_16_FN: std::sync::LazyLock<FormatHex16Fn> = std::sync::LazyLock::new(|| {
-    let width = crate::hardware::global_hardware_topology()
-        .cpu
-        .register_capabilities
-        .select_for_workload(crate::hardware::RegisterWidth::Bits128);
-    match width {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        crate::hardware::RegisterWidth::Bits128 | crate::hardware::RegisterWidth::Bits256 => {
-            format_hex_16_128
-        }
-        crate::hardware::RegisterWidth::Bits64 => format_hex_16_64,
-        _ => format_hex_16_32,
-    }
-});
 
 /// 128-bit vector register hex formatter: unpacks 16 nibbles and translates to ASCII in a single 128-bit store.
 #[cfg(target_arch = "x86_64")]
@@ -124,6 +108,7 @@ fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
 }
 
 /// 64-bit SWAR branchless hex formatter: converts 8 nibbles at a time inside 64-bit integer registers.
+#[allow(dead_code)]
 #[inline]
 fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
     #[inline(always)]
@@ -144,6 +129,7 @@ fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
 }
 
 /// 32-bit register fallback hex formatter.
+#[allow(dead_code)]
 #[inline]
 fn format_hex_16_32(val: u64, out: &mut [u8; 16]) {
     let hi = (val >> 32) as u32;
@@ -166,11 +152,28 @@ fn format_hex_16_32(val: u64, out: &mut [u8; 16]) {
     out[15] = HEX_DIGITS[(lo & 0x0f) as usize];
 }
 
-/// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes
-/// using the hardware-probed static register function pointer (`Bits128` -> `Bits64` -> `Bits32`).
+/// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes.
+///
+/// Uses SSE2 on x86_64 or NEON on AArch64 (single vector register unpack + store),
+/// with branchless 64-bit SWAR fallback. Completely eliminates indirect function pointer overhead.
 #[inline(always)]
 pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
-    (FORMAT_HEX_16_FN)(val, out)
+    #[cfg(target_arch = "x86_64")]
+    {
+        format_hex_16_128(val, out);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        format_hex_16_128(val, out);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            format_hex_16_64(val, out);
+        } else {
+            format_hex_16_32(val, out);
+        }
+    }
 }
 
 /// Helper to get current Unix epoch in seconds via the lock-free coarse clock (~0.5ns).
