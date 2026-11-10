@@ -395,26 +395,30 @@ fn compact_whitespace_and_comments(buf: &mut [u8], len: usize) -> usize {
 }
 
 /// Signature for register-width-specific fast-path normalization inspection.
+#[allow(dead_code)]
 pub type NeedsNormalizationFn = fn(bytes: &[u8], convert_plus: bool) -> bool;
 
-/// Pre-resolved static function pointer for WAF fast-path byte scanning (up to 256-bit SIMD: 32 bytes/cycle).
-pub static NEEDS_NORMALIZATION_FN: std::sync::LazyLock<NeedsNormalizationFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-        match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
-            velda_core::hardware::RegisterWidth::Bits256 => needs_normalization_256,
-            velda_core::hardware::RegisterWidth::Bits128 => needs_normalization_128,
-            velda_core::hardware::RegisterWidth::Bits64
-            | velda_core::hardware::RegisterWidth::Bits32 => needs_normalization_scalar,
-        }
-    });
-
 /// Fast-path inspector checking whether input bytes require any normalization.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn needs_normalization(bytes: &[u8], convert_plus: bool) -> bool {
-    (*NEEDS_NORMALIZATION_FN)(bytes, convert_plus)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { needs_normalization_256_x86_impl(bytes, convert_plus) }
+        } else {
+            unsafe { needs_normalization_128_x86_impl(bytes, convert_plus) }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { needs_normalization_128_neon_impl(bytes, convert_plus) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        needs_normalization_scalar(bytes, convert_plus)
+    }
 }
 
 /// 256-bit SIMD inspector scanning 32 bytes per cycle for uppercase, `%`, `#`, `+`, whitespace, `/*`, `--`, `  `.

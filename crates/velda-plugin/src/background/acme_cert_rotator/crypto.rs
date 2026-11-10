@@ -64,9 +64,23 @@ const _: () = assert!(CANONICAL_JWK_LEN == 126);
 /// Encoder contract: 32 raw bytes in, 43 base64url ASCII bytes out.
 pub type B64Encode32Fn = fn(src: &[u8; 32], out: &mut [u8; B64_32_LEN]);
 
+/// Encodes 32 raw bytes into 43 base64url ASCII bytes using the best CPU instruction set.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn b64url_encode32(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("ssse3") {
+            unsafe { encode32_ssse3_impl(src, out) };
+            return;
+        }
+    }
+    b64url_encode32_scalar(src, out);
+}
+
 /// Resolves (once, cached) the best encoder for the host CPU: SSSE3 vector path when
-/// available, otherwise the portable scalar path. Bound as a plain function pointer so the
-/// call site carries no feature-detection branch.
+/// available, otherwise the portable scalar path.
 pub fn resolve_b64url_encode32() -> B64Encode32Fn {
     static RESOLVED: std::sync::OnceLock<B64Encode32Fn> = std::sync::OnceLock::new();
     *RESOLVED.get_or_init(|| {
@@ -186,9 +200,8 @@ impl AccountKey {
         // the hardware-dispatched SIMD encoder: no heap allocation, no per-byte branching.
         let mut x_b64 = [0u8; B64_32_LEN];
         let mut y_b64 = [0u8; B64_32_LEN];
-        let encode32 = resolve_b64url_encode32();
-        encode32(pub_bytes[1..33].try_into().expect("32-byte X"), &mut x_b64);
-        encode32(pub_bytes[33..65].try_into().expect("32-byte Y"), &mut y_b64);
+        b64url_encode32(pub_bytes[1..33].try_into().expect("32-byte X"), &mut x_b64);
+        b64url_encode32(pub_bytes[33..65].try_into().expect("32-byte Y"), &mut y_b64);
 
         // RFC 7638 canonical JSON, lexicographic keys crv,kty,x,y. For P-256 every field has a
         // fixed width, so the document is exactly 126 bytes and is
@@ -203,7 +216,7 @@ impl AccountKey {
 
         let digest = ring::digest::digest(&ring::digest::SHA256, &canonical);
         let mut thumb_b64 = [0u8; B64_32_LEN];
-        encode32(
+        b64url_encode32(
             digest.as_ref().try_into().expect("SHA-256 is 32 bytes"),
             &mut thumb_b64,
         );
@@ -379,7 +392,7 @@ mod tests {
             b64url_encode32_scalar(&src, &mut scalar);
             assert_eq!(&scalar[..], reference.as_bytes());
             let mut simd = [0u8; B64_32_LEN];
-            resolve_b64url_encode32()(&src, &mut simd);
+            b64url_encode32(&src, &mut simd);
             assert_eq!(&simd[..], reference.as_bytes());
         }
     }

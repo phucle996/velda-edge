@@ -12,54 +12,69 @@
 //! The optimal implementation is resolved **once at gateway bootstrap** via `LazyLock`
 //! probing the probed `velda_core::global_hardware_topology().cpu.register_capabilities`.
 
-use std::sync::LazyLock;
-use velda_core::hardware::RegisterWidth;
-
 use super::record::PackedOtlpRecord;
 
 /// Function pointer signature for copying a 256-byte aligned `PackedOtlpRecord`.
+#[allow(dead_code)]
 pub type CopyRecordFn = fn(dst: &mut PackedOtlpRecord, src: &PackedOtlpRecord);
 
-/// Pre-resolved static function pointer matching host CPU register width.
-pub static COPY_RECORD_FN: LazyLock<CopyRecordFn> = LazyLock::new(|| {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => copy_record_256,
-        RegisterWidth::Bits128 => copy_record_128,
-        RegisterWidth::Bits64 => copy_record_64,
-        RegisterWidth::Bits32 => copy_record_portable,
-    }
-});
-
 /// Transfers a 256-byte `PackedOtlpRecord` using the optimal CPU register width.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn copy_record(dst: &mut PackedOtlpRecord, src: &PackedOtlpRecord) {
-    (*COPY_RECORD_FN)(dst, src);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { copy_record_avx2_impl(dst, src) };
+        } else {
+            copy_record_128(dst, src);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        copy_record_128(dst, src);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            copy_record_64(dst, src);
+        } else {
+            copy_record_portable(dst, src);
+        }
+    }
 }
 
 /// Function pointer signature for non-temporal streaming store of a 256-byte `PackedOtlpRecord`.
+#[allow(dead_code)]
 pub type StreamRecordFn = fn(dst: &mut PackedOtlpRecord, src: &PackedOtlpRecord);
-
-/// Pre-resolved static function pointer for non-temporal streaming writes bypassing L1/L2/L3 cache.
-pub static STREAM_RECORD_FN: LazyLock<StreamRecordFn> = LazyLock::new(|| {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => stream_record_256,
-        RegisterWidth::Bits128 => stream_record_128,
-        RegisterWidth::Bits64 => stream_record_64,
-        RegisterWidth::Bits32 => stream_record_portable,
-    }
-});
 
 /// Non-temporal streaming store: writes a 256-byte `PackedOtlpRecord` directly into RAM via
 /// Write-Combining Buffers, bypassing CPU cache levels (L1/L2/L3) to prevent cache pollution.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn stream_record(dst: &mut PackedOtlpRecord, src: &PackedOtlpRecord) {
-    (*STREAM_RECORD_FN)(dst, src);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { stream_record_avx2_impl(dst, src) };
+        } else {
+            stream_record_128(dst, src);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        stream_record_128(dst, src);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            stream_record_64(dst, src);
+        } else {
+            stream_record_portable(dst, src);
+        }
+    }
 }
 
 /// Issues a non-temporal prefetch hint (`_MM_HINT_NTA`) across the 256-byte record (4 cache lines).

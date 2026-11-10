@@ -381,6 +381,24 @@ pub fn eval_fallback(
     evaluate_path(config, state, path)
 }
 
+/// Evaluates incoming probe request buffer directly using SWAR or fallback,
+/// without indirect function pointer dispatch overhead.
+#[inline(always)]
+pub fn eval_probe_request(
+    req_buf: &[u8],
+    state: &HealthState,
+    tokens: &HealthProbeTokens,
+    config: &HealthProbeConfig,
+) -> &'static [u8] {
+    if !tokens.can_use_swar {
+        eval_fallback(req_buf, state, tokens, config)
+    } else if cfg!(target_pointer_width = "64") {
+        eval_swar_64(req_buf, state, tokens, config)
+    } else {
+        eval_swar_32x2(req_buf, state, tokens, config)
+    }
+}
+
 /// Resolves the optimal probe evaluation function pointer at bootstrap / initialization.
 ///
 /// Ensures zero dynamic hardware checking or CPU feature sniffing on the request hot path.

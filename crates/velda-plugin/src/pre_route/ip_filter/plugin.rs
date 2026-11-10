@@ -270,20 +270,35 @@ impl PreRoutePlugin for IpFilterPlugin {
 }
 
 /// Signature for register-width-specific IPv4 CIDR matching functions.
+#[allow(dead_code)]
 pub type MatchCidrV4Fn = fn(ip: u32, nets: &[u32], masks: &[u32]) -> bool;
 
-/// Pre-resolved static function pointer for IPv4 CIDR table scanning (up to 256-bit SIMD: 8 CIDRs/cycle).
-pub static MATCH_CIDR_V4_FN: std::sync::LazyLock<MatchCidrV4Fn> = std::sync::LazyLock::new(|| {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
-        velda_core::hardware::RegisterWidth::Bits256 => match_cidr_v4_256,
-        velda_core::hardware::RegisterWidth::Bits128 => match_cidr_v4_128,
-        velda_core::hardware::RegisterWidth::Bits64 => match_cidr_v4_64,
-        velda_core::hardware::RegisterWidth::Bits32 => match_cidr_v4_32,
+/// Evaluates IPv4 CIDR rules using hardware vector registers.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn match_cidr_v4(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { match_cidr_v4_256_x86_impl(ip, nets, masks) }
+        } else {
+            unsafe { match_cidr_v4_128_x86_impl(ip, nets, masks) }
+        }
     }
-});
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { match_cidr_v4_128_neon_impl(ip, nets, masks) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            match_cidr_v4_64(ip, nets, masks)
+        } else {
+            match_cidr_v4_32(ip, nets, masks)
+        }
+    }
+}
 
 /// Evaluates 8 IPv4 CIDR rules per cycle using 256-bit vector registers.
 #[inline]
@@ -454,9 +469,7 @@ impl IpFilterPlugin {
     #[inline(always)]
     fn matches_allow(&self, ip: ParsedIp) -> bool {
         match ip {
-            ParsedIp::V4(bits) => {
-                (*MATCH_CIDR_V4_FN)(bits, &self.allow_v4_nets, &self.allow_v4_masks)
-            }
+            ParsedIp::V4(bits) => match_cidr_v4(bits, &self.allow_v4_nets, &self.allow_v4_masks),
             ParsedIp::V6(bits) => {
                 for &(net, mask) in &self.allow_v6 {
                     if (bits & mask) == net {
@@ -471,9 +484,7 @@ impl IpFilterPlugin {
     #[inline(always)]
     fn matches_deny(&self, ip: ParsedIp) -> bool {
         match ip {
-            ParsedIp::V4(bits) => {
-                (*MATCH_CIDR_V4_FN)(bits, &self.deny_v4_nets, &self.deny_v4_masks)
-            }
+            ParsedIp::V4(bits) => match_cidr_v4(bits, &self.deny_v4_nets, &self.deny_v4_masks),
             ParsedIp::V6(bits) => {
                 for &(net, mask) in &self.deny_v6 {
                     if (bits & mask) == net {

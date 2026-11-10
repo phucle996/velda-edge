@@ -341,30 +341,38 @@ pub fn to_base64(bytes: &[u8]) -> String {
 }
 
 /// Signature for register-width-specific constant-time byte comparison functions.
+#[allow(dead_code)]
 pub type ConstantTimeEqFn = fn(a: &[u8], b: &[u8]) -> bool;
 
-/// Pre-resolved static function pointer for constant-time comparison (up to 256-bit SIMD).
-pub static CONSTANT_TIME_EQ_FN: std::sync::LazyLock<ConstantTimeEqFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities;
-        match caps.select_for_workload(velda_core::hardware::RegisterWidth::Bits256) {
-            velda_core::hardware::RegisterWidth::Bits256 => constant_time_eq_256,
-            velda_core::hardware::RegisterWidth::Bits128 => constant_time_eq_128,
-            velda_core::hardware::RegisterWidth::Bits64 => constant_time_eq_64bit,
-            velda_core::hardware::RegisterWidth::Bits32 => constant_time_eq_32bit,
-        }
-    });
-
 /// Constant-time byte slice comparison using hardware vector registers (up to 256-bit max)
-/// to eliminate timing side-channel attacks with zero hot-path branching.
-#[inline]
+/// to eliminate timing side-channel attacks.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    (*CONSTANT_TIME_EQ_FN)(a, b)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { constant_time_eq_256_x86_impl(a, b) }
+        } else {
+            unsafe { constant_time_eq_128_x86_impl(a, b) }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { constant_time_eq_128_neon_impl(a, b) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            constant_time_eq_64bit(a, b)
+        } else {
+            constant_time_eq_32bit(a, b)
+        }
+    }
 }
 
 /// Constant-time comparison using 256-bit vector registers (32 bytes per iteration).

@@ -4,7 +4,6 @@
 //! header fingerprint filtering across AVX2 (256-bit), SSE2 (128-bit), and scalar fallback.
 
 use http::header::HeaderName;
-use std::sync::LazyLock;
 
 /// Computes an 8-bit hash fingerprint for a header name for SIMD vector probing.
 ///
@@ -21,9 +20,11 @@ pub fn compute_header_fingerprint(name: &HeaderName) -> u8 {
 }
 
 /// Function signature for SIMD RFC 9110 header value validation.
+#[allow(dead_code)]
 pub type ValidateHeaderValFn = fn(val: &[u8]) -> bool;
 
 /// Function signature for SIMD 32-slot fingerprint vector matching.
+#[allow(dead_code)]
 pub type FingerprintMatchFn = fn(fingerprints: &[u8; 32], fp_len: usize, target: u8) -> bool;
 
 // ── 1. RFC 9110 Header Value Validation ──────────────────────────────
@@ -224,50 +225,40 @@ pub unsafe fn avx2_fingerprint_match(fingerprints: &[u8; 32], fp_len: usize, tar
     }
 }
 
-// ── Dynamic Hardware Dispatch ────────────────────────────────────────
-
-fn detect_validate_fn() -> ValidateHeaderValFn {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            return |val| unsafe { avx2_validate_header_value(val) };
-        }
-        if is_x86_feature_detected!("sse2") {
-            return |val| unsafe { sse2_validate_header_value(val) };
-        }
-    }
-    scalar_validate_header_value
-}
-
-fn detect_fingerprint_fn() -> FingerprintMatchFn {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            return |fps, len, target| unsafe { avx2_fingerprint_match(fps, len, target) };
-        }
-        if is_x86_feature_detected!("sse2") {
-            return |fps, len, target| unsafe { sse2_fingerprint_match(fps, len, target) };
-        }
-    }
-    scalar_fingerprint_match
-}
-
-/// Dynamic function pointer for hardware-accelerated RFC 9110 header validation.
-pub static VALIDATE_HEADER_VALUE: LazyLock<ValidateHeaderValFn> = LazyLock::new(detect_validate_fn);
-
-/// Dynamic function pointer for hardware-accelerated fingerprint vector probe.
-pub static FINGERPRINT_MATCH: LazyLock<FingerprintMatchFn> = LazyLock::new(detect_fingerprint_fn);
+// ── Hardware Vector Dispatch ──────────────────────────────────────────
 
 /// Validates a header value slice using the optimal CPU instruction set.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn validate_header_value_simd(val: &[u8]) -> bool {
-    (*VALIDATE_HEADER_VALUE)(val)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { avx2_validate_header_value(val) };
+        }
+        if is_x86_feature_detected!("sse2") {
+            return unsafe { sse2_validate_header_value(val) };
+        }
+    }
+    scalar_validate_header_value(val)
 }
 
 /// Probes a header fingerprint against a precomputed 32-entry vector using SIMD instructions.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn fingerprint_matches_simd(fingerprints: &[u8; 32], fp_len: usize, target: u8) -> bool {
-    (*FINGERPRINT_MATCH)(fingerprints, fp_len, target)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { avx2_fingerprint_match(fingerprints, fp_len, target) };
+        }
+        if is_x86_feature_detected!("sse2") {
+            return unsafe { sse2_fingerprint_match(fingerprints, fp_len, target) };
+        }
+    }
+    scalar_fingerprint_match(fingerprints, fp_len, target)
 }
 
 #[cfg(test)]

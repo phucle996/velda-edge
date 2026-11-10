@@ -107,7 +107,9 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::response::{HealthProbeTokens, ProbeEvalFn, evaluate_path, resolve_eval_fn};
+use super::response::{
+    HealthProbeTokens, ProbeEvalFn, eval_probe_request, evaluate_path, resolve_eval_fn,
+};
 use super::state::HealthState;
 use crate::background::BackgroundPlugin;
 use crate::error::PluginError;
@@ -234,22 +236,22 @@ impl HealthProbePlugin {
         evaluate_path(config, state, path)
     }
 
-    /// Evaluates raw request buffer using pre-resolved function pointer.
+    /// Evaluates raw request buffer using direct SWAR evaluation without indirect call overhead.
     #[inline(always)]
     pub fn evaluate_request(&self, req_buf: &[u8]) -> &'static [u8] {
-        (self.eval_fn)(req_buf, &self.state, &self.tokens, &self.config)
+        eval_probe_request(req_buf, &self.state, &self.tokens, &self.config)
     }
 
     /// Handles a single incoming probe connection using a stack-allocated buffer.
     ///
     /// # Zero-Allocation & Early-Exit Invariants
     /// - If the peer connects and closes without sending bytes (`n == 0`), returns immediately.
-    /// - Dispatches buffer through `eval_fn` directly to contiguous L1D cache-resident responses.
+    /// - Dispatches buffer directly without indirect function pointer calls.
     pub async fn handle_connection(
         config: &HealthProbeConfig,
         state: &HealthState,
         tokens: &HealthProbeTokens,
-        eval_fn: ProbeEvalFn,
+        _eval_fn: ProbeEvalFn,
         mut stream: tokio::net::TcpStream,
     ) {
         let mut buf = [0u8; 512];
@@ -258,7 +260,7 @@ impl HealthProbePlugin {
             return;
         }
 
-        let response = eval_fn(&buf[..n], state, tokens, config);
+        let response = eval_probe_request(&buf[..n], state, tokens, config);
         let _ = stream.write_all(response).await;
     }
 }

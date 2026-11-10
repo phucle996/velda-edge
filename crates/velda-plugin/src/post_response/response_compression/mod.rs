@@ -21,4 +21,4 @@ pub use negotiation::{
     parse_accept_encoding, parse_accept_encoding_stack,
 };
 pub use plugin::ResponseCompressionPlugin;
-pub use simd::{STREAMING_COPY, StreamingCopyFn, streaming_to_bytes};
+pub use simd::{STREAMING_COPY, StreamingCopyFn, streaming_copy, streaming_to_bytes};

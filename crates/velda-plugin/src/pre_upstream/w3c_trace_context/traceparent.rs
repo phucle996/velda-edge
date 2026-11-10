@@ -4,10 +4,7 @@
 //! conforming to the W3C TraceContext Recommendation:
 //! `version-trace_id-parent_id-trace_flags` (e.g. `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`).
 
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use velda_core::global_hardware_topology;
-use velda_core::hardware::RegisterWidth;
 
 /// Global atomic sequence counter for generating unique 64-bit span IDs.
 static SPAN_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -32,39 +29,6 @@ const HEX_VALID_TABLE: [bool; 256] = {
     }
     t
 };
-
-type ValidateHex32Fn = fn(&[u8; 32]) -> bool;
-type ValidateHex16Fn = fn(&[u8; 16]) -> bool;
-
-static VALIDATE_HEX_32_FN: LazyLock<ValidateHex32Fn> = LazyLock::new(|| {
-    let width = global_hardware_topology()
-        .cpu
-        .register_capabilities
-        .select_for_workload(RegisterWidth::Bits256);
-    match width {
-        #[cfg(target_arch = "x86_64")]
-        RegisterWidth::Bits256 => validate_hex_32_256,
-        #[cfg(target_arch = "x86_64")]
-        RegisterWidth::Bits128 => validate_hex_32_128,
-        #[cfg(target_arch = "aarch64")]
-        RegisterWidth::Bits128 | RegisterWidth::Bits256 => validate_hex_32_128,
-        RegisterWidth::Bits64 => validate_hex_32_64,
-        _ => validate_hex_32_32,
-    }
-});
-
-static VALIDATE_HEX_16_FN: LazyLock<ValidateHex16Fn> = LazyLock::new(|| {
-    let width = global_hardware_topology()
-        .cpu
-        .register_capabilities
-        .select_for_workload(RegisterWidth::Bits128);
-    match width {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        RegisterWidth::Bits128 | RegisterWidth::Bits256 => validate_hex_16_128,
-        RegisterWidth::Bits64 => validate_hex_16_64,
-        _ => validate_hex_16_32,
-    }
-});
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -92,6 +56,7 @@ unsafe fn validate_hex_32_avx2_inner(buf: &[u8; 32]) -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 fn validate_hex_32_256(buf: &[u8; 32]) -> bool {
     unsafe { validate_hex_32_avx2_inner(buf) }
 }
@@ -193,6 +158,7 @@ fn validate_hex_only_16_128(buf: &[u8; 16]) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn validate_hex_16_64(buf: &[u8; 16]) -> bool {
     const ZERO_8: u64 = 0x3030_3030_3030_3030;
     let w0 = unsafe { (buf.as_ptr() as *const u64).read_unaligned() };
@@ -207,6 +173,7 @@ fn validate_hex_16_64(buf: &[u8; 16]) -> bool {
     ok
 }
 
+#[allow(dead_code)]
 fn validate_hex_16_32(buf: &[u8; 16]) -> bool {
     const ZERO_4: u32 = 0x3030_3030;
     let ptr = buf.as_ptr();
@@ -224,6 +191,7 @@ fn validate_hex_16_32(buf: &[u8; 16]) -> bool {
     ok
 }
 
+#[allow(dead_code)]
 fn validate_hex_32_64(buf: &[u8; 32]) -> bool {
     const ZERO_8: u64 = 0x3030_3030_3030_3030;
     let ptr = buf.as_ptr();
@@ -241,6 +209,7 @@ fn validate_hex_32_64(buf: &[u8; 32]) -> bool {
     ok
 }
 
+#[allow(dead_code)]
 fn validate_hex_32_32(buf: &[u8; 32]) -> bool {
     let lo: &[u8; 16] = buf[0..16].try_into().unwrap();
     let hi: &[u8; 16] = buf[16..32].try_into().unwrap();
@@ -261,16 +230,54 @@ fn validate_hex_32_32(buf: &[u8; 32]) -> bool {
     ok
 }
 
-/// Validates a 32-byte ASCII hex slice (and rejects all-zeros) using the hardware-selected register function pointer.
+/// Validates a 32-byte ASCII hex slice (and rejects all-zeros) using hardware-vectorized routines.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn is_valid_nonzero_hex_32(buf: &[u8; 32]) -> bool {
-    (VALIDATE_HEX_32_FN)(buf)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { validate_hex_32_avx2_inner(buf) }
+        } else {
+            validate_hex_32_128(buf)
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        validate_hex_32_128(buf)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            validate_hex_32_64(buf)
+        } else {
+            validate_hex_32_32(buf)
+        }
+    }
 }
 
-/// Validates a 16-byte ASCII hex slice (and rejects all-zeros) using the hardware-selected register function pointer.
+/// Validates a 16-byte ASCII hex slice (and rejects all-zeros) using hardware-vectorized routines.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn is_valid_nonzero_hex_16(buf: &[u8; 16]) -> bool {
-    (VALIDATE_HEX_16_FN)(buf)
+    #[cfg(target_arch = "x86_64")]
+    {
+        validate_hex_16_128(buf)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        validate_hex_16_128(buf)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            validate_hex_16_64(buf)
+        } else {
+            validate_hex_16_32(buf)
+        }
+    }
 }
 
 /// Parsed view of a valid incoming W3C `traceparent` header.

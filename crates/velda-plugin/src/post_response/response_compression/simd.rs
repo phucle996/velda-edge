@@ -122,10 +122,27 @@ fn detect_streaming_copy_fn() -> StreamingCopyFn {
     scalar_streaming_copy
 }
 
+/// Hardware-optimized non-temporal memory streaming copy.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn streaming_copy(src: &[u8], dst: &mut [u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { avx2_streaming_copy_impl(src, dst) };
+        }
+        if is_x86_feature_detected!("sse2") {
+            return unsafe { sse2_streaming_copy_impl(src, dst) };
+        }
+    }
+    scalar_streaming_copy(src, dst);
+}
+
 /// Globally bound, hardware-optimized non-temporal memory streaming copy function pointer.
 pub static STREAMING_COPY: LazyLock<StreamingCopyFn> = LazyLock::new(detect_streaming_copy_fn);
 
-/// Writes compressed bytes directly to RAM using the hardware-optimal non-temporal streaming function pointer.
+/// Writes compressed bytes directly to RAM using hardware-vectorized non-temporal streaming routines.
 ///
 /// Bypasses L1/L2/L3 CPU caches, preventing multi-kilobyte compressed payload frames
 /// from displacing critical route tables or connection pool structures.
@@ -135,7 +152,7 @@ pub fn streaming_to_bytes(src: &[u8]) -> Bytes {
         return Bytes::new();
     }
     let mut out = vec![0u8; src.len()];
-    (*STREAMING_COPY)(src, &mut out);
+    streaming_copy(src, &mut out);
     Bytes::from(out)
 }
 

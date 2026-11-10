@@ -12,54 +12,69 @@
 //! The optimal implementation is resolved **once at gateway bootstrap** via `LazyLock`
 //! probing the probed `velda_core::global_hardware_topology().cpu.register_capabilities`.
 
-use std::sync::LazyLock;
-use velda_core::hardware::RegisterWidth;
-
 use super::span::PackedOtlpSpan;
 
 /// Function pointer signature for copying a 256-byte aligned `PackedOtlpSpan`.
+#[allow(dead_code)]
 pub type CopySpanFn = fn(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan);
 
-/// Pre-resolved static function pointer matching host CPU register width.
-pub static COPY_SPAN_FN: LazyLock<CopySpanFn> = LazyLock::new(|| {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => copy_span_256,
-        RegisterWidth::Bits128 => copy_span_128,
-        RegisterWidth::Bits64 => copy_span_64,
-        RegisterWidth::Bits32 => copy_span_portable,
-    }
-});
-
 /// Transfers a 256-byte `PackedOtlpSpan` using the optimal CPU register width.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn copy_span(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan) {
-    (*COPY_SPAN_FN)(dst, src);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { copy_span_avx2_impl(dst, src) };
+        } else {
+            copy_span_128(dst, src);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        copy_span_128(dst, src);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            copy_span_64(dst, src);
+        } else {
+            copy_span_portable(dst, src);
+        }
+    }
 }
 
 /// Function pointer signature for non-temporal streaming store of a 256-byte `PackedOtlpSpan`.
+#[allow(dead_code)]
 pub type StreamSpanFn = fn(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan);
-
-/// Pre-resolved static function pointer for non-temporal streaming writes bypassing L1/L2/L3 cache.
-pub static STREAM_SPAN_FN: LazyLock<StreamSpanFn> = LazyLock::new(|| {
-    let caps = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities;
-    match caps.select_for_workload(RegisterWidth::Bits256) {
-        RegisterWidth::Bits256 => stream_span_256,
-        RegisterWidth::Bits128 => stream_span_128,
-        RegisterWidth::Bits64 => stream_span_64,
-        RegisterWidth::Bits32 => stream_span_portable,
-    }
-});
 
 /// Non-temporal streaming store: writes a 256-byte `PackedOtlpSpan` directly into RAM via
 /// Write-Combining Buffers, bypassing CPU cache levels (L1/L2/L3) to prevent cache pollution.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn stream_span(dst: &mut PackedOtlpSpan, src: &PackedOtlpSpan) {
-    (*STREAM_SPAN_FN)(dst, src);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { stream_span_avx2_impl(dst, src) };
+        } else {
+            stream_span_128(dst, src);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        stream_span_128(dst, src);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            stream_span_64(dst, src);
+        } else {
+            stream_span_portable(dst, src);
+        }
+    }
 }
 
 /// Issues a non-temporal prefetch hint (`_MM_HINT_NTA`) across the 256-byte span (4 cache lines).
