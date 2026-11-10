@@ -9,6 +9,75 @@
 //! 4. **Ephemeral Route Injection**: Pre-bakes the HTTP-01 wire response and injects the challenge route into
 //!    [`Router`] with RAII teardown, guaranteeing zero memory or route leakage on success, failure, or timeout.
 //! 5. **Zero-Downtime Hot-Swap**: Atomically hot-swaps renewed certificates into `velda-tls::SniResolver`.
+//!
+//! # Architecture & Execution Mechanics
+//!
+//! ```text
+//!  +========================================================================================+
+//!  |                      SHADOW LOGISTICS THREAD (SCHED_IDLE)                              |
+//!  |                                                                                        |
+//!  |   [ Bootstrap / Cron "0 2 * * *" ]                                                     |
+//!  |                 |                                                                      |
+//!  |                 v                                                                      |
+//!  |       { Check Disk Expiry } ------------------------------------> (Cert Valid: Sleep)  |
+//!  |                 | (Missing / Expiring <= 30d)                                          |
+//!  |                 v                                                                      |
+//!  |       [ RFC 8555 ACME Client ] <--------------------+                                  |
+//!  |                 | (Order HTTP-01 Challenge)         | (Retry with Exp Backoff)         |
+//!  |                 v                                   |                                  |
+//!  |       [ Pre-bake Response Chunk ]                   |                                  |
+//!  |                 |                                   |                                  |
+//!  |                 +---------------+                   |                                  |
+//!  |                 |               |                   |                                  |
+//!  |                 v               v                   |                                  |
+//!  |     +--------------------+   +-------------------+  |                                  |
+//!  |     |   ChallengeStore   |   |   RouterRegistry  |  |                                  |
+//!  |     | (Store Pre-baked)  |   | (Inject Ephemeral)|  |                                  |
+//!  |     +--------------------+   +-------------------+  |                                  |
+//!  |                 |                      |            |                                  |
+//!  |                 |    +-----------------+            |                                  |
+//!  |                 |    | (RAII EphemeralRouteGuard)   |                                  |
+//!  |                 v    v                              |                                  |
+//!  +=================|====|==============================|==================================+
+//!                    |    |                              |
+//!  +=================|====|==============================|==================================+
+//!  |                 |    |   FRONTLINE TRAFFIC WORKER   |                                  |
+//!  |                 |    |                              |                                  |
+//!  |                 v    v                              |                                  |
+//!  |        [ velda-router::Router ]                     |                                  |
+//!  |             ^                                       |                                  |
+//!  |             | HTTP-01 Ingress                       |                                  |
+//!  |             | (/.well-known/acme-challenge/<token>) |                                  |
+//!  |        [ ACME CA Server ]                           |                                  |
+//!  |             |                                       |                                  |
+//!  |             v (Validated / Failed)                  |                                  |
+//!  +=============|=======================================|==================================+
+//!                |                                       |
+//!  +=============|=======================================|==================================+
+//!  |             v                                       |                                  |
+//!  |   [ Poll Order State ] -----------------------------+ (Failure / Network Stall)        |
+//!  |             | (Status: valid)                                                          |
+//!  |             v                                                                          |
+//!  |   [ Generate P-256 CSR & Finalize ]                                                    |
+//!  |             |                                                                          |
+//!  |             v                                                                          |
+//!  |   [ Download Certificate Fullchain ]                                                   |
+//!  |             |                                                                          |
+//!  |             +-----------------------+                                                  |
+//!  |             |                       |                                                  |
+//!  |             v                       v                                                  |
+//!  |   [ Atomic Disk Write ]   [ Atomic TLS Hot-Swap ]                                      |
+//!  |   (tmp file -> rename)    (into SniResolver)                                           |
+//!  |             |                       |                                                  |
+//!  |             +-----------+-----------+                                                  |
+//!  |                         |                                                              |
+//!  |                         v                                                              |
+//!  |         [ Drop EphemeralRouteGuard (RAII) ]                                            |
+//!  |         - Purge token from ChallengeStore                                              |
+//!  |         - Remove route from velda-router::Router                                       |
+//!  |         (Unconditional cleanup on Success / Error / Panic)                             |
+//!  +========================================================================================+
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;
