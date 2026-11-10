@@ -79,19 +79,11 @@ pub fn b64url_encode32(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     b64url_encode32_scalar(src, out);
 }
 
-/// Resolves (once, cached) the best encoder for the host CPU: SSSE3 vector path when
-/// available, otherwise the portable scalar path.
+/// Resolves the best encoder for the host CPU.
+///
+/// Kept for crate API compatibility; internally delegates directly to inlined `b64url_encode32`.
 pub fn resolve_b64url_encode32() -> B64Encode32Fn {
-    static RESOLVED: std::sync::OnceLock<B64Encode32Fn> = std::sync::OnceLock::new();
-    *RESOLVED.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if std::is_x86_feature_detected!("ssse3") {
-                return b64url_encode32_ssse3;
-            }
-        }
-        b64url_encode32_scalar
-    })
+    b64url_encode32
 }
 
 /// Portable fallback: delegates to the `base64` crate, writing into the caller's stack buffer.
@@ -106,6 +98,7 @@ fn b64url_encode32_scalar(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
 /// Layout for 32 bytes: two vector blocks cover input `[0..12)` and `[12..24)` -> chars
 /// `[0..32)`; the remaining 8 input bytes (`[24..32)`, 11 chars) go through the scalar path.
 /// 24 is a multiple of 3, so the concatenation is exactly the unpadded base64url string.
+#[allow(dead_code)]
 fn b64url_encode32_ssse3(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     #[cfg(target_arch = "x86_64")]
     {
