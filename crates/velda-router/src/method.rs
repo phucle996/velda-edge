@@ -145,10 +145,20 @@ pub fn match_packed_methods_32(packed_masks: u64, req_mask: u16) -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
-/// Evaluates 4 packed route method masks in parallel via the bootstrap-resolved function pointer.
+/// Evaluates 4 packed route method masks in parallel with zero indirect call overhead.
+///
+/// Inlines directly at caller sites, compiling down to 2 instructions (`imul` + `and`)
+/// on 64-bit targets with zero heap, zero stack allocation, and zero function call penalty.
 #[inline(always)]
 pub fn match_packed_methods(packed_masks: u64, req: MethodMask) -> u64 {
-    (*MATCH_PACKED_METHODS_FN)(packed_masks, req.0)
+    #[cfg(target_pointer_width = "64")]
+    {
+        match_packed_methods_64(packed_masks, req.0)
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        match_packed_methods_32(packed_masks, req.0)
+    }
 }
 
 #[cfg(test)]

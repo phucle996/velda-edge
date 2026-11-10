@@ -411,12 +411,16 @@ impl ListenerHttp1Router {
 
     /// Resolves an HTTP/1.1 route for an incoming request view.
     ///
-    /// Evaluates using the pre-bound workload-adaptive function pointer:
+    /// Evaluates using inlined workload-adaptive dispatch:
     /// - For small listeners (<= 3 routes): executes unrolled scalar [`route_small`].
     /// - For large listeners (> 3 routes): executes exact FxHashMap + flat Slash-Block [`route_table`].
     #[inline(always)]
     pub fn route(&self, req: &Http1RouteRequest<'_>) -> Option<&Http1Route> {
-        (self.route_fn)(self, req)
+        if !self.small_candidates.is_empty() {
+            route_small(self, req)
+        } else {
+            route_table(self, req)
+        }
     }
 
     /// Dynamically registers an ephemeral exact-path route into this listener's router.

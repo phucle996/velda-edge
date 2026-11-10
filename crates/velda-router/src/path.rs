@@ -187,11 +187,37 @@ pub static COMMON_PREFIX_LEN_FN: std::sync::LazyLock<CommonPrefixLenFn> =
         }
     });
 
-/// Computes common prefix length between two strings using the bootstrap-resolved
-/// hardware-accelerated register function pointer.
-#[inline]
+/// Computes common prefix length between two strings with zero indirect call overhead.
+///
+/// Inlines hardware vector registers (SSE2/AVX2 on x86_64, NEON on aarch64) directly into
+/// the radix tree traversal loop, eliminating function pointer dereferences and indirect branches.
+#[inline(always)]
 pub fn common_prefix_len(a: &str, b: &str) -> usize {
-    (*COMMON_PREFIX_LEN_FN)(a.as_bytes(), b.as_bytes())
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    #[cfg(target_arch = "x86_64")]
+    {
+        if ab.len() >= 32 && bb.len() >= 32 && std::is_x86_feature_detected!("avx2") {
+            common_prefix_len_256(ab, bb)
+        } else {
+            common_prefix_len_128(ab, bb)
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        common_prefix_len_128(ab, bb)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        #[cfg(target_pointer_width = "64")]
+        {
+            common_prefix_len_64(ab, bb)
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            common_prefix_len_32(ab, bb)
+        }
+    }
 }
 
 /// Computes common prefix length using 256-bit AVX2 vector registers (32 bytes per iteration).

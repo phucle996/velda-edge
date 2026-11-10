@@ -193,6 +193,22 @@ pub fn compare_labels_quad_32(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
     ((e0_lo ^ a0_lo) | (e0_hi ^ a0_hi) | (e1_lo ^ a1_lo) | (e1_hi ^ a1_hi)) == 0
 }
 
+/// Compares two label words simultaneously with zero indirect call overhead.
+///
+/// Inlines directly at caller sites, compiling down to 3 instructions (`xor`, `xor`, `or`)
+/// on 64-bit targets with zero stack allocations and zero function call penalty.
+#[inline(always)]
+pub fn compare_labels_dual(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
+    #[cfg(target_pointer_width = "64")]
+    {
+        compare_labels_dual_64(e0, e1, a0, a1)
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        compare_labels_quad_32(e0, e1, a0, a1)
+    }
+}
+
 /// Pre-compiled, zero-allocation host routing rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledHost {
@@ -245,7 +261,7 @@ impl CompiledHost {
 
                 // Standard 2-label suffix (e.g. "*.example.com" -> ["com", "example"])
                 if *suffix_count == 2 {
-                    let words_match = (*COMPARE_LABELS_DUAL_FN)(
+                    let words_match = compare_labels_dual(
                         suffix.blocks[0].word,
                         suffix.blocks[1].word,
                         actual.blocks[0].word,
@@ -274,7 +290,7 @@ impl CompiledHost {
 
                 // Standard 2-label domain (e.g. "example.com" -> ["com", "example"])
                 if expected.count == 2 {
-                    let words_match = (*COMPARE_LABELS_DUAL_FN)(
+                    let words_match = compare_labels_dual(
                         expected.blocks[0].word,
                         expected.blocks[1].word,
                         actual.blocks[0].word,
@@ -287,7 +303,7 @@ impl CompiledHost {
 
                 // Standard 3-label domain (e.g. "api.example.com" -> ["com", "example", "api"])
                 if expected.count == 3 {
-                    let suffix_words_match = (*COMPARE_LABELS_DUAL_FN)(
+                    let suffix_words_match = compare_labels_dual(
                         expected.blocks[0].word,
                         expected.blocks[1].word,
                         actual.blocks[0].word,
