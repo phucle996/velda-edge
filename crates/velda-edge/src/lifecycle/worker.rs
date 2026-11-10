@@ -241,17 +241,20 @@ pub fn spawn_shadow_worker(
 
             rt.block_on(async move {
                 let traffic_handle = traffic_handle_rx.await.ok();
-                // Dedicated outbound client probe socket bound to 60k port range (single socket per worker lane)
+                // Dedicated outbound client probe socket registered via Core SocketManager (SocketRole::Shadow)
                 let heal_port = 60000 + (worker_id as u16 & 0x3FF);
                 let heal_addr = std::net::SocketAddr::new(
                     std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                     heal_port,
                 );
-                let sock_cfg = velda_sock::UdpSocketConfig {
-                    reuseport: true,
-                    ..Default::default()
-                };
-                let heal_sock = velda_sock::UdpSocket::bind(heal_addr, sock_cfg).ok();
+                let shadow_id = format!("shadow_probe_worker_{worker_id}");
+                let heal_sock = velda_core::global_socket_manager()
+                    .acquire_shadow_udp(heal_addr, &shadow_id)
+                    .ok()
+                    .and_then(|std_sock| {
+                        let _ = std_sock.set_nonblocking(true);
+                        tokio::net::UdpSocket::from_std(std_sock).ok()
+                    });
 
                 // Unified JoinSet for process-wide background services on Worker 0
                 let mut bg_tasks = JoinSet::new();
@@ -395,6 +398,8 @@ pub fn spawn_shadow_worker(
                 // Gracefully cancel and flush all active tasks in both sets
                 shadow_tasks.shutdown().await;
                 bg_tasks.shutdown().await;
+                velda_core::global_socket_manager()
+                    .release_shadow_udp(&format!("shadow_probe_worker_{worker_id}"));
             });
         })
         .expect("Failed to spawn shadow worker thread")

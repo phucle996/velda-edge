@@ -79,7 +79,7 @@ impl UdpUpstream {
     pub async fn check_active_health(
         &self,
         _lane: usize,
-        heal_sock: Option<&velda_sock::UdpSocket>,
+        heal_sock: Option<&tokio::net::UdpSocket>,
     ) {
         let health = self.inner.health();
         let active_cfg = match health.config().active.as_ref() {
@@ -107,7 +107,7 @@ impl UdpUpstream {
         for ep in all_eps {
             let addr = ep.address;
             let success = if let Some(sock) = heal_sock {
-                sock.inner().try_send_to(b"ping", addr).is_ok()
+                sock.try_send_to(b"ping", addr).is_ok()
             } else {
                 false
             };

@@ -294,7 +294,7 @@ impl UpstreamTable {
         &self,
         lane: usize,
         seed: u32,
-        heal_sock: Option<&velda_sock::UdpSocket>,
+        heal_sock: Option<&tokio::net::UdpSocket>,
     ) {
         for http_up in self.http.values() {
             match http_up.as_ref() {
