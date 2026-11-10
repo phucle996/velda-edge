@@ -43,22 +43,6 @@ impl fmt::Debug for ShardedServerSessionCache {
     }
 }
 
-type HashSessionKeyFn = fn(&[u8]) -> usize;
-
-static HASH_SESSION_KEY_FN: std::sync::LazyLock<HashSessionKeyFn> =
-    std::sync::LazyLock::new(|| {
-        let width = velda_core::global_hardware_topology()
-            .cpu
-            .register_capabilities
-            .select_for_workload(velda_core::hardware::RegisterWidth::Bits64);
-        match width {
-            velda_core::hardware::RegisterWidth::Bits64
-            | velda_core::hardware::RegisterWidth::Bits128
-            | velda_core::hardware::RegisterWidth::Bits256 => hash_session_key_64,
-            velda_core::hardware::RegisterWidth::Bits32 => hash_session_key_32,
-        }
-    });
-
 #[inline]
 fn hash_session_key_64(bytes: &[u8]) -> usize {
     const OFFSET: u64 = 0xcbf29ce484222325;
@@ -84,6 +68,7 @@ fn hash_session_key_64(bytes: &[u8]) -> usize {
     (h ^ (h >> 32)) as usize
 }
 
+#[allow(dead_code)]
 #[inline]
 fn hash_session_key_32(bytes: &[u8]) -> usize {
     const OFFSET: u64 = 0xcbf29ce484222325;
@@ -109,9 +94,17 @@ fn hash_session_key_32(bytes: &[u8]) -> usize {
     (h ^ (h >> 32)) as usize
 }
 
+/// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 fn hash_session_key(bytes: &[u8]) -> usize {
-    (HASH_SESSION_KEY_FN)(bytes)
+    #[cfg(target_pointer_width = "64")]
+    {
+        hash_session_key_64(bytes)
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        hash_session_key_32(bytes)
+    }
 }
 
 impl ShardedServerSessionCache {
