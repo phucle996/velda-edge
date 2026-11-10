@@ -17,6 +17,7 @@ pub struct UdpUpstream {
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
     acceleration: UdpAccelerationPath,
+    last_probe_sec: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for UdpUpstream {
@@ -34,6 +35,7 @@ impl UdpUpstream {
         Self {
             inner,
             acceleration,
+            last_probe_sec: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -71,5 +73,53 @@ impl UdpUpstream {
         target: SocketAddr,
     ) -> Result<tokio::net::UdpSocket, std::io::Error> {
         connect_udp_socket(target, &self.acceleration)
+    }
+
+    /// Performs periodic active health check across all physical endpoints for `lane`.
+    pub async fn check_active_health(&self, lane: usize) {
+        let health = self.inner.health();
+        let active_cfg = match health.config().active.as_ref() {
+            Some(a) if a.enabled => a,
+            _ => return,
+        };
+
+        let now_sec = velda_core::coarse_now_sec();
+        let interval_sec = active_cfg.interval.as_secs().max(1);
+        let last = self
+            .last_probe_sec
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_sec < last + interval_sec {
+            return;
+        }
+        self.last_probe_sec
+            .store(now_sec, std::sync::atomic::Ordering::Relaxed);
+
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        let local_port = 60000 + (lane as u16 & 0x3FF);
+        for ep in all_eps {
+            let addr = ep.address;
+            let bind_addr = if addr.is_ipv4() {
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    local_port,
+                )
+            } else {
+                SocketAddr::new(
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                    local_port,
+                )
+            };
+            let success = if let Ok(socket) = std::net::UdpSocket::bind(bind_addr) {
+                socket.connect(addr).is_ok()
+            } else {
+                false
+            };
+            health.record_active_result(&addr, success);
+        }
     }
 }

@@ -106,6 +106,49 @@ impl<R: PoolableResource> SubPool<R> {
         None
     }
 
+    /// Pops a random candidate connection using Lemire's Fast Alternative to Modulo
+    /// (no `div` instruction) for non-biased background active health probing.
+    pub fn pop_random_candidate(
+        &mut self,
+        idle_timeout: Duration,
+        max_lifetime: Option<Duration>,
+        now: Instant,
+        seed: u32,
+    ) -> Option<R> {
+        let safe_idle_cutoff = idle_timeout.saturating_mul(3) / 4;
+
+        while !self.idle_resources.is_empty() {
+            let len = self.idle_resources.len();
+            // Lemire's FastRange: ((seed as u64 * len as u64) >> 32) as usize
+            let idx = if len > 1 {
+                ((seed as u64 * len as u64) >> 32) as usize
+            } else {
+                0
+            };
+            let resource = self.idle_resources.swap_remove(idx.min(len - 1));
+            let is_idle_valid =
+                now.saturating_duration_since(resource.last_used_at()) <= safe_idle_cutoff;
+            let is_lifetime_valid = match max_lifetime {
+                Some(ttl) => now.saturating_duration_since(resource.created_at()) <= ttl,
+                None => true,
+            };
+
+            if is_idle_valid && is_lifetime_valid {
+                if self.idle_resources.is_empty() {
+                    self.empty_since = Some(now);
+                }
+                return Some(resource);
+            }
+            let mut dead = resource;
+            dead.close();
+        }
+
+        if self.idle_resources.is_empty() && self.empty_since.is_none() {
+            self.empty_since = Some(now);
+        }
+        None
+    }
+
     /// Attempts to acquire an idle resource respecting health, idle expiration, and max lifetime.
     ///
     /// Uses LIFO (Last-In-First-Out) retrieval: the most recently used connection is

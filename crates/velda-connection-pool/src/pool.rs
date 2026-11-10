@@ -357,6 +357,56 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         shard.record_release();
     }
 
+    /// Attempts to acquire an idle connection chosen via pseudo-random sampling (FastRange)
+    /// from the specified worker lane shard, preventing zombie connections from rotting in the pool.
+    pub fn acquire_random_from_lane(
+        &self,
+        key: &K,
+        lane: usize,
+        idle_timeout: Duration,
+        seed: u32,
+    ) -> Option<R> {
+        let now = Instant::now();
+        let shard = self.shards.shard_for_lane(key, lane);
+        loop {
+            let candidate = {
+                let mut table = shard.lock();
+                if let Some(subpool) = table.get_mut(key) {
+                    subpool.pop_random_candidate(idle_timeout, self.config.max_lifetime, now, seed)
+                } else {
+                    None
+                }
+            };
+
+            match candidate {
+                Some(mut resource) => {
+                    if resource.is_healthy() {
+                        resource.touch_at(now);
+                        shard.record_hit();
+                        return Some(resource);
+                    } else {
+                        resource.close();
+                    }
+                }
+                None => break,
+            }
+        }
+        None
+    }
+
+    /// Drains and closes all idle connections for `key` in the designated worker lane shard.
+    pub fn drain_endpoint_from_lane(&self, key: &K, lane: usize) -> usize {
+        let shard = self.shards.shard_for_lane(key, lane);
+        let mut table = shard.lock();
+        if let Some(mut subpool) = table.remove(key) {
+            let count = subpool.len();
+            subpool.clear();
+            count
+        } else {
+            0
+        }
+    }
+
     // ------------------------------------------------------------------------
     // Sweeping, Eviction, and Draining Operations
     // ------------------------------------------------------------------------

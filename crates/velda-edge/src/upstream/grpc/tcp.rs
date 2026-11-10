@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
@@ -54,6 +55,8 @@ pub struct GrpcTcpUpstream {
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     pub acceleration: GrpcAccelerationPath,
+    /// Last active health probe timestamp in seconds from coarse integer clock.
+    last_probe_sec: AtomicU64,
 }
 
 impl std::fmt::Debug for GrpcTcpUpstream {
@@ -87,6 +90,7 @@ impl GrpcTcpUpstream {
             pool: Arc::new(MultiplexedPool::with_shards(shard_count)),
             max_concurrent_streams,
             acceleration,
+            last_probe_sec: AtomicU64::new(0),
         }
     }
 
@@ -255,6 +259,127 @@ impl GrpcTcpUpstream {
                         tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC TCP");
                     }
                 }
+            }
+        }
+    }
+
+    /// Performs periodic active health check across all physical endpoints for `lane`.
+    pub async fn check_active_health(&self, lane: usize, _seed: u32) {
+        let health = self.inner.health();
+        let active_cfg = match health.config().active.as_ref() {
+            Some(a) if a.enabled => a,
+            _ => return,
+        };
+
+        let now_sec = velda_core::coarse_now_sec();
+        let interval_sec = active_cfg.interval.as_secs().max(1);
+        let last = self.last_probe_sec.load(Ordering::Relaxed);
+        if now_sec < last + interval_sec {
+            return;
+        }
+        self.last_probe_sec.store(now_sec, Ordering::Relaxed);
+
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            let success = self.probe_endpoint(&addr, active_cfg, lane).await;
+            health.record_active_result(&addr, success);
+        }
+    }
+
+    async fn probe_endpoint(
+        &self,
+        addr: &SocketAddr,
+        active_cfg: &velda_upstream::ActiveHealthConfig,
+        lane: usize,
+    ) -> bool {
+        let timeout = active_cfg.timeout;
+
+        // 1. Lightweight L4 TCP probe if configured
+        if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
+            let socket_res = if addr.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()
+            } else {
+                tokio::net::TcpSocket::new_v6()
+            };
+            let Ok(socket) = socket_res else { return false };
+            let _ = socket.set_reuseport(true);
+            let _ = socket.set_reuseaddr(true);
+            let local_port = 60000 + (lane as u16 & 0x3FF);
+            let bind_addr = if addr.is_ipv4() {
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    local_port,
+                )
+            } else {
+                SocketAddr::new(
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                    local_port,
+                )
+            };
+            let _ = socket.bind(bind_addr);
+
+            let connect_fut = socket.connect(*addr);
+            match tokio::time::timeout(timeout, connect_fut).await {
+                Ok(Ok(stream)) => {
+                    let _ = stream
+                        .into_std()
+                        .and_then(|s| s.shutdown(std::net::Shutdown::Both));
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            // 2. gRPC Multiplexed probe
+            let idle_timeout = self.inner.timeouts().idle;
+            let leased = self.pool.acquire_stream(addr, idle_timeout);
+
+            if let Some(lease) = leased {
+                let mut client = lease.client.clone();
+                let ready_res = tokio::time::timeout(timeout, client.ready()).await;
+                if let Ok(Ok(_)) = ready_res {
+                    return true;
+                }
+                lease.mark_goaway();
+            }
+
+            let tls = self
+                .tls
+                .as_ref()
+                .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
+            let acceleration = self.acceleration;
+            let config = GrpcConfig::default();
+
+            match GrpcUpstreamConnector::connect(
+                *addr,
+                tls,
+                &config,
+                Some(&acceleration),
+                Some(timeout),
+            )
+            .await
+            {
+                Ok(mut fresh) => {
+                    let ready_res = tokio::time::timeout(timeout, fresh.ready()).await;
+                    if let Ok(Ok(_)) = ready_res {
+                        let res = GrpcTcpClientResource { client: fresh };
+                        self.pool.register_warmed_to_lane(
+                            *addr,
+                            lane,
+                            res,
+                            self.max_concurrent_streams,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => false,
             }
         }
     }

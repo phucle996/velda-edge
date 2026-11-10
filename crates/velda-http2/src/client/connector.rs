@@ -430,8 +430,10 @@ impl Http2AccelerationPath {
 /// (a negotiated value other than `h2` is rejected), never used to choose the protocol.
 ///
 /// Spawns the H2 connection driver onto a background Tokio task.
-pub async fn connect(
+/// Connects directly to an HTTP/2 backend target with optional local port binding, socket acceleration, timeout, and TLS encryption.
+pub async fn connect_with_bind(
     target: SocketAddr,
+    local_port: Option<u16>,
     tls: Option<(&TlsClientEngine, &str)>,
     config: &Http2Config,
     acceleration: Option<&Http2AccelerationPath>,
@@ -442,6 +444,17 @@ pub async fn connect(
     } else {
         tokio::net::TcpSocket::new_v6()?
     };
+
+    if let Some(port) = local_port {
+        let _ = socket.set_reuseport(true);
+        let _ = socket.set_reuseaddr(true);
+        let bind_addr = if target.is_ipv4() {
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
+        } else {
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)
+        };
+        let _ = socket.bind(bind_addr);
+    }
 
     #[cfg(target_os = "linux")]
     if let Some(accel) = acceleration {
@@ -522,6 +535,22 @@ pub async fn connect(
     } else {
         h2_fut.await
     }
+}
+
+/// Connects directly to an HTTP/2 backend target with optional socket acceleration, timeout, and TLS encryption.
+///
+/// TLS ALPN is validated strictly: `h2` must be successfully negotiated
+/// (a negotiated value other than `h2` is rejected), never used to choose the protocol.
+///
+/// Spawns the H2 connection driver onto a background Tokio task.
+pub async fn connect(
+    target: SocketAddr,
+    tls: Option<(&TlsClientEngine, &str)>,
+    config: &Http2Config,
+    acceleration: Option<&Http2AccelerationPath>,
+    timeout: Option<std::time::Duration>,
+) -> Result<h2::client::SendRequest<Bytes>, Http2Error> {
+    connect_with_bind(target, None, tls, config, acceleration, timeout).await
 }
 
 /// Performs the HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. TLS or TCP).

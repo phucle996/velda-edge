@@ -18,6 +18,7 @@ pub struct TcpUpstream {
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
     acceleration: TcpAccelerationPath,
+    last_probe_sec: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for TcpUpstream {
@@ -35,6 +36,7 @@ impl TcpUpstream {
         Self {
             inner,
             acceleration,
+            last_probe_sec: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -73,5 +75,71 @@ impl TcpUpstream {
         pipe(stream).await.map_err(|e| {
             EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
         })
+    }
+
+    /// Performs periodic active health check across all physical endpoints for `lane`.
+    pub async fn check_active_health(&self, lane: usize) {
+        let health = self.inner.health();
+        let active_cfg = match health.config().active.as_ref() {
+            Some(a) if a.enabled => a,
+            _ => return,
+        };
+
+        let now_sec = velda_core::coarse_now_sec();
+        let interval_sec = active_cfg.interval.as_secs().max(1);
+        let last = self
+            .last_probe_sec
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_sec < last + interval_sec {
+            return;
+        }
+        self.last_probe_sec
+            .store(now_sec, std::sync::atomic::Ordering::Relaxed);
+
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        let timeout = active_cfg.timeout;
+        for ep in all_eps {
+            let addr = ep.address;
+            let socket_res = if addr.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()
+            } else {
+                tokio::net::TcpSocket::new_v6()
+            };
+            let success = if let Ok(socket) = socket_res {
+                let _ = socket.set_reuseport(true);
+                let _ = socket.set_reuseaddr(true);
+                let local_port = 60000 + (lane as u16 & 0x3FF);
+                let bind_addr = if addr.is_ipv4() {
+                    std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                        local_port,
+                    )
+                } else {
+                    std::net::SocketAddr::new(
+                        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                        local_port,
+                    )
+                };
+                let _ = socket.bind(bind_addr);
+                let connect_fut = socket.connect(addr);
+                match tokio::time::timeout(timeout, connect_fut).await {
+                    Ok(Ok(stream)) => {
+                        let _ = stream
+                            .into_std()
+                            .and_then(|s| s.shutdown(std::net::Shutdown::Both));
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            health.record_active_result(&addr, success);
+        }
     }
 }

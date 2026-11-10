@@ -11,7 +11,9 @@ use velda_discovery::{
 };
 use velda_sync::post_sync::upstream::UpstreamConfig;
 use velda_tls::TlsClientEngine;
-use velda_upstream::{Upstream, UpstreamTimeouts};
+use velda_upstream::{
+    ActiveHealthConfig, HealthConfig, PassiveHealthConfig, Upstream, UpstreamTimeouts,
+};
 
 use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
@@ -214,7 +216,29 @@ pub fn build_upstreams(
             max_lifetime,
         };
 
-        let inner = Upstream::new(&config.id, protocol_str, discovery, balancer, timeouts);
+        let health_config = match &config.health_check {
+            Some(hc) => HealthConfig {
+                passive: hc.passive.as_ref().map(|p| PassiveHealthConfig {
+                    enabled: p.enabled,
+                    max_consecutive_failures: p.max_consecutive_failures,
+                    cooldown: std::time::Duration::from_millis(p.cooldown_ms),
+                }),
+                active: hc.active.as_ref().map(|a| ActiveHealthConfig {
+                    enabled: a.enabled,
+                    interval: std::time::Duration::from_millis(a.interval_ms),
+                    timeout: std::time::Duration::from_millis(a.timeout_ms),
+                    unhealthy_threshold: a.unhealthy_threshold,
+                    healthy_threshold: a.healthy_threshold,
+                    check_type: a.check_type.clone(),
+                    path: a.path.clone(),
+                    expected_statuses: a.expected_statuses.clone(),
+                }),
+            },
+            None => HealthConfig::default(),
+        };
+
+        let inner = Upstream::new(&config.id, protocol_str, discovery, balancer, timeouts)
+            .with_health_config(health_config);
 
         let transport = config.protocol.transport.to_ascii_lowercase();
         let app = config.protocol.application.to_ascii_lowercase();

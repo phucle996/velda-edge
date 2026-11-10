@@ -11,7 +11,7 @@ use velda_edge::upstream::http::{Http1Upstream, Http2Upstream};
 use velda_edge::upstream::lb::{EdgeUpstream, LbAlgorithm};
 use velda_edge::upstream::rdma::RdmaUpstream;
 use velda_rdma::RdmaConfig;
-use velda_upstream::UpstreamTimeouts;
+use velda_upstream::{ActiveHealthConfig, HealthConfig, UpstreamTimeouts};
 
 #[tokio::test]
 async fn test_http1_shadow_worker_warmup_end_to_end() {
@@ -252,4 +252,111 @@ async fn test_rdma_shadow_worker_warmup_end_to_end() {
     drop(lease1);
     drop(lease2);
     drop(lease3);
+}
+
+#[tokio::test]
+async fn test_http1_active_health_check_circuit_break_and_recovery() {
+    // 1. Start mock HTTP/1.1 backend server responding to /healthz
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let _server_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                res = listener.accept() => {
+                    if let Ok((mut stream, _)) = res {
+                        let mut child_rx = shutdown_rx.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            loop {
+                                tokio::select! {
+                                    _ = child_rx.changed() => break,
+                                    read_res = stream.read(&mut buf) => {
+                                        match read_res {
+                                            Ok(0) | Err(_) => break,
+                                            Ok(n) => {
+                                                let req = String::from_utf8_lossy(&buf[..n]);
+                                                if req.contains("GET /healthz") {
+                                                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK";
+                                                    let _ = stream.write_all(resp.as_bytes()).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    velda_connection_pool::set_current_thread_lane(0);
+
+    let endpoint = Endpoint::new("mock-ep", backend_addr, 1);
+    let discovery = Discovery::new_explicit(vec![endpoint]);
+    let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(1), Duration::from_secs(30));
+
+    let active_cfg = ActiveHealthConfig {
+        enabled: true,
+        interval: Duration::from_millis(100),
+        timeout: Duration::from_millis(500),
+        unhealthy_threshold: 2,
+        healthy_threshold: 1,
+        check_type: "http".into(),
+        path: Some("/healthz".into()),
+        expected_statuses: vec![200],
+    };
+
+    let health_cfg = HealthConfig {
+        passive: None,
+        active: Some(active_cfg),
+    };
+
+    let edge_upstream = EdgeUpstream::new(
+        "test-h1-active-hc",
+        "tcp",
+        discovery,
+        LbAlgorithm::RoundRobin(velda_lb::RoundRobin::new()),
+        timeouts,
+    )
+    .with_health_config(health_cfg);
+
+    let h1_upstream = Http1Upstream::new(
+        edge_upstream,
+        None,
+        StreamingMode::DISABLED,
+        PoolConfig::default(),
+        4,
+        velda_http1::Http1AccelerationPath::default(),
+        None,
+    );
+
+    // Initial state: healthy
+    assert!(h1_upstream.is_healthy(&backend_addr));
+
+    // First probe: mock backend is running -> succeeds!
+    h1_upstream.check_active_health(0, 12345).await;
+    assert!(h1_upstream.is_healthy(&backend_addr));
+
+    // Signal mock server and all client streams to stop immediately
+    let _ = shutdown_tx.send(true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Trigger consecutive active probes on an unreachable server
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h1_upstream.check_active_health(0, 12346).await;
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h1_upstream.check_active_health(0, 12347).await;
+
+    // After 2 consecutive failures exceeding unhealthy_threshold = 2, endpoint is tripped unhealthy!
+    assert!(
+        !h1_upstream.is_healthy(&backend_addr),
+        "Endpoint must be tripped unhealthy after exceeding active failure threshold!"
+    );
 }

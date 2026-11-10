@@ -276,10 +276,15 @@ pub fn spawn_shadow_worker(
                     let rt = shared_runtime.load();
                     rt.buffer_pool.maintain_lane(worker_id);
                     let upstreams = rt.upstreams.clone();
+                    let seed = (velda_core::coarse_now_sec() as u32)
+                        .wrapping_mul(2654435761)
+                        .wrapping_add(worker_id as u32);
                     if let Some(ref th) = traffic_handle {
                         let _guard = th.enter();
+                        upstreams.check_active_health(worker_id, seed).await;
                         upstreams.prewarm_lane(worker_id).await;
                     } else {
+                        upstreams.check_active_health(worker_id, seed).await;
                         upstreams.prewarm_lane(worker_id).await;
                     }
                 }
@@ -302,10 +307,15 @@ pub fn spawn_shadow_worker(
                             rt.buffer_pool.maintain_lane(worker_id);
 
                             let upstreams = rt.upstreams.clone();
+                            let seed = (velda_core::coarse_now_sec() as u32)
+                                .wrapping_mul(2654435761)
+                                .wrapping_add(worker_id as u32);
                             if let Some(ref th) = traffic_handle {
                                 let _guard = th.enter();
+                                upstreams.check_active_health(worker_id, seed).await;
                                 upstreams.prewarm_lane(worker_id).await;
                             } else {
+                                upstreams.check_active_health(worker_id, seed).await;
                                 upstreams.prewarm_lane(worker_id).await;
                             }
                         }
@@ -351,10 +361,15 @@ pub fn spawn_shadow_worker(
 
                                 current_rt.buffer_pool.maintain_lane(worker_id);
                                 let upstreams = current_rt.upstreams.clone();
+                                let seed = (velda_core::coarse_now_sec() as u32)
+                                    .wrapping_mul(2654435761)
+                                    .wrapping_add(worker_id as u32);
                                 if let Some(ref th) = traffic_handle {
                                     let _guard = th.enter();
+                                    upstreams.check_active_health(worker_id, seed).await;
                                     upstreams.prewarm_lane(worker_id).await;
                                 } else {
+                                    upstreams.check_active_health(worker_id, seed).await;
                                     upstreams.prewarm_lane(worker_id).await;
                                 }
                             }

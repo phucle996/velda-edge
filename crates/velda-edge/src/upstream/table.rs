@@ -285,4 +285,46 @@ impl UpstreamTable {
             rdma_up.prewarm_lane(lane, 1).await;
         }
     }
+
+    /// Autonomous periodic active health checking across all HTTP and gRPC upstreams for a specific worker lane.
+    ///
+    /// Invoked periodically by the core-local Shadow Worker (`SCHED_IDLE`) to detect and isolate
+    /// dead upstream endpoints before frontline client traffic reaches them.
+    pub async fn check_active_health(&self, lane: usize, seed: u32) {
+        for http_up in self.http.values() {
+            match http_up.as_ref() {
+                HttpUpstream::Http1(u) => {
+                    u.check_active_health(lane, seed).await;
+                }
+                HttpUpstream::Http2(u) => {
+                    u.check_active_health(lane, seed).await;
+                }
+                HttpUpstream::Http3(u) => {
+                    u.check_active_health(lane, seed).await;
+                }
+            }
+        }
+        for grpc_up in self.grpc.values() {
+            match grpc_up.as_ref() {
+                GrpcUpstream::Tcp(u) => {
+                    u.check_active_health(lane, seed).await;
+                }
+                GrpcUpstream::Udp(u) => {
+                    u.check_active_health(lane, seed).await;
+                }
+                GrpcUpstream::Rdma(_) => {}
+            }
+        }
+        for raw_up in self.raw.values() {
+            match raw_up.as_ref() {
+                RawUpstream::Tcp(u) => {
+                    u.check_active_health(lane).await;
+                }
+                RawUpstream::Udp(u) => {
+                    u.check_active_health(lane).await;
+                }
+                RawUpstream::Rdma(_) => {}
+            }
+        }
+    }
 }

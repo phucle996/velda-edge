@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
@@ -58,6 +59,8 @@ pub struct GrpcUdpUpstream {
     /// [PRE-COMPILED]: Pre-compiled QUIC client TLS configuration compiled directly
     /// from upstream `tls` config (custom CA roots, client mTLS cert, verify settings).
     pub quic_config: Arc<velda_grpc::udp::quinn_proto::ClientConfig>,
+    /// Last active health probe timestamp in seconds from coarse integer clock.
+    last_probe_sec: AtomicU64,
 }
 
 impl std::fmt::Debug for GrpcUdpUpstream {
@@ -91,6 +94,7 @@ impl GrpcUdpUpstream {
             pool: Arc::new(MultiplexedPool::with_shards(shard_count)),
             max_concurrent_streams,
             quic_config,
+            last_probe_sec: AtomicU64::new(0),
         }
     }
 
@@ -228,6 +232,72 @@ impl GrpcUdpUpstream {
                     }
                 }
             }
+        }
+    }
+
+    /// Performs periodic active health check across all physical endpoints for `lane`.
+    pub async fn check_active_health(&self, lane: usize, _seed: u32) {
+        let health = self.inner.health();
+        let active_cfg = match health.config().active.as_ref() {
+            Some(a) if a.enabled => a,
+            _ => return,
+        };
+
+        let now_sec = velda_core::coarse_now_sec();
+        let interval_sec = active_cfg.interval.as_secs().max(1);
+        let last = self.last_probe_sec.load(Ordering::Relaxed);
+        if now_sec < last + interval_sec {
+            return;
+        }
+        self.last_probe_sec.store(now_sec, Ordering::Relaxed);
+
+        let endpoints = self.inner.current_endpoints();
+        let all_eps = endpoints.all_endpoints();
+        if all_eps.is_empty() {
+            return;
+        }
+
+        for ep in all_eps {
+            let addr = ep.address;
+            let success = self.probe_endpoint(&addr, active_cfg, lane).await;
+            health.record_active_result(&addr, success);
+        }
+    }
+
+    async fn probe_endpoint(
+        &self,
+        addr: &SocketAddr,
+        active_cfg: &velda_upstream::ActiveHealthConfig,
+        lane: usize,
+    ) -> bool {
+        let timeout = active_cfg.timeout;
+        let idle_timeout = self.inner.timeouts().idle;
+        let leased = self.pool.acquire_stream(addr, idle_timeout);
+
+        if let Some(lease) = leased {
+            if !lease.client.is_closed() {
+                return true;
+            }
+            lease.mark_goaway();
+        }
+
+        let sni = Arc::clone(&self.target_sni);
+        let quic_tls = Arc::clone(&self.quic_config);
+        let config = velda_grpc::GrpcConfig::default();
+
+        match tokio::time::timeout(
+            timeout,
+            velda_grpc::udp::connect_udp(*addr, &sni, &config, (*quic_tls).clone()),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                let res = GrpcUdpClientResource::new(client);
+                self.pool
+                    .register_warmed_to_lane(*addr, lane, res, self.max_concurrent_streams);
+                true
+            }
+            _ => false,
         }
     }
 }
