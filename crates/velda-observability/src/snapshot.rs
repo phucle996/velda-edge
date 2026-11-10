@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use crate::types::{DownstreamProto, PipeStrategy, UpstreamProto};
-use crate::vector::{AGGREGATE_COUNTERS, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
+use crate::vector::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,7 +282,12 @@ impl MetricsSnapshot {
     /// Computes aggregate totals across all pipelines using vectorized SIMD integer arithmetic.
     #[inline]
     pub fn aggregate_pipelines(&self) -> PipelineMetricsTotals {
-        self.aggregate_pipelines_with(*AGGREGATE_COUNTERS)
+        let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
+        for p in &self.pipelines {
+            let counters = p.to_counters();
+            crate::vector::add_counters(&mut total_counters, &counters);
+        }
+        PipelineMetricsTotals::from_counters(&total_counters)
     }
 
     /// Computes aggregate totals across all pipelines using an explicit function pointer.

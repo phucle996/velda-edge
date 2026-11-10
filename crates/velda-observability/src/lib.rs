@@ -37,7 +37,7 @@ pub use types::{
     AlpnProtocol, DownstreamProto, PipeStrategy, StatusClass, StreamCompletion, UpstreamProto,
 };
 pub use vector::{
-    AGGREGATE_COUNTERS, AccumulateCountersFn, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals,
+    add_counters, AGGREGATE_COUNTERS, AccumulateCountersFn, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals,
     add_counters_32, add_counters_64, add_counters_128, add_counters_256, resolve_counters_fn,
     resolve_counters_fn_for_len,
 };

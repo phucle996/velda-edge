@@ -208,6 +208,33 @@ pub fn resolve_counters_fn_for_len(len: usize) -> AccumulateCountersFn {
     }
 }
 
+/// Adds counter slices using the optimal CPU register width.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
+pub fn add_counters(dst: &mut [u64], src: &[u64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            add_counters_256(dst, src);
+        } else {
+            add_counters_128(dst, src);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        add_counters_128(dst, src);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        if usize::BITS == 64 {
+            add_counters_64(dst, src);
+        } else {
+            add_counters_32(dst, src);
+        }
+    }
+}
+
 /// Pre-resolved static function pointer for accumulating metrics slices.
 ///
 /// Resolves once at boot adapted to the canonical pipeline slot width (`PIPELINE_COUNTERS_LEN = 20`).
