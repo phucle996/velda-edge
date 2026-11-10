@@ -33,7 +33,7 @@ jobs:
             target_cpu: generic
             desc: "ARM64 / Graviton / Ampere Edition (NEON)"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install aarch64 cross-compilation toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -102,7 +102,7 @@ jobs:
           - arch: arm64
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-edge, build-control-plane]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download edge artifacts
         uses: actions/download-artifact@v4
@@ -180,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-edge, build-control-plane, trivy-binary-scan]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download edge artifacts (amd64-v3)
         uses: actions/download-artifact@v4
