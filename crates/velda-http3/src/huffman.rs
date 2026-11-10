@@ -265,23 +265,9 @@ pub static HUFFMAN_CODES: [(u32, u8); 257] = [
     (0x3fffffff, 30), // 256
 ];
 
-type EncodeHuffmanFn = fn(&[u8], &mut bytes::BytesMut);
-
-static ENCODE_HUFFMAN_FN: std::sync::LazyLock<EncodeHuffmanFn> = std::sync::LazyLock::new(|| {
-    let width = velda_core::global_hardware_topology()
-        .cpu
-        .register_capabilities
-        .select_for_workload(velda_core::hardware::RegisterWidth::Bits64);
-    match width {
-        velda_core::hardware::RegisterWidth::Bits64
-        | velda_core::hardware::RegisterWidth::Bits128
-        | velda_core::hardware::RegisterWidth::Bits256 => encode_huffman_64,
-        velda_core::hardware::RegisterWidth::Bits32 => encode_huffman_32,
-    }
-});
-
 /// 64-bit register Huffman encoder: packs codes into a 64-bit bit-buffer and flushes 32 bits (4 bytes)
 /// at a single instruction (`put_u32`) whenever `bits >= 32`.
+#[allow(dead_code)]
 fn encode_huffman_64(input: &[u8], dst: &mut bytes::BytesMut) {
     use bytes::BufMut;
     dst.reserve(input.len());
@@ -314,6 +300,7 @@ fn encode_huffman_64(input: &[u8], dst: &mut bytes::BytesMut) {
 }
 
 /// Dual 32-bit register Huffman encoder for 32-bit targets.
+#[allow(dead_code)]
 fn encode_huffman_32(input: &[u8], dst: &mut bytes::BytesMut) {
     use bytes::BufMut;
     dst.reserve(input.len());
@@ -344,10 +331,19 @@ fn encode_huffman_32(input: &[u8], dst: &mut bytes::BytesMut) {
     }
 }
 
-/// Encodes raw bytes using RFC 7541 Huffman coding via the hardware-selected register function pointer.
-#[inline]
+/// Encodes raw bytes using RFC 7541 Huffman coding.
+///
+/// Inlined direct execution eliminating indirect function pointer overhead.
+#[inline(always)]
 pub fn encode_huffman(input: &[u8], dst: &mut bytes::BytesMut) {
-    (ENCODE_HUFFMAN_FN)(input, dst)
+    #[cfg(target_pointer_width = "64")]
+    {
+        encode_huffman_64(input, dst);
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        encode_huffman_32(input, dst);
+    }
 }
 
 #[derive(Clone, Copy)]
