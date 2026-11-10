@@ -85,7 +85,7 @@ jobs:
           cd dist && sha256sum * > SHA256SUMS
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: velda-edge-linux-${{ matrix.edition }}
           path: dist/
@@ -141,7 +141,7 @@ jobs:
           cd dist && sha256sum * > SHA256SUMS
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: velda-control-plane-linux-${{ matrix.arch }}
           path: dist/
