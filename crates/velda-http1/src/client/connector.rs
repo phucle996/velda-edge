@@ -418,10 +418,12 @@ impl Http1AccelerationPath {
     }
 }
 
-/// Connects directly to an HTTP/1.1 backend target with optional local port binding, socket acceleration, timeout, and TLS encryption.
-pub async fn connect_with_bind(
+/// Connects directly to an HTTP/1.1 backend target with optional socket acceleration, timeout, and TLS encryption.
+///
+/// `tls` is `Some((engine, sni))` for TLS upstreams. The SNI is the upstream's pre-compiled
+/// static property; it is never derived from the request Host or the target IP.
+pub async fn connect(
     target: SocketAddr,
-    local_port: Option<u16>,
     tls: Option<(&TlsClientEngine, &str)>,
     acceleration: Option<&Http1AccelerationPath>,
     timeout: Option<std::time::Duration>,
@@ -431,17 +433,6 @@ pub async fn connect_with_bind(
     } else {
         tokio::net::TcpSocket::new_v6().map_err(Http1Error::Io)?
     };
-
-    if let Some(port) = local_port {
-        let _ = socket.set_reuseport(true);
-        let _ = socket.set_reuseaddr(true);
-        let bind_addr = if target.is_ipv4() {
-            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
-        } else {
-            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)
-        };
-        let _ = socket.bind(bind_addr);
-    }
 
     #[cfg(target_os = "linux")]
     if let Some(accel) = acceleration {
@@ -506,17 +497,4 @@ pub async fn connect_with_bind(
     } else {
         Ok(UpstreamHttp1Stream::Plain(tcp_stream))
     }
-}
-
-/// Connects directly to an HTTP/1.1 backend target with optional socket acceleration, timeout, and TLS encryption.
-///
-/// `tls` is `Some((engine, sni))` for TLS upstreams. The SNI is the upstream's pre-compiled
-/// static property; it is never derived from the request Host or the target IP.
-pub async fn connect(
-    target: SocketAddr,
-    tls: Option<(&TlsClientEngine, &str)>,
-    acceleration: Option<&Http1AccelerationPath>,
-    timeout: Option<std::time::Duration>,
-) -> Result<UpstreamHttp1Stream, Http1Error> {
-    connect_with_bind(target, None, tls, acceleration, timeout).await
 }

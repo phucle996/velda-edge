@@ -385,7 +385,7 @@ impl Http2Upstream {
     /// Evaluates interval using the lock-free coarse clock (`coarse_now_sec`) in ~0.5ns.
     /// Reuses multiplexed H2 streams from the pool to probe with zero socket overhead,
     /// and safely marks GOAWAY without dropping in-flight client streams on probe failure.
-    pub async fn check_active_health(&self, lane: usize, seed: u32) {
+    pub async fn check_active_health(&self, lane: usize, _seed: u32) {
         let health = self.inner.health();
         let active_cfg = match health.config().active.as_ref() {
             Some(a) if a.enabled => a,
@@ -406,144 +406,113 @@ impl Http2Upstream {
             return;
         }
 
-        for ep in all_eps {
-            let addr = ep.address;
-            let success = self.probe_endpoint(&addr, active_cfg, lane, seed).await;
-            health.record_active_result(&addr, success);
-        }
-    }
-
-    async fn probe_endpoint(
-        &self,
-        addr: &SocketAddr,
-        active_cfg: &velda_upstream::ActiveHealthConfig,
-        lane: usize,
-        _seed: u32,
-    ) -> bool {
         let timeout = active_cfg.timeout;
 
-        // 1. Lightweight L4 TCP probe if configured
-        if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
-            let socket_res = if addr.is_ipv4() {
-                tokio::net::TcpSocket::new_v4()
-            } else {
-                tokio::net::TcpSocket::new_v6()
-            };
-            let Ok(socket) = socket_res else { return false };
-            let _ = socket.set_reuseport(true);
-            let _ = socket.set_reuseaddr(true);
-            let local_port = 60000 + (lane as u16 & 0x3FF);
-            let bind_addr = if addr.is_ipv4() {
-                SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    local_port,
-                )
-            } else {
-                SocketAddr::new(
-                    std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-                    local_port,
-                )
-            };
-            let _ = socket.bind(bind_addr);
-
-            let connect_fut = socket.connect(*addr);
-            match tokio::time::timeout(timeout, connect_fut).await {
-                Ok(Ok(stream)) => {
-                    let _ = stream
-                        .into_std()
-                        .and_then(|s| s.shutdown(std::net::Shutdown::Both));
-                    true
-                }
-                _ => false,
-            }
-        } else {
-            // 2. L7 HTTP/2 Probe
-            let idle_timeout = self.inner.timeouts().idle;
-            let leased = self.pool.acquire_stream(addr, idle_timeout);
-
-            let (client, lease_opt) = match leased {
-                Some(lease) => (lease.client.clone(), Some(lease)),
-                None => {
-                    let local_port = 60000 + (lane as u16 & 0x3FF);
-                    let tls = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                    let acceleration = self.acceleration;
-                    match velda_http2::client::connect_with_bind(
-                        *addr,
-                        Some(local_port),
-                        tls,
-                        &self.config,
-                        Some(&acceleration),
-                        Some(timeout),
-                    )
-                    .await
-                    {
-                        Ok(fresh) => (fresh, None),
-                        Err(_) => return false,
-                    }
-                }
-            };
-
-            let ready_res = tokio::time::timeout(timeout, client.clone().ready()).await;
-            let Ok(Ok(mut ready_client)) = ready_res else {
-                if let Some(lease) = lease_opt {
-                    lease.mark_goaway();
-                }
-                return false;
-            };
-
-            let path = active_cfg.path.as_deref().unwrap_or("/healthz");
-            let host = self.target_host();
-            let uri: http::Uri = match format!("http://{}{}", host, path).parse() {
-                Ok(u) => u,
-                Err(_) => return false,
-            };
-            let req = http::Request::builder()
-                .method(http::Method::GET)
-                .uri(uri)
-                .header(http::header::USER_AGENT, "Velda-HealthCheck")
-                .header(http::header::HOST, host)
-                .body(())
-                .unwrap();
-
-            let send_res = ready_client.send_request(req, true);
-            let Ok((response_fut, _)) = send_res else {
-                if let Some(lease) = lease_opt {
-                    lease.mark_goaway();
-                }
-                return false;
-            };
-
-            match tokio::time::timeout(timeout, response_fut).await {
-                Ok(Ok(resp)) => {
-                    let status = resp.status().as_u16();
-                    let is_healthy = active_cfg.expected_statuses.is_empty()
-                        || active_cfg.expected_statuses.contains(&status);
-                    if is_healthy {
-                        if lease_opt.is_none() {
-                            self.pool.register_warmed_to_lane(
-                                *addr,
-                                lane,
-                                Http2ClientResource::new(client),
-                                self.max_concurrent_streams,
-                            );
-                        }
+        for ep in all_eps {
+            let addr = ep.address;
+            let success = if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
+                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+                    Ok(Ok(stream)) => {
+                        let _ = stream
+                            .into_std()
+                            .and_then(|s| s.shutdown(std::net::Shutdown::Both));
                         true
-                    } else {
+                    }
+                    _ => false,
+                }
+            } else {
+                let idle_timeout = self.inner.timeouts().idle;
+                let leased = self.pool.acquire_stream(&addr, idle_timeout);
+
+                let (client, lease_opt) = match leased {
+                    Some(lease) => (lease.client.clone(), Some(lease)),
+                    None => {
+                        let tls = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
+                        let acceleration = self.acceleration;
+                        match velda_http2::client::connect(
+                            addr,
+                            tls,
+                            &self.config,
+                            Some(&acceleration),
+                            Some(timeout),
+                        )
+                        .await
+                        {
+                            Ok(fresh) => (fresh, None),
+                            Err(_) => {
+                                health.record_active_result(&addr, false);
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                let ready_res = tokio::time::timeout(timeout, client.clone().ready()).await;
+                let Ok(Ok(mut ready_client)) = ready_res else {
+                    if let Some(lease) = lease_opt {
+                        lease.mark_goaway();
+                    }
+                    health.record_active_result(&addr, false);
+                    continue;
+                };
+
+                let path = active_cfg.path.as_deref().unwrap_or("/healthz");
+                let host = self.target_host();
+                let uri: http::Uri = match format!("http://{}{}", host, path).parse() {
+                    Ok(u) => u,
+                    Err(_) => {
+                        health.record_active_result(&addr, false);
+                        continue;
+                    }
+                };
+                let req = http::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(uri)
+                    .header(http::header::USER_AGENT, "Velda-HealthCheck")
+                    .header(http::header::HOST, host)
+                    .body(())
+                    .unwrap();
+
+                let send_res = ready_client.send_request(req, true);
+                let Ok((response_fut, _)) = send_res else {
+                    if let Some(lease) = lease_opt {
+                        lease.mark_goaway();
+                    }
+                    health.record_active_result(&addr, false);
+                    continue;
+                };
+
+                match tokio::time::timeout(timeout, response_fut).await {
+                    Ok(Ok(resp)) => {
+                        let status = resp.status().as_u16();
+                        let is_healthy = active_cfg.expected_statuses.is_empty()
+                            || active_cfg.expected_statuses.contains(&status);
+                        if is_healthy {
+                            if lease_opt.is_none() {
+                                self.pool.register_warmed_to_lane(
+                                    addr,
+                                    lane,
+                                    Http2ClientResource::new(client),
+                                    self.max_concurrent_streams,
+                                );
+                            }
+                            true
+                        } else {
+                            if let Some(lease) = lease_opt {
+                                lease.mark_goaway();
+                            }
+                            false
+                        }
+                    }
+                    _ => {
                         if let Some(lease) = lease_opt {
                             lease.mark_goaway();
                         }
                         false
                     }
                 }
-                _ => {
-                    // Safe teardown: mark GOAWAY so no new streams are scheduled,
-                    // without killing existing in-flight client streams
-                    if let Some(lease) = lease_opt {
-                        lease.mark_goaway();
-                    }
-                    false
-                }
-            }
+            };
+            health.record_active_result(&addr, success);
         }
     }
 }

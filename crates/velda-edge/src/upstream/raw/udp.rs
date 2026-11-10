@@ -76,7 +76,11 @@ impl UdpUpstream {
     }
 
     /// Performs periodic active health check across all physical endpoints for `lane`.
-    pub async fn check_active_health(&self, lane: usize) {
+    pub async fn check_active_health(
+        &self,
+        _lane: usize,
+        heal_sock: Option<&velda_sock::UdpSocket>,
+    ) {
         let health = self.inner.health();
         let active_cfg = match health.config().active.as_ref() {
             Some(a) if a.enabled => a,
@@ -100,22 +104,10 @@ impl UdpUpstream {
             return;
         }
 
-        let local_port = 60000 + (lane as u16 & 0x3FF);
         for ep in all_eps {
             let addr = ep.address;
-            let bind_addr = if addr.is_ipv4() {
-                SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    local_port,
-                )
-            } else {
-                SocketAddr::new(
-                    std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-                    local_port,
-                )
-            };
-            let success = if let Ok(socket) = std::net::UdpSocket::bind(bind_addr) {
-                socket.connect(addr).is_ok()
+            let success = if let Some(sock) = heal_sock {
+                sock.inner().try_send_to(b"ping", addr).is_ok()
             } else {
                 false
             };

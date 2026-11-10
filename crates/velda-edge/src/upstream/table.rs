@@ -286,11 +286,16 @@ impl UpstreamTable {
         }
     }
 
-    /// Autonomous periodic active health checking across all HTTP and gRPC upstreams for a specific worker lane.
+    /// Autonomous periodic active health checking across all HTTP, gRPC, and Raw upstreams for a specific worker lane.
     ///
     /// Invoked periodically by the core-local Shadow Worker (`SCHED_IDLE`) to detect and isolate
     /// dead upstream endpoints before frontline client traffic reaches them.
-    pub async fn check_active_health(&self, lane: usize, seed: u32) {
+    pub async fn check_active_health(
+        &self,
+        lane: usize,
+        seed: u32,
+        heal_sock: Option<&velda_sock::UdpSocket>,
+    ) {
         for http_up in self.http.values() {
             match http_up.as_ref() {
                 HttpUpstream::Http1(u) => {
@@ -321,7 +326,7 @@ impl UpstreamTable {
                     u.check_active_health(lane).await;
                 }
                 RawUpstream::Udp(u) => {
-                    u.check_active_health(lane).await;
+                    u.check_active_health(lane, heal_sock).await;
                 }
                 RawUpstream::Rdma(_) => {}
             }

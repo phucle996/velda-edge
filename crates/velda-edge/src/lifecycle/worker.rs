@@ -241,6 +241,18 @@ pub fn spawn_shadow_worker(
 
             rt.block_on(async move {
                 let traffic_handle = traffic_handle_rx.await.ok();
+                // Dedicated outbound client probe socket bound to 60k port range (single socket per worker lane)
+                let heal_port = 60000 + (worker_id as u16 & 0x3FF);
+                let heal_addr = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    heal_port,
+                );
+                let sock_cfg = velda_sock::UdpSocketConfig {
+                    reuseport: true,
+                    ..Default::default()
+                };
+                let heal_sock = velda_sock::UdpSocket::bind(heal_addr, sock_cfg).ok();
+
                 // Unified JoinSet for process-wide background services on Worker 0
                 let mut bg_tasks = JoinSet::new();
                 let mut shadow_tasks = JoinSet::new();
@@ -281,10 +293,10 @@ pub fn spawn_shadow_worker(
                         .wrapping_add(worker_id as u32);
                     if let Some(ref th) = traffic_handle {
                         let _guard = th.enter();
-                        upstreams.check_active_health(worker_id, seed).await;
+                        upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                         upstreams.prewarm_lane(worker_id).await;
                     } else {
-                        upstreams.check_active_health(worker_id, seed).await;
+                        upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                         upstreams.prewarm_lane(worker_id).await;
                     }
                 }
@@ -312,10 +324,10 @@ pub fn spawn_shadow_worker(
                                 .wrapping_add(worker_id as u32);
                             if let Some(ref th) = traffic_handle {
                                 let _guard = th.enter();
-                                upstreams.check_active_health(worker_id, seed).await;
+                                upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                                 upstreams.prewarm_lane(worker_id).await;
                             } else {
-                                upstreams.check_active_health(worker_id, seed).await;
+                                upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                                 upstreams.prewarm_lane(worker_id).await;
                             }
                         }
@@ -366,10 +378,10 @@ pub fn spawn_shadow_worker(
                                     .wrapping_add(worker_id as u32);
                                 if let Some(ref th) = traffic_handle {
                                     let _guard = th.enter();
-                                    upstreams.check_active_health(worker_id, seed).await;
+                                    upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                                     upstreams.prewarm_lane(worker_id).await;
                                 } else {
-                                    upstreams.check_active_health(worker_id, seed).await;
+                                    upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
                                     upstreams.prewarm_lane(worker_id).await;
                                 }
                             }

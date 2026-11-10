@@ -515,10 +515,9 @@ impl Http1Upstream {
 
     /// Performs periodic active health check across all physical endpoints for `lane`.
     ///
-    /// Evaluates interval using the lock-free coarse clock (`coarse_now_sec`) in ~0.5ns.
-    /// Employs non-biased random sampling (Lemire's FastRange) on idle connections in pool
-    /// to avoid zombie connections, bounds I/O with strict hard timeouts, and binds outbound
-    /// probe sockets to the dedicated 60k port range (`60000 + (lane & 0x3FF)`).
+    /// Borrows an existing connection from the lane pool via FastRange random sampling
+    /// to avoid zombie connections, bounds I/O with strict hard timeouts, and cleans up
+    /// unhealthy endpoints safely.
     pub async fn check_active_health(&self, lane: usize, seed: u32) {
         let health = self.inner.health();
         let active_cfg = match health.config().active.as_ref() {
@@ -540,131 +539,94 @@ impl Http1Upstream {
             return;
         }
 
-        for ep in all_eps {
-            let addr = ep.address;
-            let success = self.probe_endpoint(&addr, active_cfg, lane, seed).await;
-            health.record_active_result(&addr, success);
-        }
-    }
-
-    async fn probe_endpoint(
-        &self,
-        addr: &SocketAddr,
-        active_cfg: &velda_upstream::ActiveHealthConfig,
-        lane: usize,
-        seed: u32,
-    ) -> bool {
         let timeout = active_cfg.timeout;
 
-        // 1. Lightweight L4 TCP probe if configured
-        if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
-            let socket_res = if addr.is_ipv4() {
-                tokio::net::TcpSocket::new_v4()
-            } else {
-                tokio::net::TcpSocket::new_v6()
-            };
-            let Ok(socket) = socket_res else { return false };
-            let _ = socket.set_reuseport(true);
-            let _ = socket.set_reuseaddr(true);
-            let local_port = 60000 + (lane as u16 & 0x3FF);
-            let bind_addr = if addr.is_ipv4() {
-                SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    local_port,
-                )
-            } else {
-                SocketAddr::new(
-                    std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-                    local_port,
-                )
-            };
-            let _ = socket.bind(bind_addr);
-
-            let connect_fut = socket.connect(*addr);
-            match tokio::time::timeout(timeout, connect_fut).await {
-                Ok(Ok(stream)) => {
-                    // Safe teardown: only shutdown when zero client bytes transferred
-                    let _ = stream
-                        .into_std()
-                        .and_then(|s| s.shutdown(std::net::Shutdown::Both));
-                    true
+        for ep in all_eps {
+            let addr = ep.address;
+            let success = if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
+                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+                    Ok(Ok(stream)) => {
+                        let _ = stream
+                            .into_std()
+                            .and_then(|s| s.shutdown(std::net::Shutdown::Both));
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
-        } else {
-            // 2. L7 HTTP/1.1 Probe
-            let idle_timeout = self.inner.timeouts().idle;
-            let sampled = self
-                .pool
-                .acquire_random_from_lane(addr, lane, idle_timeout, seed);
+            } else {
+                let idle_timeout = self.inner.timeouts().idle;
+                let sampled = self
+                    .pool
+                    .acquire_random_from_lane(&addr, lane, idle_timeout, seed);
 
-            let (mut stream, was_reused) = match sampled {
-                Some(res) => (res.stream, true),
-                None => {
-                    let local_port = 60000 + (lane as u16 & 0x3FF);
-                    let tls_ref = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                    match velda_http1::client::connect_with_bind(
-                        *addr,
-                        Some(local_port),
-                        tls_ref,
-                        Some(&self.acceleration),
-                        Some(timeout),
-                    )
-                    .await
+                let (mut stream, was_reused) = match sampled {
+                    Some(res) => (res.stream, true),
+                    None => {
+                        let tls_ref = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
+                        match velda_http1::client::connect(
+                            addr,
+                            tls_ref,
+                            Some(&self.acceleration),
+                            Some(timeout),
+                        )
+                        .await
+                        {
+                            Ok(s) => (s, false),
+                            Err(_) => {
+                                health.record_active_result(&addr, false);
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                let path = active_cfg.path.as_deref().unwrap_or("/healthz");
+                let host = self
+                    .tls
+                    .as_ref()
+                    .map(|(_, sni)| sni.as_ref())
+                    .unwrap_or_else(|| self.inner.id());
+                let probe_req = format!(
+                    "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Velda-HealthCheck\r\nConnection: keep-alive\r\n\r\n"
+                );
+
+                let io_fut = async {
+                    stream.write_all(probe_req.as_bytes()).await.ok()?;
+                    let mut buf = [0u8; 64];
+                    let n = stream.read(&mut buf).await.ok()?;
+                    if n >= 12 && &buf[..8] == b"HTTP/1.1" {
+                        let status = std::str::from_utf8(&buf[9..12]).ok()?.parse::<u16>().ok()?;
+                        Some(status)
+                    } else {
+                        None
+                    }
+                };
+
+                match tokio::time::timeout(timeout, io_fut).await {
+                    Ok(Some(status))
+                        if active_cfg.expected_statuses.is_empty()
+                            || active_cfg.expected_statuses.contains(&status) =>
                     {
-                        Ok(s) => (s, false),
-                        Err(_) => return false,
+                        let res = Http1ClientResource {
+                            stream,
+                            read_buf: bytes::BytesMut::with_capacity(4096),
+                            write_buf: bytes::BytesMut::with_capacity(4096),
+                            created_at: Instant::now(),
+                            last_used_at: Instant::now(),
+                        };
+                        self.pool.release_to_lane(&addr, lane, res);
+                        true
+                    }
+                    _ => {
+                        let _ = stream.shutdown().await;
+                        if was_reused {
+                            self.pool.drain_endpoint_from_lane(&addr, lane);
+                        }
+                        false
                     }
                 }
             };
-
-            let path = active_cfg.path.as_deref().unwrap_or("/healthz");
-            let host = self
-                .tls
-                .as_ref()
-                .map(|(_, sni)| sni.as_ref())
-                .unwrap_or_else(|| self.inner.id());
-            let probe_req = format!(
-                "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Velda-HealthCheck\r\nConnection: keep-alive\r\n\r\n"
-            );
-
-            let io_fut = async {
-                stream.write_all(probe_req.as_bytes()).await.ok()?;
-                let mut buf = [0u8; 64];
-                let n = stream.read(&mut buf).await.ok()?;
-                if n >= 12 && &buf[..8] == b"HTTP/1.1" {
-                    let status = std::str::from_utf8(&buf[9..12]).ok()?.parse::<u16>().ok()?;
-                    Some(status)
-                } else {
-                    None
-                }
-            };
-
-            match tokio::time::timeout(timeout, io_fut).await {
-                Ok(Some(status))
-                    if active_cfg.expected_statuses.is_empty()
-                        || active_cfg.expected_statuses.contains(&status) =>
-                {
-                    // Success: Deposit healthy connection into pool as pre-warmed resource
-                    let res = Http1ClientResource {
-                        stream,
-                        read_buf: bytes::BytesMut::with_capacity(4096),
-                        write_buf: bytes::BytesMut::with_capacity(4096),
-                        created_at: Instant::now(),
-                        last_used_at: Instant::now(),
-                    };
-                    self.pool.release_to_lane(addr, lane, res);
-                    true
-                }
-                _ => {
-                    // Safe teardown: only shutdown when zero client bytes are transferred
-                    let _ = stream.shutdown().await;
-                    if was_reused {
-                        self.pool.drain_endpoint_from_lane(addr, lane);
-                    }
-                    false
-                }
-            }
+            health.record_active_result(&addr, success);
         }
     }
 }

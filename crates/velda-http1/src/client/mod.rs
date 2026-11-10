@@ -12,7 +12,7 @@ pub mod header;
 pub mod request;
 pub mod response;
 
-pub use connector::{Http1AccelerationPath, UpstreamHttp1Stream, connect, connect_with_bind};
+pub use connector::{Http1AccelerationPath, UpstreamHttp1Stream, connect};
 pub use header::{extract_sni, resolve_sni, sanitize_headers, strip_port};
 pub use request::{
     Http1ClientRequest, Http1ClientRequestHead, encode_request, encode_request_head,

@@ -78,7 +78,7 @@ impl TcpUpstream {
     }
 
     /// Performs periodic active health check across all physical endpoints for `lane`.
-    pub async fn check_active_health(&self, lane: usize) {
+    pub async fn check_active_health(&self, _lane: usize) {
         let health = self.inner.health();
         let active_cfg = match health.config().active.as_ref() {
             Some(a) if a.enabled => a,
@@ -105,29 +105,8 @@ impl TcpUpstream {
         let timeout = active_cfg.timeout;
         for ep in all_eps {
             let addr = ep.address;
-            let socket_res = if addr.is_ipv4() {
-                tokio::net::TcpSocket::new_v4()
-            } else {
-                tokio::net::TcpSocket::new_v6()
-            };
-            let success = if let Ok(socket) = socket_res {
-                let _ = socket.set_reuseport(true);
-                let _ = socket.set_reuseaddr(true);
-                let local_port = 60000 + (lane as u16 & 0x3FF);
-                let bind_addr = if addr.is_ipv4() {
-                    std::net::SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                        local_port,
-                    )
-                } else {
-                    std::net::SocketAddr::new(
-                        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-                        local_port,
-                    )
-                };
-                let _ = socket.bind(bind_addr);
-                let connect_fut = socket.connect(addr);
-                match tokio::time::timeout(timeout, connect_fut).await {
+            let success =
+                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
                     Ok(Ok(stream)) => {
                         let _ = stream
                             .into_std()
@@ -135,10 +114,7 @@ impl TcpUpstream {
                         true
                     }
                     _ => false,
-                }
-            } else {
-                false
-            };
+                };
             health.record_active_result(&addr, success);
         }
     }

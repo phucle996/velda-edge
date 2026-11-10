@@ -294,45 +294,43 @@ impl Http3Upstream {
             return;
         }
 
-        for ep in all_eps {
-            let addr = ep.address;
-            let success = self.probe_endpoint(&addr, active_cfg, lane).await;
-            health.record_active_result(&addr, success);
-        }
-    }
-
-    async fn probe_endpoint(
-        &self,
-        addr: &SocketAddr,
-        active_cfg: &velda_upstream::ActiveHealthConfig,
-        lane: usize,
-    ) -> bool {
         let timeout = active_cfg.timeout;
         let idle_timeout = self.inner.timeouts().idle;
-        let leased = self.pool.acquire_stream(addr, idle_timeout);
 
-        if let Some(lease) = leased {
-            if !lease.client.is_closed() {
-                return true;
-            }
-            lease.mark_goaway();
-        }
+        for ep in all_eps {
+            let addr = ep.address;
+            let leased = self.pool.acquire_stream(&addr, idle_timeout);
 
-        let sni = Arc::clone(&self.target_sni);
-        let quic_tls = Arc::clone(&self.quic_config);
-        match tokio::time::timeout(
-            timeout,
-            velda_http3::client::connect(*addr, &sni, &self.config, (*quic_tls).clone()),
-        )
-        .await
-        {
-            Ok(Ok(client)) => {
-                let res = Http3ClientResource { client };
-                self.pool
-                    .register_warmed_to_lane(*addr, lane, res, self.max_concurrent_streams);
-                true
-            }
-            _ => false,
+            let success = if let Some(lease) = leased {
+                if !lease.client.is_closed() {
+                    true
+                } else {
+                    lease.mark_goaway();
+                    false
+                }
+            } else {
+                let sni = Arc::clone(&self.target_sni);
+                let quic_tls = Arc::clone(&self.quic_config);
+                match tokio::time::timeout(
+                    timeout,
+                    velda_http3::client::connect(addr, &sni, &self.config, (*quic_tls).clone()),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => {
+                        let res = Http3ClientResource { client };
+                        self.pool.register_warmed_to_lane(
+                            addr,
+                            lane,
+                            res,
+                            self.max_concurrent_streams,
+                        );
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            health.record_active_result(&addr, success);
         }
     }
 }
