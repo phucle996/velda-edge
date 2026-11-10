@@ -2215,6 +2215,7 @@ name = "velda-plugin"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "arc-swap",
  "base64 0.22.1",
  "bitflags",
  "brotli",
@@ -2241,8 +2242,10 @@ dependencies = [
  "velda-core",
  "velda-grpc",
  "velda-observability",
+ "velda-router",
  "velda-sync",
  "velda-tls",
+ "x509-parser",
  "zstd",
 ]
 

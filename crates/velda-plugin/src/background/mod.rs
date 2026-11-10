@@ -16,11 +16,13 @@ use tokio::sync::watch;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 
+pub mod acme_cert_rotator;
 pub mod health_probe;
 pub mod otlp_metrics_exporter;
 pub mod prometheus_exporter;
 pub mod statsd_exporter;
 
+pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
@@ -107,6 +109,10 @@ pub fn instantiate(
         "statsd_exporter" => {
             let exporter = StatsdExporterPlugin::from_config(config)?;
             Ok(Arc::new(exporter))
+        }
+        "acme_cert_rotator" => {
+            let rotator = AcmeCertRotatorPlugin::from_config(config)?;
+            Ok(Arc::new(rotator))
         }
         other => Err(PluginError::Config(format!(
             "Unsupported background plugin '{other}' for plugin '{}'",

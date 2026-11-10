@@ -39,6 +39,8 @@ pub use otlp_metrics_exporter::*;
 
 pub mod statsd_exporter;
 pub use statsd_exporter::*;
+pub mod acme_cert_rotator;
+pub use acme_cert_rotator::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
@@ -124,6 +126,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "health_probe" => Some("background"),
         "otlp_metrics_exporter" => Some("background"),
         "statsd_exporter" => Some("background"),
+        "acme_cert_rotator" => Some("background"),
         _ => None,
     }
 }
@@ -566,6 +569,15 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                     });
                 }
                 statsd_exporter::validate_statsd_exporter_config(&plugin.id, &plugin.config)?;
+            }
+            "acme_cert_rotator" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                acme_cert_rotator::validate_acme_cert_rotator_config(&plugin.id, &plugin.config)?;
             }
             "opentelemetry_logger" => {
                 if plugin.phase != "post_response" {

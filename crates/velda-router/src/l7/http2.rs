@@ -418,6 +418,73 @@ impl ListenerHttp2Router {
     pub fn route(&self, req: &Http2RouteRequest<'_>) -> Option<&Http2Route> {
         (self.route_fn)(self, req)
     }
+
+    /// Dynamically registers an ephemeral exact-path route into this listener's router.
+    ///
+    /// Used by background logistics plugins (such as `acme_cert_rotator`) to inject temporary in-memory
+    /// endpoints (e.g. `/.well-known/acme-challenge/<token>`) directly into the router table.
+    /// Guarantees O(1) lock-free lookup on the request hot path without recompiling configuration on disk.
+    pub fn insert_exact_route(
+        &mut self,
+        exact_path: String,
+        route: Http2Route,
+        method_mask: MethodMask,
+    ) {
+        // 1. Scalar register unrolled strategy (`route_small`):
+        // Prepend to `small_candidates` so exact match takes precedence over existing prefix rules.
+        self.small_candidates.insert(
+            0,
+            Http2SmallCandidate {
+                route,
+                exact_path: Some(exact_path.clone()),
+                path_prefix: None,
+                compiled_host: CompiledHost::Any,
+                method_mask,
+            },
+        );
+
+        // 2. Hash-table lookup strategy (`route_table`):
+        // Register in `routes` arena and prepend candidate to `exact_routes` hash map.
+        let route_idx = self.routes.len() as u32;
+        self.routes.push(route);
+        let candidate = Http2HotCandidate {
+            compiled_host: CompiledHost::Any,
+            route_idx,
+            method_mask,
+        };
+        self.exact_routes
+            .entry(exact_path)
+            .or_default()
+            .insert(0, candidate);
+    }
+
+    /// Dynamically removes an ephemeral exact-path route previously registered for this listener.
+    ///
+    /// Invoked unconditionally upon challenge completion or expiration (via RAII Drop guard)
+    /// to guarantee zero memory leakage and restore pristine routing state.
+    pub fn remove_exact_route(&mut self, exact_path: &str, route_id: RouteId) {
+        // 1. Purge from `exact_routes` hash table
+        if let Some(candidates) = self.exact_routes.get_mut(exact_path) {
+            candidates.retain(|c| {
+                if let Some(r) = self.routes.get(c.route_idx as usize) {
+                    r.id != route_id
+                } else {
+                    false
+                }
+            });
+            if candidates.is_empty() {
+                self.exact_routes.remove(exact_path);
+            }
+        }
+
+        // 2. Purge from scalar `small_candidates`
+        self.small_candidates.retain(|c| c.route.id != route_id);
+
+        // 3. Reclaim arena slot if this route was the most recent element pushed
+        if self.routes.last().is_some_and(|r| r.id == route_id) {
+            self.routes.pop();
+        }
+    }
 }
 
 #[inline]
@@ -509,6 +576,34 @@ impl Http2Router {
     #[inline]
     pub fn listener_count(&self) -> usize {
         self.listeners.len()
+    }
+
+    /// Dynamically registers an ephemeral exact-path route for a specific listener.
+    pub fn insert_exact_route(
+        &mut self,
+        listener_id: impl Into<ListenerId>,
+        exact_path: String,
+        route: Http2Route,
+        method_mask: MethodMask,
+    ) {
+        let lid = listener_id.into();
+        self.listeners
+            .entry(lid)
+            .or_default()
+            .insert_exact_route(exact_path, route, method_mask);
+    }
+
+    /// Dynamically removes an ephemeral exact-path route for a specific listener.
+    pub fn remove_exact_route(
+        &mut self,
+        listener_id: impl Into<ListenerId>,
+        exact_path: &str,
+        route_id: RouteId,
+    ) {
+        let lid = listener_id.into();
+        if let Some(listener) = self.listeners.get_mut(&lid) {
+            listener.remove_exact_route(exact_path, route_id);
+        }
     }
 }
 
