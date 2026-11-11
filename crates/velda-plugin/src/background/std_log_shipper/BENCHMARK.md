@@ -12,9 +12,9 @@ Performance benchmark specification and evaluation framework for the `std_log_sh
 
 ---
 
-### 1.2 Standardized 4-Tier Metric Taxonomy
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
 1. **Tier 1: Macro Network, L7 & Logging Delivery Metrics**:
    - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
@@ -68,13 +68,21 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)**: CPU cost to format timestamps, status codes, and integers via LUT.
+   - **SPSC Ring Buffer Push Duration (nanoseconds)**: Duration to enqueue structured log records into lock-free core-local SPSC ring buffers.
+   - **Log Record Slab Buffer Recycling Efficiency (%)**: Percentage of log record memory buffers reused from pre-allocated memory slabs.
+   - **Async Stdout / Local File Flush Latency (microseconds)**: Duration to flush batched log chunks into stdout or disk files.
+   - **Line Delimiter Buffering Chunk Size (bytes)**: Optimal chunk size utilized when batching multi-record writes.
+   - **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)**: Percentage of requests maintaining strict zero-blocking guarantees during sink saturation.
+   - **Zero-Copy Request Header / Path Reference Rate (%)**: Percentage of log payload strings referenced directly without heap duplication.
 
 ---
 
 ## 2. Focused Benchmark Scenarios
 
 To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Low-Rate Baseline (5,000 log/s)** — Measure added baseline latency overhead when formatting integers via `DIGIT_PAIRS LUT` and enqueueing into SPSC ring buffers under light load.
+- **Scenario 01: Low-Rate Baseline (5,000 log/s)** — Measure added baseline latency overhead when formatting integers via DIGIT_PAIRS LUT and enqueueing into SPSC ring buffers under light load.
 - **Scenario 02: Nominal Production Load (40,000 log/s)** — Evaluate sustained serving stability, tail latency, and resource footprint under nominal daily traffic with > 50% CPU headroom.
 - **Scenario 03: Peak Queue Saturation (100,000+ log/s)** — Extreme stress testing to verify SPSC ring buffer saturation behavior and confirm non-blocking frontline worker guarantees under drop-overflow conditions.
 - **Scenario 04: Extended Record Geometry (~1,024 bytes)** — Evaluate formatting throughput and buffer copy efficiency when handling large, deeply nested JSON access log records.
@@ -86,7 +94,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 
 ---
 
-### Scenario 01: Low-Rate Baseline (5,000 Log/sec) — Baseline Overhead Evaluation
+### Scenario 01: Low-Rate Baseline (5,000 log/s)
 - **Objective**: Determine baseline latency addition and CPU footprint when formatting and queueing access log records under low concurrency.
 - **Execution Command**: `oha -z 15s -q 5000 -c 50 http://<gateway_host>:<port>/api/v1/ping`
 
@@ -140,11 +148,18 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Push Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Log Record Slab Buffer Recycling Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Async Stdout / Local File Flush Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Line Delimiter Buffering Chunk Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Request Header / Path Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Nominal Production Load (40,000 Log/sec) — Sustained Baseline Performance
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 access log records/second with > 50% CPU headroom.
+### Scenario 02: Nominal Production Load (40,000 log/s)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 access log records/second.
 - **Execution Command**: `oha -z 15s -q 40000 -c 100 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
@@ -197,12 +212,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Push Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Log Record Slab Buffer Recycling Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Async Stdout / Local File Flush Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Line Delimiter Buffering Chunk Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Request Header / Path Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 03: Peak Queue Saturation (100,000+ Log/sec) — Ring Buffer Saturation & Drop-Overflow
-- **Objective**: Overload the gateway with extreme request volume to saturate the SPSC ring buffer and verify that the non-blocking drop-overflow mechanism guarantees zero latency degradation for frontline workers.
-- **Execution Command**: `wrk -t4 -c200 -d15s --latency http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 03: Peak Queue Saturation (100,000+ log/s)
+- **Objective**: Verify that frontline serving workers remain completely unblocked and latency remains flat even when sink writer is saturated.
+- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -254,12 +276,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Push Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Log Record Slab Buffer Recycling Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Async Stdout / Local File Flush Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Line Delimiter Buffering Chunk Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Request Header / Path Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 04: Extended Record Geometry (~1,024 Bytes: Nested JSON Details)
-- **Objective**: Challenge serialization throughput and memory efficiency when access log entries contain deeply nested custom JSON metadata.
-- **Execution Command**: `wrk -t4 -c100 -d15s --latency http://<gateway_host>:<port>/api/v1/heavy-log`
+### Scenario 04: Extended Record Geometry (~1,024 bytes)
+- **Objective**: Measure memory footprint and CPU overhead when serializing large access log entries with multi-header attributes.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -311,12 +340,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Push Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Log Record Slab Buffer Recycling Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Async Stdout / Local File Flush Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Line Delimiter Buffering Chunk Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Request Header / Path Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 05: Output Sink Backpressure (~200ms Delay) — Thread Isolation Verification
-- **Objective**: Verify that I/O stalls (simulated 200ms write latency on the logging sink pipe) are fully absorbed by the shadow worker without introducing tail latency or queue blockages on frontline worker threads.
-- **Execution Command**: `wrk -t4 -c100 -d15s http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 05: Output Sink Backpressure (~200ms Delay)
+- **Objective**: Confirm that shadow worker strictly isolates sink write delays and drops oldest records without exhausting gateway memory.
+- **Execution Command**: `oha -z 15s -q 20000 -c 64 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -368,6 +404,13 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JSON String Serialization Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Push Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Log Record Slab Buffer Recycling Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Async Stdout / Local File Flush Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Line Delimiter Buffering Chunk Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Drop-Overflow Ring Buffer Non-Blocking Guarantee (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Request Header / Path Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
@@ -377,11 +420,11 @@ To focus directly on essential operational requirements, the evaluation framewor
 | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
 | **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Log Formatting Mechanism** | **Static Frame Template + 200B Integer LUT** | Serialize AST JSON (`cjson.encode`) | Serialize AST JSON (`cjson.safe.encode`) | Protobuf String Serializer (`google.protobuf`) |
-| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Primary Execution Mechanism** | **SPSC Ring Buffer + DIGIT_PAIRS LUT + Async Shadow Writer** | Nginx standard access_log / Lua file I/O | APISIX file-logger via ngx.timer | Envoy file_access_log sink via worker threads |
+| **Heap Allocations** | **Zero hot-path allocations (Slab recycling)** | Nginx log buffer string allocations | Lua table & string allocations | C++ stringstream / buffer allocations |
 | **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | Non-blocking (Atomic SPSC ring buffer enqueue) | Serializing overhead on worker thread | Batch buffer in ngx.timer | Access log filter within request lifecycle |
-| **I/O Backpressure & Congestion Mechanism** | Proactive drop-overflow in SPSC ring buffer | Worker blocking or buffer overrun | ngx.timer buffer retention or drop | Ring buffer overflow drop / non-blocking flush |
-| **Disk / Pipe Output Worker Thread** | Dedicated Shadow Logistics Worker (`SCHED_IDLE`) | Main Nginx worker thread | Nginx timer callback thread | Dedicated File Access Logger thread |
+| **Hot-Path Request Serving Impact** | **Lock-free SPSC enqueue (< 8 ns)** | Write syscall on main worker thread | Buffer copy on main worker thread | Access log filter in worker event loop |
+| **Backpressure / Failure Mechanism** | **Proactive ring buffer drop-overflow** | Worker blocking on disk I/O stall | ngx.timer queue overflow drop | Memory buffer drop watermark |
+| **Worker Execution Allocation** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Main Nginx worker thread | Nginx timer callback thread | Main Envoy worker threads |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
 | **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |

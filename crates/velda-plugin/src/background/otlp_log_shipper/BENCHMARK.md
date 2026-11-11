@@ -12,9 +12,9 @@ Performance benchmark specification and evaluation framework for the `otlp_log_s
 
 ---
 
-### 1.2 Standardized 4-Tier Metric Taxonomy
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
 1. **Tier 1: Macro Network, L7 & OpenTelemetry Telemetry Delivery Metrics**:
    - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
@@ -68,6 +68,14 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)**: Latency to decode 32-hex trace_id and 16-hex span_id via precomputed LUT.
+   - **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)**: Overhead to format and pack OTLP ResourceLogs envelopes.
+   - **Protobuf Wire Encoding Size Per Log Record (bytes)**: Average byte size per serialized OpenTelemetry LogRecord.
+   - **SPSC Ring Buffer Enqueue Latency (nanoseconds)**: Time to push structured log records into the core-local SPSC ring buffer.
+   - **Zero-Copy Log Message String Reference Rate (%)**: Percentage of log payload strings referenced directly without heap duplication.
+   - **Shadow Logistics Worker Batch Flush Latency (milliseconds)**: Duration for shadow worker to compress and transmit OTLP batches over HTTP/2.
+   - **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)**: Verification of zero mutex contention or lock acquisition on the frontline serving path.
 
 ---
 
@@ -86,7 +94,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 
 ---
 
-### Scenario 01: Low-Rate Baseline (5,000 OTLP Records/sec) — Baseline Overhead Evaluation
+### Scenario 01: Low-Rate Baseline (5,000 OTLP Records/sec)
 - **Objective**: Determine baseline latency addition and CPU footprint when extracting trace headers and queueing OTLP log records under low concurrency.
 - **Execution Command**: `oha -z 15s -q 5000 -c 50 -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" http://<gateway_host>:<port>/api/v1/ping`
 
@@ -140,11 +148,18 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Encoding Size Per Log Record (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Log Message String Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker Batch Flush Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Nominal Production Load (40,000 OTLP Records/sec) — Sustained Baseline Performance
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 OTLP log records/second with > 50% CPU headroom.
+### Scenario 02: Nominal Production Load (40,000 OTLP Records/sec)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 OTLP records/second.
 - **Execution Command**: `oha -z 15s -q 40000 -c 100 -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
@@ -197,12 +212,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Encoding Size Per Log Record (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Log Message String Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker Batch Flush Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 03: Peak Queue Saturation (100,000+ OTLP Records/sec) — Ring Buffer Saturation & Drop-Overflow
-- **Objective**: Overload the gateway with extreme request volume to saturate the SPSC ring buffer and verify that the non-blocking drop-overflow mechanism guarantees zero latency degradation for frontline workers.
-- **Execution Command**: `wrk -t4 -c200 -d15s -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" --latency http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 03: Peak Queue Saturation (100,000+ OTLP Records/sec)
+- **Objective**: Confirm that frontline serving workers remain completely unblocked and latency remains flat even when downstream OTLP collector is saturated.
+- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -254,12 +276,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Encoding Size Per Log Record (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Log Message String Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker Batch Flush Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
 ### Scenario 04: W3C TraceContext & Extended OTLP Payload (~1,200 Bytes)
-- **Objective**: Challenge zero-copy parsing of `traceparent` headers via `HEX_LUT` and packing multi-dimensional Resource attributes and error metadata without dynamic heap allocations.
-- **Execution Command**: `wrk -t4 -c100 -d15s -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" --latency http://<gateway_host>:<port>/api/v1/heavy-otlp`
+- **Objective**: Evaluate formatting throughput and buffer copy efficiency when handling large, multi-attribute OTLP log records.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -311,12 +340,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Encoding Size Per Log Record (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Log Message String Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker Batch Flush Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
 ### Scenario 05: OTLP Collector Backpressure & Failure (~200ms Delay & Downed Collector)
-- **Objective**: Verify that collector connection stalls (200ms delay or connection refusal) do not block frontline traffic or cause process instability, validating SPSC ring buffer isolation.
-- **Execution Command**: `wrk -t4 -c100 -d15s http://<gateway_host>:<port>/api/v1/ping`
+- **Objective**: Confirm that shadow worker strictly isolates downstream network latency and drops oldest records without exhausting RAM.
+- **Execution Command**: `oha -z 15s -q 20000 -c 64 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -368,6 +404,13 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **W3C traceparent Hex Decode Latency via HEX_LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **ResourceLogs Protobuf Frame Packing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Encoding Size Per Log Record (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Zero-Copy Log Message String Reference Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker Batch Flush Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Non-Blocking Frontline Serving Guarantee (Zero Mutex Lock Pauses)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
@@ -377,12 +420,11 @@ To focus directly on essential operational requirements, the evaluation framewor
 | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
 | **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **OTLP Formatting Mechanism** | **Static Envelope Frame + 200B LUT + Hex LUT** | JSON Encoder cosocket (`cjson`) | Protobuf / JSON buffer ngx.timer | Protobuf C++ API (`google.protobuf`) |
-| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Primary Execution Mechanism** | **Static Envelope Frame + 200B LUT + Hex LUT + Shadow Worker** | JSON Encoder cosocket (`cjson`) | Protobuf / JSON buffer ngx.timer | Protobuf C++ API (`google.protobuf`) |
+| **Heap Allocations** | **Zero hot-path allocations (Slab recycling)** | Lua string allocations per log record | Lua table & string allocations | Protobuf C++ heap allocations |
 | **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **W3C TraceContext Extraction** | Zero-Copy Byte Pointer + Offset Scan via HEX_LUT | Substring slicing `string.sub` | Substring slicing `string.sub` | C++ String Substr & Header Map |
-| **Hot-Path Request Serving Impact** | Non-blocking (Atomic SPSC ring buffer enqueue) | Serializing overhead on worker thread | Batch buffer in ngx.timer | Access log filter within request lifecycle |
-| **Collector Congestion Mechanism** | Proactive drop-overflow in SPSC ring buffer | Worker blocking or buffer overrun | ngx.timer buffer retention or drop | Ring buffer overflow drop / non-blocking flush |
-| **Telemetry Push Worker Thread** | Dedicated Shadow Logistics Worker (`SCHED_IDLE`) | Main Nginx worker thread | Nginx timer callback thread | Dedicated gRPC ALS client thread |
+| **Hot-Path Request Serving Impact** | **Atomic SPSC enqueue (< 8 ns)** | Serializing overhead on worker thread | Batch buffer in ngx.timer | Access log filter within request lifecycle |
+| **Backpressure / Failure Mechanism** | **Proactive drop-overflow in SPSC ring buffer** | Worker blocking or buffer overrun | ngx.timer buffer retention or drop | Ring buffer overflow drop / non-blocking flush |
+| **Worker Execution Allocation** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Main Nginx worker thread | Nginx timer callback thread | Dedicated gRPC ALS client thread |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
 | **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |

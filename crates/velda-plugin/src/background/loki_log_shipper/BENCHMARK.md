@@ -12,16 +12,16 @@ Performance benchmark specification and evaluation framework for the `loki_log_s
 
 ---
 
-### 1.2 Standardized 4-Tier Metric Taxonomy
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
 1. **Tier 1: Macro Network, L7 & Grafana Loki Delivery Metrics**:
    - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
    - **Total Requests**: Total downstream requests successfully served.
    - **Throughput (requests/second)**: Processing throughput rate.
    - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
-   - **Total Loki Log Entries Emitted**: Total `[timestamp_ns, line]` entry pairs successfully delivered.
+   - **Total Loki Log Entries Emitted**: Total `[timestamp_ns, line]` entry pairs successfully delivered to Loki.
    - **Loki Entries Throughput (entries/second)**: Formatting and delivery rate of Grafana Loki stream entries.
    - **Active Loki Streams Partitioned**: Number of concurrent stream partitions indexed by static and dynamic labels.
    - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
@@ -68,13 +68,21 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **Snappy Block Compression Ratio (% Size Reduction)**: Compression savings achieved by Snappy framing before HTTP push.
+   - **Snappy Compression Throughput (Megabytes/second)**: Rate of payload compression into Snappy blocks.
+   - **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)**: Overhead to format 19-digit UNIX nanosecond timestamps via precomputed LUT.
+   - **Stream Label Partitioning & Indexing Overhead (nanoseconds)**: CPU cost to sort and hash stream labels for Loki stream deduplication.
+   - **Protobuf Wire Serialization Rate (records/second)**: Throughput of serializing Loki PushRequest protobuf messages.
+   - **SPSC Ring Buffer Enqueue Duration (nanoseconds)**: Time required by frontline workers to push log entries into lock-free SPSC ring buffers.
+   - **SPSC Drop-Overflow Non-Blocking Enforcement (%)**: Percentage of requests maintaining strict zero-blocking guarantees during collector saturation.
 
 ---
 
 ## 2. Focused Benchmark Scenarios
 
 To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Low-Rate Baseline (5,000 Entries/sec)** — Measure added baseline latency overhead when formatting 19-digit nanosecond timestamps via `DIGIT_PAIRS LUT` and partitioning static stream labels.
+- **Scenario 01: Low-Rate Baseline (5,000 Entries/sec)** — Measure added baseline latency overhead when formatting 19-digit nanosecond timestamps via DIGIT_PAIRS LUT and partitioning static stream labels.
 - **Scenario 02: Nominal Production Load (40,000 Entries/sec)** — Evaluate sustained serving stability, tail latency, and resource footprint under nominal daily traffic with > 50% CPU headroom.
 - **Scenario 03: Peak Queue Saturation (100,000+ Entries/sec)** — Extreme stress testing to verify SPSC ring buffer saturation behavior and confirm non-blocking frontline worker guarantees under drop-overflow conditions.
 - **Scenario 04: Dynamic Multi-Stream Partitioning (~1,024 Bytes)** — Evaluate routing-based label partitioning across multiple concurrent streams (`route_id`, `status_code`, `method`) with deeply nested JSON value payloads.
@@ -86,7 +94,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 
 ---
 
-### Scenario 01: Low-Rate Baseline (5,000 Entries/sec) — Baseline Overhead Evaluation
+### Scenario 01: Low-Rate Baseline (5,000 Entries/sec)
 - **Objective**: Determine baseline latency addition and CPU footprint when formatting Loki entries and queueing into SPSC rings under low concurrency.
 - **Execution Command**: `oha -z 15s -q 5000 -c 50 http://<gateway_host>:<port>/api/v1/ping`
 
@@ -98,7 +106,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Average Log Record Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Active Loki Streams Partitioned** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -140,11 +148,18 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Block Compression Ratio (% Size Reduction)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Compression Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Stream Label Partitioning & Indexing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Serialization Rate (records/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Drop-Overflow Non-Blocking Enforcement (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Nominal Production Load (40,000 Entries/sec) — Sustained Baseline Performance
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 Loki log entries/second with > 50% CPU headroom.
+### Scenario 02: Nominal Production Load (40,000 Entries/sec)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 Loki log entries/second.
 - **Execution Command**: `oha -z 15s -q 40000 -c 100 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
@@ -155,7 +170,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Average Log Record Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Active Loki Streams Partitioned** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -197,69 +212,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Block Compression Ratio (% Size Reduction)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Compression Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Stream Label Partitioning & Indexing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Serialization Rate (records/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Drop-Overflow Non-Blocking Enforcement (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 03: Peak Queue Saturation (100,000+ Entries/sec) — Ring Buffer Saturation & Drop-Overflow
-- **Objective**: Overload the gateway with extreme request volume to saturate the SPSC ring buffer and verify that the non-blocking drop-overflow mechanism guarantees zero latency degradation for frontline workers.
-- **Execution Command**: `wrk -t4 -c200 -d15s --latency http://<gateway_host>:<port>/api/v1/ping`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Average Log Record Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### Scenario 04: Dynamic Multi-Stream Partitioning (~1,024 Bytes)
-- **Objective**: Evaluate routing-based label partitioning across multiple concurrent streams (`route_id`, `status_code`, `method`) carrying custom JSON value lines.
-- **Execution Command**: `wrk -t4 -c100 -d15s --latency http://<gateway_host>:<port>/api/v1/heavy-loki`
+### Scenario 03: Peak Queue Saturation (100,000+ Entries/sec)
+- **Objective**: Verify that frontline serving workers remain completely unblocked and latency remains flat even when downstream Loki collector is saturated.
+- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -270,7 +235,6 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Loki Streams Partitioned** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Average Log Record Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -312,12 +276,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Block Compression Ratio (% Size Reduction)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Compression Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Stream Label Partitioning & Indexing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Serialization Rate (records/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Drop-Overflow Non-Blocking Enforcement (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 05: Loki Push API Backpressure & Failure (~200ms Delay & Downed Server)
-- **Objective**: Verify that Loki server response stalls (200ms delay or connection refusal) do not block frontline traffic or cause buffer leaks, validating SPSC ring buffer isolation.
-- **Execution Command**: `wrk -t4 -c100 -d15s http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 04: Dynamic Multi-Stream Partitioning (~1,024 Bytes)
+- **Objective**: Measure memory footprint and CPU overhead when partitioning high-cardinality streams under continuous request serving.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -327,7 +298,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Average Log Record Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Active Loki Streams Partitioned** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -369,6 +340,77 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Block Compression Ratio (% Size Reduction)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Compression Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Stream Label Partitioning & Indexing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Serialization Rate (records/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Drop-Overflow Non-Blocking Enforcement (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 05: Loki Push API Backpressure & Failure (~200ms Delay & Downed Server)
+- **Objective**: Confirm that shadow logistics worker strictly absorbs collector latency and drops oldest records without exhausting gateway memory.
+- **Execution Command**: `oha -z 15s -q 20000 -c 64 http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Loki Log Entries Emitted** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Loki Entries Throughput (entries/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Active Loki Streams Partitioned** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Block Compression Ratio (% Size Reduction)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Snappy Compression Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Nanosecond Timestamp Formatting Latency (DIGIT_PAIRS LUT, nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Stream Label Partitioning & Indexing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Protobuf Wire Serialization Rate (records/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Ring Buffer Enqueue Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SPSC Drop-Overflow Non-Blocking Enforcement (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
@@ -378,12 +420,11 @@ To focus directly on essential operational requirements, the evaluation framewor
 | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
 | **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Stream Label Partitioning Mechanism** | **Static Stream Partitioning (Pre-computed at init)** | Dynamic Hash Map per request | Hash Table ngx.var per request | Static Route Metadata & ALS stream |
-| **Timestamp Formatting Mechanism** | **200B Integer Lookup Table (`DIGIT_PAIRS LUT`)** | String concatenation `ngx.now()` | String concatenation `ngx.now()` | System Clock `time_point` formatting |
-| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Primary Execution Mechanism** | **SPSC Ring Buffer + Snappy Block Compressor + Shadow Worker Push** | Nginx Lua cosocket HTTP push (`cjson`) | APISIX loki-logger via ngx.timer buffer | Envoy fluentd / Loki access log sink via HTTP |
+| **Heap Allocations** | **Zero hot-path allocations (Slab recycling)** | Lua string concatenation allocations | Lua table & string allocations | Protobuf C++ heap allocations |
 | **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | Non-blocking (Atomic SPSC ring buffer enqueue) | Serializing overhead on worker thread | Batch buffer in ngx.timer | Access log filter within request lifecycle |
-| **Loki Backpressure & Congestion Mechanism** | Proactive drop-overflow in SPSC ring buffer | Worker blocking or buffer overrun | ngx.timer buffer retention or drop | Ring buffer overflow drop / non-blocking flush |
-| **Log Push Worker Thread** | Dedicated Shadow Logistics Worker (`SCHED_IDLE`) | Main Nginx worker thread | Nginx timer callback thread | Dedicated HTTP/gRPC client thread |
+| **Hot-Path Request Serving Impact** | **Lock-free atomic SPSC enqueue (< 8 ns)** | Lua table creation in log phase | Buffer insertion in log phase | Access log handler in worker event loop |
+| **Backpressure / Failure Mechanism** | **Proactive ring buffer drop-overflow** | Lua cosocket blocking or memory growth | ngx.timer queue overflow drop | Memory buffer drop watermark |
+| **Worker Execution Allocation** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Main Nginx worker thread | Nginx timer callback thread | Main Envoy worker threads |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
 | **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |

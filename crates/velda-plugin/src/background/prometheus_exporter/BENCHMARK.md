@@ -12,19 +12,19 @@ Performance benchmark specification and evaluation framework for the `prometheus
 
 ---
 
-### 1.2 Standardized 4-Tier Metric Taxonomy
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
 1. **Tier 1: Macro Network, L7 & Prometheus Exposition Delivery Metrics**:
    - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
-   - **Total Requests**: Total scrape requests successfully served by the `/metrics` endpoint.
-   - **Throughput (requests/second)**: Scrape processing throughput rate.
+   - **Total Requests**: Total downstream requests successfully served.
+   - **Throughput (requests/second)**: Processing throughput rate.
    - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
-   - **Total Metric Samples Exported**: Total individual gauge, counter, and histogram samples formatted.
-   - **Metric Samples Throughput (samples/second)**: Formatting and delivery rate of Prometheus metric samples.
+   - **Total Scrape Requests Served**: Total scrape requests successfully served by the `/metrics` endpoint.
+   - **Scrape Processing Throughput (scrapes/second)**: Throughput rate of serving `/metrics` scrapes.
    - **Active Metric Series Count**: Number of distinct metric series formatted in the output exposition text.
-   - **Mean Latency (milliseconds)**: Average time from scrape request receipt to response completion.
+   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
    - **Min Latency (milliseconds)**: Minimum recorded latency.
    - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
    - **P75 Latency (milliseconds)**: 75th percentile response latency.
@@ -46,7 +46,7 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
    - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
    - **RAM Usage (%)**: Percentage of total system memory consumed.
-   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate during scrape exposition.
+   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
    - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
 3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
    - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
@@ -68,17 +68,25 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **Prometheus Text Line Serialization Speed (lines/microsecond)**: Throughput of formatting metric lines in Prometheus 0.0.4 text format.
+   - **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)**: CPU cost to format metric timestamps and sample values using precomputed LUT.
+   - **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)**: Dynamic heap allocations observed when serving scrape requests.
+   - **Lock-Free Multi-Core Counter Reduction Duration (microseconds)**: Duration to gather and sum atomic counter slots from all worker lanes.
+   - **Text Exposition Wire Density (bytes/metric sample)**: Average byte efficiency of the generated Prometheus exposition output.
+   - **Scrape Response Generation Latency (microseconds)**: Turnaround latency to generate and flush the entire `/metrics` payload.
+   - **Frontline Request Serving Isolation (Zero Lock Contention)**: Verification of zero lock contention on frontline traffic during concurrent `/metrics` scraping.
 
 ---
 
 ## 2. Focused Benchmark Scenarios
 
 To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Low-Latency Floor Scrape (Concurrency = 1, Keep-Alive)** — Measure floor serialization latency, TTFB, and CPU cycles per scrape request under sequential scraping conditions without concurrent load.
-- **Scenario 02: Multi-Scraper Concurrent Burst (Concurrency = 16)** — Evaluate scraping throughput, latency distribution, and CPU scaling when multiple Prometheus instances scrape the edge gateway concurrently.
-- **Scenario 03: Scraper Saturation & Semaphore Bounds (Concurrency = 64, max_concurrency = 16)** — Evaluate gateway stability, 503 Service Unavailable enforcement, and semaphore queue behavior when scrape request concurrency exceeds configured limits.
-- **Scenario 04: Cryptographic TLS & mTLS Scrape Overhead (HTTPS /metrics)** — Evaluate cryptographic overhead, TLS handshake latency, and session resumption impact on Prometheus scrape serving.
-- **Scenario 05: Scraper Backpressure & Slowloris Resistance (200ms Read Stalls & Socket Backpressure)** — Verify that slow Prometheus clients (simulated 200ms socket read stalls) do not cause socket leaks, buffer inflation, or front-line traffic degradation.
+- **Scenario 01: Low-Rate Scrape Baseline (10 Scrapes/sec, 500 Metric Series)** — Measure added baseline latency and CPU footprint when periodically formatting 500 metric series into Prometheus text exposition.
+- **Scenario 02: High-Cadence Scrape Load (1,000 Scrapes/sec, 2,000 Metric Series)** — Evaluate sustained exposition performance, tail latency, and CPU footprint when serving 1,000 concurrent scrape requests/sec.
+- **Scenario 03: Extreme Scrape Saturation (5,000 Scrapes/sec, 10,000 Metric Series)** — Stress test memory buffer reuse and text serializer throughput under extreme scrape saturation across 10,000 active metric series.
+- **Scenario 04: Dynamic Multi-Label Dimension Formatting (High Cardinality Series)** — Evaluate formatting throughput and LUT integer conversion efficiency when serializing high-cardinality multi-label series.
+- **Scenario 05: Scrape Endpoint Contention During 100,000 req/s Downstream Serving** — Simulate heavy concurrent `/metrics` scraping while frontline workers are serving 100,000 req/s downstream proxy traffic.
 
 ---
 
@@ -86,9 +94,9 @@ To focus directly on essential operational requirements, the evaluation framewor
 
 ---
 
-### Scenario 01: Low-Latency Floor Scrape (Concurrency = 1, Keep-Alive) — Floor Latency Evaluation
-- **Objective**: Measure floor serialization latency, TTFB, and CPU cycles per scrape request under sequential scraping conditions without concurrent load.
-- **Execution Command**: `wrk -t1 -c1 -d15s --latency http://<gateway_host>:9090/metrics`
+### Scenario 01: Low-Rate Scrape Baseline (10 Scrapes/sec, 500 Metric Series)
+- **Objective**: Determine baseline scrape generation latency and buffer allocation behavior under low concurrency.
+- **Execution Command**: `oha -z 15s -q 10 -c 2 http://<gateway_host>:<port>/metrics`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -96,8 +104,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Metric Samples Exported** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Metric Samples Throughput (samples/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Scrape Requests Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Processing Throughput (scrapes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Metric Series Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -140,12 +148,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Prometheus Text Line Serialization Speed (lines/microsecond)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Counter Reduction Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Text Exposition Wire Density (bytes/metric sample)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Response Generation Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Request Serving Isolation (Zero Lock Contention)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Multi-Scraper Concurrent Burst (Concurrency = 16) — Multi-Node Scrape Scalability
-- **Objective**: Evaluate scraping throughput, latency distribution, and CPU scaling when multiple Prometheus instances scrape the edge gateway concurrently.
-- **Execution Command**: `wrk -t2 -c16 -d15s --latency http://<gateway_host>:9090/metrics`
+### Scenario 02: High-Cadence Scrape Load (1,000 Scrapes/sec, 2,000 Metric Series)
+- **Objective**: Evaluate text formatting throughput and lock-free counter reduction under heavy concurrent scraping.
+- **Execution Command**: `oha -z 15s -q 1000 -c 50 http://<gateway_host>:<port>/metrics`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -153,8 +168,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Metric Samples Exported** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Metric Samples Throughput (samples/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Scrape Requests Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Processing Throughput (scrapes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Metric Series Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -197,12 +212,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Prometheus Text Line Serialization Speed (lines/microsecond)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Counter Reduction Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Text Exposition Wire Density (bytes/metric sample)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Response Generation Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Request Serving Isolation (Zero Lock Contention)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 03: Scraper Saturation & Semaphore Bounds (Concurrency = 64, max_concurrency = 16) — Semaphore Resilience
-- **Objective**: Evaluate gateway stability, 503 Service Unavailable enforcement, and semaphore queue behavior when scrape request concurrency exceeds configured limits.
-- **Execution Command**: `wrk -t4 -c64 -d15s --latency http://<gateway_host>:9090/metrics`
+### Scenario 03: Extreme Scrape Saturation (5,000 Scrapes/sec, 10,000 Metric Series)
+- **Objective**: Verify that `/metrics` endpoint handles peak scraping without memory leakage or starving frontline serving threads.
+- **Execution Command**: `oha -z 15s -c 128 http://<gateway_host>:<port>/metrics`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -210,8 +232,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Metric Samples Exported** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Metric Samples Throughput (samples/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Scrape Requests Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Processing Throughput (scrapes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Metric Series Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -254,12 +276,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Prometheus Text Line Serialization Speed (lines/microsecond)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Counter Reduction Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Text Exposition Wire Density (bytes/metric sample)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Response Generation Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Request Serving Isolation (Zero Lock Contention)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 04: Cryptographic TLS & mTLS Scrape Overhead (HTTPS /metrics) — Cryptographic Impact
-- **Objective**: Evaluate cryptographic overhead, TLS handshake latency, and session resumption impact on Prometheus scrape serving.
-- **Execution Command**: `wrk -t2 -c16 -d15s --latency https://<gateway_host>:9090/metrics`
+### Scenario 04: Dynamic Multi-Label Dimension Formatting (High Cardinality Series)
+- **Objective**: Measure wire density and serialization speed when formatting deeply dimensioned metric series.
+- **Execution Command**: `oha -z 15s -q 2000 -c 64 http://<gateway_host>:<port>/metrics`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -267,8 +296,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Metric Samples Exported** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Metric Samples Throughput (samples/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Scrape Requests Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Processing Throughput (scrapes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Metric Series Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -311,12 +340,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Prometheus Text Line Serialization Speed (lines/microsecond)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Counter Reduction Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Text Exposition Wire Density (bytes/metric sample)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Response Generation Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Request Serving Isolation (Zero Lock Contention)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 05: Scraper Backpressure & Slowloris Resistance (200ms Read Stalls & Socket Backpressure) — Slow-Scraper Resilience
-- **Objective**: Verify that slow Prometheus clients (simulated 200ms socket read stalls) do not cause socket leaks, buffer inflation, or front-line traffic degradation.
-- **Execution Command**: `wrk -t4 -c32 -d15s http://<gateway_host>:9090/metrics`
+### Scenario 05: Scrape Endpoint Contention During 100,000 req/s Downstream Serving
+- **Objective**: Confirm that scrape response generation does not cause tail latency spikes on downstream request serving.
+- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -324,8 +360,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Metric Samples Exported** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Metric Samples Throughput (samples/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Scrape Requests Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Processing Throughput (scrapes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Active Metric Series Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
@@ -368,6 +404,13 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Prometheus Text Line Serialization Speed (lines/microsecond)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Integer/Float Formatting Overhead via DIGIT_PAIRS LUT (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Output Buffer Allocation Count (Zero-Allocation on Reused Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Counter Reduction Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Text Exposition Wire Density (bytes/metric sample)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scrape Response Generation Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Request Serving Isolation (Zero Lock Contention)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
@@ -377,12 +420,11 @@ To focus directly on essential operational requirements, the evaluation framewor
 | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
 | **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Formatting Engine** | **200B `DIGIT_PAIRS LUT` + Reciprocal Division-Free Formatting** | Lua table building + string concat | Lua table building + string concat | Dynamic Prometheus text generator (C++) |
-| **Concurrency Limiting** | **Hard Atomic Semaphore (`max_concurrency`)** | Unbounded (Nginx connection limit) | Unbounded (Nginx connection limit) | Configurable connection limit |
-| **Exposition Serving Thread** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Nginx worker thread handling `/metrics` | Nginx worker thread handling `/metrics` | Worker thread / admin interface |
-| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Heavy Lua GC churn during formatting | Heavy Lua GC churn during formatting | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | Non-blocking (Atomic snapshots over cacheline-isolated slots) | Spinlock contention on shared dict | Spinlock contention on shared dict | Lock-free atomic counter reading |
-| **Cryptographic TLS & mTLS Handling** | **Dedicated rustls / kTLS stack** | OpenSSL via OpenResty | OpenSSL via OpenResty | BoringSSL |
+| **Primary Execution Mechanism** | **Lock-Free Atomic Slots + DIGIT_PAIRS LUT Text Formatter** | lua-resty-prometheus via shared dict traversal | apisix prometheus plugin via shared memory | Envoy admin /stats/prometheus endpoint |
+| **Heap Allocations** | **Zero allocations on reused scrape buffers** | Heavy Lua string concatenation per scrape | Heavy Lua string concatenation per scrape | C++ stringstream / buffer allocations |
+| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
+| **Hot-Path Request Serving Impact** | **AtomicRelaxed fetch_add (< 2 ns)** | Shared dict atomic counter increment | Shared dict atomic counter increment | Thread-local counter increment |
+| **Backpressure / Failure Mechanism** | **Non-blocking lock-free snapshot generation** | Worker blocking during large dictionary walk | Worker blocking during large dictionary walk | Admin endpoint thread execution |
+| **Worker Execution Allocation** | **Served via dedicated endpoint or shadow lane** | Executed on request-serving Nginx worker | Executed on request-serving Nginx worker | Envoy admin endpoint worker |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
 | **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |

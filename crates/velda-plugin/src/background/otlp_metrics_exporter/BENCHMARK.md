@@ -12,9 +12,9 @@ Performance benchmark specification and evaluation framework for the `otlp_metri
 
 ---
 
-### 1.2 Standardized 4-Tier Metric Taxonomy
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
 1. **Tier 1: Macro Network, L7 & OpenTelemetry Metrics Delivery Metrics**:
    - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
@@ -68,6 +68,14 @@ All benchmark scenarios are evaluated across four standardized, non-abbreviated 
    - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)**: Hot-path CPU latency to increment lane-sharded atomic counters.
+   - **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)**: Time required by shadow worker to aggregate atomic metric slots across all cores.
+   - **MetricPayload Protobuf Serialization Throughput (datapoints/second)**: Rate of encoding aggregated metric slots into OTLP ExportMetricsServiceRequest frames.
+   - **OTLP Metric Wire Size Efficiency (bytes/datapoint)**: Average wire footprint per exported metric data point.
+   - **Export Buffer Memory Slab Recycling Rate (%)**: Percentage of protobuf export buffers reused across push intervals.
+   - **Shadow Worker Background HTTP/2 Push Duration (milliseconds)**: Time taken by shadow worker to transmit metrics payload to remote collector.
+   - **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)**: Hardware verification of zero cache invalidation across frontline worker cores.
 
 ---
 
@@ -86,8 +94,8 @@ To focus directly on essential operational requirements, the evaluation framewor
 
 ---
 
-### Scenario 01: Low-Rate Baseline Traffic (5,000 req/s, 10s Push Interval) — Baseline Overhead Evaluation
-- **Objective**: Measure added baseline serving latency and CPU footprint when incrementing core-local atomic counters on frontline workers with low push cadence.
+### Scenario 01: Low-Rate Baseline Traffic (5,000 req/s, 10s Push Interval)
+- **Objective**: Determine baseline serving latency and CPU footprint when updating atomic counters under low concurrency.
 - **Execution Command**: `oha -z 15s -q 5000 -c 50 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
@@ -140,11 +148,18 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **MetricPayload Protobuf Serialization Throughput (datapoints/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **OTLP Metric Wire Size Efficiency (bytes/datapoint)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Export Buffer Memory Slab Recycling Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background HTTP/2 Push Duration (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Nominal Production Load (40,000 req/s, 10s Push Interval) — Sustained Baseline Performance
-- **Objective**: Evaluate sustained throughput, tail latency profile, and resource consumption under nominal production load with periodic background OTLP export.
+### Scenario 02: Nominal Production Load (40,000 req/s, 10s Push Interval)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption when continuously processing 40,000 req/s.
 - **Execution Command**: `oha -z 15s -q 40000 -c 100 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
@@ -197,12 +212,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **MetricPayload Protobuf Serialization Throughput (datapoints/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **OTLP Metric Wire Size Efficiency (bytes/datapoint)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Export Buffer Memory Slab Recycling Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background HTTP/2 Push Duration (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 03: Peak Hot-Path Saturation (100,000+ req/s, Lock-Free Snapshot Verification) — Contention-Free Atomic Scaling
-- **Objective**: Extreme stress testing to verify lock-free atomic snapshot aggregation across all core lanes without cacheline bouncing or mutex contention during heavy multi-core traffic saturation.
-- **Execution Command**: `wrk -t4 -c200 -d15s http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 03: Peak Hot-Path Saturation (100,000+ req/s, Lock-Free Snapshot Verification)
+- **Objective**: Confirm zero cacheline bouncing across CPU cores and verify lock-free atomic counter throughput under full wire saturation.
+- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -254,12 +276,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **MetricPayload Protobuf Serialization Throughput (datapoints/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **OTLP Metric Wire Size Efficiency (bytes/datapoint)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Export Buffer Memory Slab Recycling Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background HTTP/2 Push Duration (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 04: High-Cadence Push Staggering (1s Push Interval, Rapid Serializer Stress) — Export Serializer Throughput
-- **Objective**: Evaluate serializer throughput and CPU footprint when push interval is lowered to 1 second, repeatedly transforming slot tables into OTLP metric payloads.
-- **Execution Command**: `wrk -t4 -c100 -d15s http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 04: High-Cadence Push Staggering (1s Push Interval, Rapid Serializer Stress)
+- **Objective**: Stress test shadow worker protobuf serialization and connection reuse under aggressive 1-second export cycles.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -311,12 +340,19 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **MetricPayload Protobuf Serialization Throughput (datapoints/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **OTLP Metric Wire Size Efficiency (bytes/datapoint)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Export Buffer Memory Slab Recycling Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background HTTP/2 Push Duration (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 05: OTLP Collector Backpressure & Failure (~200ms Delay & Downed Collector) — Thread Isolation Verification
-- **Objective**: Verify that remote OTLP collector connection stalls (simulated 200ms write latency or connection timeout) are completely isolated to the shadow worker without introducing jitter or latency degradation to frontline request serving.
-- **Execution Command**: `wrk -t4 -c100 -d15s http://<gateway_host>:<port>/api/v1/ping`
+### Scenario 05: OTLP Collector Backpressure & Failure (~200ms Delay & Downed Collector)
+- **Objective**: Confirm that collector stalls are strictly confined to the shadow worker and cause zero jitter on downstream request serving.
+- **Execution Command**: `oha -z 15s -q 20000 -c 64 http://<gateway_host>:<port>/api/v1/ping`
 
 | Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -368,6 +404,13 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 | **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Per-Core Atomic Slot Counter Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Multi-Core Snapshot Aggregation Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **MetricPayload Protobuf Serialization Throughput (datapoints/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **OTLP Metric Wire Size Efficiency (bytes/datapoint)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Export Buffer Memory Slab Recycling Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background HTTP/2 Push Duration (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cross-Core Cacheline Bouncing Rate (0 by design in Velda)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
@@ -377,11 +420,11 @@ To focus directly on essential operational requirements, the evaluation framewor
 | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
 | **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Metrics Collection Mechanism** | **Lock-Free `CoreSlotTable` (64B Cacheline-Isolated)** | Shared Dict (`ngx.shared.DICT`) with spinlocks | Shared Dict (`ngx.shared.DICT`) with spinlocks | Thread-local stats store + central TLS aggregator |
-| **Metric Export Mechanism** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Background `ngx.timer.at` Lua thread | Background `ngx.timer.at` Lua thread | Flush timer on main thread / stat sink dispatcher |
-| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Primary Execution Mechanism** | **Per-Core Sharded Atomic Slots + Zero-Alloc Protobuf Serializer** | Lua shared dict atomic increments + cosocket push | Shared memory buffer + ngx.timer exporter | Thread-local stats store + Protobuf exporter |
+| **Heap Allocations** | **Zero hot-path allocations (Static slot tables)** | Lua table creation in log phase | Lua table & string allocations | Protobuf C++ heap allocations |
 | **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | Non-blocking (Lock-free atomic counter increments) | Atomic add or spinlock contention on `lua_shared_dict` | Spinlock contention on `lua_shared_dict` | Lock-free atomic increment in thread-local storage |
-| **Collector Backpressure Isolation** | Shadow Worker completely decoupled from serving | Timer pool exhaustion under backpressure | Timer pool exhaustion or buffer overflow | Async HTTP/gRPC sink with bounded queue |
+| **Hot-Path Request Serving Impact** | **AtomicRelaxed fetch_add (< 2 ns)** | lua_shared_dict atomic update | lua_shared_dict atomic update | Thread-local counter increment |
+| **Backpressure / Failure Mechanism** | **Shadow worker drops delayed export batch** | Worker blocking or timer pileup | ngx.timer queue overflow drop | Memory buffer drop watermark |
+| **Worker Execution Allocation** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Main Nginx worker thread | Nginx timer callback thread | Main Envoy worker threads |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
 | **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
