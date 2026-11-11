@@ -3,14 +3,14 @@
 //! Organizes per-core sharded pipeline counters, connection pool gauges/histograms,
 //! global process counters, and SIMD-accelerated snapshot aggregation.
 
-pub mod global;
-pub mod pool;
-pub mod slot;
-pub mod snapshot;
-pub mod store;
-pub mod telemetry;
-pub mod types;
-pub mod vector;
+mod global;
+mod pool;
+mod slot;
+mod snapshot;
+mod store;
+mod telemetry;
+mod types;
+mod vector;
 
 pub use global::GlobalMetrics;
 pub use pool::{EvictionReason, PoolMetrics};
