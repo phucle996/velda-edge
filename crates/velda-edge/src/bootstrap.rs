@@ -120,8 +120,10 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
         "Velda Edge supervisor bootstrapped successfully"
     );
 
-    let metrics = Arc::new(velda_observability::MetricsStore::new());
-    let _ = velda_observability::init_global_metrics(metrics.clone());
+    // Single process-wide metrics store. `global_metrics()` is get-or-init, so this returns the
+    // same Arc that plugins instantiated during `load_initial_runtime` already captured.
+    // Never construct a second `MetricsStore` here: it would diverge from the real global.
+    let metrics = velda_observability::global_metrics();
 
     Ok(EdgeSupervisor {
         config,

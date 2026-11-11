@@ -46,6 +46,34 @@ pub async fn serve(
         "Proxying L4 TCP stream to RDMA kernel-bypass upstream via zero-copy arena"
     );
 
+    let started = std::time::Instant::now();
+    let (request_id, _) = velda_core::next_request_id();
+    let emit_log = |rx: u64, tx: u64, completion: velda_observability::LogCompletionReason| {
+        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+            request_id: request_id.entropy(),
+            timestamp_sec: request_id.timestamp_secs() as u32,
+            duration_us: started.elapsed().as_micros().min(u32::MAX as u128) as u32,
+            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            bytes_rx: rx.min(u32::MAX as u64) as u32,
+            bytes_tx: tx.min(u32::MAX as u64) as u32,
+            upstream_ip: 0,
+            peer_port: peer.port(),
+            upstream_port: 0,
+            status_code: 0,
+            route_id: route_id.0 as u16,
+            ua_major_version: 0,
+            rpc_msgs_or_flags: 0,
+            downstream_proto: velda_observability::LogProtocol::RawTcp as u8,
+            upstream_proto: velda_observability::LogProtocol::RawTcp as u8,
+            pipe_strategy: 3, // PipeStrategy::Duplex
+            completion: completion as u8,
+            method: velda_observability::LogHttpMethod::Unknown as u8,
+            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+            ua_family: velda_observability::UaFamily::None as u8,
+            ua_os: velda_observability::UaOs::Unknown as u8,
+        });
+    };
+
     // Step 1: Lease a pre-warmed RDMA channel from the core-local lane shard.
     // Conforms to AGENTS.md Sec 2.9: Frontline worker does not perform handshakes or block on warmup.
     let lease = match upstream.acquire().await {
@@ -56,6 +84,11 @@ pub async fn serve(
                 upstream = %upstream_id,
                 peer = %peer,
                 "Failed to acquire RDMA lease for L4 raw forwarding"
+            );
+            emit_log(
+                0,
+                0,
+                velda_observability::LogCompletionReason::UpstreamError,
             );
             return;
         }
@@ -124,6 +157,10 @@ pub async fn serve(
     tokio::pin!(client_to_rdma);
     tokio::pin!(rdma_to_client);
 
+    let mut rx_bytes = 0u64;
+    let mut tx_bytes = 0u64;
+    let mut completion = velda_observability::LogCompletionReason::Complete;
+
     tokio::select! {
         c2s_res = &mut client_to_rdma => {
             match c2s_res {
@@ -131,6 +168,8 @@ pub async fn serve(
                     // Client finished writing; drain remaining upstream responses up to idle timeout
                     match tokio::time::timeout(idle_timeout, &mut rdma_to_client).await {
                         Ok(Ok(s2c)) => {
+                            rx_bytes = c2s;
+                            tx_bytes = s2c;
                             tracing::debug!(
                                 upstream = %upstream_id,
                                 peer = %peer,
@@ -140,6 +179,8 @@ pub async fn serve(
                             );
                         }
                         Ok(Err(e)) => {
+                            rx_bytes = c2s;
+                            completion = velda_observability::LogCompletionReason::UpstreamError;
                             lease.mark_broken();
                             tracing::warn!(
                                 error = %e,
@@ -149,6 +190,8 @@ pub async fn serve(
                             );
                         }
                         Err(_) => {
+                            rx_bytes = c2s;
+                            completion = velda_observability::LogCompletionReason::Timeout;
                             lease.mark_broken();
                             tracing::debug!(
                                 upstream = %upstream_id,
@@ -160,6 +203,7 @@ pub async fn serve(
                     }
                 }
                 Err(e) => {
+                    completion = velda_observability::LogCompletionReason::ClientCancel;
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,
@@ -173,6 +217,7 @@ pub async fn serve(
         s2c_res = &mut rdma_to_client => {
             match s2c_res {
                 Ok(s2c) => {
+                    tx_bytes = s2c;
                     tracing::debug!(
                         upstream = %upstream_id,
                         peer = %peer,
@@ -181,6 +226,7 @@ pub async fn serve(
                     );
                 }
                 Err(e) => {
+                    completion = velda_observability::LogCompletionReason::UpstreamError;
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,
@@ -192,6 +238,8 @@ pub async fn serve(
             }
         }
     }
+
+    emit_log(rx_bytes, tx_bytes, completion);
 
     // Raw L4 TCP streams lack application framing delimiters.
     // Mark channel broken to prevent cross-session byte bleeding into pooled connections (CWE-444/CWE-456).

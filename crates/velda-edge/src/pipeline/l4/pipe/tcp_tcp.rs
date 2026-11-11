@@ -47,16 +47,59 @@ pub async fn serve(
     let idle_timeout = config.idle_timeout.or(Some(upstream.timeouts().idle));
     let buffer_size = config.copy_buffer_size;
 
+    let started = std::time::Instant::now();
+    let (request_id, _) = velda_core::next_request_id();
+
     // Step 2: Dispatch connection from upstream pool and bridge byte streams.
     // Utilizes Linux splice(2) kernel zero-copy where available, falling back to chunked user-space copy.
-    match upstream
+    let result = upstream
         .dispatch_stream(|stream| {
             velda_sock::forward_connection(conn, stream, buffer_size, idle_timeout)
         })
-        .await
-    {
+        .await;
+
+    // Step 3: Emit exactly one connection-level access log record (L4 has no per-request framing).
+    // `status_code`/`method` stay 0/Unknown: raw TCP carries no HTTP semantics. The selected
+    // backend endpoint is chosen inside `dispatch_stream`, so `upstream_ip/port` remain 0 here.
+    let (rx, tx, completion) = match &result {
+        Ok(stats) => (
+            stats.client_to_server_bytes,
+            stats.server_to_client_bytes,
+            velda_observability::LogCompletionReason::Complete,
+        ),
+        Err(_) => (
+            0,
+            0,
+            velda_observability::LogCompletionReason::UpstreamError,
+        ),
+    };
+    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        request_id: request_id.entropy(),
+        timestamp_sec: request_id.timestamp_secs() as u32,
+        duration_us: started.elapsed().as_micros().min(u32::MAX as u128) as u32,
+        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        bytes_rx: rx.min(u32::MAX as u64) as u32,
+        bytes_tx: tx.min(u32::MAX as u64) as u32,
+        upstream_ip: 0,
+        peer_port: peer.port(),
+        upstream_port: 0,
+        status_code: 0,
+        route_id: route_id.0 as u16,
+        ua_major_version: 0,
+        rpc_msgs_or_flags: 0,
+        downstream_proto: velda_observability::LogProtocol::RawTcp as u8,
+        upstream_proto: velda_observability::LogProtocol::RawTcp as u8,
+        pipe_strategy: 3, // PipeStrategy::Duplex: raw L4 is always full-duplex
+        completion: completion as u8,
+        method: velda_observability::LogHttpMethod::Unknown as u8,
+        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+        ua_family: velda_observability::UaFamily::None as u8,
+        ua_os: velda_observability::UaOs::Unknown as u8,
+    });
+
+    match result {
         Ok(stats) => {
-            // Step 3: Record transferred byte telemetry upon graceful stream closure.
+            // Step 4: Record transferred byte telemetry upon graceful stream closure.
             tracing::debug!(
                 upstream = %upstream_id,
                 peer = %peer,
@@ -66,7 +109,7 @@ pub async fn serve(
             );
         }
         Err(e) => {
-            // Step 4: Log abnormal connection termination (e.g. client reset, network drop, timeout).
+            // Step 5: Log abnormal connection termination (e.g. client reset, network drop, timeout).
             tracing::warn!(
                 error = %e,
                 upstream = %upstream_id,

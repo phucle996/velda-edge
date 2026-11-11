@@ -280,6 +280,39 @@ pub async fn serve(
 
     // Step 5: Spawn background session worker driving bidirectional packet pumping.
     tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let (request_id, _) = velda_core::next_request_id();
+        let emit_log =
+            |peer: std::net::SocketAddr,
+             rx: u64,
+             tx: u64,
+             completion: velda_observability::LogCompletionReason| {
+                velda_observability::global_log_store().emit(
+                    &velda_observability::AccessLogRecord {
+                        request_id: request_id.entropy(),
+                        timestamp_sec: request_id.timestamp_secs() as u32,
+                        duration_us: started.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        bytes_rx: rx.min(u32::MAX as u64) as u32,
+                        bytes_tx: tx.min(u32::MAX as u64) as u32,
+                        upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
+                        peer_port: peer.port(),
+                        upstream_port: target_addr.port(),
+                        status_code: 0,
+                        route_id: route_id.0 as u16,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        downstream_proto: velda_observability::LogProtocol::RawUdp as u8,
+                        upstream_proto: velda_observability::LogProtocol::RawUdp as u8,
+                        pipe_strategy: 3, // PipeStrategy::Duplex
+                        completion: completion as u8,
+                        method: velda_observability::LogHttpMethod::Unknown as u8,
+                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                        ua_family: velda_observability::UaFamily::None as u8,
+                        ua_os: velda_observability::UaOs::Unknown as u8,
+                    },
+                );
+            };
         // Step 5a: Open accelerated kernel UDP socket connected to upstream target.
         let upstream_socket = match up_clone.connect_socket(target_addr) {
             Ok(s) => s,
@@ -291,11 +324,19 @@ pub async fn serve(
                     "Failed to connect accelerated upstream UDP socket for L4 session"
                 );
                 get_udp_session_table().remove(&session_key);
+                emit_log(
+                    client_addr,
+                    0,
+                    0,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
                 return;
             }
         };
 
         // Step 5b: Send initial datagram to prime the upstream connection.
+        let mut bytes_rx = initial_bytes.len() as u64;
+        let mut bytes_tx = 0u64;
         if let Err(e) = upstream_socket.send(&initial_bytes).await {
             tracing::warn!(
                 error = %e,
@@ -304,6 +345,12 @@ pub async fn serve(
                 "Failed to send initial UDP datagram to upstream"
             );
             get_udp_session_table().remove(&session_key);
+            emit_log(
+                client_addr,
+                0,
+                0,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
             return;
         }
 
@@ -335,6 +382,9 @@ pub async fn serve(
                                 }
                             }
 
+                            for pkt in &batch[..batch_count] {
+                                bytes_rx += pkt.len() as u64;
+                            }
                             send_batch_to_socket(&upstream_socket, &batch[..batch_count]).await;
                             has_activity.store(true, Ordering::Relaxed);
                         }
@@ -360,7 +410,9 @@ pub async fn serve(
                             drained_any = true;
                             // Fast path: non-blocking GSO / batch send directly to downstream socket
                             match downstream_socket.try_send_gso_aware(&buf[..n], gso_size, current_peer) {
-                                Some(Ok(_)) => {}
+                                Some(Ok(_)) => {
+                                    bytes_tx += n as u64;
+                                }
                                 Some(Err(e)) => {
                                     tracing::trace!(
                                         error = %e,
@@ -378,17 +430,20 @@ pub async fn serve(
                         }
                     });
 
-                    if let Some((pkt, gso_size)) = fallback_packet
-                        && let Err(e) = downstream_socket
+                    if let Some((pkt, gso_size)) = fallback_packet {
+                        let pkt_len = pkt.len() as u64;
+                        if let Err(e) = downstream_socket
                             .send_gso_aware(&pkt, gso_size, current_peer)
                             .await
-                    {
-                        tracing::trace!(
-                            error = %e,
-                            client = %current_peer,
-                            "Failed forwarding UDP reply back to client with backpressure"
-                        );
-                        break;
+                        {
+                            tracing::trace!(
+                                error = %e,
+                                client = %current_peer,
+                                "Failed forwarding UDP reply back to client with backpressure"
+                            );
+                            break;
+                        }
+                        bytes_tx += pkt_len;
                     }
 
                     if drained_any {
@@ -429,7 +484,14 @@ pub async fn serve(
             }
         }
 
-        // Step 6: Evict session key from table on task exit.
+        // Step 6: Evict session key and emit exactly one session-level access log record.
+        let final_peer = *session_peer.read();
         get_udp_session_table().remove(&session_key);
+        emit_log(
+            final_peer,
+            bytes_rx,
+            bytes_tx,
+            velda_observability::LogCompletionReason::Complete,
+        );
     });
 }

@@ -139,6 +139,39 @@ pub async fn serve(
 
     // Step 4: Spawn background session worker driving bidirectional UDP <-> RDMA bridging.
     tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let (request_id, _) = velda_core::next_request_id();
+        let emit_log =
+            |peer: std::net::SocketAddr,
+             rx: u64,
+             tx: u64,
+             completion: velda_observability::LogCompletionReason| {
+                velda_observability::global_log_store().emit(
+                    &velda_observability::AccessLogRecord {
+                        request_id: request_id.entropy(),
+                        timestamp_sec: request_id.timestamp_secs() as u32,
+                        duration_us: started.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        bytes_rx: rx.min(u32::MAX as u64) as u32,
+                        bytes_tx: tx.min(u32::MAX as u64) as u32,
+                        upstream_ip: 0,
+                        peer_port: peer.port(),
+                        upstream_port: 0,
+                        status_code: 0,
+                        route_id: route_id.0 as u16,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        downstream_proto: velda_observability::LogProtocol::RawUdp as u8,
+                        upstream_proto: velda_observability::LogProtocol::RawUdp as u8,
+                        pipe_strategy: 3, // PipeStrategy::Duplex
+                        completion: completion as u8,
+                        method: velda_observability::LogHttpMethod::Unknown as u8,
+                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                        ua_family: velda_observability::UaFamily::None as u8,
+                        ua_os: velda_observability::UaOs::Unknown as u8,
+                    },
+                );
+            };
         // Step 4a: Lease a pre-warmed RDMA channel from the local core lane shard.
         // Conforms to AGENTS.md Sec 2.9: Frontline worker does not block on warmup.
         let lease = match up_clone.acquire().await {
@@ -151,6 +184,12 @@ pub async fn serve(
                     "Failed to acquire RDMA lease for bidirectional L4 UDP session"
                 );
                 get_udp_session_table().remove(&session_key);
+                emit_log(
+                    client_addr,
+                    0,
+                    0,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
                 return;
             }
         };
@@ -174,9 +213,18 @@ pub async fn serve(
             );
             lease.mark_broken();
             get_udp_session_table().remove(&session_key);
+            emit_log(
+                client_addr,
+                0,
+                0,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
             return;
         }
 
+        let mut bytes_rx = initial_bytes.len() as u64;
+        let mut bytes_tx = 0u64;
+        let mut completion = velda_observability::LogCompletionReason::Complete;
         let has_activity = AtomicBool::new(false);
         let mut assured = false;
         let mut unassured_elapsed = Duration::ZERO;
@@ -206,9 +254,11 @@ pub async fn serve(
                                     upstream = %upstream_id,
                                     "Failed posting RDMA Send Work Request for client datagram"
                                 );
+                                completion = velda_observability::LogCompletionReason::UpstreamError;
                                 lease.mark_broken();
                                 break;
                             }
+                            bytes_rx += first_data.len() as u64;
 
                             // Opportunistically drain additional queued datagrams to amortize task wakeups
                             let mut drained = 0;
@@ -228,9 +278,11 @@ pub async fn serve(
                                                 upstream = %upstream_id,
                                                 "Failed posting batched RDMA Send Work Request"
                                             );
+                                            completion = velda_observability::LogCompletionReason::UpstreamError;
                                             lease.mark_broken();
                                             break;
                                         }
+                                        bytes_rx += data.len() as u64;
                                         drained += 1;
                                     }
                                     Err(_) => break,
@@ -256,6 +308,7 @@ pub async fn serve(
                                 );
                                 break;
                             }
+                            bytes_tx += resp_payload.len() as u64;
                             assured = true;
                             has_activity.store(true, Ordering::Relaxed);
                         }
@@ -269,6 +322,7 @@ pub async fn serve(
                                 upstream = %upstream_id,
                                 "RDMA channel receive failure during L4 UDP session"
                             );
+                            completion = velda_observability::LogCompletionReason::UpstreamError;
                             lease.mark_broken();
                             break;
                         }
@@ -309,7 +363,9 @@ pub async fn serve(
 
         // Step 5: Evict session key from table on task exit.
         // Mark channel broken to prevent cross-session datagram bleeding into pooled connections.
+        let final_peer = *session_peer.read();
         lease.mark_broken();
         get_udp_session_table().remove(&session_key);
+        emit_log(final_peer, bytes_rx, bytes_tx, completion);
     });
 }
