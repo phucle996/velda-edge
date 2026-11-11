@@ -12,9 +12,9 @@ use http::{HeaderMap, HeaderValue, Method, Uri, Version};
 use ring::hmac;
 use rustc_hash::FxHashMap;
 use velda_core::{Action, Body, L7Request, ProtocolFamily, RejectReason, StreamingMode};
-use velda_plugin::PreUpstreamPlugin;
 use velda_plugin::factory::{LoadedPlugin, build_route_plugin_plan};
 use velda_plugin::pre_route::{CorsPreflightPlugin, OriginPattern};
+use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::{CsrfConfig, CsrfPlugin};
 
 fn current_epoch_secs() -> u64 {

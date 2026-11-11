@@ -27,10 +27,10 @@ pub mod std_log_shipper;
 
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
-pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin, format_loki_push_payload};
+pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
 pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
-pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
+pub use prometheus_exporter::{PrometheusExporterConfig, PrometheusExporterPlugin};
 pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
 pub use std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use http::header::HeaderValue;
 use http::{HeaderMap, Method, Uri, Version};
 use velda_core::{Action, Body, L7Request, RejectReason};
-use velda_plugin::PreUpstreamPlugin;
+use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::{
     ClaimToHeaderConfig, Oauth2IntrospectionConfig, Oauth2IntrospectionPlugin,
 };

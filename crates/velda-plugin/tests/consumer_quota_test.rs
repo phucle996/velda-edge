@@ -11,7 +11,7 @@ use std::sync::Arc;
 use http::header::RETRY_AFTER;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
 use velda_core::{Action, Body, L7Request, RejectReason};
-use velda_plugin::PreUpstreamPlugin;
+use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::consumer_quota::{
     ConsumerQuotaConfig, ConsumerQuotaPlugin, QuotaAlgorithm, QuotaWindowConfig,
 };

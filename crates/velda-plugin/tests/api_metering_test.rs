@@ -12,7 +12,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use rustc_hash::FxHashMap;
 use velda_core::{Action, Body, L7Request, RejectReason};
-use velda_plugin::PreUpstreamPlugin;
+use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::api_metering::{
     ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, TierConfig,
 };

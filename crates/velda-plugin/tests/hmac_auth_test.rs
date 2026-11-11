@@ -6,7 +6,7 @@ use http::header::HeaderValue;
 use http::{HeaderMap, Method, Uri, Version};
 use ring::hmac;
 use velda_core::{Action, Body, L7Request, RejectReason};
-use velda_plugin::PreUpstreamPlugin;
+use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::hmac_auth::canonical::{
     CanonicalRequest, SignedHeadersSpec, compute_sha256, sign_canonical_request, to_base64,
 };

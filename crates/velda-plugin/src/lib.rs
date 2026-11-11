@@ -21,52 +21,18 @@ pub mod post_response;
 pub mod pre_route;
 pub mod pre_upstream;
 
+// Root exports are limited to the cross-phase orchestration surface.
+// Plugin types, configs and internal state are reached through their phase module
+// (e.g. `velda_plugin::pre_route::WafLitePlugin`) so the phase stays visible at call sites.
+pub use background::{BackgroundPlugin, spawn_background_plugins};
+pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
+pub use error::PluginError;
+pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
 pub use hook::{
     ShadowTask, has_shadow_hook, set_core_shadow_sender, set_global_shadow_sender,
     try_dispatch_shadow,
 };
-
-pub use background::prometheus_exporter::{
-    PrometheusExporter, PrometheusExporterPlugin, format_snapshot,
-};
-pub use background::{
-    BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, LokiLogShipperConfig,
-    LokiLogShipperPlugin, OtlpLogShipperConfig, OtlpLogShipperPlugin, OtlpMetricsExporterConfig,
-    OtlpMetricsExporterPlugin, StatsdExporterConfig, StatsdExporterPlugin, StdLogShipperConfig,
-    StdLogShipperPlugin, format_loki_push_payload, spawn_background_plugins,
-};
-pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
-pub use error::PluginError;
-pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin};
-pub use header::*;
-pub use http_cache::{
-    CacheEntry, HttpCacheRegistry, HttpCacheStorage, filter_cacheable_headers, normalize_query,
-};
 pub use plan::RoutePluginPlan;
-pub use post_response::{
-    CompressionAlgorithm, CorsConfig, CorsResponsePlugin, HttpCacheStoreConfig,
-    HttpCacheStorePlugin, OpentelemetryTracerConfig, OpentelemetryTracerPlugin, PostResponsePlugin,
-    ResponseCompressionConfig, ResponseCompressionPlugin, ResponseHeaderMutationConfig,
-    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, run_post_response_plugins,
-};
-pub use pre_route::{
-    CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,
-    ResourceLimitPlugin, ResourceLimits, ThreatVector, WafLitePlugin, WafMode, WafScope,
-    run_pre_route_plugins,
-};
-pub use pre_upstream::{
-    AccountState, ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, ApiMeteringConfig, ApiMeteringPlugin,
-    CanaryConfig, CanaryPlugin, ConsumerQuotaConfig, ConsumerQuotaPlugin, CsrfConfig, CsrfPlugin,
-    ExhaustedAction, GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin, HashSource,
-    HeaderMatchRule, HeaderMutationConfig, HeaderMutationPlugin, HeaderRule, HmacAuthConfig,
-    HmacAuthPlugin, HmacCredentialConfig, HttpAbortConfig, HttpCacheLookupConfig,
-    HttpCacheLookupPlugin, HttpDelayConfig, HttpFaultCondition, HttpFaultInjectionPlugin,
-    IpRangeMatcher, JwtAlgorithm, JwtAuthPlugin, KeySource, MICRO_CREDITS_PER_UNIT,
-    MeteringDecision, MirroredRequest, Oauth2IntrospectionConfig, Oauth2IntrospectionPlugin,
-    PathRewriteStrategy, PreUpstreamPlugin, QueryStrategy, QuotaAlgorithm, QuotaDecision,
-    QuotaWindowConfig, RateLimitPlugin, RequestMirrorConfig, RequestMirrorPlugin,
-    RequestTerminationConfig, RequestTerminationPlugin, ShardedMeteringState, ShardedQuotaState,
-    TierConfig, TokenSource, UrlRewriteConfig, UrlRewritePlugin, W3cTraceContextConfig,
-    W3cTraceContextPlugin, WindowState, get_mirror_sender, init_mirror_queue,
-    run_pre_upstream_plugins,
-};
+pub use post_response::run_post_response_plugins;
+pub use pre_route::run_pre_route_plugins;
+pub use pre_upstream::run_pre_upstream_plugins;

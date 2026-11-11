@@ -7,7 +7,7 @@
 //! - **Bounded Authority**: Returns [`Action::Continue`], [`Action::Respond`] (e.g. 429), or [`Action::Reject`].
 //! - **Target Context Available**: The router has already resolved the target upstream pool and endpoint.
 
-pub use std::sync::Arc;
+use std::sync::Arc;
 use velda_core::{Action, L7Request, UpstreamId};
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
