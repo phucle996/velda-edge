@@ -33,7 +33,7 @@ High-performance, zero-regex L7 ingress perimeter firewall that inspects request
 
 ## 2. Built-in Attack Signatures & Scanner Dictionary
 
-Velda Edge ships with **119 built-in attack signatures** and **15 malicious scanner User-Agents** in [`dictionary.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/dictionary.rs), compiled directly into the SIMD Aho-Corasick automaton. **You do NOT need to configure these patterns in `custom_blocked_patterns` or `custom_blocked_user_agents`.**
+Velda Edge ships with **119 built-in attack signatures** and **15 malicious scanner User-Agents** in [`dictionary.rs`](./dictionary.rs), compiled directly into the SIMD Aho-Corasick automaton. **You do NOT need to configure these patterns in `custom_blocked_patterns` or `custom_blocked_user_agents`.**
 
 > [!TIP]
 > **Automatic Deduplication ("Khử trùng")**:

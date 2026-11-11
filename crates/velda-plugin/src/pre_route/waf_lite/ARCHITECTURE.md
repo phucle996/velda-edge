@@ -23,7 +23,7 @@ The `waf_lite` plugin operates at the ingress pre-route phase of Velda Edge, enf
    - *Raw Non-ASCII Byte Defense*: Inspects raw `HeaderValue::as_bytes()` directly, preventing bypass via `0x80`–`0xFF` byte prefixing.
    - *Duplicate Header Smuggling Defense*: Inspects all occurrences of duplicate headers (`HeaderMap::get_all`).
 5. **Automatic Compile-Time & Sync-Time Deduplication ("Khử trùng")**:
-   `velda-sync` automatically strips any `custom_blocked_patterns` or `custom_blocked_user_agents` that are already covered by (exact match or superstring of) [`dictionary.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/dictionary.rs) built-ins or repeated within the custom list, persisting the deduplicated configuration into `plugins.bin`.
+   `velda-sync` automatically strips any `custom_blocked_patterns` or `custom_blocked_user_agents` that are already covered by (exact match or superstring of) [`dictionary.rs`](./dictionary.rs) built-ins or repeated within the custom list, persisting the deduplicated configuration into `plugins.bin`.
 6. **Pre-Baked Static Responses**:
    Rejections clone an immutable pre-allocated `403 Forbidden` response template (`L7Response::from_bytes`) in single-digit nanoseconds. Detect mode injects pre-baked static `HeaderValue` constants without runtime string parsing.
 
@@ -67,7 +67,7 @@ flowchart TD
 
 ### 3.1 Static Dictionary & Threat Classification (`dictionary.rs`)
 
-[`dictionary.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/dictionary.rs) owns the zero-allocation static knowledge base:
+[`dictionary.rs`](./dictionary.rs) owns the zero-allocation static knowledge base:
 - `ThreatVector`: 1-byte `Copy` enum (`PathTraversal`, `SqlInjection`, `CrossSiteScripting`, `RemoteCodeExecution`, `MaliciousScanner`, `CustomPattern`).
 - `BUILTIN_ATTACK_SIGNATURES: &[(&str, ThreatVector)]`: 119 curated, non-overlapping lowercase attack signatures across Path Traversal, SQLi, XSS, Log4j, Shell RCE, and Framework CVEs.
 - `BUILTIN_MALICIOUS_USER_AGENTS: &[&str]`: 15 automated scanner User-Agent substrings.

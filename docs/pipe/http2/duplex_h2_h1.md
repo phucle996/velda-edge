@@ -3,7 +3,7 @@
 
 | Subsystem Information | Specification |
 | :--- | :--- |
-| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/duplex_h2_h1.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/duplex_h2_h1.rs) |
+| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/duplex_h2_h1.rs`](../../../crates/velda-edge/src/pipeline/http2/pipe/duplex_h2_h1.rs) |
 | **Model** | Split-Socket Asynchronous Duplex Bridge (*Mô hình Cầu Nối Song Công Tách Socket*) |
 | **Downstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Multiplexed Binary Framing (`velda-http2`) |
 | **Upstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/1.1 Split Socket Pool (`velda-upstream`) |

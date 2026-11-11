@@ -42,7 +42,7 @@ flowchart LR
 ```
 
 ### Tier 1: Isolated Whitebox Unit Tests
-- Implemented in [`origin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/cors_preflight/origin.rs) and [`plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/cors_preflight/plugin.rs).
+- Implemented in [`origin.rs`](./origin.rs) and [`plugin.rs`](./plugin.rs).
 - Verifies exact origin matching, subdomain wildcard expansion, 256-byte LUT character validation, method bitmask encoding/decoding, header pre-baking, credentials reflection, and error response formatting.
 
 ### Tier 2: Adversarial Attack & Security Vulnerability Suites
@@ -50,7 +50,7 @@ flowchart LR
 - Asserts that attacks injecting path separators (`/`), credentials (`@`), query parameters (`?`), fragments (`#`), ports (`:`), consecutive dots (`..`), and invalid characters are immediately rejected with `403 Forbidden`.
 
 ### Tier 3: Crate Integration Tests
-- Implemented in [`crates/velda-plugin/tests/cors_suite_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/cors_suite_test.rs).
+- Implemented in [`crates/velda-plugin/tests/cors_suite_test.rs`](../../../tests/cors_suite_test.rs).
 - Simulates realistic multi-phase browser request flows through `RoutePluginPlan`, testing `cors_preflight` at `pre_route` combined with `cors` at `post_response`.
 
 ### Tier 4: Distributed Azure VM Live Cluster

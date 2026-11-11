@@ -1,6 +1,6 @@
 # Báo Cáo Đo Đối Sánh Hiệu Năng & Phân Tích Symbol Chuyên Sâu: Plugin AI Token Metering
 
-Tài liệu này đặc tả và định hình khung số liệu đối chuẩn thực tế toàn diện cho plugin [`ai_token_metering`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/ai_token_metering/) của **Velda Edge** (Rust Edition 2024), so sánh đối đầu trực tiếp trên môi trường đám mây thực tế **Microsoft Azure** với hai hệ sinh thái API Gateway hàng đầu:
+Tài liệu này đặc tả và định hình khung số liệu đối chuẩn thực tế toàn diện cho plugin [`ai_token_metering`](./) của **Velda Edge** (Rust Edition 2024), so sánh đối đầu trực tiếp trên môi trường đám mây thực tế **Microsoft Azure** với hai hệ sinh thái API Gateway hàng đầu:
 - **Velda Edge**: v0.1.0-release (Rust Edition 2024, Hourglass Architecture, Zero-Allocation Reverse Tail Window Scanner, Micro-USD $10^{-6}$ Fixed-Point Arithmetic, 64-Stripe Cache-Line Aligned Ledger `#[repr(align(64))]`, Shadow Logistics Redis Reconciler under `SCHED_IDLE`).
 - **Kong Gateway**: v3.9.0 (OpenResty LuaJIT 2.1, ngx_lua body_filter buffer, AST `cjson.decode`, `lua_shared_dict` + Redis).
 - **Apache APISIX**: v3.10.0 (OpenResty LuaJIT 2.1, body filter full-stream buffering, `cjson.safe.decode`, shm spinlock).

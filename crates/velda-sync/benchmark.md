@@ -146,7 +146,7 @@ Evaluates domain-specific JSON parsing, semantic validation, compact binary comp
 
 ```bash
 # Set PROTOC path if required by tonic-build
-export PROTOC=/home/phucle/.cache/uv/archive-v0/3kT7ylvB58kWDUbK/torch/bin/protoc
+export PROTOC=protoc
 
 # 1. Single-thread decompression, SHA-256, & domain compilation
 cargo bench -p velda-sync --bench single_thread_bench

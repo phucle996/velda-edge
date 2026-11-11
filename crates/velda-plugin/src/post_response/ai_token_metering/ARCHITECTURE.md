@@ -6,7 +6,7 @@ This document details the architectural invariants, hardware-level optimization 
 
 ## 1. System Topology & Lifecycle Integration
 
-In accordance with the **Hourglass Architecture** ([`docs/HOURGLASS_MODEL.md`](file:///home/phucle/Desktop/velda-edge/docs/HOURGLASS_MODEL.md)), the `ai_token_metering` plugin executes strictly in the bottom cone during the `post_response` phase. It does not participate in ingress routing, downstream connection acceptance, or upstream connection dispatching.
+In accordance with the **Hourglass Architecture** ([`docs/HOURGLASS_MODEL.md`](../../../../../docs/HOURGLASS_MODEL.md)), the `ai_token_metering` plugin executes strictly in the bottom cone during the `post_response` phase. It does not participate in ingress routing, downstream connection acceptance, or upstream connection dispatching.
 
 ```mermaid
 flowchart TD

@@ -3,7 +3,7 @@
 
 | Subsystem Information | Specification |
 | :--- | :--- |
-| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h3.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h3.rs) |
+| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h3.rs`](../../../crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h3.rs) |
 | **Model** | TCP-to-QUIC Cross-Transport Bridge (*Mô hình Cầu Nối Xuyên Tầng Vận Chuyển TCP sang UDP/QUIC*) |
 | **Downstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Binary Framing / HPACK (`velda-http2`) |
 | **Upstream Transport / Codec** | L4 UDP Datagrams $\to$ L7 HTTP/3 QUIC Streams / QPACK (`velda-upstream` / `velda-http3`) |

@@ -22,7 +22,7 @@ flowchart TD
 
 ### 2.1 Zero-Float Math via Basis Points ($0..10,000$)
 Floating point calculations (`f64`, `f32`) on the hot path introduce register spilling, non-deterministic IEEE-754 rounding, and potential floating point exploit vectors.
-In [`consumer_quota::algorithm`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/consumer_quota/algorithm.rs):
+In [`consumer_quota::algorithm`](./algorithm.rs):
 - Sliding window interpolation uses Basis Points (1 bp = 0.01%):
   $$\text{weight\_bp} = \frac{\text{elapsed\_into\_epoch} \times 10,000}{\text{window\_seconds}}$$
   $$\text{effective\_count} = \text{curr\_count} + \frac{\text{prev\_count} \times (10,000 - \text{weight\_bp})}{10,000}$$
@@ -31,7 +31,7 @@ In [`consumer_quota::algorithm`](file:///home/phucle/Desktop/velda-edge/crates/v
 
 ### 2.2 Lock-Striped Cache-Aligned Sharding (`#[repr(align(64))]`)
 To eliminate L1/L2 data cache bouncing and false sharing across worker cores:
-- The state container [`ShardedQuotaState`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/consumer_quota/algorithm.rs#L160) allocates 64 independent shards.
+- The state container [`ShardedQuotaState`](./algorithm.rs#L160) allocates 64 independent shards.
 - Each shard contains its own `std::sync::Mutex<FxHashMap<u64, Vec<WindowState>>>` aligned to 64 bytes (the L1 cacheline boundary on x86_64).
 - Across 4 worker cores, the probability of two cores hitting the exact same shard lock simultaneously is $\frac{1}{64} \approx 1.56\%$. Uncontended atomic CAS operations complete in $< 10 \text{ ns}$.
 

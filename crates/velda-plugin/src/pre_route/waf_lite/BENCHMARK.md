@@ -139,7 +139,7 @@ wrk -t 2 -c 64 -d 10s http://<GATEWAY_HOST>:80/api/waf/baseline --latency
 
 #### Scenario 2: Cleartext Clean Traffic (Active WAF Lite Inspection)
 ```bash
-wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua http://<GATEWAY_HOST>:80/api/waf/clean --latency
+wrk -t 2 -c 64 -d 10s -s ./bench_waf_clean.lua http://<GATEWAY_HOST>:80/api/waf/clean --latency
 ```
 - **Throughput**: **43,801.79 RPS** (Transfer: 6.39 MB/s)
 - **Total Requests**: 438,250 in 10.01s
@@ -213,7 +213,7 @@ wrk -t 2 -c 64 -d 10s -H "Referer: http://attacker.com?payload=\${jndi:ldap://ev
 
 #### Scenario 7: HTTPS HTTP/1.1 Clean Traffic
 ```bash
-wrk -t 2 -c 64 -d 10s -s /home/phucle/bench_waf_clean.lua https://<GATEWAY_HOST>:443/api/waf/clean --latency
+wrk -t 2 -c 64 -d 10s -s ./bench_waf_clean.lua https://<GATEWAY_HOST>:443/api/waf/clean --latency
 ```
 - **Throughput**: **36,634.06 RPS** (Transfer: 5.35 MB/s)
 - **Total Requests**: 366,783 in 10.01s (100% `200 OK`)
@@ -229,7 +229,7 @@ wrk -t 2 -c 64 -d 10s "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%
 
 #### Scenario 9: HTTPS HTTP/2 Clean Traffic (`oha`)
 ```bash
-/home/phucle/oha -z 10s -c 64 --http2 --insecure https://<GATEWAY_HOST>:443/api/waf/clean
+oha -z 10s -c 64 --http2 --insecure https://<GATEWAY_HOST>:443/api/waf/clean
 ```
 - **Throughput**: **23,328.01 RPS**
 - **Success Rate**: 100.00% (233,365 `200 OK` responses)
@@ -237,7 +237,7 @@ wrk -t 2 -c 64 -d 10s "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%
 
 #### Scenario 10: HTTPS HTTP/2 Attack Rejection (`oha`)
 ```bash
-/home/phucle/oha -z 10s -c 64 --http2 --insecure "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%252fboot.ini"
+oha -z 10s -c 64 --http2 --insecure "https://<GATEWAY_HOST>:443/api/waf/block?file=%252e%252e%252fboot.ini"
 ```
 - **Throughput**: **37,403.83 RPS**
 - **Success Rate**: 100.00% (374,200 `403 Forbidden` responses)

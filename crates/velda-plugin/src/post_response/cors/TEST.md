@@ -41,7 +41,7 @@ flowchart LR
 ```
 
 ### Tier 1: Whitebox Unit Tests
-- Implemented in [`crates/velda-plugin/src/post_response/cors/plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/cors/plugin.rs).
+- Implemented in [`crates/velda-plugin/src/post_response/cors/plugin.rs`](./plugin.rs).
 - Verifies `on_response` behavior across wildcard, exact, and subdomain origin configurations, credentials enforcement, expose headers joining, and `Vary` multi-value appends.
 
 ### Tier 2: Egress Header Preservation Tests
@@ -49,7 +49,7 @@ flowchart LR
 - Validates that multiple `Vary` headers are handled via HTTP multi-value lists rather than string concatenations.
 
 ### Tier 3: Crate Integration Tests
-- Implemented in [`crates/velda-plugin/tests/cors_suite_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/cors_suite_test.rs).
+- Implemented in [`crates/velda-plugin/tests/cors_suite_test.rs`](../../../tests/cors_suite_test.rs).
 - Executes coordinated workflows involving preflight `OPTIONS` and standard `GET`/`POST` responses across configured routes.
 
 ### Tier 4: Distributed Azure VM Live Cluster

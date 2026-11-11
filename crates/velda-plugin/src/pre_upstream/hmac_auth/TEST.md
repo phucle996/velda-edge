@@ -11,9 +11,9 @@ The `hmac_auth` plugin operates as a pre-upstream Layer 7 security gate for fina
 - **Wire Tampering**: Mandatory cryptographic binding of request body payloads (`req.body`) and sensitive headers into a deterministic canonical request representation.
 - **Replay Attacks**: Dual-layer defense mechanism:
   - Configurable anti-replay clock skew window (default: 60 seconds).
-  - Hardware-sharded, lock-striped in-memory cache ([`NonceCache`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/hmac_auth/nonce.rs)) that rejects duplicate nonces with zero lock contention across CPU cores.
+  - Hardware-sharded, lock-striped in-memory cache ([`NonceCache`](./nonce.rs)) that rejects duplicate nonces with zero lock contention across CPU cores.
 - **Nonce Cache Poisoning DoS**: Nonces are strictly committed to the cache **after** cryptographic HMAC signature verification passes.
-- **Timing Side-Channel Attacks**: Signatures and payload digests are verified using 128-bit SIMD vector constant-time comparison ([`constant_time_eq`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/hmac_auth/canonical.rs#L176-L195)).
+- **Timing Side-Channel Attacks**: Signatures and payload digests are verified using 128-bit SIMD vector constant-time comparison ([`constant_time_eq`](./canonical.rs#L176-L195)).
 - **Zero-Heap Allocation on Hot Path**: All payload hashing, hex encoding, base64 encoding, and canonical component streaming operate purely on pre-allocated stack buffers (`[u8; 64]`, `[u8; 88]`, `[u8; 128]`).
 
 ---
@@ -40,11 +40,11 @@ Testing was conducted across four comprehensive tiers, from whitebox unit testin
 ```
 
 ### Tier 1: Isolated Whitebox Unit Tests
-- Implemented in [`crates/velda-plugin/src/pre_upstream/hmac_auth/plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/hmac_auth/plugin.rs) and [`canonical.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/hmac_auth/canonical.rs).
+- Implemented in [`crates/velda-plugin/src/pre_upstream/hmac_auth/plugin.rs`](./plugin.rs) and [`canonical.rs`](./canonical.rs).
 - Verifies canonical string construction, query parameter sorting, zero-alloc uppercase method handling, SIMD constant-time byte comparisons, and stack formatting.
 
 ### Tier 2: Crate Integration Tests
-- Implemented in [`crates/velda-plugin/tests/hmac_auth_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/hmac_auth_test.rs).
+- Implemented in [`crates/velda-plugin/tests/hmac_auth_test.rs`](../../../tests/hmac_auth_test.rs).
 - Instantiates `HmacAuthPlugin` directly from configuration, executes requests through `on_upstream_request`, and asserts full context transitions and downstream responses.
 
 ### Tier 3: Real-World Distributed Azure VM Cluster
@@ -87,7 +87,7 @@ if let Some(val) = req.headers.get(&self.content_sha256_header)
 **Exploit Scenario**: An adversary intercepting an in-flight request could keep the original valid `x-signature` and `x-content-sha256` headers, while altering the payload body (`req.body`) to malicious parameters (e.g. modifying payment amount from `$10` to `$1,000,000`). Because the gateway blindly trusted `x-content-sha256`, the canonical HMAC calculation matched the signature, allowing the tampered body to be dispatched to the upstream service.
 
 ### 3.2 Implemented Patch
-The vulnerability was resolved directly in [`compute_payload_hash_bytes`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/hmac_auth/plugin.rs#L183-L280):
+The vulnerability was resolved directly in [`compute_payload_hash_bytes`](./plugin.rs#L183-L280):
 
 1. **Buffered In-Memory Payloads (`Body::Bytes`)**:
    - The gateway **always** computes the authentic SHA-256 digest directly from `req.body` into a stack buffer `[u8; 64]`.

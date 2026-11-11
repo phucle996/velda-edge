@@ -55,7 +55,7 @@ Velda Edge implements native compile-time defenses against UDP and QUIC denial-o
 
 ## 2. The 12 Dedicated HTTP/3 Pipelines Matrix
 
-Velda Edge implements **12 compile-time specialized pipeline strategy modules** under [`crates/velda-edge/src/pipeline/http3/pipe/`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http3/pipe/):
+Velda Edge implements **12 compile-time specialized pipeline strategy modules** under [`crates/velda-edge/src/pipeline/http3/pipe/`](../../../crates/velda-edge/src/pipeline/http3/pipe/):
 
 | Pipeline Strategy | Upstream Protocol | Implementation Module | Architectural Role & Specialization | Specification File |
 | :--- | :--- | :--- | :--- | :--- |

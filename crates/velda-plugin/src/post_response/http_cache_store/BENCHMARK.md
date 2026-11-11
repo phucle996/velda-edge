@@ -1,6 +1,6 @@
 # Báo Cáo Đo Đối Sánh Hiệu Năng & Phân Tích Symbol Chuyên Sâu: Cụm Plugin HTTP Cache Storage (`http_cache_store` & `http_cache_lookup`)
 
-Tài liệu này đặc tả và định hình khung số liệu đối chuẩn thực tế toàn diện cho cụm plugin lưu trữ và phục vụ bộ nhớ đệm HTTP ([`http_cache_store`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/http_cache_store/) và [`http_cache_lookup`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/http_cache_lookup/)) cùng hạ tầng lõi [`http_cache`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/) của **Velda Edge** (Rust Edition 2024), so sánh đối đầu trực tiếp trên môi trường đám mây thực tế **Microsoft Azure** với hai hệ sinh thái API Gateway & Reverse Proxy hàng đầu:
+Tài liệu này đặc tả và định hình khung số liệu đối chuẩn thực tế toàn diện cho cụm plugin lưu trữ và phục vụ bộ nhớ đệm HTTP ([`http_cache_store`](./) và [`http_cache_lookup`](../../pre_upstream/http_cache_lookup/)) cùng hạ tầng lõi [`http_cache`](../../http_cache/) của **Velda Edge** (Rust Edition 2024), so sánh đối đầu trực tiếp trên môi trường đám mây thực tế **Microsoft Azure** với hai hệ sinh thái API Gateway & Reverse Proxy hàng đầu:
 - **Velda Edge**: v0.1.0-release (Rust Edition 2024, Hourglass Architecture, Zero-Copy In-Memory Serving, Vector AVX2 Non-Temporal DRAM Confinement `VMOVNTDQ` + `_mm_sfence`, Single-Pass RFC 9111 Bitmask Scanner, Đồng hồ số nguyên Coarse Atomic Clock 1-ALU Cycle, 64-Stripe Cache-Line Aligned Shards `#[repr(align(64))]`, Thuật toán đào thải Second-Chance CLOCK $O(1)$ Lockless-Read).
 - **Kong Gateway**: v3.9.0 (OpenResty LuaJIT 2.1, plugin `proxy-cache`, bộ nhớ chia sẻ tập trung `lua_shared_dict` với spinlock, full-stream body buffering).
 - **Apache APISIX**: v3.10.0 (OpenResty LuaJIT 2.1, plugin `proxy-cache`, bộ nhớ chia sẻ `ngx.shared.DICT`, disk/memory hybrid, Lua table allocations).
@@ -82,7 +82,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 > 3. **Triệt Tiêu Syscall Thời Gian Bằng Đồng Hồ Số Nguyên Coarse Clock**:
 >    Trong các kiến trúc truyền thống (Nginx/Kong/Envoy), mỗi thao tác kiểm tra tính tươi mới (`is_fresh`) của cache entry đều triệu gọi `clock_gettime(CLOCK_REALTIME)` qua VDSO hoặc syscall kernel, tiêu tốn 15–35 chu kỳ CPU. Velda Edge loại bỏ hoàn toàn chi phí này bằng cách sử dụng luồng Shadow Worker cập nhật một `AtomicU64` timestamp theo giây (`coarse_now_sec`). Frontline Worker chỉ tốn đúng 1 lệnh ALU assembly `MOV` (0.8 ns) để lấy thời gian hiện tại.
 > 4. **Tránh False Sharing Với Phân Mảnh 64-Stripe Cache-Line Aligned**:
->    Kho lưu trữ [`HttpCacheStorage`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/storage.rs) được chia thành 64 phân đoạn (`CacheShard`), mỗi phân đoạn được căn lề 64 bytes (`#[repr(align(64))]`) tương ứng với kích thước 1 cacheline của CPU AMD EPYC 7763. Điều này ngăn chặn hiện tượng tranh chấp dòng cache (False Sharing) khi Worker 0 và Worker 1 cùng thực thi ghi/đọc cache đồng thời.
+>    Kho lưu trữ [`HttpCacheStorage`](../../http_cache/storage.rs) được chia thành 64 phân đoạn (`CacheShard`), mỗi phân đoạn được căn lề 64 bytes (`#[repr(align(64))]`) tương ứng với kích thước 1 cacheline của CPU AMD EPYC 7763. Điều này ngăn chặn hiện tượng tranh chấp dòng cache (False Sharing) khi Worker 0 và Worker 1 cùng thực thi ghi/đọc cache đồng thời.
 
 ---
 
@@ -169,7 +169,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 #### Phân Tích Chuyên Sâu Số Liệu & Cơ Chế Phần Cứng (In-Depth Metric Explanation)
 1. **Tại sao Throughput đạt tới 192,763 RPS với độ trễ P99 chỉ 0.78ms?**
-   - Trong kịch bản Cache HIT, Velda Edge không cần thiết lập kết nối upstream hay gửi bất kỳ byte nào ra mạng backend. Luồng xử lý tại [`http_cache_lookup`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/http_cache_lookup/plugin.rs) tính toán FxHash của khóa cache (`compute_cache_key_with_headers`), tra cứu trên `HttpCacheStorage` và sinh ngay `Action::Respond` với `Body::Bytes`.
+   - Trong kịch bản Cache HIT, Velda Edge không cần thiết lập kết nối upstream hay gửi bất kỳ byte nào ra mạng backend. Luồng xử lý tại [`http_cache_lookup`](../../pre_upstream/http_cache_lookup/plugin.rs) tính toán FxHash của khóa cache (`compute_cache_key_with_headers`), tra cứu trên `HttpCacheStorage` và sinh ngay `Action::Respond` với `Body::Bytes`.
    - **Bất biến Pure Payload**: Velda không lưu trữ bảng `HeaderMap` trong cache. Nhờ đó, kích thước bộ mô tả `CacheEntry` chỉ chiếm **48 bytes** (nhỏ hơn 1 cacheline 64 bytes của CPU Zen 3). Khi Hit, Velda chỉ khởi tạo 6 header thiết yếu (`content-type`, `content-length`, `age`, `x-cache: HIT`, `content-encoding`, `vary`) trên stack buffer, hoàn toàn không cấp phát heap (`0 B / 0 allocs`).
 2. **Cơ chế triệt tiêu Syscall thời gian bằng Coarse Atomic Clock:**
    - Trong khi Kong và APISIX thực hiện kiểm tra TTL qua hàm `ngx.now()` hoặc `clock_gettime` (tạo ra ít nhất 2 syscalls/req), Velda Edge chỉ tốn đúng **1.02 syscalls/req** (chính là lệnh kernel `writev` để xả dữ liệu xuống socket). Việc kiểm tra tính tươi mới `entry.is_fresh(now)` được đối sánh trực tiếp với giá trị đọc từ atomic clock integer (`coarse_now_sec`), tiêu tốn đúng **0.8 nanosecond** và $0$ syscall.
@@ -237,7 +237,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 #### Phân Tích Chuyên Sâu Số Liệu & Cơ Chế Phần Cứng (In-Depth Metric Explanation)
 1. **Sức mạnh của Vector AVX2 Non-Temporal Store (`VMOVNTDQ`):**
    - Với payload 32KB, các gateway truyền thống (Kong, APISIX, Nginx) sử dụng hàm `memcpy` chuẩn của glibc. Khi copy 32KB, toàn bộ 32KB dữ liệu điền kín bộ đệm L1 Data Cache (kích thước 32KB trên mỗi Zen 3 core), đẩy toàn bộ dữ liệu của connection context ra ngoài.
-   - Velda Edge kích hoạt module [`dram.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/dram.rs) với hàm `stream_payload_avx2`. Dữ liệu được căn lề 32-byte và ghi tuần tự bằng thanh ghi vector 256-bit `_mm256_stream_si256`. Lệnh này báo hiệu cho CPU Memory Controller xả trực tiếp dữ liệu qua Write-Combining Store Buffers vào RAM vật lý mà **không nạp dòng cacheline vào L1/L2/L3**.
+   - Velda Edge kích hoạt module [`dram.rs`](../../http_cache/dram.rs) với hàm `stream_payload_avx2`. Dữ liệu được căn lề 32-byte và ghi tuần tự bằng thanh ghi vector 256-bit `_mm256_stream_si256`. Lệnh này báo hiệu cho CPU Memory Controller xả trực tiếp dữ liệu qua Write-Combining Store Buffers vào RAM vật lý mà **không nạp dòng cacheline vào L1/L2/L3**.
    - **Bằng chứng số liệu định lượng**: Tỷ lệ `L1-dcache-miss %` của Velda chỉ là **4.10%**, trong khi Kong bị trượt tới **18.50%** (cao gấp 4.5 lần). Điều này giữ cho các cấu trúc phục vụ của worker luôn ấm trong L1 cache.
 2. **Tiết kiệm chu kỳ CPU (10,150 cycles vs 20,500 cycles):**
    - Kong và APISIX phải phân bổ chuỗi đệm trong Lua GC (`ngx.arg[1]`), gom các chunk của body và nối chuỗi trước khi đẩy vào shm dictionary. Quá trình này tiêu tốn tới 68.5% User CPU và 485MB RAM RSS.
@@ -304,7 +304,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 #### Phân Tích Chuyên Sâu Số Liệu & Cơ Chế Phần Cứng (In-Depth Metric Explanation)
 1. **Tại sao Second-Chance CLOCK $O(1)$ vượt trội hoàn toàn so với LRU doubly-linked list?**
    - Các hệ thống như Nginx hoặc Envoy sử dụng danh sách liên kết đôi (doubly-linked list) để theo dõi LRU. Khi có thao tác HIT, hệ thống phải ngắt con trỏ của node hiện tại và nối lại vào đầu danh sách (MRU head). Thao tác này bắt buộc phải chiếm Mutex độc quyền (write lock) ngay trên đường phục vụ đọc, dẫn đến nghẽn khóa nghiêm trọng khi số lượng kết nối đồng thời tăng cao.
-   - Velda Edge cài đặt giải thuật **Second-Chance CLOCK** tại [`storage.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/storage.rs):
+   - Velda Edge cài đặt giải thuật **Second-Chance CLOCK** tại [`storage.rs`](../../http_cache/storage.rs):
      - Mỗi entry sở hữu một cờ bit atomic `referenced: AtomicBool`.
      - Thao tác HIT chỉ ghi `referenced.store(true, Ordering::Relaxed)` — đây là thao tác nguyên tử độc lập không cần khóa lock!
      - Khi bộ nhớ đầy, kim đồng hồ (`clock_hand`) quét vòng tròn $O(1)$: nếu gặp `true` thì hạ xuống `false` (trao cơ hội thứ hai); nếu gặp `false` hoặc entry hết hạn (`!is_fresh`), lập tức thu hồi giải phóng bộ nhớ.
@@ -384,7 +384,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 ---
 
 ### KB 05: HTTP/2 — Multi-Variant Smart Negotiation (Gzip / Brotli / Zstd Pre-Compressed Variant Serving)
-- **Mục tiêu thử nghiệm**: Khảo sát tính năng thương lượng biến thể nén thông minh ([`entity.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/entity.rs): `negotiate_smart_variant`). Client gửi ngẫu nhiên các header `Accept-Encoding: gzip`, `br`, `zstd` hoặc không nén. Velda Edge lập tức phục vụ đúng biến thể byte đã nén sẵn trong RAM cache mà **hoàn toàn không nén lại lúc runtime**.
+- **Mục tiêu thử nghiệm**: Khảo sát tính năng thương lượng biến thể nén thông minh ([`entity.rs`](../../http_cache/entity.rs): `negotiate_smart_variant`). Client gửi ngẫu nhiên các header `Accept-Encoding: gzip`, `br`, `zstd` hoặc không nén. Velda Edge lập tức phục vụ đúng biến thể byte đã nén sẵn trong RAM cache mà **hoàn toàn không nén lại lúc runtime**.
 - **Lệnh thực thi**: `h2load -n 500000 -c 100 -m 10 -H "Accept-Encoding: gzip, br, zstd" https://172.16.0.5:8443/api/v1/variants/data`
 
 | Phân Lớp Đo Lường | Tiêu Chí Đo Lường Chi Tiết (Metric) | **Velda Edge** (Rust 2024) | **Kong 3.9** (proxy-cache) | **APISIX 3.10** (proxy-cache) | Tỷ Lệ / Nhận Xét Đối Sánh |
@@ -426,7 +426,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 #### Phân Tích Chuyên Sâu Số Liệu & Cơ Chế Phần Cứng (In-Depth Metric Explanation)
 1. **Kiến trúc Multi-Variant Caching độc nhất của Velda Edge:**
    - Trong Kong và APISIX, cache entry chỉ lưu trữ một phiên bản duy nhất (hoặc là raw body, hoặc là codec đầu tiên mà upstream trả về). Khi một client khác gửi `Accept-Encoding: br` nhưng cache chỉ có gzip, gateway buộc phải giải nén gzip rồi nén lại sang Brotli ngay trên hot path, khiến CPU bùng nổ và thông lượng tụt dốc.
-   - Velda Edge định nghĩa cấu trúc [`CompressedVariants`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/http_cache/entity.rs) với 3 trường tùy chọn: `gzip`, `brotli`, `zstd`.
+   - Velda Edge định nghĩa cấu trúc [`CompressedVariants`](../../http_cache/entity.rs) với 3 trường tùy chọn: `gzip`, `brotli`, `zstd`.
    - Hàm `negotiate_smart_variant` duyệt qua chuỗi `Accept-Encoding` với độ phức tạp **$O(1)$**, ưu tiên lựa chọn codec có tỷ lệ nén cao nhất (`brotli` > `zstd` > `gzip` > `raw`).
    - Do toàn bộ các biến thể này đã được tiền nén sẵn (pre-compressed) và ghim trong DRAM, worker chỉ đơn giản lấy con trỏ `Bytes` tương ứng để trả về cho client. Quá trình này tiêu tốn đúng **0 allocs** và **1,650 instructions**, mang lại thông lượng ấn tượng **188,679 RPS**.
 
@@ -500,7 +500,7 @@ Mỗi kịch bản đều được phân tích định lượng đồng bộ qua
 
 #### Phân Tích Chuyên Sâu Số Liệu & Cơ Chế Phần Cứng (In-Depth Metric Explanation)
 - Kong 3.9 hoàn toàn chưa hỗ trợ HTTP/3. APISIX 3.10 hỗ trợ thử nghiệm nhưng bị nghẽn CPU nghiêm trọng do việc mã hóa/giải mã QUIC packet trong OpenResty đòi hỏi nhiều lớp chuyển tiếp cdecl giữa C và Lua.
-- Velda Edge xây dựng động cơ [`velda-http3`](file:///home/phucle/Desktop/velda-edge/crates/velda-http3/) thuần Rust với zero-allocation ring buffer cho UDP datagrams. Khi có Cache HIT, payload từ `HttpCacheStorage` được đóng gói trực tiếp vào QUIC STREAM frame mà không qua bất kỳ lớp trung gian nào, đạt thông lượng **23,529 RPS** với độ trễ P99 chỉ **10.5ms**.
+- Velda Edge xây dựng động cơ [`velda-http3`](../../../../velda-http3/) thuần Rust với zero-allocation ring buffer cho UDP datagrams. Khi có Cache HIT, payload từ `HttpCacheStorage` được đóng gói trực tiếp vào QUIC STREAM frame mà không qua bất kỳ lớp trung gian nào, đạt thông lượng **23,529 RPS** với độ trễ P99 chỉ **10.5ms**.
 
 ---
 

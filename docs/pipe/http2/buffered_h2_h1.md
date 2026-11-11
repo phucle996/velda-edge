@@ -3,7 +3,7 @@
 
 | Subsystem Information | Specification |
 | :--- | :--- |
-| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h1.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h1.rs) |
+| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h1.rs`](../../../crates/velda-edge/src/pipeline/http2/pipe/buffered_h2_h1.rs) |
 | **Model** | Multiplexed-to-KeepAlive Demux Bridge (*Mô hình Cầu nối Giải mã Ghép kênh sang Keep-Alive*) |
 | **Downstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Binary Framing / HPACK (`velda-http2`) |
 | **Upstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/1.1 Keep-Alive Pool (`velda-upstream`) |

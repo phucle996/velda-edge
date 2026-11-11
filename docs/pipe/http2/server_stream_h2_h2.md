@@ -3,7 +3,7 @@
 
 | Subsystem Information | Specification |
 | :--- | :--- |
-| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h2.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h2.rs) |
+| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h2.rs`](../../../crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h2.rs) |
 | **Model** | Dual-End Stream-to-Stream Multiplexing (*Mô hình Chuyển tiếp Dòng Dữ liệu Hai Đầu H2-to-H2*) |
 | **Downstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Multiplexed Binary Framing (`velda-http2`) |
 | **Upstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Multiplexed Pool (`velda-upstream` / `h2::client`) |

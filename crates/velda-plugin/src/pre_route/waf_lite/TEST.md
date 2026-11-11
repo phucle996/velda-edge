@@ -40,7 +40,7 @@ flowchart LR
 ```
 
 ### Tier 1: Isolated Whitebox Unit Tests
-- Implemented in [`dictionary.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/dictionary.rs), [`scanner.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/scanner.rs), and [`plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/waf_lite/plugin.rs).
+- Implemented in [`dictionary.rs`](./dictionary.rs), [`scanner.rs`](./scanner.rs), and [`plugin.rs`](./plugin.rs).
 - Verifies dictionary parity with `velda-sync`, zero substring redundancy across all 119 built-in signatures, 3-pass percent-decoding, Stage A/B comment-wrapping defense, parameter-smuggling defense, SIMD pattern matching, and pre-baked response generation.
 
 ### Tier 2: Adversarial Attack & Security Vulnerability Suites
@@ -53,7 +53,7 @@ flowchart LR
   - Duplicate header smuggling (hiding attack in secondary `User-Agent` or custom headers).
 
 ### Tier 3: Crate Integration & Configuration Deduplication Validation
-- Implemented in [`velda-sync`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/pre_route/waf_lite.rs).
+- Implemented in [`velda-sync`](../../../../velda-sync/src/post_sync/plugin/pre_route/waf_lite.rs).
 - Verifies strict declarative configuration validation and automatic deduplication ("Khử trùng") of custom patterns and User-Agents against built-in signatures.
 
 ---

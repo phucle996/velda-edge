@@ -79,7 +79,7 @@ For browsers that do not support Fetch Metadata, the plugin validates the `Origi
 ### 3.4 Gate 4: Zero-Allocation Byte Scanner & Signed Token Verification
 
 #### 3.4.1 Zero-Allocation Cookie Scanner
-Instead of splitting `Cookie` strings into vectors, [`extract_cookie_value`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_upstream/csrf/plugin.rs) walks the raw byte slice looking for `b"<cookie_name>="` bounded by `;` or whitespace, returning an sub-slice `&[u8]` without heap allocations.
+Instead of splitting `Cookie` strings into vectors, [`extract_cookie_value`](./plugin.rs) walks the raw byte slice looking for `b"<cookie_name>="` bounded by `;` or whitespace, returning an sub-slice `&[u8]` without heap allocations.
 
 #### 3.4.2 114-Byte Stateless Signed Token Layout
 ```text

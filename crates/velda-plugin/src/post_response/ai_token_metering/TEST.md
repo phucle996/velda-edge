@@ -24,7 +24,7 @@ Testing for `ai_token_metering` follows a three-tier pyramid:
 
 ## 2. Automated Test Suite Matrix
 
-Automated tests are located in [`tests/ai_token_metering_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/ai_token_metering_test.rs).
+Automated tests are located in [`tests/ai_token_metering_test.rs`](../../../tests/ai_token_metering_test.rs).
 
 | Test Name | Target Component | Verifications & Invariants |
 |---|---|---|

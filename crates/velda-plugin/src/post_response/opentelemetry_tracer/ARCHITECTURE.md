@@ -25,7 +25,7 @@ The `opentelemetry_tracer` plugin executes during the Layer 7 **`post_response`*
    - Traffic Worker `velda-worker-{id}` produces strictly into its dedicated local SPSC ring buffer shard (`shards[worker_id]`).
    - Companion Shadow Logistics Worker `velda-shadow-{id}` pinned to the same core under `SCHED_IDLE` drains this shard, eliminating cross-core cache invalidation and false sharing.
 5. **Hierarchical Trace Continuity & Header Workspace Bridge**:
-   - Seamlessly extracts W3C trace metadata from [`HeaderWorkspace`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/buffer/header.rs): `x-trace-id`, `x-span-id`, `x-parent-span-id`, and fallback `traceparent`.
+   - Seamlessly extracts W3C trace metadata from [`HeaderWorkspace`](../../../../velda-core/src/buffer/header.rs): `x-trace-id`, `x-span-id`, `x-parent-span-id`, and fallback `traceparent`.
    - Links the gateway hop directly to parent client spans (`parent_span_id`), resolving orphan span graph fragmentation in Jaeger, Grafana Tempo, and Datadog APM.
 6. **Dual Transport Wire Protocol Isolation**:
    - Supports both standard OpenTelemetry Collector trace ingestion protocols:

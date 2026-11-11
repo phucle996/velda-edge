@@ -79,7 +79,7 @@ flowchart TD
 
 ## 2. Lock-Free Health State Machine
 
-The health and readiness state is encapsulated by [`HealthState`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-plugin/src/background/health_probe/plugin.rs#L40-L100), backed exclusively by cacheline-isolated atomic flags (`Arc<AtomicBool>`):
+The health and readiness state is encapsulated by [`HealthState`](./plugin.rs#L40-L100), backed exclusively by cacheline-isolated atomic flags (`Arc<AtomicBool>`):
 
 ```mermaid
 stateDiagram-v2
@@ -173,7 +173,7 @@ Achieves 0% branch misprediction penalty and guarantees constant-time CPU execut
 
 The `health_probe` plugin does not perform raw socket syscalls, port binding, or process-wide conflict detection. In accordance with the **Crate Boundary Invariant** and **Hourglass Architecture**:
 
-- **Socket Authority Delegated to Core**: All network listener lifecycles, kernel socket options, and anti-collision checks are centrally owned and managed by [`velda-core::socket::GlobalSocketManager`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs). (For the comprehensive internal architecture, see [`crates/velda-core/src/socket.rs`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs)).
+- **Socket Authority Delegated to Core**: All network listener lifecycles, kernel socket options, and anti-collision checks are centrally owned and managed by [`velda-core::socket::GlobalSocketManager`](../../../../velda-core/src/socket.rs). (For the comprehensive internal architecture, see [`crates/velda-core/src/socket.rs`](../../../../velda-core/src/socket.rs)).
 - **Direct Handoff at Bootstrap**: During bootstrap, the runtime environment requests a shadow socket claim (`SocketRole::Shadow`) from `velda-core` for the configured management port (e.g. `0.0.0.0:9091`). Once verified against the Port Isolation Invariant ($\text{ManagementPort} \cap \text{TrafficPorts} = \emptyset$), the pre-bound listener handle is handed off directly to `health_probe`.
 - **Autonomous Shadow Loop**: Upon receiving the listener handoff, `health_probe` executes exclusively within `velda-shadow-0` (`SCHED_IDLE`) via its flat sequential accept loop. Frontline traffic workers (`velda-worker-{0..N}`) remain completely detached from and unaware of the management socket.
 - **Clean Deallocation on Shutdown**: On SIGTERM, `health_probe` exits its accept loop and yields the socket handle back to the core runtime for clean deregistration and release.

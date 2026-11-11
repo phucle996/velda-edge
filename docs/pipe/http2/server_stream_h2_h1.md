@@ -3,7 +3,7 @@
 
 | Subsystem Information | Specification |
 | :--- | :--- |
-| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h1.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h1.rs) |
+| **Source Implementation** | [`crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h1.rs`](../../../crates/velda-edge/src/pipeline/http2/pipe/server_stream_h2_h1.rs) |
 | **Model** | Progressive Chunk-to-Frame Stream Bridge (*Mô hình Chuyển đổi Khung Dữ liệu Đẩy Tiến trình*) |
 | **Downstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/2 Multiplexed Binary Framing (`velda-http2`) |
 | **Upstream Transport / Codec** | L4 TCP Stream $\to$ L7 HTTP/1.1 Chunked/Keep-Alive Pool (`velda-upstream`) |

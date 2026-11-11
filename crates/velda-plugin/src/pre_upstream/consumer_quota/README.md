@@ -22,7 +22,7 @@ High-performance, zero-allocation pre-upstream fair-use and member rate-capping 
 ## 2. Configuration Specification
 
 > [!IMPORTANT]
-> **Identity Extraction Invariant**: The plugin reads client identity directly from [`HeaderWorkspace`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/buffer/header.rs). Incoming client headers must be authenticated and stamped authoritatively by upstream auth plugins (`jwt_auth`, `api_key_auth`, or `hmac_auth`).
+> **Identity Extraction Invariant**: The plugin reads client identity directly from [`HeaderWorkspace`](../../../../velda-core/src/buffer/header.rs). Incoming client headers must be authenticated and stamped authoritatively by upstream auth plugins (`jwt_auth`, `api_key_auth`, or `hmac_auth`).
 
 | Field | Type | Required | Constraints / Default | Description |
 | :--- | :---: | :---: | :--- | :--- |

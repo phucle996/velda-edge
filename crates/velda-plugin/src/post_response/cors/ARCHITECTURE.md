@@ -130,7 +130,7 @@ fn is_token_origin_swar(token: &[u8]) -> bool {
 
 ### 3.4 Hardware-Accelerated Subdomain Pattern Matching
 
-Origins configured with wildcard subdomain patterns (e.g. `https://*.example.com`) are evaluated by [`OriginPattern::Subdomain`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/pre_route/cors_preflight/origin.rs).
+Origins configured with wildcard subdomain patterns (e.g. `https://*.example.com`) are evaluated by [`OriginPattern::Subdomain`](../../pre_route/cors_preflight/origin.rs).
 
 - Validates that the incoming origin begins with the expected protocol/host prefix and ends with the exact domain suffix using fast SIMD `memcmp` equality.
 - Every byte within the wildcard label is validated against `SUBDOMAIN_CHAR_LUT`, an L1 cache-resident 256-byte table.

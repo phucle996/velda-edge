@@ -17,7 +17,7 @@ Ultra-high-performance, asynchronous distributed trace span reporter for the **V
 | **Record Memory Footprint** | **Exact 256 bytes** (`#[repr(C, align(64))]`), exactly 4 CPU cache lines |
 
 ### What it Captures
-- **Distributed Trace Identifiers**: Captures `trace_id` (16 bytes binary), `span_id` (8 bytes binary), and `parent_span_id` (8 bytes binary) directly from [`HeaderWorkspace`](file:///home/phucle/Desktop/velda-edge/crates/velda-core/src/buffer/header.rs), representing the edge gateway as an authoritative hop in distributed trace graphs.
+- **Distributed Trace Identifiers**: Captures `trace_id` (16 bytes binary), `span_id` (8 bytes binary), and `parent_span_id` (8 bytes binary) directly from [`HeaderWorkspace`](../../../../velda-core/src/buffer/header.rs), representing the edge gateway as an authoritative hop in distributed trace graphs.
 - **Hierarchical Trace Continuity**: Seamlessly extracts `x-parent-span-id` injected by `w3c_trace_context` to link client-initiated spans to upstream backends, eliminating orphan root spans in Jaeger and Grafana Tempo.
 - **Span Kind & Timing**: Stamps span kind as `SPAN_KIND_SERVER (2)`, recording high-resolution nanosecond timestamps (`start_time_unix_nano`, `end_time_unix_nano`).
 - **Span Status**: Automatically flags spans as `STATUS_CODE_OK (1)` for status codes $< 400$, or `STATUS_CODE_ERROR (2)` for status codes $\ge 400$.

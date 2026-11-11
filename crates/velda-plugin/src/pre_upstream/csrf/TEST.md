@@ -34,7 +34,7 @@ The `csrf` test harness validates defense against the following vectors:
 
 ## 3. Multi-Phase Pipeline Integration Verification
 
-In [`crates/velda-plugin/tests/csrf_suite_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/csrf_suite_test.rs), the CSRF plugin was verified alongside `cors_preflight` through a compiled [`RoutePluginPlan`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/plan.rs).
+In [`crates/velda-plugin/tests/csrf_suite_test.rs`](../../../tests/csrf_suite_test.rs), the CSRF plugin was verified alongside `cors_preflight` through a compiled [`RoutePluginPlan`](../../plan.rs).
 
 ### Attack Scenario Execution:
 ```http

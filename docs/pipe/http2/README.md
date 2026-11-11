@@ -54,7 +54,7 @@ Velda Edge implements native compile-time defenses against modern HTTP/2 denial-
 
 ## 2. The 12 Dedicated HTTP/2 Pipelines Matrix
 
-Velda Edge implements **12 compile-time specialized pipeline strategy modules** under [`crates/velda-edge/src/pipeline/http2/pipe/`](file:///home/phucle/Desktop/velda-edge/crates/velda-edge/src/pipeline/http2/pipe/):
+Velda Edge implements **12 compile-time specialized pipeline strategy modules** under [`crates/velda-edge/src/pipeline/http2/pipe/`](../../../crates/velda-edge/src/pipeline/http2/pipe/):
 
 | Pipeline Strategy | Upstream Protocol | Implementation Module | Architectural Role & Specialization | Specification File |
 | :--- | :--- | :--- | :--- | :--- |

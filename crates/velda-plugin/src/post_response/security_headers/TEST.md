@@ -35,7 +35,7 @@ flowchart LR
 ```
 
 ### Tier 1: Whitebox Unit Tests
-- Implemented in [`crates/velda-plugin/src/post_response/security_headers/plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/security_headers/plugin.rs).
+- Implemented in [`crates/velda-plugin/src/post_response/security_headers/plugin.rs`](./plugin.rs).
 - Verifies:
   - Default OWASP headers injection (`Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`).
   - 64-byte struct alignment and bitmask flags (`op_mask`).
@@ -46,7 +46,7 @@ flowchart LR
   - JSON deserialization via `PluginConfig`.
 
 ### Tier 2: Declarative Sync Validation Tests
-- Implemented in [`crates/velda-sync/src/post_sync/plugin/post_response/security_headers.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-sync/src/post_sync/plugin/post_response/security_headers.rs).
+- Implemented in [`crates/velda-sync/src/post_sync/plugin/post_response/security_headers.rs`](../../../../velda-sync/src/post_sync/plugin/post_response/security_headers.rs).
 - Verifies:
   - HSTS enabled with zero `max_age_secs` rejection.
   - Invalid frame options rejection (must be DENY, SAMEORIGIN, ALLOW-FROM, or none).
@@ -55,7 +55,7 @@ flowchart LR
   - Rejection of missing required fields.
 
 ### Tier 3: Independent Integration Test Suite
-- Implemented in [`crates/velda-plugin/tests/security_headers_suite_test.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/tests/security_headers_suite_test.rs).
+- Implemented in [`crates/velda-plugin/tests/security_headers_suite_test.rs`](../../../tests/security_headers_suite_test.rs).
 - Verifies:
   - Memory pointer verification ensuring header array resides directly within struct memory boundary (zero heap pointer indirection).
   - Multi-phase integration in response pipeline.

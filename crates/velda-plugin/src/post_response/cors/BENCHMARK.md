@@ -1055,7 +1055,7 @@ Số liệu thu thập trực tiếp qua `perf stat -e instructions,cycles,branc
 
 ### 7.2 Phân Tích Lệnh Máy (Assembly Disassembly & Register Harmony)
 
-Khi biên dịch với cờ `--release` (`opt-level = 3`, `codegen-units = 1`, `lto = "fat"`), logic kiểm tra bitmask và so sánh SWAR trong [`crates/velda-plugin/src/post_response/cors/plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/post_response/cors/plugin.rs) được compiler hạ thành các lệnh máy x86-64 tối ưu tối đa:
+Khi biên dịch với cờ `--release` (`opt-level = 3`, `codegen-units = 1`, `lto = "fat"`), logic kiểm tra bitmask và so sánh SWAR trong [`crates/velda-plugin/src/post_response/cors/plugin.rs`](./plugin.rs) được compiler hạ thành các lệnh máy x86-64 tối ưu tối đa:
 
 ```nasm
 ; Phase 1: Kiểm tra bitmask cờ tĩnh trong 1 chu kỳ ALU
