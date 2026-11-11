@@ -137,21 +137,13 @@
       }
     },
     {
-      "id": "std_http_access_log",
+      "id": "std_log_shipper",
+      "phase": "background",
       "config": {
         "target": "stdout",
         "format": "json",
-        "include_user_agent": true,
-        "include_request_id": true,
-        "include_route_id": true,
-        "include_upstream": true,
-        "include_latency": true,
-        "buffer_capacity": 4096,
-        "sampling": {
-          "200": 0.05,
-          "429": 1.0,
-          "502": 1.0
-        }
+        "flush_interval_ms": 100,
+        "max_batch_size": 512
       }
     },
     {

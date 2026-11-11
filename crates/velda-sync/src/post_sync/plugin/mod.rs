@@ -43,6 +43,10 @@ pub mod acme_cert_rotator;
 pub use acme_cert_rotator::*;
 pub mod loki_log_shipper;
 pub use loki_log_shipper::*;
+pub mod std_log_shipper;
+pub use std_log_shipper::*;
+pub mod otlp_log_shipper;
+pub use otlp_log_shipper::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
@@ -119,9 +123,6 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_cache_store" => Some("post_response"),
         "response_header_mutation" => Some("post_response"),
         "response_compression" => Some("post_response"),
-        "std_http_access_log" => Some("post_response"),
-        "std_grpc_access_log" => Some("post_response"),
-        "opentelemetry_logger" => Some("post_response"),
         "opentelemetry_tracer" => Some("post_response"),
         "ai_token_metering" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
@@ -130,6 +131,8 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "statsd_exporter" => Some("background"),
         "acme_cert_rotator" => Some("background"),
         "loki_log_shipper" => Some("background"),
+        "std_log_shipper" => Some("background"),
+        "otlp_log_shipper" => Some("background"),
         _ => None,
     }
 }
@@ -140,9 +143,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
 pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
     match id {
         "grpc_fault_injection" => Some("grpc"),
-        "std_grpc_access_log" => Some("grpc"),
         "http_fault_injection" => Some("http"),
-        "std_http_access_log" => Some("http"),
         "cors_preflight" => Some("http"),
         "cors" => Some("http"),
         "http_cache_lookup" => Some("http"),
@@ -519,30 +520,6 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                 }
                 post_response::validate_response_compression_config(&plugin.id, &plugin.config)?;
             }
-            "std_http_access_log" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_std_http_access_log_config(&plugin.id, &plugin.config)?;
-            }
-            "std_grpc_access_log" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_std_grpc_access_log_config(&plugin.id, &plugin.config)?;
-            }
             "health_probe" => {
                 if plugin.phase != "background" {
                     return Err(SyncError::Validation {
@@ -591,17 +568,23 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
                 }
                 loki_log_shipper::validate_loki_log_shipper_config(&plugin.id, &plugin.config)?;
             }
-            "opentelemetry_logger" => {
-                if plugin.phase != "post_response" {
+            "std_log_shipper" => {
+                if plugin.phase != "background" {
                     return Err(SyncError::Validation {
                         domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
                     });
                 }
-                post_response::validate_opentelemetry_logger_config(&plugin.id, &plugin.config)?;
+                std_log_shipper::validate_std_log_shipper_config(&plugin.id, &plugin.config)?;
+            }
+            "otlp_log_shipper" => {
+                if plugin.phase != "background" {
+                    return Err(SyncError::Validation {
+                        domain: "plugins".into(),
+                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
+                    });
+                }
+                otlp_log_shipper::validate_otlp_log_shipper_config(&plugin.id, &plugin.config)?;
             }
             "opentelemetry_tracer" => {
                 if plugin.phase != "post_response" {

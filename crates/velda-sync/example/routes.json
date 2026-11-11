@@ -19,8 +19,7 @@
           "rate_limit"
         ],
         "post_response": [
-          "security_headers",
-          "std_http_access_log"
+          "security_headers"
         ]
       }
     },
@@ -41,7 +40,7 @@
           "jwt_auth"
         ],
         "post_response": [
-          "std_http_access_log"
+          "security_headers"
         ]
       }
     },
@@ -81,7 +80,7 @@
           "jwt_auth"
         ],
         "post_response": [
-          "std_http_access_log"
+          "security_headers"
         ]
       }
     },
