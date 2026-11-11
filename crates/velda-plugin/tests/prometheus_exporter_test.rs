@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use velda_observability::MetricsStore;
-use velda_plugin::PrometheusExporter;
+use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
 use velda_sync::{
     AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
     TlsExporterConfig,

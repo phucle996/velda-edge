@@ -37,7 +37,7 @@ if curl -s "http://127.0.0.1:${PORT_BACKEND}/" >/dev/null 2>&1; then
     echo "velda-bench-backend already active on http://127.0.0.1:${PORT_BACKEND}"
 else
     echo "Launching velda-bench-backend on port ${PORT_BACKEND}..."
-    cargo run -p velda-bench-backend >/dev/null 2>&1 &
+    RUSTUP_TOOLCHAIN=stable cargo run -p velda-bench-backend >/dev/null 2>&1 &
     BACKEND_PID=$!
     for _ in {1..50}; do
         if curl -s "http://127.0.0.1:${PORT_BACKEND}/" >/dev/null 2>&1; then
@@ -74,7 +74,7 @@ echo ""
 echo "======================================================================"
 echo " 4. Live Runtime CPU Cycle Profiling (RDTSC on 1,000,000 Iterations)"
 echo "======================================================================"
-cargo test --release -p velda-plugin --test prometheus_exporter_machine_code_test -- --nocapture
+RUSTUP_TOOLCHAIN=stable cargo test --release -p velda-plugin --test prometheus_exporter_machine_code_test -- --nocapture
 
 echo ""
 echo "======================================================================"

@@ -1,7 +1,12 @@
 //! Prometheus Exporter Plugin Module.
+//!
+//! Provides zero-allocation, lock-free OpenMetrics telemetry export on dedicated Shadow Worker threads.
 
-pub mod formatter;
+pub mod config;
+pub mod lut;
+pub mod plugin;
 pub mod server;
+pub mod template;
 
-pub use formatter::format_snapshot;
-pub use server::{PrometheusExporter, PrometheusExporterPlugin};
+pub use config::PrometheusExporterConfig;
+pub use plugin::PrometheusExporterPlugin;

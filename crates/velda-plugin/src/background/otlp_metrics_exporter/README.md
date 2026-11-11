@@ -16,6 +16,48 @@ The `otlp_metrics_exporter` plugin is a high-performance, lock-free background s
 | **Hot-Path Overhead** | **0 ns serving cost**; zero lock contention, zero allocations, and zero network I/O on traffic worker cores |
 | **Export Transports** | OTLP/gRPC (Port 4317, binary Protobuf over HTTP/2) or OTLP/HTTP (Port 4318, JSON over HTTP/1.1) |
 
+```text
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                        VELDA EDGE — OTLP METRICS EXPORTER ARCHITECTURE                               ║
+║          (crates/velda-plugin/src/background/otlp_metrics_exporter: OtlpMetricsExporterPlugin)       ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+ [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, interval_secs)
+  velda-worker-0 (Core 0)                        
+  velda-worker-1 (Core 1)                        
+        │                                                    │ (Periodic Ticker)
+        ▼                                                    ▼
+  ┌───────────┐  Lock-Free Atomic Extraction ┌──────────────────────────────────┐
+  │ Pipeline  │ ───────────────────────────► │      MetricsStore::snapshot()    │
+  │ Counters  │    (Ordering::Relaxed)       │   (36 Pipelines, 288 Data Points)│
+  └───────────┘                              └────────────────┬─────────────────┘
+                                                              │
+                                              ┌───────────────┴───────────────┐
+                                              │                               │
+                                        [mode: "grpc"]                  [mode: "http"]
+                                              ▼                               ▼
+                                   ┌─────────────────────┐         ┌─────────────────────┐
+                                   │  proto/template.rs  │         │   json/template.rs  │
+                                   │ Pre-Baked Wire      │         │ Pre-Baked Chunk     │
+                                   │ Skeleton (100% Safe)│         │ Interleaving (JSON) │
+                                   │ (1,624 CPU cycles)  │         │ (8,986 CPU cycles)  │
+                                   └──────────┬──────────┘         └──────────┬──────────┘
+                                              │                               │
+                                              ▼                               ▼
+                                   ┌─────────────────────┐         ┌─────────────────────┐
+                                   │   proto/client.rs   │         │    json/client.rs   │
+                                   │ Persistent HTTP/2   │         │ Persistent HTTP/1.1 │
+                                   │ 5-byte Framing      │         │ Keep-Alive (TCP/TLS)│
+                                   └──────────┬──────────┘         └──────────┬──────────┘
+                                              │                               │
+                                              ▼                               ▼
+                                  gRPC Port 4317 (Protobuf)        HTTP Port 4318 (JSON)
+                                  ┌──────────────────────────────────────────────────────┐
+                                  │               OpenTelemetry Collector                │
+                                  └──────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 2. Technical Documentation Index

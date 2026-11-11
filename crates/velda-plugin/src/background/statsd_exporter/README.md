@@ -19,10 +19,54 @@ High-performance, zero-allocation, connectionless UDP telemetry exporter for Vel
 ## 2. Overview & Core Invariants
 
 * **Stateless & Connectionless Transport**: Streams metrics over non-blocking UDP (`tokio::net::UdpSocket`), eliminating TCP state-machine overhead, three-way handshakes, and ACK packet latency.
-* **Core-Managed Socket Lifecycle**: Sockets are authoritatively allocated through [`velda_core::global_socket_manager().acquire_shadow_udp()`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs), preventing port collisions with Data Plane traffic listeners.
+* **Core-Managed Socket Lifecycle**: Sockets are authoritatively allocated through [`velda_core::global_socket_manager().acquire_shadow_udp()`](../../../../velda-core/src/socket.rs), preventing port collisions with Data Plane traffic listeners.
 * **Zero-Allocation Byte Serializer**: Employs a pre-allocated reusable packet buffer and a 2-digit ASCII lookup table (`DIGIT_PAIRS`), completely eliminating `format!` runtime allocations and vtable parsing.
-* **MTU-Bounded Packet Batching**: Strictly enforces `max_packet_size` (default: 1432 bytes) to guarantee datagrams fit within standard Ethernet MTU without triggering kernel IP fragmentation.
+* **MTU-Bounded Packet Batching**: Strictly enforces `max_packet_size` (required, recommended: 1432 bytes) to guarantee datagrams fit within standard Ethernet MTU without triggering kernel IP fragmentation.
 * **Off-Path Shadow Worker Isolation**: Operates exclusively on background logistics tasks (`phase: "background"` inferred automatically by `canonical_phase_for_id`), reading lock-free atomic snapshots (`store.snapshot()`) with zero write contention on traffic workers.
+
+```text
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                          VELDA EDGE — STATSD EXPORTER ARCHITECTURE                                   ║
+║              (crates/velda-plugin/src/background/statsd_exporter: StatsdExporterPlugin)              ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+ [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, interval_secs)
+  velda-worker-0 (Core 0)                        
+  velda-worker-1 (Core 1)                        
+        │                                                    │ (Periodic Ticker)
+        ▼                                                    ▼
+  ┌───────────┐  Lock-Free Atomic Extraction ┌──────────────────────────────────┐
+  │ Pipeline  │ ───────────────────────────► │      MetricsStore::snapshot()    │
+  │ Counters  │    (Ordering::Relaxed)       │   (36 Pipelines, 563 Data Points)│
+  └───────────┘                              └────────────────┬─────────────────┘
+                                                              │
+                                   ┌──────────────────────────┴──────────────────────────┐
+                                   │                                                     │
+                        [dialect: "dogstatsd"]                                [dialect: "standard"]
+                                   ▼                                                     ▼
+                        ┌───────────────────────┐                             ┌───────────────────────┐
+                        │ dialect/dogstatsd.rs  │                             │  dialect/standard.rs  │
+                        │ Pre-baked Tag Suffix  │                             │ Pre-baked Dot Paths   │
+                        │ Direct-to-Packet Pass │                             │ Direct-to-Packet Pass │
+                        │ (14,356 CPU cycles)   │                             │ (10,022 CPU cycles)   │
+                        └──────────┬────────────┘                             └──────────┬────────────┘
+                                   │                                                     │
+                                   └──────────────────────────┬──────────────────────────┘
+                                                              │
+                                                              ▼
+                                                   ┌─────────────────────┐
+                                                   │    transport.rs     │
+                                                   │ acquire_shadow_udp  │
+                                                   │ kernel connect()    │
+                                                   │ libc::sendmmsg(64)  │
+                                                   └──────────┬──────────┘
+                                                              │
+                                                              ▼ UDP Datagrams (MTU 1432)
+                                                   ┌─────────────────────────────────────┐
+                                                   │   Datadog / Telegraf / StatsD       │
+                                                   └─────────────────────────────────────┘
+```
 
 ---
 
@@ -37,7 +81,7 @@ High-performance, zero-allocation, connectionless UDP telemetry exporter for Vel
 | `interval_secs` | Integer (u64) | **Yes** | `1 ..= 3600` | `2` | Periodic telemetry flush interval in seconds. |
 | `prefix` | String | **Yes** | Non-empty, ASCII alphanumerics, `_`, `-`, `.` | `"velda"` | Global metric name prefix prepended to all exported metrics. |
 | `dialect` | String | **Yes** | `"dogstatsd"` or `"standard"` | `"dogstatsd"` | Metric line format: `"dogstatsd"` (with `#k:v` tags) or `"standard"` (dot notation). |
-| `max_packet_size` | Integer (usize) | **Yes** | `256 ..= 65507` bytes | `1432` | Maximum UDP packet payload size before flushing to avoid IP fragmentation. |
+| `max_packet_size` | Integer (usize) | **Yes** | `256 ..= 65507` bytes | *(none, recommended 1432)* | Maximum UDP packet payload size before flushing to avoid IP fragmentation. |
 
 ---
 

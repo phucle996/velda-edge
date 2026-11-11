@@ -1,6 +1,6 @@
 # Architectural Specification: Standard Stream Log Shipper Plugin (`std_log_shipper`)
 
-This document details the architectural invariants, threading model, memory layout, and machine-level mechanics of the `std_log_shipper` background logging plugin in the **Velda Edge Data Plane**.
+This document details the architectural invariants, threading model, memory layout, and micro-architectural mechanics of the refactored `std_log_shipper` background logging plugin in the **Velda Edge Data Plane**.
 
 ---
 
@@ -12,7 +12,7 @@ In accordance with the Velda Edge Hourglass Architecture, request serving and op
 - **Bottom Cone (Upstream Forwarding)**: Dispatches requests over pre-warmed connection pools.
 - **Shadow Logistics Layer**: Operates completely outside the request-serving hot path under Linux `SCHED_IDLE` scheduling priority.
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                        VELDA EDGE DATA PLANE ARCHITECTURE                              │
 │                                                                                        │
@@ -21,7 +21,7 @@ In accordance with the Velda Edge Hourglass Architecture, request serving and op
 │   │ Client Request -> Ingress Decode -> Route Match -> Upstream Pipe -> Response   │   │
 │   │                                                                                │   │
 │   │ [Hot-Path Telemetry Hook]                                                      │   │
-│   │ AccessLogRecord::from_scalars() -> 64 bytes integer struct                     │   │
+│   │ AccessLogRecord::from_scalars() -> 64-byte scalar struct (1 cache line)        │   │
 │   │ Core-Local SPSC Ring Push (< 70 CPU clock cycles, O(1), zero locks, zero alloc)│   │
 │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
 │                                           │ Atomic In-Memory Hand-off                  │
@@ -30,11 +30,15 @@ In accordance with the Velda Edge Hourglass Architecture, request serving and op
 │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
 │   │ LogStore::flush_all_lanes() -> Batched Arc<[AccessLogRecord]> Slices           │   │
 │   │                                                                                │   │
-│   │ StdLogShipperPlugin::run()                                                     │   │
+│   │ StdLogShipperPlugin::run() (< 150 lines coordinator)                           │   │
+│   │  ├─ StdLogSink::init() -> Persistent File / Stdout / Stderr handle (O(1) open) │   │
 │   │  ├─ format_std_log_payload()                                                   │   │
 │   │  │   ├─ Splicing pre-baked static JSON/Text frame slices                       │   │
-│   │  │   └─ Division-free 2-digit ASCII Lookup Table (LUT) integer conversion      │   │
-│   │  └─ Asynchronous write to target stream (stdout / stderr / file)               │   │
+│   │  │   ├─ Division-free 2-digit ASCII Lookup Table (LUT) integer conversion      │   │
+│   │  │   ├─ 128-bit RequestId SSSE3 PSHUFB SIMD 32-char hex stamping               │   │
+│   │  │   ├─ Zero-allocation RFC 5952 IPv6 branchless zero-compression              │   │
+│   │  │   └─ Pre-reserved buffer capacity (zero heap reallocations)                 │   │
+│   │  └─ sink.write_all(&out_buf).await -> Direct VFS write (Zero open/close churn) │   │
 │   │                                                                                │   │
 │   │ Automatic Memory Reclamation when Arc strong count drops to zero               │   │
 │   └────────────────────────────────────────────────────────────────────────────────┘   │
@@ -43,69 +47,78 @@ In accordance with the Velda Edge Hourglass Architecture, request serving and op
 
 ---
 
-## 2. Lock-Free SPSC Ring Ingestion & Subscription
+## 2. Subsystem Layout & Clean Separation of Concerns
 
-### 2.1 Frontline Ingestion Contract
-Traffic workers record operational telemetry into an immutable, 64-byte scalar struct: [`velda_observability::AccessLogRecord`].
-- Memory footprint: Exactly 64 bytes (1 cache line).
-- Representation: Fully composed of primitive integers (`u64`, `u32`, `u16`, `u8`) with zero pointer indirection and zero string heap allocations.
-- Ingestion mechanism: Each worker writes into its dedicated core-local Single-Producer Single-Consumer (SPSC) ring buffer.
-- Latency profile: Less than 70 CPU clock cycles per record, completely free of locks, system calls, and atomic contention across CPU cores.
+The subsystem is modularized into discrete, bounded units:
 
-### 2.2 Batched Reference-Counted Draining
-The shadow worker periodically executes `subscriber.drain_batches(max_batches)`:
-- Chunks of log records are organized into shared slices wrapped in an atomic reference counter: `Arc<[AccessLogRecord]>`.
-- Multiple active background exporters (such as `std_log_shipper`, `otlp_log_shipper`, and `loki_log_shipper`) consume the identical reference-counted batch concurrently.
-- No exporter copies or duplicates the raw log records in memory. Memory is reclaimed automatically when the last exporter drops its `Arc` handle.
+```text
+crates/velda-plugin/src/background/std_log_shipper/
+├── lut.rs                  # Hardware-optimized division-free integer, SIMD 32-char hex & RFC 5952 IP LUT
+├── config.rs               # Declarative StdLogShipperConfig & TargetStream (Stdout, Stderr, File)
+├── sink.rs                 # Persistent StdLogSink holding open tokio::fs::File descriptor across cycles
+├── plugin.rs               # Concise shadow worker coordinator (< 150 lines)
+├── mod.rs                  # Public API root re-exports
+│
+└── format/                 # Formatting engine
+    ├── mod.rs              # Re-export format_std_log_payload
+    ├── text.rs             # Extended Text & NCSA Common Log Format (CLF) formatting
+    └── json.rs             # High-speed NDJSON access log formatting
+```
 
 ---
 
-## 3. Division-Free 2-Digit ASCII Lookup Table (LUT) Serialization
+## 3. Persistent File Sink Mechanics (`sink.rs`)
 
-Traditional log formatting libraries rely on standard library formatting macros (such as `write!`, `format!`), which introduce severe overhead:
-1. Parsing format specifiers at runtime.
-2. Multiple branching and repeated hardware division (`DIV` / `IDIV` instructions costing 20–80 cycles per operation).
-3. Heap allocations and dynamic string resizing.
+### 3.1 Elimination of Per-Cycle File Descriptor Churn
+Prior implementations incurred high OS overhead by repeatedly invoking `OpenOptions::open()` on every periodic flush (every 50–100ms), creating hundreds of redundant `open()`, `stat()`, and `close()` syscalls per minute:
 
-`std_log_shipper` eliminates this overhead entirely:
+```text
+OLD (Defective):
+  Every 100ms: OpenOptions::open(path).await ──► Write ──► Drop File (close syscall)
 
-```rust
-// Pre-computed 2-digit ASCII Lookup Table (200 bytes, fits into a single L1 data cache line)
-const DIGIT_PAIRS: &[u8; 200] = b"\
-    00010203040506070809\
-    10111213141516171819\
-    20212223242526272829\
-    30313233343536373839\
-    40414243444546474849\
-    50515253545556575859\
-    60616263646566676869\
-    70717273747576777879\
-    80818283848586878889\
-    90919293949596979899";
+NEW (StdLogSink):
+  Startup:     StdLogSink::init(&target).await (Single O(1) open syscall)
+  Serving:     File descriptor kept persistently open across all flush iterations
+  Every 100ms: sink.write_all(&out_buf).await ──► Single write syscall ──► sink.flush()
 ```
 
-### 3.1 Fast Integer Conversion (`fast_write_u64`)
-- Single-digit integers (`n < 10`) are converted in 1 CPU instruction: `buf.push(b'0' + n as u8)`.
-- Multi-digit integers are converted 2 digits at a time by extracting pairs via reciprocal multiplication and table indexing.
-- Results are stored into a stack-allocated 20-byte buffer and spliced into the destination vector via vectorized `memcpy`.
-
-### 3.2 Pre-Baked Frame Chunk Splicing
-Static JSON keys and structure framing bytes are pre-defined as byte slices (`&'static [u8]`):
-```rust
-const JSON_K0: &[u8] = b"{\"req_id\":\"";
-const JSON_K1: &[u8] = b"\",\"ts\":";
-const JSON_K2: &[u8] = b",\"dur_us\":";
-const JSON_K3: &[u8] = b",\"proto\":\"";
-// ...
-const JSON_END: &[u8] = b"\"}\n";
-```
-The serialization loop performs zero parsing. It sequentially appends static chunk slices and converted integer bytes into a reusable contiguous buffer (`Vec<u8>`).
+### 3.2 Polymorphic Stream Target Support
+`StdLogSink` supports three asynchronous output modes without dynamic dispatch (`dyn`):
+- `StdLogSink::Stdout(tokio::io::Stdout)`: Direct writes to process standard output.
+- `StdLogSink::Stderr(tokio::io::Stderr)`: Direct writes to process standard error.
+- `StdLogSink::File(tokio::fs::File)`: Direct asynchronous writes to a persistent filesystem descriptor.
 
 ---
 
-## 4. Shadow Worker Threading & `SCHED_IDLE` Lifecycle
+## 4. Hardware-Accelerated Serialization Mechanics (`lut.rs`)
 
-1. **CPU Pinning**: `std_log_shipper` runs exclusively on companion thread `velda-shadow-0`, pinned to CPU Core 0 alongside primary traffic worker `velda-worker-0`.
-2. **Scheduling Priority**: Managed under Linux `SCHED_IDLE`. When request traffic surges on Core 0, the Linux Completely Fair Scheduler (CFS) immediately yields all CPU time to `velda-worker-0`.
-3. **Clock Cycle Scavenging**: During inter-packet intervals or idle moments, the shadow worker activates to process queued records without degrading traffic throughput or tail latency.
-4. **Graceful Shutdown**: Listens to the global `watch::Receiver<bool>` shutdown signal. Upon shutdown notification, any residual records in SPSC rings are flushed before thread termination.
+### 4.1 Division-Free Decimal Formatting (`fast_write_u64`)
+Eliminates costly `DIV` / `IDIV` hardware division instructions (20–80 cycles) by using reciprocal multiplication and a 200-byte L1D-resident table (`DIGIT_PAIRS`):
+```text
+n >= 100 ──► (n % 100) * 2 ──► DIGIT_PAIRS[rem..rem+2] ──► temp[curr..curr+2]
+```
+
+### 4.2 128-Bit RequestId SSSE3 SIMD Hex Stamping (`fast_write_hex32`)
+The frontline pipeline emits 128-bit request IDs reconstructed as `(timestamp_sec as u128) << 64 | request_id as u128`.
+`std_log_shipper` formats this 128-bit value into 32 lowercase hex characters using the SSSE3 `_mm_shuffle_epi8` (PSHUFB) instruction:
+```text
+[ req_hi (8B) ] [ req_lo (8B) ] ──► PSHUFB Vector Shuffles ──► 32 ASCII Bytes (3-5 ns)
+```
+
+### 4.3 Zero-Heap-Allocation RFC 5952 IPv6 Compression (`fast_write_ipv6`)
+Eliminates intermediate heap allocations (`v6.to_string()`) when logging IPv6 addresses:
+1. Deconstructs the 128-bit integer into 8 big-endian 16-bit words.
+2. Identifies the longest contiguous sequence of zeros ($\ge 2$) per RFC 5952.
+3. Formats hex segments into a fixed 40-byte stack buffer (`[u8; 40]`).
+4. Slices the result directly into the destination buffer with zero dynamic allocations.
+
+---
+
+## 5. Zero-Reallocation Formatting Pipeline (`format/`)
+
+1. **Pre-Reserved Capacity**: `format_std_log_payload` scans batch record counts upfront ($O(\text{batches})$) and invokes `out.reserve(total_recs * 320)`, ensuring that subsequent chunk splicing and integer writes never trigger heap reallocation or memory relocation.
+2. **Pre-Baked Static Frame Slices**: All JSON keys, punctuation, and structural framing bytes are pre-defined as `&'static [u8]` constants.
+3. **Multi-Format Support**:
+   - `"json"`: High-throughput NDJSON with 32-character SIMD hex request IDs.
+   - `"text"`: Detailed multi-protocol operational format (HTTP, gRPC, Raw TCP/UDP).
+   - `"clf"`: Canonical NCSA Common Log Format (`host - - [ts] "req" status bytes`).

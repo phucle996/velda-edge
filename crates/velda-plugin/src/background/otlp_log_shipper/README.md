@@ -17,6 +17,47 @@ The `otlp_log_shipper` plugin is a high-performance background telemetry service
 | **Export Transports** | OTLP/HTTP (JSON over HTTP/1.1, default port 4318) or OTLP/gRPC (Protobuf over HTTP/2, default port 4317) |
 | **OpenTelemetry Compliance** | Conforms to OpenTelemetry Log Data Model (`opentelemetry.proto.logs.v1`) |
 
+```text
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                          VELDA EDGE — OTLP LOG SHIPPER ARCHITECTURE                                  ║
+║              (crates/velda-plugin/src/background/otlp_log_shipper: OtlpLogShipperPlugin)             ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+ [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, 100ms Ticker)
+  velda-worker-0 (Core 0)                        
+  velda-worker-1 (Core 1)                        
+        │                                                    │ (Every 100ms)
+        ▼                                                    ▼
+  ┌───────────┐  Zero-Lock SPSC Ring Drain  ┌──────────────────────────────────┐
+  │ AccessLog │ ──────────────────────────► │  Drain Batches (max 1000 recs)   │
+  │  Record   │    (< 2ns per record)       └────────────────┬─────────────────┘
+  └───────────┘                                              │
+                                              ┌──────────────┴──────────────┐
+                                              │                             │
+                                        [mode: "grpc"]                [mode: "http"]
+                                              ▼                             ▼
+                                   ┌─────────────────────┐       ┌─────────────────────┐
+                                   │  proto/template.rs  │       │   json/template.rs  │
+                                   │ Wire Skeletons (PB) │       │ Pre-Baked Envelope  │
+                                   │ Raw Pointer Stamp   │       │ SIMD Itoa + PSHUFB  │
+                                   │ (96-111 CPU cycles) │       │ (203-311 cycles)    │
+                                   └──────────┬──────────┘       └──────────┬──────────┘
+                                              │                             │
+                                              ▼                             ▼
+                                   ┌─────────────────────┐       ┌─────────────────────┐
+                                   │   proto/client.rs   │       │    json/client.rs   │
+                                   │ Persistent HTTP/2   │       │ Persistent HTTP/1.1 │
+                                   │ 5-byte Framing      │       │ Keep-Alive (TCP/TLS)│
+                                   └──────────┬──────────┘       └──────────┬──────────┘
+                                              │                             │
+                                              ▼                             ▼
+                                  gRPC Port 4317 (Protobuf)      HTTP Port 4318 (JSON)
+                                  ┌────────────────────────────────────────────────────┐
+                                  │             OpenTelemetry Collector                │
+                                  └────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 2. Technical Documentation Index

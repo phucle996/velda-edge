@@ -21,12 +21,17 @@ use velda_observability::{
     PipeStrategy,
 };
 
-use velda_plugin::background::otlp_log_shipper::{
-    OtlpJsonEnvelope, OtlpLogClient, OtlpLogsGrpcClient, format_otlp_records_json,
-    format_otlp_records_proto,
+use velda_plugin::background::otlp_log_shipper::json::{
+    OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json,
 };
-use velda_plugin::background::otlp_metrics_exporter::{
-    OtlpMetricsClient, OtlpMetricsGrpcClient, format_otlp_metrics_json, format_otlp_metrics_proto,
+use velda_plugin::background::otlp_log_shipper::proto::{
+    OtlpLogsGrpcClient, format_otlp_records_proto,
+};
+use velda_plugin::background::otlp_metrics_exporter::json::{
+    OtlpMetricsClient, format_otlp_metrics_json,
+};
+use velda_plugin::background::otlp_metrics_exporter::proto::{
+    OtlpMetricsGrpcClient, format_otlp_metrics_proto,
 };
 use velda_plugin::header::{TRACEPARENT, X_SPAN_ID, X_TRACE_ID};
 use velda_plugin::post_response::opentelemetry_tracer::{

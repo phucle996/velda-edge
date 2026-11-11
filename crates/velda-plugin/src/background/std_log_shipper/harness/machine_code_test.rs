@@ -14,7 +14,7 @@ use velda_observability::{
     AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, LogStore,
     PipeStrategy,
 };
-use velda_plugin::background::std_log_shipper::format_std_log_payload;
+use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 
 fn create_sample_http_record(id: u64, ts: u32) -> AccessLogRecord {
     AccessLogRecord::from_scalars(

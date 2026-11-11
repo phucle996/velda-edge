@@ -62,7 +62,7 @@ The `prometheus_exporter` plugin (`crates/velda-plugin/src/background/prometheus
 
 In compliance with the **Hourglass Architecture** and **Subsystem Boundaries**, `prometheus_exporter` does not execute raw socket syscalls, port binding, or process-wide conflict detection:
 
-- **Socket Authority Delegated to Core**: All network listener lifecycles, socket options (`SO_REUSEADDR`, `SO_REUSEPORT`), and port collision checks are centrally owned and managed by [`velda-core::socket::GlobalSocketManager`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs).
+- **Socket Authority Delegated to Core**: All network listener lifecycles, socket options (`SO_REUSEADDR`, `SO_REUSEPORT`), and port collision checks are centrally owned and managed by [`velda-core::socket::GlobalSocketManager`](../../../../velda-core/src/socket.rs).
 - **Port Isolation Invariant**: The management port (e.g. `9090`) is strictly disjoint from all traffic listeners:
   $$\text{ManagementPort} \cap \text{TrafficPorts} = \emptyset$$
   Extreme traffic spikes or DDoS saturation on ports 80/443 can never exhaust socket file descriptors or block telemetry scrapes.

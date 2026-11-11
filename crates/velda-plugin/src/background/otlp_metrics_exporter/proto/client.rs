@@ -1,4 +1,4 @@
-//! Persistent HTTP/2 gRPC OTLP Client (`otlp_metrics_exporter`).
+//! Persistent HTTP/2 gRPC OTLP Client (`otlp_metrics_exporter::proto::client`).
 //!
 //! Maintains a persistent HTTP/2 stream multiplexer to an OpenTelemetry Collector gRPC endpoint
 //! (`/opentelemetry.proto.collector.metrics.v1.MetricsService/Export`, standard port 4317).

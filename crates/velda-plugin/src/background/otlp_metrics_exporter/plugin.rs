@@ -1,15 +1,56 @@
-//! OpenTelemetry Metrics Exporter Background Plugin (`otlp_metrics_exporter`).
+//! OpenTelemetry Metrics Exporter Background Plugin (`otlp_metrics_exporter::plugin`).
 //!
 //! Periodically captures lock-free point-in-time [`MetricsSnapshot`] values from
 //! [`velda_observability::MetricsStore`] and pushes compliant OpenTelemetry ResourceMetrics
-//! JSON payloads to an OTLP/HTTP collector endpoint (`POST /v1/metrics`).
+//! JSON payloads (`POST /v1/metrics`) or binary Protobuf over gRPC to an OTLP collector.
+//!
+//! # Architecture & Mechanism
+//!
+//! ```text
+//! ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+//! ║                        VELDA EDGE — OTLP METRICS EXPORTER PIPELINE                               ║
+//! ║                  (crates/velda-plugin: otlp_metrics_exporter::plugin)                             ║
+//! ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+//!
+//!  [FRONTLINE WORKERS]                       [SHADOW WORKER: velda-shadow-0 (SCHED_IDLE)]
+//!   velda-worker-0/1                          interval_secs periodic ticker
+//!         │                                                │
+//!         ▼ (Atomic writes)                                ▼
+//!   ┌───────────┐   Lock-Free Atomic Extraction    ┌───────────────────────────────┐
+//!   │ 36 Slots  │ ───────────────────────────────► │   MetricsStore::snapshot()    │
+//!   │ Counters  │     (< 100ns vector reduce)      │   (36 Pipelines, 288 DPs)     │
+//!   └───────────┘                                  └───────────────┬───────────────┘
+//!                                                                  │
+//!                                                  ┌───────────────┴───────────────┐
+//!                                                  │                               │
+//!                                            [mode: "grpc"]                  [mode: "http"]
+//!                                                  ▼                               ▼
+//!                                       ┌─────────────────────┐         ┌─────────────────────┐
+//!                                       │  proto/template.rs  │         │   json/template.rs  │
+//!                                       │ Pre-Baked Wire      │         │ Pre-Baked Chunk     │
+//!                                       │ Skeleton (100% Safe)│         │ Interleaving (JSON) │
+//!                                       │ (1,624 CPU cycles)  │         │ (8,986 CPU cycles)  │
+//!                                       └──────────┬──────────┘         └──────────┬──────────┘
+//!                                                  │                               │
+//!                                                  ▼                               ▼
+//!                                       ┌─────────────────────┐         ┌─────────────────────┐
+//!                                       │   proto/client.rs   │         │    json/client.rs   │
+//!                                       │ Persistent HTTP/2   │         │ Persistent HTTP/1.1 │
+//!                                       │ 5-byte Framing      │         │ Keep-Alive (TCP/TLS)│
+//!                                       └──────────┬──────────┘         └──────────┬──────────┘
+//!                                                  │                               │
+//!                                                  ▼                               ▼
+//!                                      gRPC Port 4317 (Protobuf)        HTTP Port 4318 (JSON)
+//!                                      ┌──────────────────────────────────────────────────────┐
+//!                                      │               OpenTelemetry Collector                │
+//!                                      └──────────────────────────────────────────────────────┘
+//! ```
 //!
 //! # Strict Monorepo Invariants
 //! - **Shadow Execution**: Runs strictly on Shadow Worker supervisory threads with idle priority.
 //! - **Zero Hot-Path Contention**: Telemetry is extracted via lock-free atomic snapshots.
-//! - **Connection Reuse**: Uses a self-contained persistent HTTP/1.1 Keep-Alive socket.
+//! - **Connection Reuse**: Uses a self-contained persistent HTTP/1.1 or HTTP/2 Keep-Alive socket.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,41 +58,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use http::HeaderMap;
-use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use velda_observability::{MetricsStore, global_metrics};
 use velda_sync::post_sync::plugin::PluginConfig;
 
-use super::client::OtlpMetricsClient;
-use super::client_grpc::OtlpMetricsGrpcClient;
-use super::format::format_otlp_metrics_into;
-use super::proto::{OtlpProtoTemplate, format_otlp_metrics_proto_into};
+use super::config::OtlpMetricsExporterConfig;
+use super::json::{OtlpJsonTemplate, OtlpMetricsClient};
+use super::proto::{OtlpMetricsGrpcClient, OtlpProtoTemplate, format_otlp_metrics_proto_into};
 use crate::background::BackgroundPlugin;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
-
-/// Declarative configuration for [`OtlpMetricsExporterPlugin`].
-///
-/// # Strict Invariant: 100% Explicit Declaration
-/// Every parameter must be explicitly declared in the configuration JSON.
-/// Zero defaults are permitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OtlpMetricsExporterConfig {
-    /// OTLP transport protocol (must be explicitly declared as `"http"` or `"grpc"`).
-    pub protocol: String,
-    /// OTLP collector endpoint URL (e.g. `http://127.0.0.1:4318/v1/metrics` or `grpc://127.0.0.1:4317`).
-    pub endpoint: String,
-    /// Periodic push interval in seconds (between 1 and 3600).
-    pub interval_secs: u64,
-    /// TCP and TLS connection establishment timeout in milliseconds (100 to 60000).
-    pub connect_timeout_ms: u64,
-    /// Request export completion timeout in milliseconds (100 to 60000).
-    pub request_timeout_ms: u64,
-    /// Service name reported in OpenTelemetry Resource attributes.
-    pub service_name: String,
-    /// Custom HTTP or gRPC headers (use `{}` if none).
-    pub headers: HashMap<String, String>,
-}
 
 /// Standalone Background OTLP Metrics Exporter Plugin.
 pub struct OtlpMetricsExporterPlugin {
@@ -184,13 +200,14 @@ impl BackgroundPlugin for OtlpMetricsExporterPlugin {
                     connect_timeout,
                     request_timeout,
                 )?;
+                let json_template = OtlpJsonTemplate::new(&self.config.service_name);
                 let mut json_buf = Vec::with_capacity(64 * 1024);
 
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
                             let snapshot = self.metrics_store.snapshot();
-                            format_otlp_metrics_into(&snapshot, &self.config.service_name, &mut json_buf);
+                            json_template.format_into(&snapshot, &mut json_buf);
 
                             match http_client.send_metrics(&json_buf, &self.custom_headers).await {
                                 Ok(status) => {

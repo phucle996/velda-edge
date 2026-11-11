@@ -10,9 +10,8 @@ use velda_observability::{
     DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
 };
 use velda_plugin::background::BackgroundPlugin;
-use velda_plugin::background::statsd_exporter::formatter::{
-    StatsdDialect, fast_write_i64, fast_write_u64, format_statsd_snapshot,
-};
+use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
+use velda_plugin::background::statsd_exporter::lut::{fast_write_i64, fast_write_u64};
 use velda_plugin::background::statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
 
 #[test]
@@ -213,11 +212,8 @@ async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
         max_packet_size: 1432,
     };
 
-    let plugin = Arc::new(StatsdExporterPlugin::new(
-        "test_statsd_exporter",
-        config,
-        store.clone(),
-    ));
+    let plugin =
+        Arc::new(StatsdExporterPlugin::new("test_statsd_exporter", config, store.clone()).unwrap());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 

@@ -6,7 +6,7 @@ This document specifies the architectural design, threading model, memory layout
 
 ## 1. Architectural Mission & Invariants
 
-The `otlp_metrics_exporter` plugin (`crates/velda-plugin/src/background/otlp_metrics_exporter/`) periodically captures point-in-time telemetry from [`velda_observability::MetricsStore`](file:///home/phucle/Desktop/velda-edge/crates/velda-observability/src/store.rs) and pushes compliant OpenTelemetry ResourceMetrics payloads directly to an OpenTelemetry Collector via **OTLP/gRPC** (`/opentelemetry.proto.collector.metrics.v1.MetricsService/Export`) or **OTLP/HTTP** (`POST /v1/metrics`).
+The `otlp_metrics_exporter` plugin (`crates/velda-plugin/src/background/otlp_metrics_exporter/`) periodically captures point-in-time telemetry from [`velda_observability::MetricsStore`](../../../../velda-observability/src/metrics/store.rs) and pushes compliant OpenTelemetry ResourceMetrics payloads directly to an OpenTelemetry Collector via **OTLP/gRPC** (`/opentelemetry.proto.collector.metrics.v1.MetricsService/Export`) or **OTLP/HTTP** (`POST /v1/metrics`).
 
 ```mermaid
 flowchart TD
@@ -72,11 +72,11 @@ crates/velda-plugin/src/background/otlp_metrics_exporter/
 ```
 
 ### Module Responsibilities:
-- [`plugin.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/plugin.rs): Implements `BackgroundPlugin`. Manages the supervisory task, ticker interval, scratch buffer lifecycle, and error accounting (`flushed_count`, `failed_count`).
-- [`proto.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/proto.rs): Defines Prost-compatible data structures for `ExportMetricsServiceRequest`. Implements `OtlpProtoTemplate` for in-place data point mutation and direct encoding.
-- [`format.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/format.rs): Provides `format_otlp_metrics_into` and stack-based integer formatting utilities (`fast_write_u64`, `fast_write_i64`, `fast_format_u128_into`).
-- [`client_grpc.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/client_grpc.rs): Manages raw TCP/TLS connections to gRPC collectors (port 4317), HTTP/2 handshake (`h2::client::handshake`), and length-prefixed framing.
-- [`client.rs`](file:///home/phucle/Desktop/velda-edge/crates/velda-plugin/src/background/otlp_metrics_exporter/client.rs): Manages persistent TCP/TLS HTTP/1.1 connections to OTLP collectors (port 4318), Keep-Alive socket leasing, and transparent reconnection.
+- [`plugin.rs`](./plugin.rs): Implements `BackgroundPlugin`. Manages the supervisory task, ticker interval, scratch buffer lifecycle, and error accounting (`flushed_count`, `failed_count`).
+- [`proto.rs`](./proto/mod.rs): Defines Prost-compatible data structures for `ExportMetricsServiceRequest`. Implements `OtlpProtoTemplate` for in-place data point mutation and direct encoding.
+- [`format.rs`](./json/template.rs): Provides `format_otlp_metrics_into` and stack-based integer formatting utilities (`fast_write_u64`, `fast_write_i64`, `fast_format_u128_into`).
+- [`client_grpc.rs`](./proto/client.rs): Manages raw TCP/TLS connections to gRPC collectors (port 4317), HTTP/2 handshake (`h2::client::handshake`), and length-prefixed framing.
+- [`client.rs`](./json/client.rs): Manages persistent TCP/TLS HTTP/1.1 connections to OTLP collectors (port 4318), Keep-Alive socket leasing, and transparent reconnection.
 
 ---
 

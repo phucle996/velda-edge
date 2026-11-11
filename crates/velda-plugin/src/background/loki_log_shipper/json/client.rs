@@ -1,7 +1,22 @@
-//! Persistent Keep-Alive OTLP HTTP/1.1 Client for Logs (`opentelemetry_logger`).
+//! Persistent Keep-Alive Grafana Loki HTTP/1.1 Client (`loki_log_shipper::json::client`).
 //!
-//! Maintains a warm, persistent TCP/TLS stream to an OpenTelemetry Collector endpoint
-//! (`/v1/logs`), avoiding connection churn and TLS handshake storms on repeated flushes.
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           LOKI HTTP/1.1 KEEP-ALIVE FLOW                                │
+//! │                                                                                        │
+//! │  send_logs(json_payload)                                                               │
+//! │        │                                                                               │
+//! │        ├─── Warm Stream Available?                                                     │
+//! │        │          ├── YES ──► Write HTTP/1.1 POST /loki/api/v1/push                     │
+//! │        │          └── NO  ──► Connect TCP ──► Set TCP_NODELAY ──► TLS Handshake (if)   │
+//! │        │                                                                               │
+//! │        ▼                                                                               │
+//! │  Read Status Code (httparse):                                                          │
+//! │        ├── 200..299 ──► Success, retain persistent stream in pool                      │
+//! │        ├── EOF / Idle Teardown ──► Clear stream, transparent reconnect retry (attempt 2)│
+//! │        └── Timeout ──► Drop stream, return PluginError::Io                             │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -43,9 +58,9 @@ impl TransportStream {
     }
 }
 
-/// Parsed endpoint target specification for OTLP communication.
+/// Parsed endpoint target specification for Grafana Loki HTTP communication.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OtlpLogEndpoint {
+pub struct LokiLogEndpoint {
     pub is_tls: bool,
     pub host: String,
     pub port: u16,
@@ -53,8 +68,8 @@ pub struct OtlpLogEndpoint {
     pub host_header: String,
 }
 
-impl OtlpLogEndpoint {
-    /// Parses an HTTP/HTTPS URL into an [`OtlpLogEndpoint`].
+impl LokiLogEndpoint {
+    /// Parses an HTTP/HTTPS URL into a [`LokiLogEndpoint`].
     pub fn parse(endpoint_url: &str, default_path: &str) -> Result<Self, PluginError> {
         let trimmed = endpoint_url.trim();
         let (is_tls, rest) = if let Some(stripped) = trimmed.strip_prefix("https://") {
@@ -63,7 +78,7 @@ impl OtlpLogEndpoint {
             (false, stripped)
         } else {
             return Err(PluginError::Config(format!(
-                "Invalid OTLP endpoint URL '{endpoint_url}': must begin with http:// or https://"
+                "Invalid Loki endpoint URL '{endpoint_url}': must begin with http:// or https://"
             )));
         };
 
@@ -74,7 +89,7 @@ impl OtlpLogEndpoint {
 
         if authority.is_empty() {
             return Err(PluginError::Config(format!(
-                "Invalid OTLP endpoint URL '{endpoint_url}': missing host authority"
+                "Invalid Loki endpoint URL '{endpoint_url}': missing host authority"
             )));
         }
 
@@ -84,14 +99,14 @@ impl OtlpLogEndpoint {
                 let port_str = &authority[idx + 1..];
                 let port = port_str.parse::<u16>().map_err(|_| {
                     PluginError::Config(format!(
-                        "Invalid port '{port_str}' in OTLP endpoint '{endpoint_url}'"
+                        "Invalid port '{port_str}' in Loki endpoint '{endpoint_url}'"
                     ))
                 })?;
                 (host.to_string(), port)
             }
             _ => {
                 let host = authority.trim_matches(|c| c == '[' || c == ']');
-                let default_port = if is_tls { 443 } else { 4318 };
+                let default_port = if is_tls { 443 } else { 3100 };
                 (host.to_string(), default_port)
             }
         };
@@ -118,23 +133,25 @@ impl OtlpLogEndpoint {
     }
 }
 
-/// Standalone Persistent Keep-Alive OTLP Logs Client.
-pub struct OtlpLogClient {
-    endpoint: OtlpLogEndpoint,
+/// Standalone Persistent Keep-Alive Grafana Loki HTTP Client.
+pub struct LokiLogClient {
+    endpoint: LokiLogEndpoint,
+    tenant_id: String,
     stream: Option<TransportStream>,
     tls_connector: Option<TlsConnector>,
     connect_timeout: Duration,
     request_timeout: Duration,
 }
 
-impl OtlpLogClient {
-    /// Creates a new client targeting the given endpoint URL with explicit timeouts.
+impl LokiLogClient {
+    /// Creates a new client targeting the given endpoint URL with tenant id and explicit timeouts.
     pub fn new(
         endpoint_url: &str,
+        tenant_id: &str,
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, PluginError> {
-        let endpoint = OtlpLogEndpoint::parse(endpoint_url, "/v1/logs")?;
+        let endpoint = LokiLogEndpoint::parse(endpoint_url, "/loki/api/v1/push")?;
         let tls_connector = if endpoint.is_tls {
             let root_store = rustls::RootCertStore::empty();
             let config = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -151,6 +168,7 @@ impl OtlpLogClient {
 
         Ok(Self {
             endpoint,
+            tenant_id: tenant_id.to_string(),
             stream: None,
             tls_connector,
             connect_timeout,
@@ -165,13 +183,13 @@ impl OtlpLogClient {
             .map_err(|_| {
                 PluginError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("Connection timeout to OTLP collector at {addr_str}"),
+                    format!("Connection timeout to Loki server at {addr_str}"),
                 ))
             })?
             .map_err(|e| {
                 PluginError::Io(std::io::Error::new(
                     e.kind(),
-                    format!("Failed to connect to OTLP collector at {addr_str}: {e}"),
+                    format!("Failed to connect to Loki server at {addr_str}: {e}"),
                 ))
             })?;
 
@@ -191,12 +209,12 @@ impl OtlpLogClient {
                     .await
                     .map_err(|_| {
                         PluginError::Tls(format!(
-                            "TLS handshake timeout to OTLP collector at {addr_str}"
+                            "TLS handshake timeout to Loki server at {addr_str}"
                         ))
                     })?
                     .map_err(|e| {
                         PluginError::Tls(format!(
-                            "TLS handshake failed to OTLP collector at {addr_str}: {e}"
+                            "TLS handshake failed to Loki server at {addr_str}: {e}"
                         ))
                     })?;
 
@@ -206,7 +224,7 @@ impl OtlpLogClient {
         }
     }
 
-    /// Transmits an OTLP JSON payload, maintaining persistent keep-alive connection.
+    /// Transmits a Loki JSON push payload, maintaining persistent keep-alive connection.
     pub async fn send_logs(
         &mut self,
         json_payload: &[u8],
@@ -223,7 +241,13 @@ impl OtlpLogClient {
             let stream = self.stream.as_mut().expect("Stream established");
             match tokio::time::timeout(
                 self.request_timeout,
-                Self::write_and_read_response(stream, &self.endpoint, json_payload, custom_headers),
+                Self::write_and_read_response(
+                    stream,
+                    &self.endpoint,
+                    &self.tenant_id,
+                    json_payload,
+                    custom_headers,
+                ),
             )
             .await
             {
@@ -236,7 +260,10 @@ impl OtlpLogClient {
                 Ok(Err(e)) => {
                     self.stream = None;
                     if attempts < 2 {
-                        tracing::debug!(error = %e, "OTLP logs connection closed while idle, retrying once with new connection");
+                        tracing::debug!(
+                            error = %e,
+                            "Loki connection closed while idle, retrying once with new connection"
+                        );
                         continue;
                     }
                     return Err(e);
@@ -245,7 +272,7 @@ impl OtlpLogClient {
                     self.stream = None;
                     return Err(PluginError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        "OTLP logs flush request timed out",
+                        "Loki flush request timed out",
                     )));
                 }
             }
@@ -254,107 +281,91 @@ impl OtlpLogClient {
 
     async fn write_and_read_response(
         stream: &mut TransportStream,
-        endpoint: &OtlpLogEndpoint,
+        endpoint: &LokiLogEndpoint,
+        tenant_id: &str,
         payload: &[u8],
         custom_headers: &HeaderMap,
     ) -> Result<(u16, bool), PluginError> {
-        let mut header_buf = String::with_capacity(512);
-        let _ = write!(
-            header_buf,
+        let mut head = String::with_capacity(512);
+        write!(
+            head,
             "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n",
-            endpoint.path,
-            endpoint.host_header,
-            payload.len()
-        );
+            endpoint.path, endpoint.host_header, payload.len()
+        )
+        .map_err(|e| PluginError::Http(format!("Failed to format request head: {e}")))?;
+
+        if !tenant_id.is_empty() {
+            write!(head, "X-Scope-OrgID: {tenant_id}\r\n")
+                .map_err(|e| PluginError::Http(format!("Failed to write tenant header: {e}")))?;
+        }
 
         for (k, v) in custom_headers {
-            let _ = write!(
-                header_buf,
-                "{}: {}\r\n",
-                k.as_str(),
-                v.to_str().unwrap_or("")
-            );
-        }
-        header_buf.push_str("\r\n");
-
-        stream.write_all(header_buf.as_bytes()).await?;
-        if !payload.is_empty() {
-            stream.write_all(payload).await?;
-        }
-        stream.flush().await?;
-
-        let mut read_buf = [0u8; 4096];
-        let mut total_read = 0;
-
-        loop {
-            let n = stream.read(&mut read_buf[total_read..]).await?;
-            if n == 0 {
-                if total_read == 0 {
-                    return Err(PluginError::Io(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "Remote server closed connection before sending response",
-                    )));
-                }
-                break;
-            }
-            total_read += n;
-
-            let mut headers = [httparse::EMPTY_HEADER; 64];
-            let mut resp = httparse::Response::new(&mut headers);
-            match resp.parse(&read_buf[..total_read]) {
-                Ok(httparse::Status::Complete(body_start)) => {
-                    let status = resp.code.unwrap_or(200);
-                    let mut keep_alive = true;
-                    let mut content_length = None;
-
-                    for h in resp.headers.iter() {
-                        if h.name.eq_ignore_ascii_case("connection")
-                            && h.value.eq_ignore_ascii_case(b"close")
-                        {
-                            keep_alive = false;
-                        } else if h.name.eq_ignore_ascii_case("content-length")
-                            && let Ok(val_str) = std::str::from_utf8(h.value)
-                        {
-                            content_length = val_str.trim().parse::<usize>().ok();
-                        }
-                    }
-
-                    if let Some(cl) = content_length {
-                        let body_read = total_read.saturating_sub(body_start);
-                        if body_read < cl {
-                            let mut remaining = cl - body_read;
-                            let mut discard = [0u8; 1024];
-                            while remaining > 0 {
-                                let r = stream.read(&mut discard).await?;
-                                if r == 0 {
-                                    keep_alive = false;
-                                    break;
-                                }
-                                remaining = remaining.saturating_sub(r);
-                            }
-                        }
-                    }
-
-                    return Ok((status, keep_alive));
-                }
-                Ok(httparse::Status::Partial) => {
-                    if total_read >= read_buf.len() {
-                        return Err(PluginError::Http(
-                            "HTTP response headers exceeded buffer limit".into(),
-                        ));
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    return Err(PluginError::Http(format!(
-                        "Invalid HTTP response from OTLP collector: {e}"
-                    )));
-                }
+            if let Ok(v_str) = v.to_str() {
+                write!(head, "{}: {}\r\n", k.as_str(), v_str).map_err(|e| {
+                    PluginError::Http(format!("Failed to format custom header: {e}"))
+                })?;
             }
         }
+        head.push_str("\r\n");
 
-        Err(PluginError::Http(
-            "Connection closed unexpectedly by OTLP collector".into(),
-        ))
+        stream.write_all(head.as_bytes()).await.map_err(|e| {
+            PluginError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to write HTTP header: {e}"),
+            ))
+        })?;
+
+        stream.write_all(payload).await.map_err(|e| {
+            PluginError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to write HTTP body: {e}"),
+            ))
+        })?;
+
+        stream.flush().await.map_err(|e| {
+            PluginError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to flush HTTP stream: {e}"),
+            ))
+        })?;
+
+        // Read HTTP status response
+        let mut response_buf = [0u8; 1024];
+        let bytes_read = stream.read(&mut response_buf).await.map_err(|e| {
+            PluginError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read HTTP response: {e}"),
+            ))
+        })?;
+
+        if bytes_read == 0 {
+            return Err(PluginError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Loki server closed connection (EOF)",
+            )));
+        }
+
+        let resp_slice = &response_buf[..bytes_read];
+        let mut headers = [httparse::EMPTY_HEADER; 16];
+        let mut parsed_resp = httparse::Response::new(&mut headers);
+
+        match parsed_resp.parse(resp_slice) {
+            Ok(httparse::Status::Complete(_)) | Ok(httparse::Status::Partial) => {
+                let status = parsed_resp.code.unwrap_or(500);
+                let mut keep_alive = true;
+                for h in parsed_resp.headers {
+                    if h.name.eq_ignore_ascii_case("connection")
+                        && h.value.eq_ignore_ascii_case(b"close")
+                    {
+                        keep_alive = false;
+                        break;
+                    }
+                }
+                Ok((status, keep_alive))
+            }
+            Err(e) => Err(PluginError::Http(format!(
+                "Failed to parse Loki HTTP response: {e}"
+            ))),
+        }
     }
 }

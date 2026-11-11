@@ -10,9 +10,9 @@ use velda_observability::{
     PipeStrategy,
 };
 use velda_plugin::background::BackgroundPlugin;
-use velda_plugin::background::std_log_shipper::{
-    StdLogShipperConfig, StdLogShipperPlugin, TargetStream, format_std_log_payload,
-};
+use velda_plugin::background::std_log_shipper::config::TargetStream;
+use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
+use velda_plugin::background::std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 use velda_sync::post_sync::plugin::PluginConfig;
 
 #[test]

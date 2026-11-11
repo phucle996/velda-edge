@@ -1,19 +1,30 @@
-//! OpenTelemetry Log Shipper Background Plugin (`otlp_log_shipper`).
+//! OpenTelemetry Log Shipper Background Plugin (`otlp_log_shipper::plugin`).
 //!
-//! Subscribes to reference-counted 64-byte [`AccessLogRecord`] batches from
-//! [`velda_observability::LogStore`] across all protocols (HTTP/1, H2, H3, gRPC, Raw L4)
-//! and ships them to an OpenTelemetry Collector over persistent HTTP/1.1 Keep-Alive (`/v1/logs`)
-//! or HTTP/2 gRPC (`/opentelemetry.proto.collector.logs.v1.LogsService/Export`).
-//!
-//! # Hardware & Architecture Rationale
-//! - **Zero Hot-Path Contention**: Log emission occurs into lock-free SPSC rings on frontline workers.
-//!   This shipper runs asynchronously on shadow workers (`SCHED_IDLE`), draining batches via
-//!   [`LogStore::subscribe`].
-//! - **Reference-Counted Lifetime**: Drained batches are held as `Arc<[AccessLogRecord]>`. Dropping
-//!   the slice after formatting decrements strong counts atomically, returning memory to the allocator
-//!   without mutex contention when all registered shippers finish reading.
-//! - **Warm Persistent Channels**: Reuses established TCP/TLS connections across export cycles
-//!   to eliminate handshake latency storms and socket churn.
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        VELDA EDGE DATA PLANE ARCHITECTURE                              │
+//! │                                                                                        │
+//! │   FRONTLINE TRAFFIC WORKERS (Core 0..N, SCHED_OTHER)                                  │
+//! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
+//! │   │ Client Ingress -> Route Matching -> Upstream Proxying -> Client Response       │   │
+//! │   │                                                                                │   │
+//! │   │ [Hot-Path Telemetry Hook]                                                      │   │
+//! │   │ 64-byte AccessLogRecord ──► Core-Local SPSC Ring (< 70 CPU clock cycles)       │   │
+//! │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
+//! │                                           │ Atomic In-Memory Hand-off                  │
+//! │                                           ▼                                            │
+//! │   SHADOW LOGISTICS WORKER (velda-shadow-0, SCHED_IDLE)                                 │
+//! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
+//! │   │ LogStore::flush_all_lanes() ──► Batched Arc<[AccessLogRecord]> Slices          │   │
+//! │   │                                                                                │   │
+//! │   │ OtlpLogShipperPlugin::run()                                                    │   │
+//! │   │  ├── is_grpc?                                                                  │   │
+//! │   │  │    ├── YES ──► proto::OtlpProtoWireEnvelope + proto::OtlpLogsGrpcClient     │   │
+//! │   │  │    └── NO  ──► json::OtlpJsonEnvelope       + json::OtlpLogClient           │   │
+//! │   │  └── Batch Drop: Atomic reference decrement (Zero lock contention)            │   │
+//! │   └────────────────────────────────────────────────────────────────────────────────┘   │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,12 +36,10 @@ use http::HeaderMap;
 use tokio::sync::watch;
 use velda_observability::{LogStore, global_log_store};
 use velda_sync::post_sync::plugin::PluginConfig;
-pub use velda_sync::post_sync::plugin::otlp_log_shipper::OtlpLogShipperConfig;
 
-use super::client::OtlpLogClient;
-use super::client_grpc::OtlpLogsGrpcClient;
-use super::format::{OtlpJsonEnvelope, format_otlp_records_json};
-use super::wire::OtlpProtoWireEnvelope;
+pub use super::config::OtlpLogShipperConfig;
+use super::json::{OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json};
+use super::proto::{OtlpLogsGrpcClient, OtlpProtoWireEnvelope};
 use crate::background::BackgroundPlugin;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -130,6 +139,7 @@ impl BackgroundPlugin for OtlpLogShipperPlugin {
             );
 
             if is_grpc {
+                // gRPC HTTP/2 Protobuf Wire path
                 let mut grpc_client = OtlpLogsGrpcClient::new(
                     &self.config.endpoint,
                     connect_timeout,
@@ -192,6 +202,7 @@ impl BackgroundPlugin for OtlpLogShipperPlugin {
                     }
                 }
             } else {
+                // HTTP/1.1 JSON Keep-Alive path
                 let mut http_client =
                     OtlpLogClient::new(&self.config.endpoint, connect_timeout, request_timeout)?;
                 let mut json_buf = Vec::with_capacity(32 * 1024);

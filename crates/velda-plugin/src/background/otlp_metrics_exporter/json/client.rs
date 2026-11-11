@@ -1,4 +1,4 @@
-//! Persistent Keep-Alive OTLP HTTP/1.1 Client (`otlp_metrics_exporter`).
+//! Persistent Keep-Alive OTLP HTTP/1.1 Client (`otlp_metrics_exporter::json::client`).
 //!
 //! Maintains a warm, persistent TCP/TLS stream to an OpenTelemetry Collector endpoint
 //! (`/v1/metrics`), avoiding connection churn and TLS handshake storms on repeated flushes.

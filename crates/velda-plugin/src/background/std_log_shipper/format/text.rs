@@ -1,0 +1,185 @@
+//! Text & Common Log Format (CLF) Access Log Formatting (`std_log_shipper::format::text`).
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                              TEXT LOG RECORD SERIALIZATION                             │
+//! │                                                                                        │
+//! │  rec: &AccessLogRecord (64B)                                                           │
+//! │   ├─ fast_write_ip(rec.peer_ip) ──► RFC 5952 zero-alloc dotted-decimal / compressed    │
+//! │   ├─ : peer_port                                                                       │
+//! │   ├─ [ timestamp_sec ]                                                                 │
+//! │   ├─ " method proto "                                                                  │
+//! │   ├─ status_code bytes_tx duration_us                                                  │
+//! │   ├─ route= upstream=                                                                  │
+//! │   └─ ua= completion= \n                                                                │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
+
+use std::sync::Arc;
+use velda_observability::{
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily,
+};
+
+use super::super::lut::{fast_write_ip, fast_write_ipv4, fast_write_ts_sec, fast_write_u64};
+
+// Pre-baked static text chunks
+const TEXT_OPEN_BRACKET: &[u8] = b" [";
+const TEXT_CLOSE_BRACKET_QUOTE: &[u8] = b"] \"";
+const TEXT_QUOTE_SPACE: &[u8] = b"\" ";
+const TEXT_US_ROUTE: &[u8] = b"us route=";
+const TEXT_UPSTREAM: &[u8] = b" upstream=";
+const TEXT_UA: &[u8] = b" ua=\"";
+const TEXT_COMPLETION: &[u8] = b"\" completion=";
+const TEXT_COMPLETION_RAW: &[u8] = b" completion=";
+const TEXT_GRPC_STATUS: &[u8] = b"us grpc_status=";
+const TEXT_MSGS: &[u8] = b" msgs=";
+const TEXT_RX: &[u8] = b" rx=";
+const TEXT_TX: &[u8] = b" tx=";
+const TEXT_POST: &[u8] = b"POST ";
+const CLF_PREFIX: &[u8] = b" - - [";
+
+/// Formats batches of [`AccessLogRecord`] into Extended Text format directly into `out`.
+///
+/// Pre-reserves buffer capacity to guarantee 0 heap reallocations.
+pub fn format_text_records(
+    batches: &[Arc<[AccessLogRecord]>],
+    total_recs: usize,
+    out: &mut Vec<u8>,
+) {
+    out.reserve(total_recs * 250);
+
+    for batch in batches {
+        for rec in batch.iter() {
+            let proto = LogProtocol::from_u8(rec.downstream_proto);
+            let completion = LogCompletionReason::from_u8(rec.completion);
+            let method = LogHttpMethod::from_u8(rec.method);
+            let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
+            let ua_fam = UaFamily::from_u8(rec.ua_family);
+
+            fast_write_ip(out, rec.peer_ip);
+            out.push(b':');
+            fast_write_u64(out, rec.peer_port as u64);
+            out.extend_from_slice(TEXT_OPEN_BRACKET);
+            fast_write_ts_sec(out, rec.timestamp_sec);
+            out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
+
+            match proto {
+                LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                    out.extend_from_slice(method.as_str().as_bytes());
+                    out.push(b' ');
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                    out.extend_from_slice(TEXT_QUOTE_SPACE);
+                    fast_write_u64(out, rec.status_code as u64);
+                    out.push(b' ');
+                    fast_write_u64(out, rec.bytes_tx as u64);
+                    out.push(b' ');
+                    fast_write_u64(out, rec.duration_us as u64);
+                    out.extend_from_slice(TEXT_US_ROUTE);
+                    fast_write_u64(out, rec.route_id as u64);
+                    out.extend_from_slice(TEXT_UPSTREAM);
+                    fast_write_ipv4(out, rec.upstream_ip);
+                    out.push(b':');
+                    fast_write_u64(out, rec.upstream_port as u64);
+                    out.extend_from_slice(TEXT_UA);
+                    out.extend_from_slice(ua_fam.as_str().as_bytes());
+                    out.push(b'/');
+                    fast_write_u64(out, rec.ua_major_version as u64);
+                    out.extend_from_slice(TEXT_COMPLETION);
+                    out.extend_from_slice(completion.as_str().as_bytes());
+                    out.push(b'\n');
+                }
+                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                    out.extend_from_slice(TEXT_POST);
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                    out.extend_from_slice(TEXT_QUOTE_SPACE);
+                    fast_write_u64(out, rec.status_code as u64);
+                    out.push(b' ');
+                    fast_write_u64(out, rec.bytes_tx as u64);
+                    out.push(b' ');
+                    fast_write_u64(out, rec.duration_us as u64);
+                    out.extend_from_slice(TEXT_GRPC_STATUS);
+                    out.extend_from_slice(grpc_st.as_str().as_bytes());
+                    out.extend_from_slice(TEXT_MSGS);
+                    fast_write_u64(out, rec.rpc_msgs_or_flags as u64);
+                    out.extend_from_slice(b" route=");
+                    fast_write_u64(out, rec.route_id as u64);
+                    out.extend_from_slice(TEXT_UPSTREAM);
+                    fast_write_ipv4(out, rec.upstream_ip);
+                    out.push(b':');
+                    fast_write_u64(out, rec.upstream_port as u64);
+                    out.extend_from_slice(TEXT_UA);
+                    out.extend_from_slice(ua_fam.as_str().as_bytes());
+                    out.push(b'/');
+                    fast_write_u64(out, rec.ua_major_version as u64);
+                    out.extend_from_slice(TEXT_COMPLETION);
+                    out.extend_from_slice(completion.as_str().as_bytes());
+                    out.push(b'\n');
+                }
+                LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                    out.extend_from_slice(TEXT_QUOTE_SPACE);
+                    fast_write_u64(out, rec.status_code as u64);
+                    out.extend_from_slice(TEXT_RX);
+                    fast_write_u64(out, rec.bytes_rx as u64);
+                    out.extend_from_slice(TEXT_TX);
+                    fast_write_u64(out, rec.bytes_tx as u64);
+                    out.push(b' ');
+                    fast_write_u64(out, rec.duration_us as u64);
+                    out.extend_from_slice(TEXT_US_ROUTE);
+                    fast_write_u64(out, rec.route_id as u64);
+                    out.extend_from_slice(TEXT_UPSTREAM);
+                    fast_write_ipv4(out, rec.upstream_ip);
+                    out.push(b':');
+                    fast_write_u64(out, rec.upstream_port as u64);
+                    out.extend_from_slice(TEXT_COMPLETION_RAW);
+                    out.extend_from_slice(completion.as_str().as_bytes());
+                    out.push(b'\n');
+                }
+            }
+        }
+    }
+}
+
+/// Formats batches of [`AccessLogRecord`] into standard NCSA Common Log Format (CLF).
+///
+/// Format: `host - - [timestamp] "request" status bytes`
+pub fn format_clf_records(
+    batches: &[Arc<[AccessLogRecord]>],
+    total_recs: usize,
+    out: &mut Vec<u8>,
+) {
+    out.reserve(total_recs * 150);
+
+    for batch in batches {
+        for rec in batch.iter() {
+            let proto = LogProtocol::from_u8(rec.downstream_proto);
+            let method = LogHttpMethod::from_u8(rec.method);
+
+            fast_write_ip(out, rec.peer_ip);
+            out.extend_from_slice(CLF_PREFIX);
+            fast_write_ts_sec(out, rec.timestamp_sec);
+            out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
+
+            match proto {
+                LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                    out.extend_from_slice(method.as_str().as_bytes());
+                    out.push(b' ');
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                }
+                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                    out.extend_from_slice(TEXT_POST);
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                }
+                LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                    out.extend_from_slice(proto.as_str().as_bytes());
+                }
+            }
+
+            out.extend_from_slice(TEXT_QUOTE_SPACE);
+            fast_write_u64(out, rec.status_code as u64);
+            out.push(b' ');
+            fast_write_u64(out, rec.bytes_tx as u64);
+            out.push(b'\n');
+        }
+    }
+}

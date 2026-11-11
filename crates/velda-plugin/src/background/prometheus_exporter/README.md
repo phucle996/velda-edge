@@ -16,6 +16,45 @@ Production-grade background service exposing zero-allocation OpenMetrics / Prome
 | **Format** | Prometheus Text-based format 0.0.4 / OpenMetrics standard |
 | **Security** | Supports Optional TLS/mTLS, Bearer Token / HTTP Basic Authentication, and CORS |
 
+```text
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                        VELDA EDGE — PROMETHEUS EXPORTER ARCHITECTURE                                 ║
+║          (crates/velda-plugin/src/background/prometheus_exporter: PrometheusExporterPlugin)         ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+ [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, Management Port)
+  velda-worker-0 (Core 0)                        
+  velda-worker-1 (Core 1)                        
+        │                                                    │
+        ▼                                                    ▼
+  ┌───────────┐  Lock-Free Atomic Extraction ┌──────────────────────────────────┐
+  │ Pipeline  │ ───────────────────────────► │      MetricsStore::snapshot()    │
+  │ Counters  │    (Ordering::Relaxed)       │   (36 Pipelines, 850 Data Points)│
+  └───────────┘                              └────────────────┬─────────────────┘
+                                                              │
+                                                              ▼
+                                                   ┌─────────────────────┐
+                                                   │     template.rs     │
+                                                   │ Pre-baked Skeletons │
+                                                   │ SIMD Itoa (LUT)     │
+                                                   │ (850 Metric Lines)  │
+                                                   └──────────┬──────────┘
+                                                              │
+                                                              ▼ Reused Scratch Buffer
+                                                   ┌─────────────────────┐
+                                                   │      server.rs      │
+                                                   │ acquire_shadow_tcp  │
+                                                   │ mTLS + Auth + CORS  │
+                                                   │ Concurrency Limiter │
+                                                   └──────────┬──────────┘
+                                                              │
+                                                              ▼ HTTP/HTTPS GET /metrics
+                                                   ┌─────────────────────────────────────┐
+                                                   │         Prometheus Server           │
+                                                   └─────────────────────────────────────┘
+```
+
 ---
 
 ## 2. Technical Documentation Index

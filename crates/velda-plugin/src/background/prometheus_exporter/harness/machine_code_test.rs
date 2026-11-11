@@ -5,9 +5,8 @@
 
 use std::io::Write;
 use velda_observability::MetricsStore;
-use velda_plugin::background::prometheus_exporter::formatter::{
-    fast_write_i64, fast_write_u64, format_snapshot,
-};
+use velda_plugin::background::prometheus_exporter::lut::{fast_write_i64, fast_write_u64};
+use velda_plugin::background::prometheus_exporter::template::format_snapshot;
 
 #[test]
 fn test_runtime_machine_code_execution_cycles() {
@@ -136,7 +135,7 @@ async fn test_ab_comparative_traffic_coexistence() {
     use tokio::net::TcpStream;
     use tokio::sync::watch;
     use velda_observability::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
-    use velda_plugin::PrometheusExporter;
+    use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
     use velda_sync::{
         AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
         TlsExporterConfig,

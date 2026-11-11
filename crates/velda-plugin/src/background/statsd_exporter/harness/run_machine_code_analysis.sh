@@ -37,7 +37,7 @@ echo ""
 echo "======================================================================"
 echo " 2. Building Release Artifact with Debug Symbols for Disassembly"
 echo "======================================================================"
-RUSTFLAGS="-g -C strip=none" cargo test -p velda-plugin --test statsd_exporter_machine_code_test --no-run --release
+RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" RUSTFLAGS="-g -C strip=none" cargo test -p velda-plugin --test statsd_exporter_machine_code_test --no-run --release
 
 TEST_BIN=$(ls -t "${WORKSPACE_ROOT}/target/release/deps/statsd_exporter_machine_code_test-"* | grep -v '\.d$' | head -n 1)
 echo "Target Executable: ${TEST_BIN}"
@@ -47,8 +47,8 @@ echo "======================================================================"
 echo " 3. Disassembly & Symbol Verification Check"
 echo "======================================================================"
 if command -v objdump >/dev/null 2>&1; then
-    echo "Dumping Assembly Snippet of Hot Serialization Loop (SIMD + 2-digit LUT):"
-    objdump -d -M intel --demangle "${TEST_BIN}" | grep -A 40 "<velda_plugin::background::statsd_exporter::formatter::format_statsd_snapshot" | head -n 45 || true
+    echo "Dumping Assembly Snippet of Hot Serialization Loop (SIMD + Pre-baked Skeletons + Direct-to-Packet):"
+    objdump -d -M intel --demangle "${TEST_BIN}" | grep -E -A 40 "<velda_plugin::background::statsd_exporter::(dialect|formatter)::(format_statsd_snapshot|dogstatsd::DogStatsdTemplate::format_with_writer)" | head -n 45 || true
 fi
 
 echo ""

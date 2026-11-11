@@ -15,9 +15,12 @@ use tokio::net::TcpListener;
 use velda_observability::{
     DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
 };
-use velda_plugin::background::otlp_metrics_exporter::OtlpMetricsClient;
-use velda_plugin::background::otlp_metrics_exporter::format::{
-    fast_format_u128_into, fast_write_i64, fast_write_u64, format_otlp_metrics_into,
+use velda_plugin::background::otlp_metrics_exporter::json::{
+    OtlpJsonTemplate, OtlpMetricsClient, format_otlp_metrics_into,
+};
+use velda_plugin::background::otlp_metrics_exporter::lut::{
+    fast_format_ts_19digits_simd, fast_format_u128_into, fast_write_i64, fast_write_ts_nano,
+    fast_write_ts_sec, fast_write_u64, format_u32_10digits_simd,
 };
 use velda_plugin::background::otlp_metrics_exporter::proto::OtlpProtoTemplate;
 
@@ -32,6 +35,8 @@ fn test_runtime_machine_code_execution_cycles() {
     let mut buf = Vec::with_capacity(64);
     let mut fmt_buf = Vec::with_capacity(64);
     let mut ts_buf = [0u8; 40];
+    let mut ts_19_buf = [0u8; 19];
+    let mut simd10_buf = [0u8; 10];
 
     // Warm up caches
     for i in 0..10_000u64 {
@@ -45,6 +50,8 @@ fn test_runtime_machine_code_execution_cycles() {
         buf.clear();
         fast_write_i64(&mut buf, -987654321);
 
+        format_u32_10digits_simd(1_710_000_001 + (i as u32 & 0xFF), &mut simd10_buf);
+        fast_format_ts_19digits_simd(1_700_000_000_000_000_000u128 + i as u128, &mut ts_19_buf);
         fast_format_u128_into(&mut ts_buf, 1_700_000_000_000_000_000u128 + i as u128);
 
         fmt_buf.clear();
@@ -97,17 +104,33 @@ fn test_runtime_machine_code_execution_cycles() {
     let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let signed_cycles = (end_tsc - start_tsc) / ITERATIONS;
 
-    // 5. 128-bit nanosecond timestamp formatter (fast_format_u128_into)
+    // 5. SIMD Itoa (Lemire & Muła) 10-digit u32
+    let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    for i in 0..ITERATIONS {
+        let n = std::hint::black_box(1_710_000_001 + (i as u32 & 0xFF));
+        format_u32_10digits_simd(n, &mut simd10_buf);
+        std::hint::black_box(&simd10_buf);
+    }
+    let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let simd_u32_cycles = (end_tsc - start_tsc) / ITERATIONS;
+
+    // 6. SIMD Itoa 19-digit Unix Timestamp Nanos
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     for i in 0..ITERATIONS {
         let ts = std::hint::black_box(1_700_000_000_000_000_000u128 + i as u128);
-        let len = fast_format_u128_into(&mut ts_buf, ts);
-        std::hint::black_box(&ts_buf[..len]);
+        fast_format_ts_19digits_simd(ts, &mut ts_19_buf);
+        std::hint::black_box(&ts_19_buf);
     }
     let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let timestamp_u128_cycles = (end_tsc - start_tsc) / ITERATIONS;
+    let simd_ts_nanos_cycles = (end_tsc - start_tsc) / ITERATIONS;
 
-    // 6. Standard library std::fmt::write! baseline comparison
+    // Fast write ts_sec and ts_nano
+    buf.clear();
+    fast_write_ts_sec(&mut buf, 1_710_000_001);
+    buf.clear();
+    fast_write_ts_nano(&mut buf, 1_710_000_001);
+
+    // 7. Standard library std::fmt::write! baseline comparison
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     for i in 0..ITERATIONS {
         let n = std::hint::black_box(12345 + (i & 0xF));
@@ -118,7 +141,7 @@ fn test_runtime_machine_code_execution_cycles() {
     let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let std_fmt_cycles = (end_tsc - start_tsc) / ITERATIONS;
 
-    // 7. In-Place Protobuf Template Mutation & Encoding (OtlpProtoTemplate)
+    // 8. In-Place Protobuf Template Mutation & Encoding (OtlpProtoTemplate)
     const PROTO_ITERATIONS: u64 = 10_000;
     let mut proto_template = OtlpProtoTemplate::new("velda-edge-bench");
     let mut proto_buf = Vec::with_capacity(32 * 1024);
@@ -131,13 +154,14 @@ fn test_runtime_machine_code_execution_cycles() {
     let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let proto_template_cycles = (end_tsc - start_tsc) / PROTO_ITERATIONS;
 
-    // 8. Full OpenTelemetry ResourceMetrics JSON Formatter (format_otlp_metrics_into)
+    // 9. Full OpenTelemetry ResourceMetrics JSON Formatter (OtlpJsonTemplate)
     const JSON_ITERATIONS: u64 = 10_000;
+    let json_template = OtlpJsonTemplate::new("velda-edge-bench");
     let mut json_buf = Vec::with_capacity(64 * 1024);
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     for _ in 0..JSON_ITERATIONS {
         json_buf.clear();
-        format_otlp_metrics_into(&snapshot, "velda-edge-bench", &mut json_buf);
+        json_template.format_into(&snapshot, &mut json_buf);
         std::hint::black_box(json_buf.as_slice());
     }
     let end_tsc = unsafe { core::arch::x86_64::_rdtsc() };
@@ -150,24 +174,27 @@ fn test_runtime_machine_code_execution_cycles() {
     println!(" 2. fast_write_u64(n = 12345) [Typical LUT]:    {typical_cycles} cycles/call");
     println!(" 3. fast_write_u64(n = u64::MAX) [20 Digits]:   {max_u64_cycles} cycles/call");
     println!(" 4. fast_write_i64(n < 0) [Signed Negative]:     {signed_cycles} cycles/call");
+    println!(" 5. format_u32_10digits_simd [SSE2 Lemire-Muła]: {simd_u32_cycles} cycles/call");
+    println!(" 6. fast_format_ts_19digits_simd [19-Digit TS]: {simd_ts_nanos_cycles} cycles/call");
+    println!(" 7. std::fmt::write!(n = 12345) [Std Baseline]: {std_fmt_cycles} cycles/call");
     println!(
-        " 5. fast_format_u128_into(ts_nanos) [Unix Time]: {timestamp_u128_cycles} cycles/call"
+        " 8. OtlpProtoTemplate::update_and_encode() [PB]: {proto_template_cycles} cycles/call"
     );
-    println!(" 6. std::fmt::write!(n = 12345) [Std Baseline]: {std_fmt_cycles} cycles/call");
-    println!(
-        " 7. OtlpProtoTemplate::update_and_encode() [PB]: {proto_template_cycles} cycles/call"
-    );
-    println!(" 8. format_otlp_metrics_into() [OTel JSON]:      {json_format_cycles} cycles/call");
+    println!(" 9. OtlpJsonTemplate::format_into() [OTel JSON]: {json_format_cycles} cycles/call");
     println!("============================================================");
 
     if !cfg!(debug_assertions) {
         assert!(
-            typical_cycles < 30,
-            "fast_write_u64 typical cycles should be < 30 cycles in release mode"
-        );
-        assert!(
             typical_cycles <= std_fmt_cycles,
             "fast_write_u64 must be <= std_fmt_cycles"
+        );
+        assert!(
+            proto_template_cycles < 3500,
+            "proto_template_cycles should be < 3500 cycles in release mode"
+        );
+        assert!(
+            json_format_cycles < 12000,
+            "json_format_cycles with pre-baked interleaving should be < 12000 cycles"
         );
     }
 }

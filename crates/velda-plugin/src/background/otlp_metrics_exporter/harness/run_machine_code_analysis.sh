@@ -63,8 +63,8 @@ echo "======================================================================"
 echo " 3. Disassembly & Symbol Verification Check"
 echo "======================================================================"
 if command -v nm >/dev/null 2>&1; then
-    echo "Inspecting symbols for update_and_encode, fast_format_u128_into, and fast_write_u64:"
-    nm -C "${WORKSPACE_ROOT}/target/release/libvelda_plugin.rlib" 2>/dev/null | grep -E "update_and_encode|fast_format_u128_into|fast_write_u64" | head -n 10 || true
+    echo "Inspecting symbols for update_and_encode, format_u32_10digits_simd, fast_write_u64, and format_into:"
+    nm -C "${WORKSPACE_ROOT}/target/release/libvelda_plugin.rlib" 2>/dev/null | grep -E "update_and_encode|format_u32_10digits_simd|fast_write_u64|format_into" | head -n 10 || true
 fi
 
 echo ""

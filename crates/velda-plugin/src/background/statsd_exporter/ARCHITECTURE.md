@@ -61,7 +61,7 @@ flowchart TD
 ### Invariant 1: Core Socket Ownership & Anti-Conflict
 Under Section 2.8 and 2.9 of the Velda Edge Engineering Rules:
 * The exporter **never** invokes raw socket binding directly.
-* All sockets are authoritatively requested from [`velda_core::global_socket_manager().acquire_shadow_udp()`](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/greeting_handler/crates/velda-core/src/socket.rs).
+* All sockets are authoritatively requested from [`velda_core::global_socket_manager().acquire_shadow_udp()`](../../../../velda-core/src/socket.rs).
 * The Core Socket Manager guarantees that shadow ports never collide with active Data Plane Traffic ports (`:80`, `:443`, `:8080`, `:8443`).
 * Upon graceful shutdown, `release_shadow_udp()` cleanly unregisters the claim and returns the socket to the operating system.
 

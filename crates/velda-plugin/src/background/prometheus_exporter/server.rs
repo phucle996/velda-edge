@@ -1,19 +1,16 @@
-//! Prometheus Exporter HTTP/1.1 & HTTPS Server.
+//! Prometheus Exporter HTTP/1.1 & HTTPS Server (`prometheus_exporter::server`).
 //!
 //! Exposes OpenMetrics / Prometheus scrape endpoints (`GET /metrics`) and liveness probes (`GET /healthz`)
 //! on a management network interface strictly separated from Data Plane traffic workers.
 //!
-//! # Hard Architectural Boundary: Shadow Worker vs Traffic Workers
-//! - **Shadow Domain**: This server runs exclusively on the Shadow Worker runtime.
-//! - **Zero Interference**: It never touches traffic event loops, worker pinning, or hot-path pipelines.
-//! - **Non-blocking Telemetry**: Metrics are extracted via lock-free point-in-time snapshots
-//!   ([`MetricsStore::snapshot`]), ensuring zero write stalls or cacheline contention for worker threads.
-//!
-//! # Strict Declarative Features
-//! - **Transport**: Plaintext HTTP/1.1 or HTTPS with TLS 1.2/1.3 and optional mutual TLS (mTLS).
-//! - **Authentication**: Precomputed token checks for Bearer or HTTP Basic authentication.
-//! - **CORS**: Standards-compliant Preflight (`OPTIONS`) and Origin validation.
-//! - **Scrape Protection**: Strict concurrency bounds via Semaphore and hard per-scrape timeout limits.
+//! # Microarchitectural Invariants
+//! 1. **Zero Heap Allocation on Hot Scrape Loop**: Uses pre-allocated [`BufferPool`] and pre-baked
+//!    [`PrometheusTemplate`] skeletons. Scrape bodies and headers require 0 dynamic heap allocations.
+//! 2. **Shadow Worker Execution**: Operates strictly on Shadow Worker runtimes under `SCHED_IDLE`,
+//!    never touching frontline traffic worker pins or causing cacheline invalidations.
+//! 3. **Non-blocking Telemetry**: Extracts point-in-time atomics via lock-free [`MetricsStore::snapshot`].
+//! 4. **Socket Safety Invariant**: Strictly uses [`velda_core::global_socket_manager`] via
+//!    `acquire_shadow_tcp` and `release_shadow_tcp`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,8 +28,76 @@ use velda_observability::MetricsStore;
 use velda_sync::PrometheusExporterConfig;
 use velda_tls::ServerTlsConfig;
 
-use super::formatter::format_snapshot;
+use super::lut::fast_write_u64_slice;
+use super::template::PrometheusTemplate;
 use crate::error::PluginError;
+
+// ============================================================================
+// Zero-Allocation Scratch Buffer Pool
+// ============================================================================
+
+/// Pre-allocated reusable scratch buffer pool for zero-allocation scrape processing.
+pub struct BufferPool {
+    pool: std::sync::Mutex<Vec<Vec<u8>>>,
+    initial_capacity: usize,
+}
+
+impl BufferPool {
+    /// Pre-allocates `capacity_count` buffers of `buffer_bytes` size each.
+    pub fn new(capacity_count: usize, buffer_bytes: usize) -> Self {
+        let pool = (0..capacity_count)
+            .map(|_| Vec::with_capacity(buffer_bytes))
+            .collect();
+        Self {
+            pool: std::sync::Mutex::new(pool),
+            initial_capacity: buffer_bytes,
+        }
+    }
+
+    /// Acquires an exclusive scratch buffer from the pool, creating one if empty.
+    pub fn acquire(&self) -> PooledBuffer<'_> {
+        let mut guard = self.pool.lock().unwrap();
+        let buf = guard
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(self.initial_capacity));
+        PooledBuffer {
+            buf: Some(buf),
+            pool: self,
+        }
+    }
+}
+
+/// RAII handle that automatically clears and returns a buffer to its owning [`BufferPool`] on drop.
+pub struct PooledBuffer<'a> {
+    buf: Option<Vec<u8>>,
+    pool: &'a BufferPool,
+}
+
+impl<'a> std::ops::Deref for PooledBuffer<'a> {
+    type Target = Vec<u8>;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.buf.as_ref().unwrap()
+    }
+}
+
+impl<'a> std::ops::DerefMut for PooledBuffer<'a> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buf.as_mut().unwrap()
+    }
+}
+
+impl<'a> Drop for PooledBuffer<'a> {
+    fn drop(&mut self) {
+        if let Some(mut buf) = self.buf.take() {
+            buf.clear();
+            if let Ok(mut guard) = self.pool.pool.lock() {
+                guard.push(buf);
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Transport Stream Abstraction (Plaintext vs TLS)
@@ -99,6 +164,8 @@ pub struct PrometheusExporter {
     tls_acceptor: Option<TlsAcceptor>,
     concurrency_limiter: Arc<Semaphore>,
     expected_auth_header: Option<String>,
+    template: Arc<PrometheusTemplate>,
+    buffer_pool: Arc<BufferPool>,
 }
 
 /// Canonical type alias adhering to `*Plugin` background plugin naming conventions.
@@ -173,12 +240,18 @@ impl PrometheusExporter {
             None
         };
 
+        let template = Arc::new(PrometheusTemplate::new());
+        let buffer_bytes = config.scrape.max_buffer_size_kb.max(32) * 1024;
+        let buffer_pool = Arc::new(BufferPool::new(config.scrape.max_concurrency, buffer_bytes));
+
         Ok(Self {
             config,
             metrics,
             tls_acceptor,
             concurrency_limiter,
             expected_auth_header,
+            template,
+            buffer_pool,
         })
     }
 
@@ -248,7 +321,6 @@ impl PrometheusExporter {
                     });
                 }
                 changed = shutdown_rx.changed() => {
-
                     if changed.is_err() || *shutdown_rx.borrow() {
                         tracing::info!("Prometheus exporter received shutdown signal; stopping accept loop");
                         break;
@@ -367,12 +439,12 @@ impl PrometheusExporter {
 
         // 3. Health check probe bypasses Auth (standard k8s/monitoring convention)
         if path == "/healthz" {
-            let response = "HTTP/1.1 200 OK\r\n\
-                            Content-Type: text/plain; charset=utf-8\r\n\
-                            Content-Length: 2\r\n\
-                            Connection: close\r\n\r\n\
-                            OK";
-            stream.write_all(response.as_bytes()).await?;
+            let response = b"HTTP/1.1 200 OK\r\n\
+                             Content-Type: text/plain; charset=utf-8\r\n\
+                             Content-Length: 2\r\n\
+                             Connection: close\r\n\r\n\
+                             OK";
+            stream.write_all(response).await?;
             stream.flush().await?;
             return Ok(());
         }
@@ -410,13 +482,13 @@ impl PrometheusExporter {
             let _permit = match self.concurrency_limiter.try_acquire() {
                 Ok(permit) => permit,
                 Err(_) => {
-                    let response = "HTTP/1.1 503 Service Unavailable\r\n\
-                                    Retry-After: 1\r\n\
-                                    Content-Type: text/plain; charset=utf-8\r\n\
-                                    Content-Length: 30\r\n\
-                                    Connection: close\r\n\r\n\
-                                    Max Scrape Concurrency Reached";
-                    stream.write_all(response.as_bytes()).await?;
+                    let response = b"HTTP/1.1 503 Service Unavailable\r\n\
+                                     Retry-After: 1\r\n\
+                                     Content-Type: text/plain; charset=utf-8\r\n\
+                                     Content-Length: 30\r\n\
+                                     Connection: close\r\n\r\n\
+                                     Max Scrape Concurrency Reached";
+                    stream.write_all(response).await?;
                     stream.flush().await?;
                     return Ok(());
                 }
@@ -425,21 +497,23 @@ impl PrometheusExporter {
             // Acquire lock-free point-in-time snapshot
             let snapshot = self.metrics.snapshot();
             let max_buffer_bytes = self.config.scrape.max_buffer_size_kb * 1024;
-            let mut body_buf = String::with_capacity(32 * 1024);
 
-            match format_snapshot(&snapshot, &mut body_buf, max_buffer_bytes) {
+            // Acquire zero-allocation pooled scratch buffer
+            let mut body_buf = self.buffer_pool.acquire();
+
+            match self
+                .template
+                .format_snapshot_into(&snapshot, &mut body_buf, max_buffer_bytes)
+            {
                 Ok(()) => {
-                    let response_header = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                         Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
-                         Content-Length: {}\r\n\
-                         Connection: close\r\n\
-                         {}\r\n",
+                    let mut header_buf = [0u8; 512];
+                    let header_len = format_http_200_header(
+                        &mut header_buf,
                         body_buf.len(),
-                        cors_headers
+                        if origin_allowed { &cors_headers } else { "" },
                     );
-                    stream.write_all(response_header.as_bytes()).await?;
-                    stream.write_all(body_buf.as_bytes()).await?;
+                    stream.write_all(&header_buf[..header_len]).await?;
+                    stream.write_all(&body_buf).await?;
                     stream.flush().await?;
                 }
                 Err(PluginError::BufferOverflow(limit_kb)) => {
@@ -473,12 +547,12 @@ impl PrometheusExporter {
             }
         } else {
             // Not Found
-            let response = "HTTP/1.1 404 Not Found\r\n\
-                            Content-Type: text/plain; charset=utf-8\r\n\
-                            Content-Length: 9\r\n\
-                            Connection: close\r\n\r\n\
-                            Not Found";
-            stream.write_all(response.as_bytes()).await?;
+            let response = b"HTTP/1.1 404 Not Found\r\n\
+                             Content-Type: text/plain; charset=utf-8\r\n\
+                             Content-Length: 9\r\n\
+                             Connection: close\r\n\r\n\
+                             Not Found";
+            stream.write_all(response).await?;
             stream.flush().await?;
         }
 
@@ -486,16 +560,31 @@ impl PrometheusExporter {
     }
 }
 
-impl crate::background::BackgroundPlugin for PrometheusExporter {
-    #[inline(always)]
-    fn id(&self) -> &str {
-        "prometheus_exporter"
+/// Zero-allocation HTTP 200 response header formatter.
+fn format_http_200_header(out: &mut [u8; 512], content_len: usize, cors_header: &str) -> usize {
+    let mut curr = 0;
+    let p1 = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: ";
+    out[curr..curr + p1.len()].copy_from_slice(p1);
+    curr += p1.len();
+
+    let mut len_digits = [0u8; 24];
+    let len_str_len = fast_write_u64_slice(&mut len_digits, content_len as u64);
+    out[curr..curr + len_str_len].copy_from_slice(&len_digits[..len_str_len]);
+    curr += len_str_len;
+
+    let p2 = b"\r\nConnection: close\r\n";
+    out[curr..curr + p2.len()].copy_from_slice(p2);
+    curr += p2.len();
+
+    if !cors_header.is_empty() {
+        let cors_bytes = cors_header.as_bytes();
+        out[curr..curr + cors_bytes.len()].copy_from_slice(cors_bytes);
+        curr += cors_bytes.len();
     }
 
-    fn run(
-        self: Arc<Self>,
-        shutdown: watch::Receiver<bool>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PluginError>> + Send>> {
-        Box::pin(async move { self.run_server(shutdown).await })
-    }
+    let p3 = b"\r\n";
+    out[curr..curr + p3.len()].copy_from_slice(p3);
+    curr += p3.len();
+
+    curr
 }
