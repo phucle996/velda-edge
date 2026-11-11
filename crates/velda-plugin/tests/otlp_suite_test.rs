@@ -1,4 +1,4 @@
-//! Comprehensive Test Suite for OTLP Plugins (`otlp_metrics_exporter`, `opentelemetry_logger`,
+//! Comprehensive Test Suite for OTLP Plugins (`otlp_metrics_exporter`, `otlp_log_shipper`,
 //! `opentelemetry_tracer`, `w3c_trace_context`).
 //!
 //! Validates:
@@ -12,19 +12,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue, Method, Uri, Version};
+use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use velda_core::{Body, L7Request};
-use velda_observability::MetricsStore;
+use velda_observability::{
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, MetricsStore,
+    PipeStrategy,
+};
 
+use velda_plugin::background::otlp_log_shipper::{
+    OtlpJsonEnvelope, OtlpLogClient, OtlpLogsGrpcClient, format_otlp_records_json,
+    format_otlp_records_proto,
+};
 use velda_plugin::background::otlp_metrics_exporter::{
     OtlpMetricsClient, OtlpMetricsGrpcClient, format_otlp_metrics_json, format_otlp_metrics_proto,
 };
 use velda_plugin::header::{TRACEPARENT, X_SPAN_ID, X_TRACE_ID};
-use velda_plugin::post_response::opentelemetry_logger::{
-    OtlpLogClient, OtlpLogsGrpcClient, PackedOtlpRecord, decode_hex, format_otlp_records_json,
-    format_otlp_records_proto,
-};
 use velda_plugin::post_response::opentelemetry_tracer::{
     OtlpSpanItem, OtlpTraceClient, OtlpTracesGrpcClient, format_otlp_spans_json,
     format_otlp_spans_proto,
@@ -185,48 +189,60 @@ async fn test_otlp_metrics_transparent_reconnect() {
 }
 
 #[tokio::test]
-async fn test_opentelemetry_logger_batching_and_send() {
+async fn test_otlp_log_shipper_batching_and_send() {
     let (url, conns, reqs, _shutdown) = spawn_mock_collector("/v1/logs").await;
 
     let mut client = OtlpLogClient::new(&url, Duration::from_secs(5), Duration::from_secs(10))
         .expect("Client initialized");
 
-    let mut rec1 = PackedOtlpRecord::empty();
-    rec1.time_unix_nano = 1710000000000000000;
-    rec1.status = 200;
-    rec1.method = PackedOtlpRecord::encode_method(&Method::GET);
-    rec1.set_path(b"/api/items");
-    rec1.set_client_ip("192.168.1.50".parse().unwrap());
-    rec1.set_route_id(b"items-route");
-    rec1.set_upstream(b"10.0.0.10:8080");
-    rec1.duration_us = 2500;
-    let mut raw_trace = [0u8; 16];
-    decode_hex(b"4bf92f3577b34da6a3ce929d0e0e4736", &mut raw_trace);
-    rec1.set_trace_id(&raw_trace);
-    let mut raw_span = [0u8; 8];
-    decode_hex(b"00f067aa0ba902b7", &mut raw_span);
-    rec1.set_span_id(&raw_span);
+    let rec1 = AccessLogRecord::from_scalars(
+        0x4bf9_2f35_77b3_4da6,
+        1_710_000_000,
+        2500,
+        "192.168.1.50:12345".parse().unwrap(),
+        Some("10.0.0.10:8080".parse().unwrap()),
+        100,
+        200,
+        200,
+        1,
+        0,
+        LogProtocol::H1,
+        LogProtocol::H1,
+        PipeStrategy::Buffered,
+        LogCompletionReason::Complete,
+        LogHttpMethod::Get,
+        LogGrpcStatus::NonGrpc,
+        b"curl/8.6.0",
+    );
 
-    let mut rec2 = PackedOtlpRecord::empty();
-    rec2.time_unix_nano = 1710000000001000000;
-    rec2.status = 500;
-    rec2.method = PackedOtlpRecord::encode_method(&Method::POST);
-    rec2.set_path(b"/api/checkout");
-    rec2.set_client_ip("192.168.1.51".parse().unwrap());
-    rec2.set_route_id(b"checkout-route");
-    rec2.set_upstream(b"10.0.0.11:8080");
-    rec2.duration_us = 15200;
-    rec2.set_trace_id(&raw_trace);
-    let mut raw_span2 = [0u8; 8];
-    decode_hex(b"5fb397be34d23b0f", &mut raw_span2);
-    rec2.set_span_id(&raw_span2);
+    let rec2 = AccessLogRecord::from_scalars(
+        0x5fb3_97be_34d2_3b0f,
+        1_710_000_001,
+        15200,
+        "192.168.1.51:12346".parse().unwrap(),
+        Some("10.0.0.11:8080".parse().unwrap()),
+        200,
+        500,
+        500,
+        2,
+        0,
+        LogProtocol::H1,
+        LogProtocol::H1,
+        PipeStrategy::Buffered,
+        LogCompletionReason::Complete,
+        LogHttpMethod::Post,
+        LogGrpcStatus::NonGrpc,
+        b"curl/8.6.0",
+    );
 
-    let mut payload = String::with_capacity(1024);
-    format_otlp_records_json(&[rec1, rec2], "test-edge", &mut payload);
+    let batches = vec![Arc::from(vec![rec1, rec2])];
+    let envelope = OtlpJsonEnvelope::new("test-edge");
+    let mut payload = Vec::with_capacity(1024);
+    format_otlp_records_json(&batches, &envelope, &mut payload);
     let headers = HeaderMap::new();
 
     let status = client
-        .send_logs(payload.as_bytes(), &headers)
+        .send_logs(&payload, &headers)
         .await
         .expect("Sent logs");
     assert_eq!(status, 200);
@@ -427,23 +443,31 @@ async fn test_otlp_logs_and_traces_grpc_export() {
     let (logs_endpoint, logs_count, _logs_shutdown) =
         spawn_mock_grpc_collector(OtlpLogsGrpcClient::RPC_PATH).await;
 
-    let mut rec = PackedOtlpRecord::empty();
-    rec.time_unix_nano = 1729579200000000000;
-    rec.status = 200;
-    rec.method = PackedOtlpRecord::encode_method(&Method::POST);
-    rec.set_path(b"/api/pay");
-    rec.set_client_ip("127.0.0.1".parse().unwrap());
-    rec.set_route_id(b"pay-route");
-    rec.set_upstream(b"10.0.0.1:80");
-    rec.duration_us = 2100;
-    let mut raw_trace = [0u8; 16];
-    decode_hex(b"4bf92f3577b34da6a3ce929d0e0e4736", &mut raw_trace);
-    rec.set_trace_id(&raw_trace);
-    let mut raw_span = [0u8; 8];
-    decode_hex(b"00f067aa0ba902b7", &mut raw_span);
-    rec.set_span_id(&raw_span);
+    let rec = AccessLogRecord::from_scalars(
+        0x4bf9_2f35_77b3_4da6,
+        1_729_579_200,
+        2100,
+        "127.0.0.1:12345".parse().unwrap(),
+        Some("10.0.0.1:80".parse().unwrap()),
+        150,
+        300,
+        200,
+        1,
+        0,
+        LogProtocol::H2,
+        LogProtocol::H2,
+        PipeStrategy::Buffered,
+        LogCompletionReason::Complete,
+        LogHttpMethod::Post,
+        LogGrpcStatus::NonGrpc,
+        b"curl/8.6.0",
+    );
 
-    let log_proto_bytes = format_otlp_records_proto(&[rec], "pay-service");
+    let batches = vec![Arc::from(vec![rec])];
+    let (req, _) = format_otlp_records_proto(&batches, "pay-service");
+    let mut log_proto_bytes = Vec::new();
+    req.encode(&mut log_proto_bytes).unwrap();
+
     let mut log_client = OtlpLogsGrpcClient::new(
         &logs_endpoint,
         Duration::from_secs(5),
