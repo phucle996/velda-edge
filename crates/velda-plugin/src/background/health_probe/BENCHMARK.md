@@ -1,390 +1,388 @@
-# Performance Benchmark Report: Health & Readiness Probe Plugin
+# Performance Benchmark Report: Health & Readiness Probe Plugin (`health_probe`)
 
-This document specifies the standardized benchmarking framework and metrics for the [`health_probe`](crates/velda-plugin/src/background/health_probe/) plugin in **Velda Edge** (Rust Edition 2024), comparing directly on isolated cloud infrastructure against **Envoy Proxy 1.31**, **Nginx 1.24**, and **Kong Gateway 3.9**:
-- **Velda Edge**: v0.1.0 (Rust 2024, Hourglass Architecture, Sequential Inline Loop on `velda-shadow-0` under `SCHED_IDLE`, Adaptive Register SWAR 64-bit / dual 32-bit, Branchless ALU $2 - \text{match} - \text{ok}$, L1D Cache-Resident Wire Frame 195B).
-- **Envoy Proxy**: v1.31.5 (C++20, EventLoop Libevent, Dynamic JSON Admin `/ready`, TCMalloc).
-- **Nginx**: v1.24.0 (C, Event-driven epoll master-worker, `stub_status` module).
-- **Kong Gateway**: v3.9.0 (OpenResty LuaJIT 2.1, `/status` endpoint, dynamic lua table, `cjson.encode`).
-
-> [!NOTE]
-> This document serves as the **Standardized Benchmark Specification Form**. All empirical data cells remain in a pending state (`*[TBD]*`) awaiting execution on dedicated cloud VM clusters.
+Performance benchmark specification and evaluation framework for the `health_probe` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
 
 ---
 
 ## 1. Test Environment & Measurement Methodology
 
-### 1.1 Dedicated 2-VM Dual-Core Cloud Testbed
-- **Network Fabric**: Private VNet, Accelerated Networking (SR-IOV `netvsc`), RTT < 0.50 ms, wire bandwidth 10+ Gbps.
-- **Gateway Server (VM2: `172.16.0.5`)**: 2 vCPUs AMD EPYC 7763 (Zen 3, 2.45 GHz), 4 GB RAM, Ubuntu 24.04 LTS. 1:1 Core Pinning (`velda-worker-0/1` on Core 0/1; `velda-shadow-0` background thread under `SCHED_IDLE`).
-- **Client Node (VM1: `172.16.0.4`)**: 2 vCPUs AMD EPYC 7763, 4 GB RAM. Tooling: `wrk` v4.2.0, `oha` v1.6.0, `pidstat`, `perf stat`, `perf record`.
-- **Upstream Backend Node**: `velda-bench-backend` (`crates/velda-bench-backend`), serving HTTP/1.1 (port 8081/8441), HTTP/2 (port 8082/8442), and HTTP/3 (port 8443) 100% in-memory streaming.
-- **Isolation Invariant**: Only one gateway is activated at any given time on the same port 9091.
+### 1.1 Production-Grade Hardware & Network Testbed
 
-### 1.2 4-Tier Standardized Measurement Criteria
-1. **Macro Tier (Network & Probe Metrics)**: Duration, Total Probes, Throughput, Bandwidth, Latency (Mean, Min, Max, P50..P99.9, Stdev, TTFB), HTTP status distribution, Success Rate.
-2. **System Resource Tier**: % CPU (User, System, SoftIRQ, Shadow vs Frontline), Peak RSS, % RAM, Heap Allocations / Probe, Memory Leak Rate.
-3. **Micro Tier (Kernel & OS)**: Syscalls / Probe, Context Switches / Probe, Total Syscalls, Total CS, Kernel Time, Futex Calls & Ratio.
-4. **Micro Tier (HPC & CPU Hardware Counters)**: Instructions, Cycles, IPC, Branches, Branch-misses & %, L1-dcache miss %, LLC miss %.
-
-### 1.3 Micro-architectural Technical Notes
-- **L1D Cache-Resident Wire Table**: Emits immutable static byte slices from `WIRE_RESPONSES` (195B, 64-byte aligned), eliminating 100% of string formatting and serialization overhead on the hot path.
-- **Port & Thread Isolation**: Port 9091 executes on `velda-shadow-0` (`SCHED_IDLE`), causing zero CPU contention with Frontline Traffic Workers on Core 0/1.
-- **Bounded Timeout**: Strict bounded hard timeout `timeout_ms = 500ms`, mitigating socket stalls and FD exhaustion.
+*[TBD]*
 
 ---
 
-## 2. Comprehensive 5-Scenario Test Matrix
+### 1.2 Standardized 4-Tier Metric Taxonomy
 
-```
-╔═══════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                             COMPREHENSIVE 5-SCENARIO PROBE TEST MATRIX                            ║
-╠══════════════════════════════╦══════════════════════╦══════════════════════╦══════════════════════╣
-║ Scenario Type                ║ Endpoint             ║ Workload / Conns     ║ Evaluation Objective ║
-╠══════════════════════════════╬══════════════════════╬══════════════════════╬══════════════════════╣
-║ KB 01: Low-Latency Liveness  ║ GET /livez           ║ Concurrency = 1      ║ Floor Latency        ║
-║ KB 02: Dense Multi-Node Poll ║ GET /readyz          ║ Concurrency = 64     ║ K8s Load Capacity    ║
-║ KB 03: Saturated Flood / DDoS║ GET /livez           ║ Concurrency = 256    ║ Peak Saturation Limit║
-║ KB 04: Graceful Draining     ║ GET /readyz (SIGTERM)║ Concurrency = 32     ║ Transition Dynamics  ║
-║ KB 05: Slowloris & Malformed ║ GET / + Slowloris    ║ Concurrency = 128    ║ Slow-Attack Hardening║
-╚══════════════════════════════╩══════════════════════╩══════════════════════╩══════════════════════╝
-```
+All benchmark scenarios are evaluated across four standardized, non-abbreviated metric tiers:
+
+1. **Tier 1: Macro Network, L7 & Health Probe Delivery Metrics**:
+   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
+   - **Total Requests**: Total health and readiness probe requests successfully served.
+   - **Throughput (requests/second)**: Probe processing throughput rate.
+   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
+   - **Total Probes Served**: Total `/livez` and `/readyz` probe responses delivered.
+   - **Probe Throughput (probes/second)**: Ingestion and response rate of the health probe engine.
+   - **Average Probe Response Size (bytes)**: Serialized wire payload size per probe response.
+   - **Mean Latency (milliseconds)**: Average time from probe request receipt to response completion.
+   - **Min Latency (milliseconds)**: Minimum recorded latency.
+   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
+   - **P75 Latency (milliseconds)**: 75th percentile response latency.
+   - **P90 Latency (milliseconds)**: 90th percentile response latency.
+   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
+   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
+   - **Max Latency (milliseconds)**: Maximum recorded response latency.
+   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
+   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
+   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
+   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
+2. **Tier 2: System Resource Footprint**:
+   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
+   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
+   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
+   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
+   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
+   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
+   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
+   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
+   - **RAM Usage (%)**: Percentage of total system memory consumed.
+   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate during probe serving.
+   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
+3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
+   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
+   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
+   - **Total System Calls**: Aggregate transitions into the Linux kernel.
+   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
+   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
+   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
+   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
+4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
+   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
+   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
+   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
+   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
+   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
+   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
+   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
+   - **Branch Mispredictions**: Hardware branch prediction misses.
+   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
+   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
+   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
 
 ---
 
-## 3. Detailed 5-Scenario Comparative Benchmark Tables
+## 2. Focused Benchmark Scenarios
+
+To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
+- **Scenario 01: Low-Latency Floor Liveness Probe (Concurrency = 1, Keep-Alive)** — Measure minimum floor latency and micro-architectural CPU overhead per request under sequential probe conditions.
+- **Scenario 02: Dense Multi-Node Kubelet Polling (Concurrency = 64)** — Assess load resilience when multiple Kubelet nodes concurrently poll the readiness endpoint over 64 parallel connections.
+- **Scenario 03: Peak Saturated Flood & Probe Overload (Concurrency = 256)** — Extreme stress testing to verify gateway stability and connection queue behavior under high concurrency health probe assault.
+- **Scenario 04: Graceful Draining & Readiness State Transition (SIGTERM Event)** — Measure transition latency and probe response consistency when the gateway shifts from ready (200 OK) to draining (503 Service Unavailable) upon receiving SIGTERM.
+- **Scenario 05: Slowloris & Malformed Request Resistance (500ms Timeout & 404 Resolution)** — Verify that stalled HTTP probes and malformed paths are bounded by hard timeouts (`timeout_ms = 500ms`) without leaking file descriptors or degrading edge traffic serving.
 
 ---
 
-### KB 01: Low-Latency Liveness Probe (`GET /livez`) — Concurrency = 1 (Keep-Alive)
+## 3. Detailed Benchmark Results
+
+---
+
+### Scenario 01: Low-Latency Floor Liveness Probe (Concurrency = 1, Keep-Alive) — Floor Latency Evaluation
 - **Objective**: Measure minimum floor latency and micro-architectural CPU overhead per request under sequential probe conditions.
-- **Execution Command**: `wrk -t1 -c1 -d15s --latency http://172.16.0.5:9091/livez`
+- **Execution Command**: `wrk -t1 -c1 -d15s --latency http://<gateway_host>:9091/livez`
 
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **15.00s** | 15.00s | 15.00s | 15.00s | Standard test session |
-| | **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Transfer Bandwidth (MB/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Min Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P50 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P75 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P90 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99.9 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Max Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Latency Standard Deviation (Stdev)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Average Time To First Byte (TTFB Avg)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **HTTP Status Code Distribution (200 / 503 / 404)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% User CPU (Userspace Serving)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% System / Kernel CPU (Syscalls)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% SoftIRQ CPU (Network IRQ Handling)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Shadow Worker CPU % (`velda-shadow-0`)** | *[TBD]* | N/A | N/A | N/A | *[TBD]* |
-| | **Frontline Traffic Workers CPU %** | **0.0% (Core 0/1)** | *[TBD]* | *[TBD]* | *[TBD]* | **0.00% CPU steal** |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% RAM Usage** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| | **Memory Leak Rate** | **0.00 MB / min** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total System Calls (`syscalls`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total Context Switches (`CS`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Kernel Execution Time (Kernel Time)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| | **Futex Ratio of Total Syscalls (%)** | **0.00%** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (HPC & CPU)** | **Total CPU Instructions (`instructions`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Cycles (`cycles`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Instruction Efficiency (`IPC = insn / cycle`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Branches (`branches`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branches / Probe (`branches / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Mispredictions (`branch-misses`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Last Level Cache Miss Rate (`LLC-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Probe Throughput (probes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Average Probe Response Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### KB 02: Dense Multi-Node Kubelet Polling (`GET /readyz`) — Concurrency = 64
+### Scenario 02: Dense Multi-Node Kubelet Polling (Concurrency = 64) — Multi-Node Ingestion Capacity
 - **Objective**: Assess load resilience when multiple Kubelet nodes concurrently poll the readiness endpoint over 64 parallel connections.
-- **Execution Command**: `wrk -t2 -c64 -d15s --latency http://172.16.0.5:9091/readyz`
+- **Execution Command**: `wrk -t2 -c64 -d15s --latency http://<gateway_host>:9091/readyz`
 
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **15.00s** | 15.00s | 15.00s | 15.00s | Standard test session |
-| | **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Transfer Bandwidth (MB/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Min Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P50 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P75 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P90 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99.9 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Max Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Latency Standard Deviation (Stdev)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Average Time To First Byte (TTFB Avg)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **HTTP Status Code Distribution (200 / 503 / 404)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% User CPU (Userspace Serving)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% System / Kernel CPU (Syscalls)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% SoftIRQ CPU (Network IRQ Handling)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Shadow Worker CPU % (`velda-shadow-0`)** | *[TBD]* | N/A | N/A | N/A | *[TBD]* |
-| | **Frontline Traffic Workers CPU %** | **0.0% (Core 0/1)** | *[TBD]* | *[TBD]* | *[TBD]* | **0.00% CPU steal** |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% RAM Usage** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| | **Memory Leak Rate** | **0.00 MB / min** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total System Calls (`syscalls`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total Context Switches (`CS`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Kernel Execution Time (Kernel Time)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| | **Futex Ratio of Total Syscalls (%)** | **0.00%** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (HPC & CPU)** | **Total CPU Instructions (`instructions`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Cycles (`cycles`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Instruction Efficiency (`IPC = insn / cycle`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Branches (`branches`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branches / Probe (`branches / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Mispredictions (`branch-misses`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Last Level Cache Miss Rate (`LLC-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### KB 03: Saturated Flood & DDoS Overload — Concurrency = 256
-- **Objective**: Assess resilience and saturation thresholds when the probe endpoint is subjected to aggressive bursts (256 concurrent connections).
-- **Execution Command**: `wrk -t2 -c256 -d15s --latency http://172.16.0.5:9091/livez`
-
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **15.00s** | 15.00s | 15.00s | 15.00s | Standard test session |
-| | **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Transfer Bandwidth (MB/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Min Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P50 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P75 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P90 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99.9 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Max Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Latency Standard Deviation (Stdev)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Average Time To First Byte (TTFB Avg)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **HTTP Status Code Distribution (200 / 503 / 404)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% User CPU (Userspace Serving)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% System / Kernel CPU (Syscalls)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% SoftIRQ CPU (Network IRQ Handling)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Shadow Worker CPU % (`velda-shadow-0`)** | *[TBD]* | N/A | N/A | N/A | *[TBD]* |
-| | **Frontline Traffic Workers CPU %** | **0.0% (Core 0/1)** | *[TBD]* | *[TBD]* | *[TBD]* | **0.00% CPU steal** |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% RAM Usage** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| | **Memory Leak Rate** | **0.00 MB / min** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total System Calls (`syscalls`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total Context Switches (`CS`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Kernel Execution Time (Kernel Time)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| | **Futex Ratio of Total Syscalls (%)** | **0.00%** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (HPC & CPU)** | **Total CPU Instructions (`instructions`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Cycles (`cycles`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Instruction Efficiency (`IPC = insn / cycle`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Branches (`branches`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branches / Probe (`branches / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Mispredictions (`branch-misses`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Last Level Cache Miss Rate (`LLC-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Probe Throughput (probes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Average Probe Response Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### KB 04: Graceful Draining Transition — SIGTERM Interception, Instant 503 Flip
-- **Objective**: Verify state machine behavior upon SIGTERM reception. `/readyz` must flip instantaneously to `503 Service Unavailable` so Kubelet prunes the pod before process shutdown.
-- **Execution Command**: Probe workload with 32 connections, sending `kill -TERM $(pidof velda-edge)` at second 5.
+### Scenario 03: Peak Saturated Flood & Probe Overload (Concurrency = 256) — Peak Saturation Limits
+- **Objective**: Extreme stress testing to verify gateway stability and connection queue behavior under high concurrency health probe assault.
+- **Execution Command**: `wrk -t4 -c256 -d15s --latency http://<gateway_host>:9091/livez`
 
-#### Draining State Transition Metrics Table
-| Transition Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Technical Remarks |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **Time to flip `/readyz` to 503** | *[TBD ms]* | *[TBD ms]* | N/A | *[TBD ms]* | Instant atomic flag transition |
-| **`/livez` status during Draining** | **200 OK (Still Live)** | 200 OK | 200 OK | 200 OK | Prevents premature pod restart |
-| **Anomalous probe errors during transition** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | Zero crash, zero TCP RST drop |
-| **Socket listener release latency on shutdown** | *[TBD ms]* | *[TBD ms]* | *[TBD ms]* | *[TBD ms]* | Clean listener port teardown |
-
-#### 4-Tier Benchmark Table During Draining (32 Conns)
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **15.00s** | 15.00s | 15.00s | 15.00s | Standard test session |
-| | **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P50 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Distribution: HTTP 200 OK vs 503 Draining** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% User CPU / % Kernel CPU** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| **Micro (HPC & CPU)** | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### KB 05: Slowloris & Malformed Probe Attack — Bounded Hard `timeout_ms` Guard
-- **Objective**: Test self-defense resilience when subjected to 128 Slowloris connections (slow byte drip) combined with malformed requests (`POST /`, `/unknown`).
-- **Execution Command**: Slow client injector script + `wrk -t2 -c64 -d15s http://172.16.0.5:9091/unknown`
-
-#### Slowloris Resilience Metrics Table
-| Attack Resilience Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Kong 3.9** (LuaJIT) | Technical Remarks |
-| :--- | :---: | :---: | :---: | :--- |
-| **Slowloris Connection Disconnect Latency** | **Exactly 500 ms (`timeout_ms`)** | *[TBD]* | *[TBD]* | Bounded hard timeout reclaims FD |
-| **404 Response Rate for Unknown Paths** | **100.0% (RESP_404 64B)** | 100.0% | 100.0% | Branchless formula resolves index=2 |
-| **Impact on Legitimate Probe Throughput** | **0.0% degradation** | *[TBD]* | *[TBD]* | 512B stack buffer fully isolated |
-| **Leaked File Descriptors Accumulation (FD Leak)** | **0 FD leak** | *[TBD]* | *[TBD]* | Reclaimed immediately on timeout |
-
-#### 4-Tier Benchmark Table Under Attack Conditions
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **15.00s** | 15.00s | 15.00s | Standard test session |
-| | **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Distribution: HTTP 404 vs Closed Slowloris** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| **Micro (HPC & CPU)** | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Probe Throughput (probes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Average Probe Response Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-## 4. Sustained Longevity Stress Test @ 50,000 RPS x 300 Seconds
+### Scenario 04: Graceful Draining & Readiness State Transition (SIGTERM Event) — Dynamic Transition Overhead
+- **Objective**: Measure transition latency and probe response consistency when the gateway shifts from ready (200 OK) to draining (503 Service Unavailable) upon receiving SIGTERM.
+- **Execution Command**: `wrk -t2 -c32 -d15s --latency http://<gateway_host>:9091/readyz`
 
-- **Objective**: Test long-term micro-architectural stability over 300 seconds under a continuous 50,000 probes/s workload (15,000,000 total probes), confirming zero memory leaks and zero CPU degradation.
-- **Execution Command**: `wrk -t4 -c128 -d300s --latency http://172.16.0.5:9091/livez`
-
-| Measurement Tier | Detailed Metric | **Velda Edge** (Rust 2024) | **Envoy 1.31** (C++) | **Nginx 1.24** (C) | **Kong 3.9** (LuaJIT) | Ratio / Comparative Remarks |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Macro (Network & Probe)** | **Measurement Duration** | **300.00s (5 minutes)** | 300.00s | 300.00s | 300.00s | Extended longevity session |
-| | **Total Probes Served** | *[TBD (~15M)]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Transfer Bandwidth (MB/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Mean Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Min Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P50 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P75 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P90 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99 Latency (Tail Latency)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **P99.9 Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Max Latency** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Latency Standard Deviation (Stdev)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Average Time To First Byte (TTFB Avg)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **HTTP Status Code Distribution (200 / 503 / 404)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Resources** | **Total CPU Utilization (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% User CPU (Userspace Serving)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% System / Kernel CPU (Syscalls)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% SoftIRQ CPU (Network IRQ Handling)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Shadow Worker CPU % (`velda-shadow-0`)** | *[TBD]* | N/A | N/A | N/A | *[TBD]* |
-| | **Frontline Traffic Workers CPU %** | **0.0% (Core 0/1)** | *[TBD]* | *[TBD]* | *[TBD]* | **0.00% CPU steal** |
-| | **Peak Resident Memory (Peak RSS MB)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **% RAM Usage** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Heap Allocations / Probe** | **0 B / 0 allocs** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero heap allocation** |
-| | **Memory Leak Rate** | **0.00 MB / min** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (Kernel & OS)** | **Syscalls / Probe (`syscalls / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Context Switches / Probe (`CS / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total System Calls (`syscalls`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total Context Switches (`CS`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Kernel Execution Time (Kernel Time)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Futex Lock Calls (Futex Calls)** | **0** | *[TBD]* | *[TBD]* | *[TBD]* | **Zero futex contention** |
-| | **Futex Ratio of Total Syscalls (%)** | **0.00%** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Micro (HPC & CPU)** | **Total CPU Instructions (`instructions`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Instructions / Probe (`insn / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Cycles (`cycles`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **CPU Cycles / Probe (`cycles / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Instruction Efficiency (`IPC = insn / cycle`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Total CPU Branches (`branches`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branches / Probe (`branches / req`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Mispredictions (`branch-misses`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Branch Misprediction Rate (`branch-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **L1 Data Cache Miss Rate (`L1-dcache-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| | **Last Level Cache Miss Rate (`LLC-miss %`)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-## 5. In-Depth CPU Symbol Analysis (Linux `perf report`)
-
-Call graph data will be collected via `perf record -F 500 -p $(pidof velda-edge) -g`:
-
-### 5.1 CPU Distribution by Architectural Layer
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ LINUX KERNEL NETWORK STACK & TCP SOCKET DRIVER (*[TBD %]*)                             │
-└───────────────────────────────────────────────────┬────────────────────────────────────┘
-                                                    │
-┌───────────────────────────────────────────────────┴────────────────────────────────────┐
-│ TOKIO ASYNC RUNTIME & NETWORKING INTERNALS (*[TBD %]*)                                 │
-└───────────────────────────────────────────────────┬────────────────────────────────────┘
-                                                    │
-┌───────────────────────────────────────────────────┴────────────────────────────────────┐
-│ PLUGIN HEALTH PROBE LOGIC (*[TBD %]*)                                                  │
-└───────────────────────────────────────────────────┬────────────────────────────────────┘
-                                                    │
-┌───────────────────────────────────────────────────┴────────────────────────────────────┐
-│ MEMORY ALLOCATOR & ZERO-ALLOC INLINE (0.00%)                                           │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 5.2 Detailed Function / Symbol Distribution Table
-| CPU (%) | Worker Core | Demangled Symbol / Function Name | Source Module | I-Cache Miss | Branch Miss | Role & Hardware Execution Mechanism |
-| :---: | :---: | :--- | :--- | :---: | :---: | :--- |
-| *[TBD]* | Shadow-0 | `HealthProbePlugin::handle_connection` | `health_probe::plugin` | *[TBD]* | *[TBD]* | Reads socket into 512B stack buffer, invokes `eval_fn`, and writes slice. Zero heap alloc. |
-| *[TBD]* | Shadow-0 | `response::eval_swar_64` | `health_probe::response` | *[TBD]* | *[TBD]* | Reads 8-byte path in a single 64-bit register (`movq 4(%rdi), %rax`), XOR+AND bitmask, index $2-\text{match}-\text{ok}$. |
-| *[TBD]* | Shadow-0 | `response::get_wire_response` | `health_probe::response` | *[TBD]* | *[TBD]* | Retrieves slice from contiguous 195B `WIRE_RESPONSES` table preloaded in L1D cache line. |
-| *[TBD]* | Shadow-0 | `HealthState::is_live` / `is_ready` | `health_probe::state` | *[TBD]* | *[TBD]* | Reads atomic flag `AtomicBool::load(Acquire)` cacheline isolated. Speed < 2 clock cycles. |
-| **0.00%** | Frontline | Frontline Traffic Serving Loops | `velda-worker-{0..N}` | 0.00% | 0.00% | **0.00% CPU overhead on frontline traffic threads.** |
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Probe Throughput (probes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Average Probe Response Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-## 6. Comprehensive Architectural Comparison: Velda Edge vs Envoy vs Nginx vs Kong
+### Scenario 05: Slowloris & Malformed Request Resistance (500ms Timeout & 404 Resolution) — Slow-Attack Hardening
+- **Objective**: Verify that stalled HTTP probes and malformed paths are bounded by hard timeouts (`timeout_ms = 500ms`) without leaking file descriptors or degrading edge traffic serving.
+- **Execution Command**: `wrk -t4 -c128 -d15s http://<gateway_host>:9091/`
 
-| Technical Criteria | Velda Edge (Rust Edition 2024) | Envoy Proxy 1.31 (C++) | Nginx 1.24 (C) | Kong Gateway 3.9 (LuaJIT) |
-|---|---|---|---|---|
-| **Implementation Language** | **Rust (Zero-Cost Abstractions)** | C++20 | C | C + OpenResty LuaJIT 2.1 |
-| **Probe Threading Model** | **Dedicated Shadow Worker (`SCHED_IDLE`)** | EventLoop Worker Threads | Master-Worker Epoll Process | Worker Process EventLoop |
-| **Impact on Frontline Traffic** | **0.00% (Strict Isolation)** | Contends for common event loop | Contends for common worker process | Contends for common Lua VM |
-| **Path Matching Technique** | **Adaptive Register SWAR (64-bit / 2x32-bit)** | String Comparison (`std::string`) | String Prefix Trie / `ngx_strcmp` | Lua String Hash / Table Lookup |
-| **Branchless Elimination** | **Yes ($index = 2 - \text{match} - \text{ok}$)** | No (Multiple `if` conditional branches) | No (`if` conditional branching chains) | No (Lua bytecode branching) |
-| **Wire Response Memory Placement** | **Contiguous L1D Cache-Resident (195B)** | Heap String Buffers | Static Buffers | Lua Dynamic Strings |
-| **Heap Allocations / Probe** | **0 Bytes (Zero Garbage)** | ~480 – 600 Bytes | ~120 Bytes | ~1,200 – 1,800 Bytes |
-| **Garbage Collection Impact** | **None (Zero GC)** | No GC (malloc/free overhead) | No GC | Periodic Lua GC Sweep Cycles |
-| **Slowloris Timeout Protection** | **Hard Bounded (`timeout_ms` 500ms)** | Bounded via stream timeout | `client_body_timeout` | Nginx default timeout (60s) |
-| **SIGTERM State Flip Latency** | **< 150 µs (Atomic Flag)** | ~4.5 ms | Requires config reload | ~12.0 ms |
-| **RAM Footprint (50,000 RPS)** | **~13.8 MB** | **85 MB – 112 MB** | **18 MB – 25 MB** | **145 MB – 198 MB** |
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Probes Served** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Probe Throughput (probes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Average Probe Response Size (bytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
+
+| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
+| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
+| **Path Matching Technique** | **Adaptive Register SWAR (64-bit / 2x32-bit)** | String prefix / Lua table lookup | String prefix / Lua table lookup | Dynamic prefix trie / string match |
+| **Wire Response Placement** | **Contiguous L1D Cache-Resident (195B Table)** | Dynamic string alloc / buffer pool | Dynamic string alloc / buffer pool | Static string slice / dynamic buffer |
+| **Probe Serving Worker** | **Dedicated Shadow Logistics Worker (`SCHED_IDLE`)** | Nginx worker thread handling `/status` | Nginx worker thread handling `/healthz` | Worker event loop handling `/ready` |
+| **Heap Allocations** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
+| **Hot-Path Request Serving Impact** | Non-blocking (Port 9091 on Shadow Worker, 0% CPU steal) | Contends for common Nginx worker | Contends for common Nginx worker | Contends for worker event loop |
+| **Slowloris & Timeout Protection** | **Hard Bounded (`timeout_ms` = 500ms)** | Bounded via Nginx client timeout | Bounded via Nginx client timeout | Bounded via stream timeout |
+| **Draining State Transition Latency** | **Atomic Flag Transition (`AtomicBool::store`)** | Dynamic config reload / timer sweep | Dynamic config reload / timer sweep | Dynamic admin `/healthcheck/fail` |
+| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
