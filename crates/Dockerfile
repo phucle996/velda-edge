@@ -1,4 +1,4 @@
-FROM rust:1.98-slim-bookworm AS builder
+FROM rust:1.99-slim-bookworm AS builder
 
 ARG TARGET_CPU=x86-64-v3
 ENV RUSTFLAGS="-C target-cpu=${TARGET_CPU}"
