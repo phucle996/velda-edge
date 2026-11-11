@@ -61,3 +61,16 @@ path = "src/background/statsd_exporter/harness/machine_code_test.rs"
 name = "acme_cert_rotator_machine_code_test"
 path = "src/background/acme_cert_rotator/harness/machine_code_test.rs"
 
+[[test]]
+name = "std_log_shipper_machine_code_test"
+path = "src/background/std_log_shipper/harness/machine_code_test.rs"
+
+[[test]]
+name = "otlp_log_shipper_machine_code_test"
+path = "src/background/otlp_log_shipper/harness/machine_code_test.rs"
+
+[[test]]
+name = "loki_log_shipper_machine_code_test"
+path = "src/background/loki_log_shipper/harness/machine_code_test.rs"
+
+

@@ -31,8 +31,9 @@ pub use background::prometheus_exporter::{
 };
 pub use background::{
     BackgroundPlugin, HealthProbeConfig, HealthProbePlugin, HealthState, LokiLogShipperConfig,
-    LokiLogShipperPlugin, OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin,
-    StatsdExporterConfig, StatsdExporterPlugin, format_loki_push_payload, spawn_background_plugins,
+    LokiLogShipperPlugin, OtlpLogShipperConfig, OtlpLogShipperPlugin, OtlpMetricsExporterConfig,
+    OtlpMetricsExporterPlugin, StatsdExporterConfig, StatsdExporterPlugin, StdLogShipperConfig,
+    StdLogShipperPlugin, format_loki_push_payload, spawn_background_plugins,
 };
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use error::PluginError;
@@ -44,12 +45,9 @@ pub use http_cache::{
 pub use plan::RoutePluginPlan;
 pub use post_response::{
     CompressionAlgorithm, CorsConfig, CorsResponsePlugin, HttpCacheStoreConfig,
-    HttpCacheStorePlugin, LogFormat, OpentelemetryLoggerConfig, OpentelemetryLoggerPlugin,
-    OpentelemetryTracerConfig, OpentelemetryTracerPlugin, PackedLogRecord, PostResponsePlugin,
+    HttpCacheStorePlugin, OpentelemetryTracerConfig, OpentelemetryTracerPlugin, PostResponsePlugin,
     ResponseCompressionConfig, ResponseCompressionPlugin, ResponseHeaderMutationConfig,
-    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, StdGrpcAccessLogConfig,
-    StdGrpcAccessLogPlugin, StdHttpAccessLogConfig, StdHttpAccessLogPlugin,
-    run_post_response_plugins,
+    ResponseHeaderMutationPlugin, SecurityHeadersPlugin, run_post_response_plugins,
 };
 pub use pre_route::{
     CorsPreflightPlugin, IpFilterMode, IpFilterPlugin, OriginPattern, PreRoutePlugin,

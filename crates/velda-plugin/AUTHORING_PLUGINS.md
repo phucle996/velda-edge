@@ -208,8 +208,8 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
     match id {
         "ip_filter" | "resource_limit" | "waf_lite" => Some("pre_route"),
         "jwt_auth" | "rate_limit" | "header_mutation" => Some("pre_upstream"),
-        "security_headers" | "cors" | "std_http_access_log" => Some("post_response"),
-        "health_probe" | "prometheus_exporter" => Some("background"),
+        "security_headers" | "cors" => Some("post_response"),
+        "health_probe" | "prometheus_exporter" | "std_log_shipper" => Some("background"),
         _ => None,
     }
 }

@@ -154,6 +154,7 @@ impl RunningWorkerPool {
                                 "Ingress shard encountered error"
                             );
                         }
+                        reg.set_state(w_id, WorkerRole::Traffic, WorkerState::Draining);
                     });
 
                     reg.set_state(w_id, WorkerRole::Traffic, WorkerState::Stopped);
@@ -193,6 +194,7 @@ impl RunningWorkerPool {
 }
 
 struct WithTrafficHandle {
+    shutdown: watch::Receiver<bool>,
     handle: tokio::runtime::Handle,
     inner: ShadowTask,
 }
@@ -204,8 +206,20 @@ impl std::future::Future for WithTrafficHandle {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
-        let _guard = self.handle.enter();
-        self.inner.as_mut().poll(cx)
+        if *self.shutdown.borrow() {
+            return std::task::Poll::Ready(());
+        }
+
+        let handle = self.handle.clone();
+        let inner = &mut self.inner;
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = handle.enter();
+            inner.as_mut().poll(cx)
+        }));
+        match res {
+            Ok(poll_res) => poll_res,
+            Err(_) => std::task::Poll::Ready(()),
+        }
     }
 }
 
@@ -294,13 +308,14 @@ pub fn spawn_shadow_worker(
                     let seed = (velda_core::coarse_now_sec() as u32)
                         .wrapping_mul(2654435761)
                         .wrapping_add(worker_id as u32);
-                    if let Some(ref th) = traffic_handle {
-                        let _guard = th.enter();
-                        upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                        upstreams.prewarm_lane(worker_id).await;
-                    } else {
-                        upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                        upstreams.prewarm_lane(worker_id).await;
+                    upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
+                    if !*shutdown.borrow() {
+                        if let Some(ref th) = traffic_handle {
+                            let _guard = th.enter();
+                            upstreams.prewarm_lane(worker_id).await;
+                        } else {
+                            upstreams.prewarm_lane(worker_id).await;
+                        }
                     }
                 }
 
@@ -335,13 +350,14 @@ pub fn spawn_shadow_worker(
                             let seed = (velda_core::coarse_now_sec() as u32)
                                 .wrapping_mul(2654435761)
                                 .wrapping_add(worker_id as u32);
-                            if let Some(ref th) = traffic_handle {
-                                let _guard = th.enter();
-                                upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                                upstreams.prewarm_lane(worker_id).await;
-                            } else {
-                                upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                                upstreams.prewarm_lane(worker_id).await;
+                            upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
+                            if !*shutdown.borrow() {
+                                if let Some(ref th) = traffic_handle {
+                                    let _guard = th.enter();
+                                    upstreams.prewarm_lane(worker_id).await;
+                                } else {
+                                    upstreams.prewarm_lane(worker_id).await;
+                                }
                             }
                         }
 
@@ -353,6 +369,7 @@ pub fn spawn_shadow_worker(
                             }
                             if let Some(ref th) = traffic_handle {
                                 shadow_tasks.spawn(WithTrafficHandle {
+                                    shutdown: shutdown.clone(),
                                     handle: th.clone(),
                                     inner: task,
                                 });
@@ -389,13 +406,14 @@ pub fn spawn_shadow_worker(
                                 let seed = (velda_core::coarse_now_sec() as u32)
                                     .wrapping_mul(2654435761)
                                     .wrapping_add(worker_id as u32);
-                                if let Some(ref th) = traffic_handle {
-                                    let _guard = th.enter();
-                                    upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                                    upstreams.prewarm_lane(worker_id).await;
-                                } else {
-                                    upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
-                                    upstreams.prewarm_lane(worker_id).await;
+                                upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
+                                if !*shutdown.borrow() {
+                                    if let Some(ref th) = traffic_handle {
+                                        let _guard = th.enter();
+                                        upstreams.prewarm_lane(worker_id).await;
+                                    } else {
+                                        upstreams.prewarm_lane(worker_id).await;
+                                    }
                                 }
                             }
                         }

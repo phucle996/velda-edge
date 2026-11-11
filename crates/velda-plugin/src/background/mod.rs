@@ -19,16 +19,20 @@ use crate::error::PluginError;
 pub mod acme_cert_rotator;
 pub mod health_probe;
 pub mod loki_log_shipper;
+pub mod otlp_log_shipper;
 pub mod otlp_metrics_exporter;
 pub mod prometheus_exporter;
 pub mod statsd_exporter;
+pub mod std_log_shipper;
 
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin, format_loki_push_payload};
+pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use prometheus_exporter::{PrometheusExporter, PrometheusExporterPlugin, format_snapshot};
 pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
+pub use std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 
 /// Contract for plugins operating as background logistics services.
 pub trait BackgroundPlugin: Send + Sync {
@@ -118,6 +122,14 @@ pub fn instantiate(
         }
         "loki_log_shipper" => {
             let shipper = LokiLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "std_log_shipper" => {
+            let shipper = StdLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "otlp_log_shipper" => {
+            let shipper = OtlpLogShipperPlugin::from_config(config)?;
             Ok(Arc::new(shipper))
         }
         other => Err(PluginError::Config(format!(

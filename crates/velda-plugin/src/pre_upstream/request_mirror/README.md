@@ -75,7 +75,7 @@ The header `X-Velda-Mirror: true` is an **immutable system constant** automatica
   "plugins": [
     "jwt_auth",
     "request_mirror",
-    "std_http_access_log"
+    "security_headers"
   ]
 }
 ```

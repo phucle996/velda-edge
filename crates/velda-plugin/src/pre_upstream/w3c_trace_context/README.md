@@ -103,7 +103,6 @@ To enable W3C TraceContext generation and propagation on an edge route, declare 
     "w3c_trace_context",
     "jwt_auth",
     "rate_limit",
-    "opentelemetry_logger",
     "opentelemetry_tracer"
   ]
 }
@@ -133,6 +132,6 @@ To enable W3C TraceContext generation and propagation on an edge route, declare 
 ┌──────────────────────────────────────┐
 │ Phase 3: opentelemetry_tracer        │ ── Exports server span matching trace_id & span_id
 ├──────────────────────────────────────┤
-│ Phase 3: opentelemetry_logger        │ ── Stitches access log record to the same trace_id
+│ Phase 4: otlp_log_shipper            │ ── Stitches access log record to the same trace_id
 └──────────────────────────────────────┘
 ```
