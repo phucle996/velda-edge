@@ -7,4 +7,6 @@
 
 pub mod plugin;
 
-pub use plugin::{LokiLogShipperConfig, LokiLogShipperPlugin, format_loki_push_payload};
+pub use plugin::{
+    LokiLogShipperConfig, LokiLogShipperPlugin, LokiStreamTemplate, format_loki_push_payload,
+};

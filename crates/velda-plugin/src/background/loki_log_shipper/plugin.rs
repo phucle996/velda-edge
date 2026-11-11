@@ -18,9 +18,7 @@
 //!    exporter completes.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::future::Future;
-use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +37,46 @@ use velda_sync::post_sync::plugin::PluginConfig;
 use crate::background::BackgroundPlugin;
 use crate::error::PluginError;
 
+/// Pre-baked static stream headers for Grafana Loki Push API partitioned by protocol family.
+#[derive(Debug, Clone)]
+pub struct LokiStreamTemplate {
+    pub http_prefix: Vec<u8>,
+    pub grpc_prefix: Vec<u8>,
+    pub raw_prefix: Vec<u8>,
+}
+
+impl LokiStreamTemplate {
+    pub fn new(service_name: &str, static_labels: &HashMap<String, String>) -> Self {
+        fn build_header(
+            service_name: &str,
+            protocol: &str,
+            static_labels: &HashMap<String, String>,
+        ) -> Vec<u8> {
+            let mut buf = Vec::with_capacity(128);
+            buf.extend_from_slice(b"{\"stream\":{\"service\":\"");
+            buf.extend_from_slice(service_name.as_bytes());
+            buf.extend_from_slice(b"\",\"protocol\":\"");
+            buf.extend_from_slice(protocol.as_bytes());
+            buf.push(b'"');
+            for (k, v) in static_labels {
+                buf.extend_from_slice(b",\"");
+                buf.extend_from_slice(k.as_bytes());
+                buf.extend_from_slice(b"\":\"");
+                buf.extend_from_slice(v.as_bytes());
+                buf.push(b'"');
+            }
+            buf.extend_from_slice(b"},\"values\":[");
+            buf
+        }
+
+        Self {
+            http_prefix: build_header(service_name, "http", static_labels),
+            grpc_prefix: build_header(service_name, "grpc", static_labels),
+            raw_prefix: build_header(service_name, "raw", static_labels),
+        }
+    }
+}
+
 /// Standalone Background Grafana Loki Log Shipper Plugin.
 pub struct LokiLogShipperPlugin {
     pub id: String,
@@ -48,6 +86,8 @@ pub struct LokiLogShipperPlugin {
     pub port: u16,
     pub path: String,
     pub host_header: String,
+    pub header_prefix: Vec<u8>,
+    pub stream_template: LokiStreamTemplate,
     pub shipped_records: Arc<AtomicU64>,
     pub failed_pushes: Arc<AtomicU64>,
 }
@@ -111,6 +151,22 @@ impl LokiLogShipperPlugin {
             format!("{host}:{port}")
         };
 
+        let mut header_prefix = Vec::with_capacity(256);
+        header_prefix.extend_from_slice(b"POST ");
+        header_prefix.extend_from_slice(path.as_bytes());
+        header_prefix.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+        header_prefix.extend_from_slice(host_header.as_bytes());
+        header_prefix
+            .extend_from_slice(b"\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n");
+        if !config.tenant_id.is_empty() {
+            header_prefix.extend_from_slice(b"X-Scope-OrgID: ");
+            header_prefix.extend_from_slice(config.tenant_id.as_bytes());
+            header_prefix.extend_from_slice(b"\r\n");
+        }
+        header_prefix.extend_from_slice(b"Content-Length: ");
+
+        let stream_template = LokiStreamTemplate::new(&config.service_name, &config.labels);
+
         Ok(Self {
             id: id.into(),
             config,
@@ -119,6 +175,8 @@ impl LokiLogShipperPlugin {
             port,
             path,
             host_header,
+            header_prefix,
+            stream_template,
             shipped_records: Arc::new(AtomicU64::new(0)),
             failed_pushes: Arc::new(AtomicU64::new(0)),
         })
@@ -132,19 +190,97 @@ impl LokiLogShipperPlugin {
     }
 }
 
+const DIGIT_PAIRS: &[u8; 200] = b"\
+    00010203040506070809\
+    10111213141516171819\
+    20212223242526272829\
+    30313233343536373839\
+    40414243444546474849\
+    50515253545556575859\
+    60616263646566676869\
+    70717273747576777879\
+    80818283848586878889\
+    90919293949596979899";
+
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
+#[inline(always)]
+fn fast_write_u64(buf: &mut Vec<u8>, mut n: u64) {
+    if n < 10 {
+        buf.push(b'0' + n as u8);
+        return;
+    }
+    let mut temp = [0u8; 20];
+    let mut curr = 20;
+    while n >= 100 {
+        let rem = (n % 100) as usize * 2;
+        n /= 100;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
+    }
+    if n < 10 {
+        curr -= 1;
+        temp[curr] = b'0' + n as u8;
+    } else {
+        let rem = n as usize * 2;
+        curr -= 2;
+        temp[curr] = DIGIT_PAIRS[rem];
+        temp[curr + 1] = DIGIT_PAIRS[rem + 1];
+    }
+    buf.extend_from_slice(&temp[curr..20]);
+}
+
+#[inline(always)]
+fn fast_write_hex16(buf: &mut Vec<u8>, n: u64) {
+    let mut temp = [0u8; 16];
+    for i in (0..16).rev() {
+        temp[i] = HEX_CHARS[((n >> ((15 - i) * 4)) & 0x0F) as usize];
+    }
+    buf.extend_from_slice(&temp);
+}
+
+#[inline(always)]
+fn fast_write_ipv4(buf: &mut Vec<u8>, ip_bits: u32) {
+    let octets = ip_bits.to_be_bytes();
+    fast_write_u64(buf, octets[0] as u64);
+    buf.push(b'.');
+    fast_write_u64(buf, octets[1] as u64);
+    buf.push(b'.');
+    fast_write_u64(buf, octets[2] as u64);
+    buf.push(b'.');
+    fast_write_u64(buf, octets[3] as u64);
+}
+
+#[inline(always)]
+fn fast_write_ip128(buf: &mut Vec<u8>, ip: u128) {
+    match decode_ip_u128(ip) {
+        std::net::IpAddr::V4(v4) => {
+            fast_write_ipv4(buf, u32::from(v4));
+        }
+        std::net::IpAddr::V6(v6) => {
+            let mut str_tmp = [0u8; 40];
+            let mut cursor = std::io::Cursor::new(&mut str_tmp[..]);
+            use std::io::Write as _;
+            let _ = write!(cursor, "{v6}");
+            let pos = cursor.position() as usize;
+            buf.extend_from_slice(&str_tmp[..pos]);
+        }
+    }
+}
+
 /// Serializes reference-counted 64-byte [`AccessLogRecord`] batches into a multi-stream
 /// Grafana Loki `/loki/api/v1/push` JSON payload partitioned by protocol family (`http`, `grpc`, `raw`).
 pub fn format_loki_push_payload(
     batches: &[Arc<[AccessLogRecord]>],
-    service_name: &str,
-    static_labels: &HashMap<String, String>,
-    out: &mut String,
+    template: &LokiStreamTemplate,
+    out: &mut Vec<u8>,
 ) -> usize {
     out.clear();
 
-    let mut http_values = String::new();
-    let mut grpc_values = String::new();
-    let mut raw_values = String::new();
+    let mut http_values = Vec::with_capacity(4096);
+    let mut grpc_values = Vec::with_capacity(2048);
+    let mut raw_values = Vec::with_capacity(1024);
     let mut total_records = 0usize;
 
     for batch in batches {
@@ -155,86 +291,127 @@ pub fn format_loki_push_payload(
             let pipe = PipeStrategy::from_discriminant(rec.pipe_strategy)
                 .unwrap_or(PipeStrategy::Buffered);
             let completion = LogCompletionReason::from_u8(rec.completion);
-            let peer_ip = decode_ip_u128(rec.peer_ip);
-            let up_ip = Ipv4Addr::from_bits(rec.upstream_ip);
             let ts_ns = (rec.timestamp_sec as u64).saturating_mul(1_000_000_000);
 
             match proto {
                 LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
                     if !http_values.is_empty() {
-                        http_values.push(',');
+                        http_values.push(b',');
                     }
                     let method = LogHttpMethod::from_u8(rec.method);
                     let ua_fam = UaFamily::from_u8(rec.ua_family);
                     let ua_os = UaOs::from_u8(rec.ua_os);
-                    let _ = write!(
-                        http_values,
-                        "[\"{ts_ns}\",\"req_id={:016x} proto={} up_proto={} pipe={} method={} status={} route_id={} dur_us={} rx={} tx={} peer={}:{} upstream={}:{} ua={}/{} os={} completion={}\"]",
-                        rec.request_id,
-                        proto.as_str(),
-                        up_proto.as_str(),
-                        pipe.as_str(),
-                        method.as_str(),
-                        rec.status_code,
-                        rec.route_id,
-                        rec.duration_us,
-                        rec.bytes_rx,
-                        rec.bytes_tx,
-                        peer_ip,
-                        rec.peer_port,
-                        up_ip,
-                        rec.upstream_port,
-                        ua_fam.as_str(),
-                        rec.ua_major_version,
-                        ua_os.as_str(),
-                        completion.as_str(),
-                    );
+
+                    http_values.extend_from_slice(b"[\"");
+                    fast_write_u64(&mut http_values, ts_ns);
+                    http_values.extend_from_slice(b"\",\"request_id=");
+                    fast_write_hex16(&mut http_values, rec.request_id);
+                    http_values.extend_from_slice(b" proto=");
+                    http_values.extend_from_slice(proto.as_str().as_bytes());
+                    http_values.extend_from_slice(b" up_proto=");
+                    http_values.extend_from_slice(up_proto.as_str().as_bytes());
+                    http_values.extend_from_slice(b" pipe=");
+                    http_values.extend_from_slice(pipe.as_str().as_bytes());
+                    http_values.extend_from_slice(b" method=");
+                    http_values.extend_from_slice(method.as_str().as_bytes());
+                    http_values.extend_from_slice(b" status=");
+                    fast_write_u64(&mut http_values, rec.status_code as u64);
+                    http_values.extend_from_slice(b" route_id=");
+                    fast_write_u64(&mut http_values, rec.route_id as u64);
+                    http_values.extend_from_slice(b" dur_us=");
+                    fast_write_u64(&mut http_values, rec.duration_us as u64);
+                    http_values.extend_from_slice(b" rx=");
+                    fast_write_u64(&mut http_values, rec.bytes_rx as u64);
+                    http_values.extend_from_slice(b" tx=");
+                    fast_write_u64(&mut http_values, rec.bytes_tx as u64);
+                    http_values.extend_from_slice(b" peer=");
+                    fast_write_ip128(&mut http_values, rec.peer_ip);
+                    http_values.push(b':');
+                    fast_write_u64(&mut http_values, rec.peer_port as u64);
+                    http_values.extend_from_slice(b" upstream=");
+                    fast_write_ipv4(&mut http_values, rec.upstream_ip);
+                    http_values.push(b':');
+                    fast_write_u64(&mut http_values, rec.upstream_port as u64);
+                    http_values.extend_from_slice(b" ua=");
+                    http_values.extend_from_slice(ua_fam.as_str().as_bytes());
+                    http_values.push(b'/');
+                    fast_write_u64(&mut http_values, rec.ua_major_version as u64);
+                    http_values.extend_from_slice(b" os=");
+                    http_values.extend_from_slice(ua_os.as_str().as_bytes());
+                    http_values.extend_from_slice(b" completion=");
+                    http_values.extend_from_slice(completion.as_str().as_bytes());
+                    http_values.extend_from_slice(b"\"]");
                 }
                 LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
                     if !grpc_values.is_empty() {
-                        grpc_values.push(',');
+                        grpc_values.push(b',');
                     }
                     let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
                     let ua_fam = UaFamily::from_u8(rec.ua_family);
-                    let _ = write!(
-                        grpc_values,
-                        "[\"{ts_ns}\",\"req_id={:016x} proto={} grpc_status={} http_status={} route_id={} dur_us={} rx={} tx={} msgs={} peer={}:{} upstream={}:{} ua={}/{} completion={}\"]",
-                        rec.request_id,
-                        proto.as_str(),
-                        grpc_st.as_str(),
-                        rec.status_code,
-                        rec.route_id,
-                        rec.duration_us,
-                        rec.bytes_rx,
-                        rec.bytes_tx,
-                        rec.rpc_msgs_or_flags,
-                        peer_ip,
-                        rec.peer_port,
-                        up_ip,
-                        rec.upstream_port,
-                        ua_fam.as_str(),
-                        rec.ua_major_version,
-                        completion.as_str(),
-                    );
+
+                    grpc_values.extend_from_slice(b"[\"");
+                    fast_write_u64(&mut grpc_values, ts_ns);
+                    grpc_values.extend_from_slice(b"\",\"request_id=");
+                    fast_write_hex16(&mut grpc_values, rec.request_id);
+                    grpc_values.extend_from_slice(b" proto=");
+                    grpc_values.extend_from_slice(proto.as_str().as_bytes());
+                    grpc_values.extend_from_slice(b" grpc_status=");
+                    grpc_values.extend_from_slice(grpc_st.as_str().as_bytes());
+                    grpc_values.extend_from_slice(b" http_status=");
+                    fast_write_u64(&mut grpc_values, rec.status_code as u64);
+                    grpc_values.extend_from_slice(b" route_id=");
+                    fast_write_u64(&mut grpc_values, rec.route_id as u64);
+                    grpc_values.extend_from_slice(b" dur_us=");
+                    fast_write_u64(&mut grpc_values, rec.duration_us as u64);
+                    grpc_values.extend_from_slice(b" rx=");
+                    fast_write_u64(&mut grpc_values, rec.bytes_rx as u64);
+                    grpc_values.extend_from_slice(b" tx=");
+                    fast_write_u64(&mut grpc_values, rec.bytes_tx as u64);
+                    grpc_values.extend_from_slice(b" msgs=");
+                    fast_write_u64(&mut grpc_values, rec.rpc_msgs_or_flags as u64);
+                    grpc_values.extend_from_slice(b" peer=");
+                    fast_write_ip128(&mut grpc_values, rec.peer_ip);
+                    grpc_values.push(b':');
+                    fast_write_u64(&mut grpc_values, rec.peer_port as u64);
+                    grpc_values.extend_from_slice(b" upstream=");
+                    fast_write_ipv4(&mut grpc_values, rec.upstream_ip);
+                    grpc_values.push(b':');
+                    fast_write_u64(&mut grpc_values, rec.upstream_port as u64);
+                    grpc_values.extend_from_slice(b" ua=");
+                    grpc_values.extend_from_slice(ua_fam.as_str().as_bytes());
+                    grpc_values.push(b'/');
+                    fast_write_u64(&mut grpc_values, rec.ua_major_version as u64);
+                    grpc_values.extend_from_slice(b" completion=");
+                    grpc_values.extend_from_slice(completion.as_str().as_bytes());
+                    grpc_values.extend_from_slice(b"\"]");
                 }
                 LogProtocol::RawTcp | LogProtocol::RawUdp => {
                     if !raw_values.is_empty() {
-                        raw_values.push(',');
+                        raw_values.push(b',');
                     }
-                    let _ = write!(
-                        raw_values,
-                        "[\"{ts_ns}\",\"req_id={:016x} proto={} dur_us={} rx={} tx={} peer={}:{} upstream={}:{} completion={}\"]",
-                        rec.request_id,
-                        proto.as_str(),
-                        rec.duration_us,
-                        rec.bytes_rx,
-                        rec.bytes_tx,
-                        peer_ip,
-                        rec.peer_port,
-                        up_ip,
-                        rec.upstream_port,
-                        completion.as_str(),
-                    );
+                    raw_values.extend_from_slice(b"[\"");
+                    fast_write_u64(&mut raw_values, ts_ns);
+                    raw_values.extend_from_slice(b"\",\"request_id=");
+                    fast_write_hex16(&mut raw_values, rec.request_id);
+                    raw_values.extend_from_slice(b" proto=");
+                    raw_values.extend_from_slice(proto.as_str().as_bytes());
+                    raw_values.extend_from_slice(b" dur_us=");
+                    fast_write_u64(&mut raw_values, rec.duration_us as u64);
+                    raw_values.extend_from_slice(b" rx=");
+                    fast_write_u64(&mut raw_values, rec.bytes_rx as u64);
+                    raw_values.extend_from_slice(b" tx=");
+                    fast_write_u64(&mut raw_values, rec.bytes_tx as u64);
+                    raw_values.extend_from_slice(b" peer=");
+                    fast_write_ip128(&mut raw_values, rec.peer_ip);
+                    raw_values.push(b':');
+                    fast_write_u64(&mut raw_values, rec.peer_port as u64);
+                    raw_values.extend_from_slice(b" upstream=");
+                    fast_write_ipv4(&mut raw_values, rec.upstream_ip);
+                    raw_values.push(b':');
+                    fast_write_u64(&mut raw_values, rec.upstream_port as u64);
+                    raw_values.extend_from_slice(b" completion=");
+                    raw_values.extend_from_slice(completion.as_str().as_bytes());
+                    raw_values.extend_from_slice(b"\"]");
                 }
             }
         }
@@ -244,33 +421,36 @@ pub fn format_loki_push_payload(
         return 0;
     }
 
-    out.push_str("{\"streams\":[");
+    out.extend_from_slice(b"{\"streams\":[");
     let mut first_stream = true;
 
-    for (family, values) in [
-        ("http", &http_values),
-        ("grpc", &grpc_values),
-        ("raw", &raw_values),
-    ] {
-        if values.is_empty() {
-            continue;
-        }
-        if !first_stream {
-            out.push(',');
-        }
+    if !http_values.is_empty() {
         first_stream = false;
-
-        let _ = write!(
-            out,
-            "{{\"stream\":{{\"service\":\"{service_name}\",\"protocol\":\"{family}\""
-        );
-        for (k, v) in static_labels {
-            let _ = write!(out, ",\"{k}\":\"{v}\"");
-        }
-        let _ = write!(out, "}},\"values\":[{values}]}}");
+        out.extend_from_slice(&template.http_prefix);
+        out.extend_from_slice(&http_values);
+        out.extend_from_slice(b"]}");
     }
 
-    out.push_str("]}");
+    if !grpc_values.is_empty() {
+        if !first_stream {
+            out.push(b',');
+        }
+        first_stream = false;
+        out.extend_from_slice(&template.grpc_prefix);
+        out.extend_from_slice(&grpc_values);
+        out.extend_from_slice(b"]}");
+    }
+
+    if !raw_values.is_empty() {
+        if !first_stream {
+            out.push(b',');
+        }
+        out.extend_from_slice(&template.raw_prefix);
+        out.extend_from_slice(&raw_values);
+        out.extend_from_slice(b"]}");
+    }
+
+    out.extend_from_slice(b"]}");
     total_records
 }
 
@@ -292,7 +472,7 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
             let connect_timeout = Duration::from_millis(self.config.connect_timeout_ms);
             let request_timeout = Duration::from_millis(self.config.request_timeout_ms);
             let mut conn: Option<TcpStream> = None;
-            let mut payload_buf = String::with_capacity(16384);
+            let mut payload_buf = Vec::with_capacity(16384);
             let mut req_buf = Vec::with_capacity(16896);
 
             loop {
@@ -307,28 +487,16 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                 // Drain reference-counted Arc<[AccessLogRecord]> batches. When `batches` goes
                 // out of scope at the end of this block, each Arc's strong count decrements.
                 let batches = subscriber.drain_batches(64);
-                let record_count = format_loki_push_payload(
-                    &batches,
-                    &self.config.service_name,
-                    &self.config.labels,
-                    &mut payload_buf,
-                );
+                let record_count =
+                    format_loki_push_payload(&batches, &self.stream_template, &mut payload_buf);
                 drop(batches);
 
                 if record_count > 0 {
                     req_buf.clear();
-                    let mut header = format!(
-                        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n",
-                        self.path,
-                        self.host_header,
-                        payload_buf.len()
-                    );
-                    if !self.config.tenant_id.is_empty() {
-                        let _ = write!(header, "X-Scope-OrgID: {}\r\n", self.config.tenant_id);
-                    }
-                    header.push_str("\r\n");
-                    req_buf.extend_from_slice(header.as_bytes());
-                    req_buf.extend_from_slice(payload_buf.as_bytes());
+                    req_buf.extend_from_slice(&self.header_prefix);
+                    fast_write_u64(&mut req_buf, payload_buf.len() as u64);
+                    req_buf.extend_from_slice(b"\r\n\r\n");
+                    req_buf.extend_from_slice(&payload_buf);
 
                     let mut pushed = false;
                     for _attempt in 0..2 {
