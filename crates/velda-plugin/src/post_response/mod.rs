@@ -15,20 +15,16 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod ai_token_metering;
 pub mod cors;
 pub mod http_cache_store;
-pub mod opentelemetry_logger;
 pub mod opentelemetry_tracer;
 pub mod response_compression;
 pub mod response_header_mutation;
 pub mod security_headers;
-pub mod std_grpc_access_log;
-pub mod std_http_access_log;
 
 pub use ai_token_metering::{
     AiTokenMeteringConfig, AiTokenMeteringPlugin, ModelPricing, TokenUsage,
 };
 pub use cors::{CorsConfig, CorsResponsePlugin};
 pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
-pub use opentelemetry_logger::{OpentelemetryLoggerConfig, OpentelemetryLoggerPlugin};
 pub use opentelemetry_tracer::{OpentelemetryTracerConfig, OpentelemetryTracerPlugin};
 pub use response_compression::{
     CompressionAlgorithm, ResponseCompressionConfig, ResponseCompressionPlugin,
@@ -38,13 +34,6 @@ pub use response_header_mutation::{
     ResponseHeaderValueSpec,
 };
 pub use security_headers::SecurityHeadersPlugin;
-pub use std_grpc_access_log::{
-    GrpcLogFormat, GrpcSamplingTable, PackedGrpcRecord, StdGrpcAccessLogConfig,
-    StdGrpcAccessLogPlugin,
-};
-pub use std_http_access_log::{
-    LogFormat, PackedLogRecord, StdHttpAccessLogConfig, StdHttpAccessLogPlugin,
-};
 
 /// Contract for plugins evaluated on outgoing upstream responses.
 pub trait PostResponsePlugin: Send + Sync {
@@ -95,14 +84,11 @@ pub fn instantiate(
     match config.id.as_str() {
         "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),
         "cors" => Ok(Arc::new(CorsResponsePlugin::from_config(config)?)),
-        "std_http_access_log" => Ok(Arc::new(StdHttpAccessLogPlugin::from_config(config)?)),
-        "std_grpc_access_log" => Ok(Arc::new(StdGrpcAccessLogPlugin::from_config(config)?)),
         "http_cache_store" => Ok(Arc::new(HttpCacheStorePlugin::from_config(config)?)),
         "response_header_mutation" => {
             Ok(Arc::new(ResponseHeaderMutationPlugin::from_config(config)?))
         }
         "response_compression" => Ok(Arc::new(ResponseCompressionPlugin::from_config(config)?)),
-        "opentelemetry_logger" => Ok(Arc::new(OpentelemetryLoggerPlugin::from_config(config)?)),
         "opentelemetry_tracer" => Ok(Arc::new(OpentelemetryTracerPlugin::from_config(config)?)),
         "ai_token_metering" => Ok(Arc::new(AiTokenMeteringPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(

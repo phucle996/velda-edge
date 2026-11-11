@@ -129,7 +129,7 @@ Ultra-high-performance, asynchronous distributed trace span reporter for the **V
   "plugins": [
     "w3c_trace_context",
     "rate_limit",
-    "opentelemetry_logger",
+    "security_headers",
     "opentelemetry_tracer"
   ]
 }
