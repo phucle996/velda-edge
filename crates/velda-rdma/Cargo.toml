@@ -11,7 +11,7 @@ bytes = "1.10"
 thiserror = "2.0"
 tracing = "0.1"
 libc = "0.2"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
