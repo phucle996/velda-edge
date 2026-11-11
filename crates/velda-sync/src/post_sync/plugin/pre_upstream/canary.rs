@@ -37,26 +37,16 @@ pub struct CanaryConfig {
     /// Traffic percentage directed to canary (0 to 100).
     pub weight: u32,
     /// Header rules triggering immediate canary routing.
-    #[serde(default)]
     pub rules: Vec<CanaryHeaderRuleConfig>,
     /// Hashing strategy: "priority", "composite", or "random".
-    #[serde(default = "default_hash_strategy")]
     pub hash_strategy: String,
     /// Ordered list of sources used for consistent session hashing:
     /// e.g. ["header:x-user-id", "cookie:session_token", "client_ip"].
-    #[serde(default)]
     pub hash_sources: Vec<String>,
-    /// Backwards-compatible legacy attribute: "client_ip", "random", or specific source.
-    #[serde(default)]
-    pub hash_by: Option<String>,
     /// Header name injected into upstream request to mark canary traffic (or "none" to disable).
     pub canary_header: String,
     /// Injected header value (or "none" if canary_header is "none").
     pub canary_header_value: String,
-}
-
-fn default_hash_strategy() -> String {
-    "priority".into()
 }
 
 /// Helper to validate RFC 9110 header token grammar.
@@ -92,7 +82,7 @@ pub fn validate_canary_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
 ) -> Result<CanaryConfig, SyncError> {
-    let mut cfg: CanaryConfig =
+    let cfg: CanaryConfig =
         serde_json::from_value(config_val.clone()).map_err(|e| SyncError::Validation {
             domain: "plugins".into(),
             reason: format!("Plugin '{plugin_id}' has malformed or incomplete canary config: {e}"),
@@ -156,49 +146,6 @@ pub fn validate_canary_config(
     }
 
     // 4. Validate and Normalize Hashing Strategy & Sources
-    // Backwards compatibility normalization from legacy `hash_by`
-    if cfg.hash_sources.is_empty()
-        && let Some(ref legacy) = cfg.hash_by
-    {
-        let legacy_clean = legacy.trim().to_ascii_lowercase();
-        match legacy_clean.as_str() {
-            "client_ip" | "ip" => {
-                cfg.hash_strategy = "priority".into();
-                cfg.hash_sources = vec!["client_ip".into()];
-            }
-            "random" => {
-                cfg.hash_strategy = "random".into();
-            }
-            "uri_path" | "path" => {
-                cfg.hash_strategy = "priority".into();
-                cfg.hash_sources = vec!["uri_path".into()];
-            }
-            s if s.starts_with("header:")
-                || s.starts_with("cookie:")
-                || s.starts_with("query:") =>
-            {
-                cfg.hash_strategy = "priority".into();
-                cfg.hash_sources = vec![s.to_string()];
-            }
-            "header" | "cookie" | "query" => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{plugin_id}': '{legacy_clean}' requires an explicit target name (e.g. 'header:x-user-id', 'cookie:session_id', 'query:tenant_id'). Bare '{legacy_clean}' without a name is forbidden to prevent unconfigured defaults."
-                    ),
-                });
-            }
-            other => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{plugin_id}': invalid hash_by '{other}'. Supported values: 'random', 'client_ip', 'uri_path', 'header:<name>', 'cookie:<name>', 'query:<name>'."
-                    ),
-                });
-            }
-        }
-    }
-
     let strat_lower = cfg.hash_strategy.trim().to_ascii_lowercase();
     match strat_lower.as_str() {
         "priority" | "composite" => {
@@ -361,6 +308,7 @@ mod tests {
         let val = json!({
             "canary_upstream": "orders-v2-canary",
             "weight": 50,
+            "rules": [],
             "hash_strategy": "composite",
             "hash_sources": [
                 "header:x-tenant-id",
@@ -378,6 +326,8 @@ mod tests {
         let val = json!({
             "canary_upstream": "upstream-b",
             "weight": 20,
+            "rules": [],
+            "hash_strategy": "priority",
             "hash_sources": ["header"],
             "canary_header": "x-canary",
             "canary_header_value": "true"
@@ -396,7 +346,9 @@ mod tests {
         let val = json!({
             "canary_upstream": "",
             "weight": 25,
+            "rules": [],
             "hash_strategy": "random",
+            "hash_sources": [],
             "canary_header": "x-canary-route",
             "canary_header_value": "true"
         });
@@ -414,7 +366,9 @@ mod tests {
         let val = json!({
             "canary_upstream": "upstream-b",
             "weight": 105,
+            "rules": [],
             "hash_strategy": "random",
+            "hash_sources": [],
             "canary_header": "x-canary-route",
             "canary_header_value": "true"
         });
@@ -428,7 +382,9 @@ mod tests {
         let val = json!({
             "canary_upstream": "upstream-b",
             "weight": 50,
+            "rules": [],
             "hash_strategy": "random",
+            "hash_sources": [],
             "canary_header": "x-canary",
             "canary_header_value": "line1\r\ninjected: evil"
         });

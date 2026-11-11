@@ -142,8 +142,8 @@
       "config": {
         "target": "stdout",
         "format": "json",
-        "flush_interval_ms": 100,
-        "max_batch_size": 512
+        "flush_interval_ms": 1000,
+        "max_batch_size": 1000
       }
     },
     {
@@ -235,12 +235,73 @@
           "orders"
         ],
         "claims_to_headers": [
-          { "claim": "sub", "header": "x-user-id" },
-          { "claim": "client_id", "header": "x-client-id" },
-          { "claim": "scope", "header": "x-authenticated-scope" }
+          {
+            "claim": "sub",
+            "header": "x-user-id"
+          },
+          {
+            "claim": "client_id",
+            "header": "x-client-id"
+          },
+          {
+            "claim": "scope",
+            "header": "x-authenticated-scope"
+          }
         ],
         "hide_credentials": true,
         "fallback_behavior": "reject"
+      }
+    },
+    {
+      "id": "otlp_log_shipper",
+      "config": {
+        "protocol": "http",
+        "endpoint": "http://otel-collector.internal:4318",
+        "service_name": "velda-edge",
+        "flush_interval_ms": 1000,
+        "max_batch_size": 1000,
+        "connect_timeout_ms": 2000,
+        "request_timeout_ms": 5000,
+        "headers": {}
+      }
+    },
+    {
+      "id": "loki_log_shipper",
+      "config": {
+        "protocol": "http",
+        "endpoint": "http://loki.internal:3100",
+        "tenant_id": "velda-prod",
+        "service_name": "velda-edge",
+        "flush_interval_ms": 1000,
+        "max_batch_size": 1000,
+        "connect_timeout_ms": 2000,
+        "request_timeout_ms": 5000,
+        "labels": {
+          "env": "prod",
+          "cluster": "edge-1"
+        }
+      }
+    },
+    {
+      "id": "otlp_metrics_exporter",
+      "config": {
+        "protocol": "http",
+        "endpoint": "http://otel-collector.internal:4318",
+        "interval_secs": 15,
+        "connect_timeout_ms": 2000,
+        "request_timeout_ms": 5000,
+        "service_name": "velda-edge",
+        "headers": {}
+      }
+    },
+    {
+      "id": "statsd_exporter",
+      "config": {
+        "endpoint": "127.0.0.1:8125",
+        "interval_secs": 10,
+        "prefix": "velda",
+        "dialect": "dogstatsd",
+        "max_packet_size": 1432
       }
     }
   ]

@@ -875,7 +875,7 @@ mod tests {
                     "max_buffer_size_kb": 256
                 },
                 "tls": { "mode": "none" },
-                "cors": { "enabled": false },
+                "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] },
                 "auth": { "mode": "none" }
             }),
         }];

@@ -52,13 +52,10 @@ pub struct CorsExporterConfig {
     /// Whether Cross-Origin Resource Sharing (CORS) is enabled.
     pub enabled: bool,
     /// Permitted origins (e.g. `["https://grafana.internal"]` or `[]`).
-    #[serde(default)]
     pub allow_origins: Vec<String>,
     /// Permitted HTTP methods (e.g. `["GET", "OPTIONS"]` or `[]`).
-    #[serde(default)]
     pub allow_methods: Vec<String>,
     /// Permitted HTTP request headers (e.g. `["Authorization"]` or `[]`).
-    #[serde(default)]
     pub allow_headers: Vec<String>,
 }
 
@@ -383,7 +380,7 @@ mod tests {
                 "max_buffer_size_kb": 256
             },
             "tls": { "mode": "none" },
-            "cors": { "enabled": false }
+            "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] }
         });
 
         let res = validate_prometheus_exporter_config("p-test", &bad_json);

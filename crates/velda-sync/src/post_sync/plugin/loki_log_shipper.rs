@@ -12,7 +12,9 @@ use crate::SyncError;
 /// Declarative configuration for the Grafana Loki Log Shipper background plugin (`loki_log_shipper`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LokiLogShipperConfig {
-    /// Target Loki push URL (e.g. `http://127.0.0.1:3100/loki/api/v1/push`).
+    /// Loki transport protocol (`"http"` or `"grpc"`).
+    pub protocol: String,
+    /// Target Loki push URL (e.g. `http://127.0.0.1:3100/loki/api/v1/push` or `grpc://127.0.0.1:9096`).
     pub endpoint: String,
     /// Multi-tenant Loki identifier sent via `X-Scope-OrgID` header (use `""` for single-tenant).
     pub tenant_id: String,
@@ -20,11 +22,11 @@ pub struct LokiLogShipperConfig {
     pub service_name: String,
     /// Periodic batch flush interval in milliseconds (100 to 60,000 ms).
     pub flush_interval_ms: u64,
-    /// Maximum records grouped into a single Loki HTTP POST payload (1 to 10,000).
+    /// Maximum records grouped into a single Loki HTTP/gRPC push payload (1 to 10,000).
     pub max_batch_size: usize,
     /// TCP connection establishment timeout in milliseconds (100 to 60,000 ms).
     pub connect_timeout_ms: u64,
-    /// HTTP push request completion timeout in milliseconds (100 to 60,000 ms).
+    /// HTTP/gRPC push request completion timeout in milliseconds (100 to 60,000 ms).
     pub request_timeout_ms: u64,
     /// Additional static stream labels merged into every Loki stream descriptor.
     pub labels: HashMap<String, String>,
@@ -44,12 +46,26 @@ pub fn validate_loki_log_shipper_config(
             ),
         })?;
 
-    let endpoint = cfg.endpoint.trim();
-    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+    let protocol = cfg.protocol.trim().to_ascii_lowercase();
+    if protocol != "http" && protocol != "grpc" {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': endpoint '{endpoint}' must start with 'http://' or 'https://'"
+                "Plugin '{plugin_id}': protocol must be explicitly set to 'http' or 'grpc', found '{protocol}'"
+            ),
+        });
+    }
+
+    let endpoint = cfg.endpoint.trim();
+    if !endpoint.starts_with("http://")
+        && !endpoint.starts_with("https://")
+        && !endpoint.starts_with("grpc://")
+        && !endpoint.starts_with("grpcs://")
+    {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': endpoint '{endpoint}' must start with 'http://', 'https://', 'grpc://', or 'grpcs://'"
             ),
         });
     }
@@ -121,6 +137,7 @@ mod tests {
     #[test]
     fn test_valid_loki_log_shipper_config() {
         let raw = json!({
+            "protocol": "http",
             "endpoint": "http://127.0.0.1:3100/loki/api/v1/push",
             "tenant_id": "velda-prod",
             "service_name": "velda-edge",
@@ -133,13 +150,45 @@ mod tests {
             }
         });
         let cfg = validate_loki_log_shipper_config("loki_shipper", &raw).unwrap();
+        assert_eq!(cfg.protocol, "http");
         assert_eq!(cfg.service_name, "velda-edge");
         assert_eq!(cfg.max_batch_size, 512);
+
+        let grpc_raw = json!({
+            "protocol": "grpc",
+            "endpoint": "grpc://127.0.0.1:9096",
+            "tenant_id": "",
+            "service_name": "velda-edge",
+            "flush_interval_ms": 500,
+            "max_batch_size": 512,
+            "connect_timeout_ms": 2000,
+            "request_timeout_ms": 5000,
+            "labels": {}
+        });
+        let grpc_cfg = validate_loki_log_shipper_config("loki_shipper_grpc", &grpc_raw).unwrap();
+        assert_eq!(grpc_cfg.protocol, "grpc");
+    }
+
+    #[test]
+    fn test_invalid_loki_log_shipper_protocol() {
+        let raw = json!({
+            "protocol": "websocket",
+            "endpoint": "http://127.0.0.1:3100/loki/api/v1/push",
+            "tenant_id": "",
+            "service_name": "velda-edge",
+            "flush_interval_ms": 500,
+            "max_batch_size": 512,
+            "connect_timeout_ms": 2000,
+            "request_timeout_ms": 5000,
+            "labels": {}
+        });
+        assert!(validate_loki_log_shipper_config("loki_shipper", &raw).is_err());
     }
 
     #[test]
     fn test_invalid_loki_log_shipper_endpoint() {
         let raw = json!({
+            "protocol": "http",
             "endpoint": "ftp://127.0.0.1:3100",
             "tenant_id": "",
             "service_name": "velda-edge",

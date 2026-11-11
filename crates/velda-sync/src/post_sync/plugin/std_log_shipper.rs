@@ -41,13 +41,23 @@ pub fn validate_std_log_shipper_config(
             reason: format!("Plugin '{plugin_id}': target cannot be empty"),
         });
     }
+    // Explicit target contract: 'stdout' | 'stderr' | absolute file path (no implicit relative paths).
+    let target_lc = target.to_ascii_lowercase();
+    if target_lc != "stdout" && target_lc != "stderr" && !target.starts_with('/') {
+        return Err(SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!(
+                "Plugin '{plugin_id}': target must be 'stdout', 'stderr' or an absolute file path, found '{target}'"
+            ),
+        });
+    }
 
     let format = cfg.format.trim().to_ascii_lowercase();
     if format != "text" && format != "json" && format != "clf" {
         return Err(SyncError::Validation {
             domain: "plugins".into(),
             reason: format!(
-                "Plugin '{plugin_id}': format must be 'text' or 'json', found '{format}'"
+                "Plugin '{plugin_id}': format must be 'text', 'json' or 'clf', found '{format}'"
             ),
         });
     }

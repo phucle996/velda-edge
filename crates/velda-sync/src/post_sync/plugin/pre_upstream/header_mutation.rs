@@ -33,7 +33,6 @@ pub struct HeaderMutationConfig {
     /// Header names to remove before forwarding to upstream.
     pub remove_headers: Vec<String>,
     /// Header rename mapping from source name to destination name.
-    #[serde(default)]
     pub rename_headers: HashMap<String, String>,
     /// Headers to set/overwrite on the request before forwarding.
     pub set_headers: HashMap<String, String>,
@@ -383,6 +382,7 @@ mod tests {
     fn test_invalid_header_name_rejected() {
         let val = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": ["Invalid: Header Name"],
             "set_headers": {},
             "append_headers": {}
@@ -394,6 +394,7 @@ mod tests {
         // Header name with leading whitespace must be rejected
         let val_space = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [" X-Spaced"],
             "set_headers": {},
             "append_headers": {}
@@ -407,6 +408,7 @@ mod tests {
     fn test_crlf_and_control_chars_rejected() {
         let val = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "X-Injected": "value\r\nInjected-Header: evil"
@@ -420,6 +422,7 @@ mod tests {
         // Null byte
         let val_null = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "X-Null": "value\u{0000}bad"
@@ -441,6 +444,7 @@ mod tests {
         // 1. Removing Host
         let val_host = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": ["Host"],
             "set_headers": {},
             "append_headers": {}
@@ -450,6 +454,7 @@ mod tests {
         // 2. Removing Content-Length
         let val_cl = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": ["content-length"],
             "set_headers": {},
             "append_headers": {}
@@ -459,6 +464,7 @@ mod tests {
         // 3. Mutating Content-Length or Transfer-Encoding (Smuggling attempt)
         let val_smuggle = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "transfer-encoding": "chunked"
@@ -470,6 +476,7 @@ mod tests {
         // 4. Mutating x-request-id
         let val_req_id = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "x-request-id": "spoofed-id"
@@ -481,6 +488,7 @@ mod tests {
         // 5. Pseudo-headers forbidden
         let val_pseudo = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 ":path": "/evil"
@@ -495,6 +503,7 @@ mod tests {
         // Unknown variable must fail
         let val_bad_var = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "X-Client": "$client_addr" // typo for $client_ip
@@ -512,6 +521,7 @@ mod tests {
         // Valid variable passes
         let val_good_var = json!({
             "strip_hop_by_hop": true,
+            "rename_headers": {},
             "remove_headers": [],
             "set_headers": {
                 "X-Client": "$client_ip",

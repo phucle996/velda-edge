@@ -46,7 +46,6 @@ pub struct HttpFaultHeaderMatchConfig {
     /// Header name to inspect.
     pub name: String,
     /// If Some, matches exact string value. If None, matches presence of header.
-    #[serde(default)]
     pub exact_match: Option<String>,
 }
 
@@ -55,32 +54,13 @@ pub struct HttpFaultHeaderMatchConfig {
 #[serde(deny_unknown_fields)]
 pub struct HttpFaultScopeConfig {
     /// CIDR blocks or IP addresses targeted for fault injection.
-    #[serde(default)]
     pub client_ips: Vec<String>,
     /// Header matching rule for targeted fault injection.
-    #[serde(default)]
     pub header_match: Option<HttpFaultHeaderMatchConfig>,
     /// Whether downstream clients can dynamically trigger delay or abort via headers.
-    #[serde(default)]
     pub allow_header_override: bool,
     /// Maximum allowed delay override in milliseconds (clamped to prevent Slowloris attacks).
-    #[serde(default = "default_max_override_delay_ms")]
     pub max_override_delay_ms: u64,
-}
-
-impl Default for HttpFaultScopeConfig {
-    fn default() -> Self {
-        Self {
-            client_ips: Vec::new(),
-            header_match: None,
-            allow_header_override: false,
-            max_override_delay_ms: default_max_override_delay_ms(),
-        }
-    }
-}
-
-fn default_max_override_delay_ms() -> u64 {
-    5_000 // 5 seconds default safe cap
 }
 
 /// Declarative configuration for the HTTP Fault Injection plugin.
@@ -88,7 +68,6 @@ fn default_max_override_delay_ms() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct HttpFaultInjectionConfig {
     /// Targeting scope and dynamic override controls.
-    #[serde(default)]
     pub scope: HttpFaultScopeConfig,
     /// Latency injection block.
     pub delay: HttpFaultDelayConfig,
@@ -308,6 +287,12 @@ mod tests {
     #[test]
     fn test_valid_http_fault_injection() {
         let val = json!({
+            "scope": {
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": false,
+                "max_override_delay_ms": 5000
+            },
             "delay": {
                 "enabled": true,
                 "fixed_delay_ms": 250,
@@ -354,7 +339,10 @@ mod tests {
     fn test_unscoped_override_rejected() {
         let val = json!({
             "scope": {
-                "allow_header_override": true
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": true,
+                "max_override_delay_ms": 5000
                 // Missing both client_ips and header_match!
             },
             "delay": {
@@ -381,6 +369,12 @@ mod tests {
     fn test_invalid_http_status_rejected() {
         // Status 200 is not an error/fault abort!
         let val = json!({
+            "scope": {
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": false,
+                "max_override_delay_ms": 5000
+            },
             "delay": {
                 "enabled": false,
                 "fixed_delay_ms": 0,
@@ -400,6 +394,12 @@ mod tests {
     #[test]
     fn test_delay_exceeds_max_rejected() {
         let val = json!({
+            "scope": {
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": false,
+                "max_override_delay_ms": 5000
+            },
             "delay": {
                 "enabled": true,
                 "fixed_delay_ms": 120_000,
@@ -423,6 +423,12 @@ mod tests {
     #[test]
     fn test_noop_config_rejected() {
         let val = json!({
+            "scope": {
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": false,
+                "max_override_delay_ms": 5000
+            },
             "delay": {
                 "enabled": false,
                 "fixed_delay_ms": 0,
@@ -446,6 +452,12 @@ mod tests {
     #[test]
     fn test_unknown_fields_rejected() {
         let val = json!({
+            "scope": {
+                "client_ips": [],
+                "header_match": null,
+                "allow_header_override": false,
+                "max_override_delay_ms": 5000
+            },
             "delay": {
                 "enabled": true,
                 "fixed_delay_ms": 100,
