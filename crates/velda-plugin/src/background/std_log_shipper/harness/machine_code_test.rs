@@ -11,8 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, LogStore,
-    PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogStore, PipeKind,
 };
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 
@@ -28,9 +27,7 @@ fn create_sample_http_record(id: u64, ts: u32) -> AccessLogRecord {
         200,
         1,
         0,
-        LogProtocol::H2,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH2H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,
@@ -50,9 +47,7 @@ fn create_sample_grpc_record(id: u64, ts: u32) -> AccessLogRecord {
         200,
         2,
         4,
-        LogProtocol::GrpcTcp,
-        LogProtocol::GrpcTcp,
-        PipeStrategy::Duplex,
+        PipeKind::DuplexGrpcTcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::Ok,
@@ -72,9 +67,7 @@ fn create_sample_raw_record(id: u64, ts: u32) -> AccessLogRecord {
         0,
         3,
         0,
-        LogProtocol::RawTcp,
-        LogProtocol::RawTcp,
-        PipeStrategy::Duplex,
+        PipeKind::TcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,

@@ -26,6 +26,7 @@ use std::time::Duration;
 use velda_grpc::tcp::server::GrpcServerStream;
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
+use crate::pipeline::PipeOutcome;
 use crate::upstream::grpc::GrpcRdmaUpstream;
 
 /// Serves a bidirectional duplex streaming gRPC request over TCP forwarded to a gRPC RDMA backend.
@@ -33,7 +34,7 @@ pub async fn serve(
     server_stream: GrpcServerStream,
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
-) -> Result<(), GrpcError> {
+) -> PipeOutcome {
     // Step 1: Deconstruct downstream stream into request parts, receive body stream, and response handle.
     let GrpcServerStream {
         parts,
@@ -52,9 +53,17 @@ pub async fn serve(
             );
             let _ = respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("rdma upstream unavailable"));
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::Unavailable,
+                0,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = client.target();
 
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
@@ -77,16 +86,18 @@ pub async fn serve(
 
         // Step 6: Task A (Client-to-Upstream Pump) - Forwards client streaming frames to RDMA.
         let upstream_forward = async {
+            let mut bytes_rx: u64 = 0;
             while let Some(chunk) = recv_stream.data().await {
                 let data = chunk.map_err(GrpcError::H2)?;
                 let len = data.len();
+                bytes_rx += len as u64;
                 let is_last = recv_stream.is_end_stream();
                 upstream_send_stream
                     .send_data(data, is_last)
                     .map_err(GrpcError::H2)?;
                 let _ = recv_stream.flow_control().release_capacity(len);
                 if is_last {
-                    return Ok::<(), GrpcError>(());
+                    return Ok::<u64, GrpcError>(bytes_rx);
                 }
             }
             if let Some(trailers) = recv_stream.trailers().await.map_err(GrpcError::H2)? {
@@ -98,7 +109,7 @@ pub async fn serve(
                     .send_data(Bytes::new(), true)
                     .map_err(GrpcError::H2)?;
             }
-            Ok(())
+            Ok::<u64, GrpcError>(bytes_rx)
         };
 
         // Step 7: Task B (Upstream-to-Client Pump) - Awaits headers and streams RDMA responses downstream.
@@ -116,16 +127,27 @@ pub async fn serve(
                 }
             }
 
+            let mut grpc_status = resp_parts
+                .headers
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u8>().ok())
+                .map(velda_observability::LogGrpcStatus::from_u8)
+                .unwrap_or(velda_observability::LogGrpcStatus::Ok);
+
             let is_end_of_stream = upstream_recv_stream.is_end_stream();
             let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
             let mut downstream_send_stream = respond
                 .send_response(resp, is_end_of_stream)
                 .map_err(GrpcError::H2)?;
 
+            let mut bytes_tx: u64 = 0;
+
             if !is_end_of_stream {
                 while let Some(chunk) = upstream_recv_stream.data().await {
                     let data = chunk.map_err(GrpcError::H2)?;
                     let len = data.len();
+                    bytes_tx += len as u64;
                     let is_last = upstream_recv_stream.is_end_stream();
                     downstream_send_stream
                         .send_data(data, is_last)
@@ -140,31 +162,59 @@ pub async fn serve(
                     .await
                     .map_err(GrpcError::H2)?
                 {
+                    if let Some(code) = trailers
+                        .get("grpc-status")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .map(velda_observability::LogGrpcStatus::from_u8)
+                    {
+                        grpc_status = code;
+                    }
                     downstream_send_stream
                         .send_trailers(trailers)
                         .map_err(GrpcError::H2)?;
                 }
             }
-            Ok(())
+            Ok::<(u64, velda_observability::LogGrpcStatus), GrpcError>((bytes_tx, grpc_status))
         };
 
         // Step 8: Concurrently join both pump tasks; abort if either fails.
-        tokio::try_join!(upstream_forward, downstream_forward)?;
-        Ok::<(), GrpcError>(())
+        let (bytes_rx, (bytes_tx, grpc_status)) =
+            tokio::try_join!(upstream_forward, downstream_forward)?;
+        Ok::<_, GrpcError>((bytes_rx, bytes_tx, grpc_status))
     };
 
     // Step 9: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match tokio::time::timeout(timeout, workflow).await {
-        Ok(res) => res,
+        Ok(Ok((rx, tx, status))) => PipeOutcome::grpc(
+            200,
+            status,
+            rx,
+            tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
+        Ok(Err(_)) => PipeOutcome::grpc(
+            200,
+            velda_observability::LogGrpcStatus::Unavailable,
+            0,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        ),
         Err(_) => {
             let _ = respond.send_trailers_only(
                 GrpcStatus::DeadlineExceeded,
                 Some("gRPC call duration deadline exceeded"),
             );
-            Err(GrpcError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "gRPC RDMA duplex call timed out",
-            )))
+            PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::DeadlineExceeded,
+                0,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::Timeout,
+            )
         }
     }
 }

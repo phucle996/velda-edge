@@ -136,6 +136,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(client.target());
 
     // 6. Forward request over HTTP/3 stream and get progressive streaming response
     let mut stream_res = client.send_stream_request(l7_req.clone()).await;
@@ -145,6 +146,7 @@ where
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
+            conn.last_upstream_addr = Some(fresh_client.target());
             stream_res = fresh_client.send_stream_request(l7_req.clone()).await;
         }
     }
@@ -267,6 +269,7 @@ where
             );
             return Err(Http1Error::ConnectionClosed);
         }
+        conn.last_bytes_tx += batch_bytes as u64;
 
         if reached_eof {
             break;

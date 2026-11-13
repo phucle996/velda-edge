@@ -157,6 +157,51 @@ pub fn fast_write_ts_sec(buf: &mut Vec<u8>, ts_sec: u32) {
     }
 }
 
+/// Formats an exact 20-character ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) into ASCII bytes
+/// directly into `buf` using Howard Hinnant's branchless integer date algorithm (0 heap allocations).
+#[inline(always)]
+pub fn fast_write_iso8601_utc(buf: &mut Vec<u8>, ts: u32) {
+    let sec = (ts % 60) as u8;
+    let min = ((ts / 60) % 60) as u8;
+    let hour = ((ts / 3600) % 24) as u8;
+    let days = (ts / 86400) as i64;
+
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    let mut out = [0u8; 20];
+    out[0] = b'0' + ((y / 1000) % 10) as u8;
+    out[1] = b'0' + ((y / 100) % 10) as u8;
+    out[2] = b'0' + ((y / 10) % 10) as u8;
+    out[3] = b'0' + (y % 10) as u8;
+    out[4] = b'-';
+    out[5] = b'0' + (m / 10) as u8;
+    out[6] = b'0' + (m % 10) as u8;
+    out[7] = b'-';
+    out[8] = b'0' + (d / 10) as u8;
+    out[9] = b'0' + (d % 10) as u8;
+    out[10] = b'T';
+    out[11] = b'0' + (hour / 10);
+    out[12] = b'0' + (hour % 10);
+    out[13] = b':';
+    out[14] = b'0' + (min / 10);
+    out[15] = b'0' + (min % 10);
+    out[16] = b':';
+    out[17] = b'0' + (sec / 10);
+    out[18] = b'0' + (sec % 10);
+    out[19] = b'Z';
+
+    buf.extend_from_slice(&out);
+}
+
 /// Formats a Unix timestamp in nanoseconds (`ts_sec * 1_000_000_000`) into ASCII bytes directly into `buf`.
 ///
 /// When `ts_sec >= 1_000_000_000`, formats the 10 digits of `ts_sec` via SIMD and appends 9 trailing zeros

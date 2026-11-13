@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use prost::Message;
 use velda_observability::{
-    DownstreamProto, MetricsSnapshot, MetricsStore, PipeStrategy, UpstreamProto,
+    DownstreamProtocol, MetricsSnapshot, MetricsStore, PipeStrategy, UpstreamProtocol,
 };
 use velda_plugin::background::otlp_metrics_exporter::json::OtlpJsonTemplate;
 use velda_plugin::background::otlp_metrics_exporter::proto::{
@@ -292,8 +292,8 @@ fn test_otlp_metrics_stress_1000_cycles_memory_stability() {
         // Mutate metrics activity
         let slot = store.slot_on_core(
             cycle % 4,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();

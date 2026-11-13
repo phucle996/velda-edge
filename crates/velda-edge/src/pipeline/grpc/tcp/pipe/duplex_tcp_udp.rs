@@ -13,6 +13,7 @@ use velda_grpc::tcp::server::GrpcServerStream;
 use velda_grpc::udp::client::GrpcUdpClient;
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
+use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcUdpUpstream;
 
 /// Dispatches a bidirectional streaming gRPC request over UDP / QUIC.
@@ -48,7 +49,7 @@ pub async fn serve(
     mut server_stream: GrpcServerStream,
     upstream: &Arc<GrpcUdpUpstream>,
     config: &GrpcConfig,
-) -> Result<(), GrpcError> {
+) -> PipeOutcome {
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
         .await
@@ -59,9 +60,17 @@ pub async fn serve(
                 GrpcStatus::ResourceExhausted,
                 Some("request message size exceeds limit"),
             );
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::ResourceExhausted,
+                0,
+                0,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = req_data.len() as u64;
 
     let l7_req = L7Request::new(
         server_stream.parts.method.clone(),
@@ -82,9 +91,17 @@ pub async fn serve(
             let _ = server_stream
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::Unavailable,
+                bytes_rx,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(client.target());
 
     let mut pipe_res = pipe_duplex_udp(&client, &l7_req, config).await;
 
@@ -98,6 +115,7 @@ pub async fn serve(
             "gRPC UDP connection dropped; self-healing with fresh connection"
         );
         if let Ok(fresh_client) = upstream.acquire_fresh(config).await {
+            upstream_addr = Some(fresh_client.target());
             pipe_res = pipe_duplex_udp(&fresh_client, &l7_req, config).await;
         }
     }
@@ -112,24 +130,39 @@ pub async fn serve(
                 .map(GrpcStatus::from_code)
                 .unwrap_or(GrpcStatus::Ok);
 
+            let bytes_tx = resp.body.len() as u64;
             let body_bytes = if resp.body.is_empty() {
                 None
             } else {
                 Some(resp.body.to_bytes())
             };
 
-            server_stream.respond.send_unary_response(
+            let _ = server_stream.respond.send_unary_response(
                 status,
                 body_bytes.as_deref(),
                 Some(resp.headers.into()),
-            )?;
-            Ok(())
+            );
+            PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::from_u8(status as u8),
+                bytes_rx,
+                bytes_tx,
+                upstream_addr,
+                velda_observability::LogCompletionReason::Complete,
+            )
         }
-        Err(e) => {
+        Err(_) => {
             let _ = server_stream
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream bridge failure"));
-            Err(e)
+            PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::Unavailable,
+                bytes_rx,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            )
         }
     }
 }

@@ -11,9 +11,7 @@
 
 use prost::Message;
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
-};
+use velda_observability::{AccessLogRecord, LogGrpcStatus, LogHttpMethod, UaFamily, UaOs};
 
 use super::super::lut::{fast_write_hex32, fast_write_ip};
 
@@ -68,11 +66,11 @@ pub struct InstrumentationScope {
 pub struct LogRecord {
     #[prost(fixed64, tag = "1")]
     pub time_unix_nano: u64,
-    #[prost(fixed64, tag = "2")]
+    #[prost(fixed64, tag = "11")]
     pub observed_time_unix_nano: u64,
-    #[prost(int32, tag = "3")]
+    #[prost(int32, tag = "2")]
     pub severity_number: i32,
-    #[prost(string, tag = "4")]
+    #[prost(string, tag = "3")]
     pub severity_text: String,
     #[prost(message, optional, tag = "5")]
     pub body: Option<AnyValue>,
@@ -80,7 +78,7 @@ pub struct LogRecord {
     pub attributes: Vec<KeyValue>,
     #[prost(uint32, tag = "7")]
     pub dropped_attributes_count: u32,
-    #[prost(uint32, tag = "8")]
+    #[prost(fixed32, tag = "8")]
     pub flags: u32,
     #[prost(bytes = "vec", tag = "9")]
     pub trace_id: Vec<u8>,
@@ -161,11 +159,12 @@ impl LogRecord {
                     value: Some(any_value::Value::StringValue(req_id_str)),
                 }),
             },
-            KeyValue::string("network.protocol.name", "HTTP/1.1"),
+            KeyValue::string("downstream_protocol", "http/1.1"),
+            KeyValue::string("upstream_protocol", "http/1.1"),
             KeyValue::string("http.request.method", "GET"),
             KeyValue::int("http.response.status_code", 200),
             KeyValue::string("rpc.grpc.status_code", "0"),
-            KeyValue::int("duration_us", 0),
+            KeyValue::int("duration_ns", 0),
             KeyValue::int("http.response.body.size", 0),
             KeyValue::int("http.request.body.size", 0),
             KeyValue::int("velda.route_id", 0),
@@ -199,7 +198,8 @@ impl LogRecord {
 
     /// Mutates pre-allocated LogRecord template in-place from scalar [`AccessLogRecord`].
     pub fn populate_from_record(&mut self, rec: &AccessLogRecord) {
-        let proto = LogProtocol::from_u8(rec.downstream_proto);
+        let downstream_protocol = rec.downstream_protocol();
+        let upstream_protocol = rec.upstream_protocol();
         let method = LogHttpMethod::from_u8(rec.method);
         let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
         let ua_fam = UaFamily::from_u8(rec.ua_family);
@@ -250,7 +250,7 @@ impl LogRecord {
         self.span_id.clear();
 
         // Attribute updates
-        if self.attributes.len() >= 14 {
+        if self.attributes.len() >= 15 {
             // request_id attribute (32-character hex string):
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s_req)),
@@ -266,7 +266,7 @@ impl LogRecord {
             }) = self.attributes[1].value
             {
                 s.clear();
-                s.push_str(proto.as_str());
+                s.push_str(downstream_protocol.as_str());
             }
 
             if let Some(AnyValue {
@@ -274,19 +274,27 @@ impl LogRecord {
             }) = self.attributes[2].value
             {
                 s.clear();
+                s.push_str(upstream_protocol.as_str());
+            }
+
+            if let Some(AnyValue {
+                value: Some(any_value::Value::StringValue(ref mut s)),
+            }) = self.attributes[3].value
+            {
+                s.clear();
                 s.push_str(method.as_str());
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[3].value
+            }) = self.attributes[4].value
             {
                 *v = rec.status_code as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[4].value
+            }) = self.attributes[5].value
             {
                 s.clear();
                 s.push_str(grpc_st.as_str());
@@ -294,35 +302,35 @@ impl LogRecord {
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[5].value
-            {
-                *v = rec.duration_us as i64;
-            }
-
-            if let Some(AnyValue {
-                value: Some(any_value::Value::IntValue(ref mut v)),
             }) = self.attributes[6].value
             {
-                *v = rec.bytes_tx as i64;
+                *v = rec.duration_ns as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
             }) = self.attributes[7].value
             {
-                *v = rec.bytes_rx as i64;
+                *v = rec.bytes_tx as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
             }) = self.attributes[8].value
             {
+                *v = rec.bytes_rx as i64;
+            }
+
+            if let Some(AnyValue {
+                value: Some(any_value::Value::IntValue(ref mut v)),
+            }) = self.attributes[9].value
+            {
                 *v = rec.route_id as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[9].value
+            }) = self.attributes[10].value
             {
                 let bytes = unsafe { s.as_mut_vec() };
                 bytes.clear();
@@ -331,14 +339,14 @@ impl LogRecord {
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[10].value
+            }) = self.attributes[11].value
             {
                 *v = rec.peer_port as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[11].value
+            }) = self.attributes[12].value
             {
                 s.clear();
                 s.push_str(ua_fam.as_str());
@@ -346,14 +354,14 @@ impl LogRecord {
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[12].value
+            }) = self.attributes[13].value
             {
                 *v = rec.ua_major_version as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[13].value
+            }) = self.attributes[14].value
             {
                 s.clear();
                 s.push_str(ua_os.as_str());
@@ -384,6 +392,7 @@ pub fn format_otlp_records_proto(
                 attributes: vec![
                     KeyValue::string("service.name", service_name),
                     KeyValue::string("telemetry.sdk.name", "velda-edge"),
+                    KeyValue::string("telemetry.sdk.language", "rust"),
                 ],
                 dropped_attributes_count: 0,
             }),

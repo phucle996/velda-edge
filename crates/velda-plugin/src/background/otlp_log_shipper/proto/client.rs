@@ -322,6 +322,10 @@ impl OtlpLogsGrpcClient {
             .map_err(|e| PluginError::Config(format!("Failed to build HTTP request: {e}")))?;
 
         let (response_future, mut send_stream) = send_req
+            .clone()
+            .ready()
+            .await
+            .map_err(|e| PluginError::Http(format!("HTTP/2 client not ready: {e}")))?
             .send_request(request, false)
             .map_err(|e| PluginError::Http(format!("Failed to initiate gRPC stream: {e}")))?;
 
@@ -352,12 +356,34 @@ impl OtlpLogsGrpcClient {
             )));
         }
 
+        // Handle gRPC Trailers-Only responses where grpc-status arrives in initial HEADERS frame
+        if let Some(status_str) = response
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+        {
+            if status_str != "0" {
+                let msg = response
+                    .headers()
+                    .get("grpc-message")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("Unknown error");
+                return Err(PluginError::Http(format!(
+                    "gRPC export rejected with status {status_str}: {msg}"
+                )));
+            }
+            return Ok(());
+        }
+
         let mut body = response.into_body();
         while let Some(chunk) = body.data().await {
             let _ = chunk.map_err(|e| PluginError::Http(format!("gRPC read chunk error: {e}")))?;
         }
 
-        if let Ok(Some(trailers)) = body.trailers().await
+        if let Some(trailers) = body
+            .trailers()
+            .await
+            .map_err(|e| PluginError::Http(format!("gRPC read trailers error: {e}")))?
             && let Some(status_str) = trailers.get("grpc-status").and_then(|h| h.to_str().ok())
             && status_str != "0"
         {
@@ -371,5 +397,57 @@ impl OtlpLogsGrpcClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_otlp_logs_grpc_rejects_trailers_only_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut conn) = h2::server::handshake(socket).await else {
+                        return;
+                    };
+                    while let Some(Ok((req, mut respond))) = conn.accept().await {
+                        let mut body = req.into_body();
+                        while let Some(Ok(_)) = body.data().await {}
+                        let resp = http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/grpc")
+                            .header("grpc-status", "13")
+                            .header("grpc-message", "proto: wrong wireType")
+                            .body(())
+                            .unwrap();
+                        let _ = respond.send_response(resp, true);
+                    }
+                });
+            }
+        });
+
+        let endpoint = format!("grpc://{addr}");
+        let mut client =
+            OtlpLogsGrpcClient::new(&endpoint, Duration::from_secs(2), Duration::from_secs(2))
+                .unwrap();
+        let err = client
+            .send_logs(b"bad", &HeaderMap::new())
+            .await
+            .expect_err("Trailers-Only grpc-status 13 must return Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("13"),
+            "Expected grpc-status 13 in error: {msg}"
+        );
+        assert!(
+            msg.contains("wrong wireType"),
+            "Expected grpc-message in error: {msg}"
+        );
     }
 }

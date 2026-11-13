@@ -35,11 +35,15 @@ fn test_slot_index_bijective_encoding_decoding() {
     let mut seen_indices = std::collections::HashSet::new();
 
     for d in [
-        DownstreamProto::H1,
-        DownstreamProto::H2,
-        DownstreamProto::H3,
+        DownstreamProtocol::H1,
+        DownstreamProtocol::H2,
+        DownstreamProtocol::H3,
     ] {
-        for u in [UpstreamProto::H1, UpstreamProto::H2, UpstreamProto::H3] {
+        for u in [
+            UpstreamProtocol::H1,
+            UpstreamProtocol::H2,
+            UpstreamProtocol::H3,
+        ] {
             for p in [
                 PipeStrategy::Buffered,
                 PipeStrategy::ServerStream,
@@ -98,16 +102,16 @@ fn test_record_completion_and_snapshot() {
     let store = MetricsStore::new();
 
     store.record_stream_start(
-        DownstreamProto::H2,
-        UpstreamProto::H1,
+        DownstreamProtocol::H2,
+        UpstreamProtocol::H1,
         PipeStrategy::ServerStream,
     );
 
     let initial_snap = store.snapshot();
     let initial_pipe = initial_snap
         .find_pipeline(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         )
         .expect("pipeline slot must exist");
@@ -115,8 +119,8 @@ fn test_record_completion_and_snapshot() {
     assert_eq!(initial_pipe.total_requests(), 0);
 
     store.record_stream_completion(
-        DownstreamProto::H2,
-        UpstreamProto::H1,
+        DownstreamProtocol::H2,
+        UpstreamProtocol::H1,
         PipeStrategy::ServerStream,
         StreamCompletion::new(
             200,
@@ -130,8 +134,8 @@ fn test_record_completion_and_snapshot() {
     let snap = store.snapshot();
     let pipe = snap
         .find_pipeline(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         )
         .unwrap();
@@ -161,13 +165,13 @@ fn test_concurrent_multi_threaded_recording() {
             for i in 0..requests_per_thread {
                 let status = if i % 10 == 0 { 500 } else { 200 };
                 store_clone.record_stream_start(
-                    DownstreamProto::H1,
-                    UpstreamProto::H1,
+                    DownstreamProtocol::H1,
+                    UpstreamProtocol::H1,
                     PipeStrategy::Buffered,
                 );
                 store_clone.record_stream_completion(
-                    DownstreamProto::H1,
-                    UpstreamProto::H1,
+                    DownstreamProtocol::H1,
+                    UpstreamProtocol::H1,
                     PipeStrategy::Buffered,
                     StreamCompletion::new(
                         status,
@@ -188,8 +192,8 @@ fn test_concurrent_multi_threaded_recording() {
     let snap = store.snapshot();
     let pipe = snap
         .find_pipeline(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         )
         .unwrap();
@@ -211,8 +215,8 @@ fn test_live_telemetry_flow() {
     let store = Arc::new(MetricsStore::new());
     let mut tel = LiveTelemetry::new(
         Arc::clone(&store),
-        DownstreamProto::H3,
-        UpstreamProto::H2,
+        DownstreamProtocol::H3,
+        UpstreamProtocol::H2,
         PipeStrategy::Duplex,
     );
 
@@ -224,7 +228,11 @@ fn test_live_telemetry_flow() {
 
     let snap = store.snapshot();
     let pipe = snap
-        .find_pipeline(DownstreamProto::H3, UpstreamProto::H2, PipeStrategy::Duplex)
+        .find_pipeline(
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H2,
+            PipeStrategy::Duplex,
+        )
         .unwrap();
 
     assert_eq!(pipe.total_requests(), 1);
@@ -433,8 +441,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
     // Pipeline 1: 100 requests (90 success 2xx, 10 errors 5xx)
     for _ in 0..90 {
         store.record_stream_completion(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             StreamCompletion {
                 status_code: 200,
@@ -447,8 +455,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
     }
     for _ in 0..10 {
         store.record_stream_completion(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             StreamCompletion {
                 status_code: 500,
@@ -463,8 +471,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
     // Pipeline 2: 50 requests (50 success 2xx)
     for _ in 0..50 {
         store.record_stream_completion(
-            DownstreamProto::H2,
-            UpstreamProto::H2,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H2,
             PipeStrategy::Duplex,
             StreamCompletion {
                 status_code: 200,
@@ -479,8 +487,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
     let snap = store.snapshot();
     let p1 = snap
         .find_pipeline(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         )
         .unwrap();
@@ -512,8 +520,8 @@ fn test_per_core_sharded_simd_aggregation() {
     for core_id in 0..4 {
         store.record_stream_completion_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             StreamCompletion {
                 status_code: 200,
@@ -528,8 +536,8 @@ fn test_per_core_sharded_simd_aggregation() {
     let snap = store.snapshot();
     let p = snap
         .find_pipeline(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         )
         .unwrap();
@@ -555,8 +563,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
     let test_cases = [
         (
             0,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             200,
             100,
@@ -566,8 +574,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             1,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             302,
             50,
@@ -577,8 +585,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             2,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             404,
             80,
@@ -588,8 +596,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             3,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             500,
             20,
@@ -599,8 +607,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             0,
-            DownstreamProto::H2,
-            UpstreamProto::H2,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H2,
             PipeStrategy::Duplex,
             200,
             1024,
@@ -610,8 +618,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             1,
-            DownstreamProto::H2,
-            UpstreamProto::H2,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H2,
             PipeStrategy::Duplex,
             502,
             30,
@@ -621,8 +629,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             2,
-            DownstreamProto::H2,
-            UpstreamProto::H2,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H2,
             PipeStrategy::Duplex,
             200,
             5000,
@@ -632,8 +640,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
         ),
         (
             3,
-            DownstreamProto::H3,
-            UpstreamProto::H2,
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H2,
             PipeStrategy::ServerStream,
             200,
             256,
@@ -707,8 +715,8 @@ fn test_aggregate_pipelines_with_explicit_function_pointers() {
     let store = MetricsStore::new();
 
     store.record_stream_completion(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
         StreamCompletion {
             status_code: 200,

@@ -63,12 +63,12 @@ pub const fn varint_len(mut val: u64) -> usize {
 /// Helper to serialize a Protobuf StringValue attribute:
 /// `KeyValue { key, value: Some(AnyValue { value: Some(StringValue(s)) }) }`
 #[inline(always)]
-fn write_str_attribute(buf: &mut Vec<u8>, key_wire_bytes: &[u8], s: &[u8]) {
+fn write_str_attribute(buf: &mut Vec<u8>, field_tag: u8, key_wire_bytes: &[u8], s: &[u8]) {
     let str_val_len = 1 + varint_len(s.len() as u64) + s.len(); // tag 0x0A + len + bytes
     let any_val_len = str_val_len;
     let kv_len = key_wire_bytes.len() + 1 + varint_len(any_val_len as u64) + any_val_len;
 
-    buf.push(0x32); // LogRecord field 6
+    buf.push(field_tag); // 0x0A for Resource.attributes (field 1), 0x32 for LogRecord.attributes (field 6)
     write_varint(buf, kv_len as u64);
     buf.extend_from_slice(key_wire_bytes);
     buf.push(0x12); // KeyValue field 2
@@ -78,28 +78,28 @@ fn write_str_attribute(buf: &mut Vec<u8>, key_wire_bytes: &[u8], s: &[u8]) {
     buf.extend_from_slice(s);
 }
 
-// Pre-baked wire skeletons combining:
-// - Tag 3: severity_number (varint)
-// - Tag 4: severity_text (string)
-// - Tag 5: body (static "HTTP access log" AnyValue message)
-// - Tag 6: repeated KeyValue attribute 0 ("request_id" key + AnyValue stringValue prefix)
+// Pre-baked wire skeletons combining canonical opentelemetry.proto.logs.v1.LogRecord tags:
+// - Tag 2 (0x10): severity_number (enum/varint)
+// - Tag 3 (0x1A): severity_text (string)
+// - Tag 5 (0x2A): body (static "HTTP access log" AnyValue message)
+// - Tag 6 (0x32): repeated KeyValue attribute 0 ("request_id" key + AnyValue stringValue prefix)
 //
 // Lengths:
 // Body message: Tag 5 (0x2A), len 17 (0x11), Tag 1 (0x0A), len 15 (0x0F), "HTTP access log" -> 19 bytes.
 // Request ID prefix: Tag 6 (0x32), len 48 (0x30), Tag 1 (0x0A), len 10 (0x0A), "request_id", Tag 2 (0x12), len 34 (0x22), Tag 1 (0x0A), len 32 (0x20) -> 18 bytes.
 // Combined Body + ReqId prefix = 19 + 18 = 37 bytes.
 //
-// INFO: Tag 3 (0x18, 0x09), Tag 4 (0x22, 0x04, "INFO") -> 8 bytes. Total = 8 + 37 = 45 bytes.
-// WARN: Tag 3 (0x18, 0x0D), Tag 4 (0x22, 0x04, "WARN") -> 8 bytes. Total = 8 + 37 = 45 bytes.
-// ERROR: Tag 3 (0x18, 0x11), Tag 4 (0x22, 0x05, "ERROR") -> 9 bytes. Total = 9 + 37 = 46 bytes.
-const SKELETON_INFO: &[u8] = b"\x18\x09\x22\x04INFO\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
-const SKELETON_WARN: &[u8] = b"\x18\x0d\x22\x04WARN\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
-const SKELETON_ERROR: &[u8] = b"\x18\x11\x22\x05ERROR\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
+// INFO: Tag 2 (0x10, 0x09), Tag 3 (0x1A, 0x04, "INFO") -> 8 bytes. Total = 8 + 37 = 45 bytes.
+// WARN: Tag 2 (0x10, 0x0D), Tag 3 (0x1A, 0x04, "WARN") -> 8 bytes. Total = 8 + 37 = 45 bytes.
+// ERROR: Tag 2 (0x10, 0x11), Tag 3 (0x1A, 0x05, "ERROR") -> 9 bytes. Total = 9 + 37 = 46 bytes.
+const SKELETON_INFO: &[u8] = b"\x10\x09\x1a\x04INFO\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
+const SKELETON_WARN: &[u8] = b"\x10\x0d\x1a\x04WARN\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
+const SKELETON_ERROR: &[u8] = b"\x10\x11\x1a\x05ERROR\x2a\x11\x0a\x0fHTTP access log\x32\x30\x0a\x0arequest_id\x12\x22\x0a\x20";
 
 // Pre-baked Protobuf IntValue attribute prefixes:
 // Format: [0x32, kv_len_placeholder, 0x0A, key_len, <key>, 0x12, any_val_len_placeholder, 0x18]
 const PRE_STATUS_CODE: &[u8] = b"\x32\x00\x0a\x19http.response.status_code\x12\x00\x18";
-const PRE_DURATION_US: &[u8] = b"\x32\x00\x0a\x0bduration_us\x12\x00\x18";
+const PRE_DURATION_NS: &[u8] = b"\x32\x00\x0a\x0bduration_ns\x12\x00\x18";
 const PRE_RESP_BODY_SIZE: &[u8] = b"\x32\x00\x0a\x17http.response.body.size\x12\x00\x18";
 const PRE_REQ_BODY_SIZE: &[u8] = b"\x32\x00\x0a\x16http.request.body.size\x12\x00\x18";
 const PRE_ROUTE_ID: &[u8] = b"\x32\x00\x0a\x0evelda.route_id\x12\x00\x18";
@@ -205,7 +205,8 @@ pub struct OtlpProtoWireEnvelope {
     pub resource_wire: Vec<u8>,
     pub scope_wire: Vec<u8>,
     // Pre-baked static attribute wire slices
-    proto_attrs: [Vec<u8>; 7],
+    downstream_protocol_attrs: [Vec<u8>; 7],
+    upstream_protocol_attrs: [Vec<u8>; 7],
     method_attrs: [Vec<u8>; 10],
     grpc_attrs: [Vec<u8>; 18],
     ua_fam_attrs: [Vec<u8>; 34],
@@ -219,16 +220,19 @@ impl OtlpProtoWireEnvelope {
         let mut resource_payload = Vec::new();
         write_str_attribute(
             &mut resource_payload,
+            0x0A,
             b"\x0a\x0cservice.name",
             service_name.as_bytes(),
         );
         write_str_attribute(
             &mut resource_payload,
+            0x0A,
             b"\x0a\x12telemetry.sdk.name",
             b"velda-edge",
         );
         write_str_attribute(
             &mut resource_payload,
+            0x0A,
             b"\x0a\x16telemetry.sdk.language",
             b"rust",
         );
@@ -263,17 +267,28 @@ impl OtlpProtoWireEnvelope {
         write_varint(&mut scope_wire, OTLP_SCHEMA_URL.len() as u64);
         scope_wire.extend_from_slice(OTLP_SCHEMA_URL);
 
-        // Static attribute tables:
-        let mut proto_attrs: [Vec<u8>; 7] = Default::default();
-        for (i, slot) in proto_attrs.iter_mut().enumerate() {
+        // Static attribute tables (LogRecord field 6 = 0x32):
+        let mut downstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
+        let mut upstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
+        for i in 0..7 {
             let p = LogProtocol::from_u8(i as u8);
-            let mut buf = Vec::new();
+            let mut down_buf = Vec::new();
             write_str_attribute(
-                &mut buf,
-                b"\x0a\x15network.protocol.name",
+                &mut down_buf,
+                0x32,
+                b"\x0a\x13downstream_protocol",
                 p.as_str().as_bytes(),
             );
-            *slot = buf;
+            downstream_protocol_attrs[i] = down_buf;
+
+            let mut up_buf = Vec::new();
+            write_str_attribute(
+                &mut up_buf,
+                0x32,
+                b"\x0a\x11upstream_protocol",
+                p.as_str().as_bytes(),
+            );
+            upstream_protocol_attrs[i] = up_buf;
         }
 
         let mut method_attrs: [Vec<u8>; 10] = Default::default();
@@ -282,6 +297,7 @@ impl OtlpProtoWireEnvelope {
             let mut buf = Vec::new();
             write_str_attribute(
                 &mut buf,
+                0x32,
                 b"\x0a\x13http.request.method",
                 m.as_str().as_bytes(),
             );
@@ -298,6 +314,7 @@ impl OtlpProtoWireEnvelope {
             let mut buf = Vec::new();
             write_str_attribute(
                 &mut buf,
+                0x32,
                 b"\x0a\x14rpc.grpc.status_code",
                 g.as_str().as_bytes(),
             );
@@ -314,6 +331,7 @@ impl OtlpProtoWireEnvelope {
             let mut buf = Vec::new();
             write_str_attribute(
                 &mut buf,
+                0x32,
                 b"\x0a\x11user_agent.family",
                 u.as_str().as_bytes(),
             );
@@ -324,14 +342,20 @@ impl OtlpProtoWireEnvelope {
         for (i, slot) in ua_os_attrs.iter_mut().enumerate() {
             let o = UaOs::from_u8(i as u8);
             let mut buf = Vec::new();
-            write_str_attribute(&mut buf, b"\x0a\x0duser_agent.os", o.as_str().as_bytes());
+            write_str_attribute(
+                &mut buf,
+                0x32,
+                b"\x0a\x0duser_agent.os",
+                o.as_str().as_bytes(),
+            );
             *slot = buf;
         }
 
         Self {
             resource_wire,
             scope_wire,
-            proto_attrs,
+            downstream_protocol_attrs,
+            upstream_protocol_attrs,
             method_attrs,
             grpc_attrs,
             ua_fam_attrs,
@@ -359,14 +383,14 @@ impl OtlpProtoWireEnvelope {
             p = p.add(3);
             let start_rec = p;
 
-            // 1. Dual-timestamp (18 bytes): time_unix_nano (tag 1, fixed64 = 0x09) & observed_time_unix_nano (tag 2, fixed64 = 0x11)
+            // 1. Dual-timestamp (18 bytes): time_unix_nano (tag 1, fixed64 = 0x09) & observed_time_unix_nano (tag 11, fixed64 = 0x59)
             #[cfg(target_arch = "x86_64")]
             {
                 use core::arch::x86_64::*;
                 *p = 0x09;
                 let ts_vec = _mm_set1_epi64x(ts_nano as i64);
                 _mm_storeu_si128(p.add(1) as *mut __m128i, ts_vec);
-                *p.add(9) = 0x11;
+                *p.add(9) = 0x59;
                 _mm_storeu_si64(p.add(10), ts_vec);
                 p = p.add(18);
             }
@@ -374,7 +398,7 @@ impl OtlpProtoWireEnvelope {
             {
                 *p = 0x09;
                 core::ptr::copy_nonoverlapping(ts_nano.to_le_bytes().as_ptr(), p.add(1), 8);
-                *p.add(9) = 0x11;
+                *p.add(9) = 0x59;
                 core::ptr::copy_nonoverlapping(ts_nano.to_le_bytes().as_ptr(), p.add(10), 8);
                 p = p.add(18);
             }
@@ -397,15 +421,16 @@ impl OtlpProtoWireEnvelope {
             core::ptr::copy_nonoverlapping(hex_bytes.as_ptr(), p, 32);
             p = p.add(32);
 
-            // 4. Attribute 1: network.protocol.name
-            let proto_idx = if (rec.downstream_proto as usize) < 7 {
-                rec.downstream_proto as usize
-            } else {
-                0
-            };
-            let proto_slice = &self.proto_attrs[proto_idx];
-            core::ptr::copy_nonoverlapping(proto_slice.as_ptr(), p, proto_slice.len());
-            p = p.add(proto_slice.len());
+            // 4. Attribute 1 & 2: downstream_protocol & upstream_protocol
+            let down_idx = (rec.downstream_protocol() as usize).min(6);
+            let down_slice = &self.downstream_protocol_attrs[down_idx];
+            core::ptr::copy_nonoverlapping(down_slice.as_ptr(), p, down_slice.len());
+            p = p.add(down_slice.len());
+
+            let up_idx = (rec.upstream_protocol() as usize).min(6);
+            let up_slice = &self.upstream_protocol_attrs[up_idx];
+            core::ptr::copy_nonoverlapping(up_slice.as_ptr(), p, up_slice.len());
+            p = p.add(up_slice.len());
 
             // 5. Attribute 2: http.request.method
             let method_idx = if (rec.method as usize) < 10 {
@@ -430,8 +455,8 @@ impl OtlpProtoWireEnvelope {
             core::ptr::copy_nonoverlapping(grpc_slice.as_ptr(), p, grpc_slice.len());
             p = p.add(grpc_slice.len());
 
-            // 8. Attribute 5: duration_us
-            p = stamp_int_attribute(p, PRE_DURATION_US, rec.duration_us as u64);
+            // 8. Attribute 5: duration_ns
+            p = stamp_int_attribute(p, PRE_DURATION_NS, rec.duration_ns);
 
             // 9. Attribute 6: http.response.body.size
             p = stamp_int_attribute(p, PRE_RESP_BODY_SIZE, rec.bytes_tx as u64);
@@ -528,7 +553,7 @@ mod tests {
     use super::super::model::{ExportLogsServiceRequest, any_value};
     use super::*;
     use prost::Message;
-    use velda_observability::PipeStrategy;
+    use velda_observability::PipeKind;
 
     #[test]
     fn test_otlp_proto_wire_template() {
@@ -544,9 +569,7 @@ mod tests {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             velda_observability::LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -592,8 +615,10 @@ mod tests {
         );
 
         // Verify attributes
-        assert_eq!(log_rec.attributes.len(), 14);
+        assert_eq!(log_rec.attributes.len(), 15);
         assert_eq!(log_rec.attributes[0].key, "request_id");
+        assert_eq!(log_rec.attributes[1].key, "downstream_protocol");
+        assert_eq!(log_rec.attributes[2].key, "upstream_protocol");
         if let Some(any_value::Value::StringValue(s)) = log_rec.attributes[0]
             .value
             .as_ref()
@@ -604,5 +629,85 @@ mod tests {
         } else {
             panic!("request_id attribute is not string");
         }
+
+        // Anti-circular check: decode with canonical upstream opentelemetry-proto generated schema
+        let official = <opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest as prost_otlp::Message>::decode(&out[..])
+            .expect("Must decode cleanly against official OpenTelemetry proto schema");
+        assert_eq!(official.resource_logs.len(), 1);
+        let off_res = official.resource_logs[0].resource.as_ref().unwrap();
+        assert_eq!(off_res.attributes.len(), 3);
+        assert_eq!(off_res.attributes[0].key, "service.name");
+        assert_eq!(
+            off_res.attributes[0].value.as_ref().unwrap().value,
+            Some(
+                opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                    "edge-prod".into()
+                )
+            )
+        );
+        assert_eq!(off_res.attributes[1].key, "telemetry.sdk.name");
+        assert_eq!(off_res.attributes[2].key, "telemetry.sdk.language");
+
+        let off_rec = &official.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(off_rec.time_unix_nano, 1_710_000_000 * 1_000_000_000);
+        assert_eq!(
+            off_rec.observed_time_unix_nano,
+            1_710_000_000 * 1_000_000_000
+        );
+        assert_eq!(off_rec.severity_number, 9);
+        assert_eq!(off_rec.severity_text, "INFO");
+        assert_eq!(off_rec.attributes.len(), 15);
+    }
+
+    #[test]
+    fn test_otlp_proto_wire_warn_and_error_severity_official() {
+        let envelope = OtlpProtoWireEnvelope::new("edge-prod");
+        let warn_rec = AccessLogRecord::from_scalars(
+            1,
+            1_710_000_000,
+            100,
+            "127.0.0.1:1000".parse().unwrap(),
+            None,
+            0,
+            0,
+            404,
+            1,
+            0,
+            PipeKind::BufferedH1H1,
+            velda_observability::LogCompletionReason::Complete,
+            LogHttpMethod::Get,
+            LogGrpcStatus::NonGrpc,
+            b"curl/8.6.0",
+        );
+        let err_rec = AccessLogRecord::from_scalars(
+            2,
+            1_710_000_001,
+            200,
+            "127.0.0.1:1001".parse().unwrap(),
+            None,
+            0,
+            0,
+            200,
+            2,
+            0,
+            PipeKind::BufferedGrpcTcpTcp,
+            velda_observability::LogCompletionReason::UpstreamError,
+            LogHttpMethod::Post,
+            LogGrpcStatus::Unimplemented,
+            b"grpc-go/1.64.0",
+        );
+        let batches = vec![Arc::from(vec![warn_rec, err_rec])];
+        let mut records_buf = Vec::new();
+        let mut out = Vec::new();
+        let count = envelope.format_records_wire(&batches, &mut records_buf, &mut out);
+        assert_eq!(count, 2);
+
+        let official = <opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest as prost_otlp::Message>::decode(&out[..])
+            .expect("WARN/ERROR records must decode against official OpenTelemetry proto schema");
+        let recs = &official.resource_logs[0].scope_logs[0].log_records;
+        assert_eq!(recs[0].severity_number, 13);
+        assert_eq!(recs[0].severity_text, "WARN");
+        assert_eq!(recs[1].severity_number, 17);
+        assert_eq!(recs[1].severity_text, "ERROR");
     }
 }

@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
 use velda_observability::{
-    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
-    TOTAL_PIPELINE_SLOTS, UpstreamProto,
+    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
+    TOTAL_PIPELINE_SLOTS, UpstreamProtocol,
 };
 
 const OPS_PER_THREAD: u64 = 1_000_000;
@@ -119,8 +119,8 @@ fn bench_contended_single_slot() {
 
                 for _ in 0..OPS_PER_THREAD {
                     store_clone.record_stream_completion(
-                        DownstreamProto::H1,
-                        UpstreamProto::H1,
+                        DownstreamProtocol::H1,
+                        UpstreamProtocol::H1,
                         PipeStrategy::Buffered,
                         comp,
                     );

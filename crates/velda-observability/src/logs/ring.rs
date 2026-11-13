@@ -90,20 +90,28 @@ impl SpscLogRing {
                     let d = dst as *mut __m256i;
                     let v0 = _mm256_load_si256(s);
                     let v1 = _mm256_load_si256(s.add(1));
+                    let v2 = _mm256_load_si256(s.add(2));
+                    let v3 = _mm256_load_si256(s.add(3));
+                    let v4 = _mm256_load_si256(s.add(4));
+                    let v5 = _mm256_load_si256(s.add(5));
+                    let v6 = _mm256_load_si256(s.add(6));
+                    let v7 = _mm256_load_si256(s.add(7));
                     _mm256_stream_si256(d, v0);
                     _mm256_stream_si256(d.add(1), v1);
+                    _mm256_stream_si256(d.add(2), v2);
+                    _mm256_stream_si256(d.add(3), v3);
+                    _mm256_stream_si256(d.add(4), v4);
+                    _mm256_stream_si256(d.add(5), v5);
+                    _mm256_stream_si256(d.add(6), v6);
+                    _mm256_stream_si256(d.add(7), v7);
                     _mm_sfence();
                 } else {
                     let s = record as *const AccessLogRecord as *const __m128i;
                     let d = dst as *mut __m128i;
-                    let v0 = _mm_load_si128(s);
-                    let v1 = _mm_load_si128(s.add(1));
-                    let v2 = _mm_load_si128(s.add(2));
-                    let v3 = _mm_load_si128(s.add(3));
-                    _mm_stream_si128(d, v0);
-                    _mm_stream_si128(d.add(1), v1);
-                    _mm_stream_si128(d.add(2), v2);
-                    _mm_stream_si128(d.add(3), v3);
+                    for i in 0..16 {
+                        let v = _mm_load_si128(s.add(i));
+                        _mm_stream_si128(d.add(i), v);
+                    }
                     _mm_sfence();
                 }
             }
@@ -160,6 +168,9 @@ impl SpscLogRing {
                     use core::arch::x86_64::*;
                     let slot = self.buffer.get_unchecked(prefetch_idx).get() as *const i8;
                     _mm_prefetch(slot, _MM_HINT_T1);
+                    _mm_prefetch(slot.add(64), _MM_HINT_T1);
+                    _mm_prefetch(slot.add(128), _MM_HINT_T1);
+                    _mm_prefetch(slot.add(192), _MM_HINT_T1);
                 }
             }
             unsafe {

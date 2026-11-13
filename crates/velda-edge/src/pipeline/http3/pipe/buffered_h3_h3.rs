@@ -62,7 +62,14 @@ async fn forward_buffered(
 }
 
 /// Serves a buffered HTTP/3 downstream request forwarded to an HTTP/3 upstream backend.
-pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response {
+pub async fn serve(
+    req: &L7Request,
+    upstream: &Arc<Http3Upstream>,
+) -> (
+    L7Response,
+    Option<std::net::SocketAddr>,
+    velda_observability::LogCompletionReason,
+) {
     let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
@@ -71,16 +78,21 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
                 upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/3 connection"
             );
-            return L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
+            return (
+                L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
             );
         }
     };
+    let mut upstream_addr = Some(client.target());
 
     let mut pipe_res = forward_buffered(&client, req, &upstream.config).await;
     let mut _fresh_lease_guard = None;
@@ -96,6 +108,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            upstream_addr = Some(fresh_client.target());
             pipe_res = forward_buffered(&fresh_client, req, &upstream.config).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
@@ -104,20 +117,28 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http3Upstream>) -> L7Response
     }
 
     match pipe_res {
-        Ok(resp) => resp,
+        Ok(resp) => (
+            resp,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
                 "HTTP/3 upstream buffered request failed"
             );
-            L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
+            (
+                L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
             )
         }
     }

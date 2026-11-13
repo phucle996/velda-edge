@@ -37,8 +37,8 @@ use velda_observability::{MetricsSnapshot, MetricsStore};
 use super::super::lut::{fast_format_ts_19digits_simd, fast_write_i64, fast_write_u64};
 
 const METRIC1_TO_METRIC2: &[u8] = b"]}},{\"name\":\"velda.active_streams\",\"description\":\"Number of streams actively in-flight\",\"unit\":\"1\",\"gauge\":{\"dataPoints\":[";
-const METRIC2_TO_METRIC3: &[u8] = b"]}},{\"name\":\"velda.bytes_received_total\",\"description\":\"Total payload bytes received from clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[";
-const METRIC3_TO_METRIC4: &[u8] = b"]}},{\"name\":\"velda.bytes_transmitted_total\",\"description\":\"Total payload bytes transmitted to clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[";
+const METRIC2_TO_METRIC3: &[u8] = b"]}},{\"name\":\"velda.bytes_received_total\",\"description\":\"Total bytes received from downstream clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[";
+const METRIC3_TO_METRIC4: &[u8] = b"]}},{\"name\":\"velda.bytes_transmitted_total\",\"description\":\"Total bytes transmitted to downstream clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[";
 const ROOT_FOOTER: &[u8] = b"]}}]}]}]}";
 
 /// Pre-baked static chunk interleaving template for OpenTelemetry ResourceMetrics JSON.
@@ -115,14 +115,16 @@ impl OtlpJsonTemplate {
         let mut rx_tails = Vec::with_capacity(36);
         let mut tx_tails = Vec::with_capacity(36);
         for slot_idx in 0..36 {
-            let (down, up, _pipe) = MetricsStore::decode_slot_index(slot_idx);
-            let mut tail = Vec::with_capacity(160);
+            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+            let mut tail = Vec::with_capacity(200);
             tail.extend_from_slice(
                 b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
             );
             tail.extend_from_slice(down.as_str().as_bytes());
             tail.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
             tail.extend_from_slice(up.as_str().as_bytes());
+            tail.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
+            tail.extend_from_slice(pipe.as_str().as_bytes());
             tail.extend_from_slice(b"\"}}]}");
             rx_tails.push(tail.clone());
             tx_tails.push(tail);
@@ -291,6 +293,21 @@ mod tests {
         );
         let metrics = &parsed["resourceMetrics"][0]["scopeMetrics"][0]["metrics"];
         assert_eq!(metrics.as_array().unwrap().len(), 4);
+
+        // Anti-circular check against canonical OpenTelemetry upstream serde schema
+        let official: opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest =
+            serde_json::from_str(&json_str)
+                .expect("OTLP JSON metrics must deserialize into official opentelemetry-proto schema");
+        let off_metrics = &official.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(off_metrics.len(), 4);
+        assert_eq!(
+            off_metrics[2].description,
+            "Total bytes received from downstream clients"
+        );
+        assert_eq!(
+            off_metrics[3].description,
+            "Total bytes transmitted to downstream clients"
+        );
     }
 
     #[test]

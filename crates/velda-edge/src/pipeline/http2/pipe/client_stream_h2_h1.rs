@@ -13,7 +13,7 @@ use velda_core::L7Response;
 use velda_http1::is_connection_close;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream bridged to an HTTP/1.1 backend.
@@ -24,7 +24,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
         && let Some(host) =
@@ -48,7 +48,13 @@ pub async fn serve(
                 format!("400 Bad Request: {e}\n").into_bytes(),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
 
@@ -89,9 +95,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     // 6. Borrow pooled buffers from upstream lease
     let (upstream_stream, read_buf, write_buf) = lease.split_all();
@@ -228,7 +241,8 @@ pub async fn serve(
     // Drop upstream lease immediately to return connection and pooled buffers to upstream pool
     drop(lease);
 
-    match resp_res {
+    let bytes_rx = receiver.bytes_received() as u64;
+    let completion = match resp_res {
         Ok(mut l7_resp) => {
             // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
             // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
@@ -243,6 +257,7 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
+            velda_observability::LogCompletionReason::Complete
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to read upstream HTTP/1.1 response");
@@ -255,6 +270,14 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
+            velda_observability::LogCompletionReason::UpstreamError
         }
-    }
+    };
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        responder.last_bytes_tx,
+        upstream_addr,
+        completion,
+    )
 }

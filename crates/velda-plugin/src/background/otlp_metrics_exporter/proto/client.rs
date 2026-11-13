@@ -324,6 +324,13 @@ impl OtlpMetricsGrpcClient {
             .map_err(|_| PluginError::Http("gRPC response headers timeout".into()))?
             .map_err(|e| PluginError::Http(format!("HTTP/2 response error: {e}")))?;
 
+        if response.status() != http::StatusCode::OK {
+            return Err(PluginError::Http(format!(
+                "gRPC export failed with HTTP status: {}",
+                response.status()
+            )));
+        }
+
         // Fast-path: Check if headers contain Trailers-Only grpc-status
         if let Some(status_val) = response.headers().get("grpc-status") {
             let status_str = status_val.to_str().unwrap_or("0");

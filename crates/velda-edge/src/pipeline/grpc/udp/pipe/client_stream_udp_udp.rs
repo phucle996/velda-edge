@@ -5,6 +5,7 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,7 +48,7 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcUdpUpstream>,
     config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
+) -> Result<(L7Response, Option<SocketAddr>), GrpcError> {
     let client = upstream.acquire(config).await.map_err(|e| {
         tracing::warn!(
             error = %e,
@@ -59,6 +60,9 @@ pub async fn serve(
             e.to_string(),
         ))
     })?;
+    let upstream_addr = Some(client.target());
 
-    pipe_client_stream_wire(&client, req, config).await
+    pipe_client_stream_wire(&client, req, config)
+        .await
+        .map(|resp| (resp, upstream_addr))
 }

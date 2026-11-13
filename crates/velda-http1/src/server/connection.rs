@@ -33,6 +33,9 @@ pub struct Http1ServerConnection<IO> {
     pub current_request_id: Option<http::header::HeaderValue>,
     pub alt_svc: Option<http::header::HeaderValue>,
     pub last_status: u16,
+    pub last_bytes_rx: u64,
+    pub last_bytes_tx: u64,
+    pub last_upstream_addr: Option<std::net::SocketAddr>,
     config: Http1Config,
 }
 
@@ -52,6 +55,9 @@ where
             current_request_id: None,
             alt_svc: None,
             last_status: 0,
+            last_bytes_rx: 0,
+            last_bytes_tx: 0,
+            last_upstream_addr: None,
             config,
         }
     }
@@ -164,6 +170,7 @@ where
 
         loop {
             if let Some(body) = decode_body(&mut self.read_buf, framing, &self.config)? {
+                self.last_bytes_rx += body.len() as u64;
                 return Ok(body);
             }
 
@@ -249,6 +256,7 @@ where
                     current_offset += n;
                 }
 
+                self.last_bytes_rx += total_len as u64;
                 return Ok(Body::from_slab(lease, total_len));
             }
         }
@@ -351,6 +359,9 @@ where
         force_close: bool,
     ) {
         self.last_status = status.as_u16();
+        if let Some(len) = body_len {
+            self.last_bytes_tx += len as u64;
+        }
         encode_head(
             version,
             status,
@@ -422,6 +433,7 @@ where
         response: &Http1ServerResponse,
     ) -> Result<(), Http1Error> {
         self.last_status = response.status.as_u16();
+        self.last_bytes_tx += response.body.len() as u64;
         let close = send_response(
             &mut self.stream,
             &mut self.write_buf,
@@ -475,6 +487,8 @@ where
         head: &Http1ServerResponseHead,
         body: &Body,
     ) -> Result<(), Http1Error> {
+        self.last_status = head.status.as_u16();
+        self.last_bytes_tx += body.len() as u64;
         let close = send_parts(
             &mut self.stream,
             &mut self.write_buf,
@@ -510,6 +524,7 @@ where
         &mut self,
         head: &Http1ServerResponseHead,
     ) -> Result<(), Http1Error> {
+        self.last_status = head.status.as_u16();
         let close = send_chunked_head(
             &mut self.stream,
             &mut self.write_buf,
@@ -558,6 +573,10 @@ where
         initial_chunk: Option<&[u8]>,
         is_terminated: bool,
     ) -> Result<bool, Http1Error> {
+        self.last_status = head.status.as_u16();
+        if let Some(chunk) = initial_chunk {
+            self.last_bytes_tx += chunk.len() as u64;
+        }
         let close = send_head_coalesced(
             &mut self.stream,
             &mut self.write_buf,
@@ -593,6 +612,7 @@ where
 
     /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).
     pub async fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), Http1Error> {
+        self.last_bytes_tx += bytes.len() as u64;
         self.stream.write_all(bytes).await?;
         self.stream.flush().await?;
         Ok(())
@@ -605,6 +625,9 @@ where
     pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
         loop {
             if let Some(res) = crate::wire::decode_chunk(&mut self.read_buf)? {
+                if let Some(ref chunk) = res {
+                    self.last_bytes_rx += chunk.len() as u64;
+                }
                 return Ok(res);
             }
 

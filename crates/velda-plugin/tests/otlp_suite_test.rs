@@ -17,8 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use velda_core::{Body, L7Request};
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, MetricsStore,
-    PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, MetricsStore, PipeKind,
 };
 
 use velda_plugin::background::otlp_log_shipper::json::{
@@ -211,9 +210,7 @@ async fn test_otlp_log_shipper_batching_and_send() {
         200,
         1,
         0,
-        LogProtocol::H1,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,
@@ -231,9 +228,7 @@ async fn test_otlp_log_shipper_batching_and_send() {
         500,
         2,
         0,
-        LogProtocol::H1,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::NonGrpc,
@@ -459,9 +454,7 @@ async fn test_otlp_logs_and_traces_grpc_export() {
         200,
         1,
         0,
-        LogProtocol::H2,
-        LogProtocol::H2,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH2H2,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::NonGrpc,

@@ -13,7 +13,7 @@ use velda_core::L7Response;
 use velda_http1::server::request::Http1BodyFraming;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
 
 /// Serves a full-duplex HTTP/2 downstream stream bridged to an HTTP/1.1 backend.
@@ -24,7 +24,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
         && let Some(host) =
@@ -58,9 +58,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     let (upstream_stream, read_buf, write_buf) = lease.split_all();
     write_buf.clear();
@@ -85,7 +92,13 @@ pub async fn serve(
             format!("502 Bad Gateway: {e}\n").into_bytes(),
         );
         let _ = responder.send_response(&err_resp);
-        return;
+        return PipeOutcome::http(
+            responder.last_status,
+            receiver.bytes_received() as u64,
+            responder.last_bytes_tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        );
     }
 
     // 6. Split HTTP/1.1 stream into read and write halves for concurrent duplex execution
@@ -165,6 +178,7 @@ pub async fn serve(
                     }
                     Ok(None) => break,
                     Err(e) => {
+                        responder.last_bytes_tx = stream_sender.bytes_sent();
                         return Err(std::io::Error::other(e));
                     }
                 }
@@ -186,6 +200,7 @@ pub async fn serve(
                         }
                         Ok(None) => break,
                         Err(e) => {
+                            responder.last_bytes_tx = stream_sender.bytes_sent();
                             return Err(std::io::Error::other(e));
                         }
                     }
@@ -193,6 +208,7 @@ pub async fn serve(
             }
         }
 
+        responder.last_bytes_tx = stream_sender.bytes_sent();
         let _ = stream_sender.finish();
         Ok::<(), std::io::Error>(())
     };
@@ -218,4 +234,15 @@ pub async fn serve(
         lease.mark_closed();
         tracing::warn!(upstream = %upstream.id(), "Duplex H2 to H1 bridge encountered error");
     }
+    PipeOutcome::http(
+        responder.last_status,
+        receiver.bytes_received() as u64,
+        responder.last_bytes_tx,
+        upstream_addr,
+        if failed {
+            velda_observability::LogCompletionReason::UpstreamError
+        } else {
+            velda_observability::LogCompletionReason::Complete
+        },
+    )
 }

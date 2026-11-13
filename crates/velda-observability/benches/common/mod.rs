@@ -6,7 +6,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_observability::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use velda_observability::{DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol};
 
 // ============================================================================
 // Memory Tracking Allocator
@@ -173,16 +173,16 @@ impl FastRng {
     }
 
     #[inline(always)]
-    pub fn next_pipeline_coords(&mut self) -> (DownstreamProto, UpstreamProto, PipeStrategy) {
+    pub fn next_pipeline_coords(&mut self) -> (DownstreamProtocol, UpstreamProtocol, PipeStrategy) {
         let d = match self.next_usize(3) {
-            0 => DownstreamProto::H1,
-            1 => DownstreamProto::H2,
-            _ => DownstreamProto::H3,
+            0 => DownstreamProtocol::H1,
+            1 => DownstreamProtocol::H2,
+            _ => DownstreamProtocol::H3,
         };
         let u = match self.next_usize(3) {
-            0 => UpstreamProto::H1,
-            1 => UpstreamProto::H2,
-            _ => UpstreamProto::H3,
+            0 => UpstreamProtocol::H1,
+            1 => UpstreamProtocol::H2,
+            _ => UpstreamProtocol::H3,
         };
         let p = match self.next_usize(4) {
             0 => PipeStrategy::Buffered,

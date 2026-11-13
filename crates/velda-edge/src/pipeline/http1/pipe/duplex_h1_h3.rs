@@ -88,6 +88,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(client.target());
 
     // 5. Opportunistically drain any already-buffered payload bytes waiting in the downstream
     // kernel socket buffer before opening the upstream stream (zero async scheduler yields).
@@ -142,6 +143,7 @@ where
                     initial_is_fin = true;
                 }
                 if !acc.is_empty() {
+                    conn.last_bytes_rx += acc.len() as u64;
                     initial_chunk = Some(acc.freeze());
                 }
             }
@@ -149,6 +151,7 @@ where
         Http1BodyFraming::ContentLength(total_len) => {
             if !conn.read_buf.is_empty() {
                 let chunk_len = conn.read_buf.len().min(total_len);
+                conn.last_bytes_rx += chunk_len as u64;
                 initial_chunk = Some(conn.read_buf.split_to(chunk_len).freeze());
                 initial_is_fin = chunk_len == total_len;
             }
@@ -193,6 +196,7 @@ where
                     return Err(Http1Error::ConnectionClosed);
                 }
             };
+            conn.last_upstream_addr = Some(fresh_client.target());
             _lease_guard = Some(fresh_lease);
             match fresh_client
                 .open_stream(
@@ -242,6 +246,9 @@ where
     let read_buf = &mut conn.read_buf;
     let write_buf = &mut conn.write_buf;
     let should_close = conn.close_requested;
+    let last_status = &mut conn.last_status;
+    let last_bytes_rx = &mut conn.last_bytes_rx;
+    let last_bytes_tx = &mut conn.last_bytes_tx;
     let req_id = req_head
         .headers
         .get(&crate::pipeline::X_REQUEST_ID)
@@ -262,6 +269,7 @@ where
                 const TARGET_RESERVE: usize = 65536;
                 loop {
                     while let Some(chunk) = decoder.decode_step(read_buf)? {
+                        *last_bytes_rx += chunk.len() as u64;
                         sender
                             .send_chunk(chunk)
                             .await
@@ -305,6 +313,7 @@ where
                             let chunk_len = available.min(remaining);
                             let chunk = read_buf.split_to(chunk_len).freeze();
                             remaining = remaining.saturating_sub(chunk_len);
+                            *last_bytes_rx += chunk_len as u64;
                             sender
                                 .send_chunk(chunk)
                                 .await
@@ -324,6 +333,7 @@ where
                             let chunk_len = read_buf.len().min(remaining);
                             if chunk_len > 0 {
                                 let chunk = read_buf.split_to(chunk_len).freeze();
+                                *last_bytes_rx += chunk_len as u64;
                                 sender
                                     .send_chunk(chunk)
                                     .await
@@ -390,6 +400,7 @@ where
             resp_stream.headers = l7_resp.headers.into();
         }
         meta.inject_response_headers(&mut resp_stream.headers);
+        *last_status = resp_stream.status.as_u16();
 
         let is_no_body_status = resp_stream.status.is_informational()
             || resp_stream.status == http::StatusCode::NO_CONTENT
@@ -449,6 +460,7 @@ where
             write_buf.extend_from_slice(&body_buf);
             client_write.write_all(write_buf).await?;
             client_write.flush().await?;
+            *last_bytes_tx += body_buf.len() as u64;
             return Ok::<(), Http1Error>(());
         }
 
@@ -473,6 +485,7 @@ where
             match chunk_res {
                 Ok(chunk) => {
                     send_chunk(&mut client_write, &chunk).await?;
+                    *last_bytes_tx += chunk.len() as u64;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Error reading response chunk from HTTP/3 upstream");

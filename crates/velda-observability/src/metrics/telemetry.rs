@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::store::MetricsStore;
-use super::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use super::types::{DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol};
 
 /// Generic telemetry interface for stream and request processing pipelines.
 pub trait Telemetry: Send + Sync + 'static {
@@ -65,8 +65,8 @@ impl Telemetry for NoopTelemetry {
 /// Thread-safe and lock-free.
 pub struct LiveTelemetry {
     store: Arc<MetricsStore>,
-    downstream: DownstreamProto,
-    upstream: UpstreamProto,
+    downstream: DownstreamProtocol,
+    upstream: UpstreamProtocol,
     pipe: PipeStrategy,
     start_time: Option<Instant>,
     ttfb: Option<Duration>,
@@ -79,8 +79,8 @@ impl LiveTelemetry {
     #[inline(always)]
     pub fn new(
         store: Arc<MetricsStore>,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) -> Self {
         store.record_stream_start(downstream, upstream, pipe);

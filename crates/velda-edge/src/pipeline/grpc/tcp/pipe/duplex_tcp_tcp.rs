@@ -20,6 +20,7 @@ use std::time::Duration;
 use velda_grpc::tcp::server::GrpcServerStream;
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
+use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcTcpUpstream;
 
 /// Serves a full-duplex bidirectional gRPC request over TCP forwarded to a gRPC TCP backend.
@@ -27,7 +28,7 @@ pub async fn serve(
     mut server_stream: GrpcServerStream,
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
-) -> Result<(), GrpcError> {
+) -> PipeOutcome {
     // Stage 1: Lease pre-warmed connection handle from worker core lane shard without cross-thread lock contention.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
@@ -40,9 +41,17 @@ pub async fn serve(
             let _ = server_stream
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::Unavailable,
+                0,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = client.target();
 
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
@@ -74,12 +83,14 @@ pub async fn serve(
 
         // Step 3: Downstream -> Upstream pump task
         let client_to_upstream = async move {
+            let mut bytes_rx: u64 = 0;
             let is_end = recv_stream.is_end_stream();
             if !is_end {
                 let mut has_trailers = false;
                 while let Some(chunk_res) = recv_stream.data().await {
                     let chunk = chunk_res.map_err(GrpcError::H2)?;
                     let len = chunk.len();
+                    bytes_rx += len as u64;
                     upstream_send_stream
                         .send_data(chunk, false)
                         .map_err(GrpcError::H2)?;
@@ -104,7 +115,7 @@ pub async fn serve(
                     .map_err(GrpcError::H2)?;
             }
 
-            Ok::<(), GrpcError>(())
+            Ok::<u64, GrpcError>(bytes_rx)
         };
 
         // Step 4: Upstream -> Downstream pump task
@@ -122,17 +133,28 @@ pub async fn serve(
                 }
             }
 
+            let mut grpc_status = resp_parts
+                .headers
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u8>().ok())
+                .map(velda_observability::LogGrpcStatus::from_u8)
+                .unwrap_or(velda_observability::LogGrpcStatus::Ok);
+
             let is_end_of_stream = upstream_recv_stream.is_end_stream();
             let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
             let mut downstream_send_stream = respond
                 .send_response(resp, is_end_of_stream)
                 .map_err(GrpcError::H2)?;
 
+            let mut bytes_tx: u64 = 0;
+
             if !is_end_of_stream {
                 let mut has_trailers = false;
                 while let Some(chunk_res) = upstream_recv_stream.data().await {
                     let chunk = chunk_res.map_err(GrpcError::H2)?;
                     let len = chunk.len();
+                    bytes_tx += len as u64;
                     downstream_send_stream
                         .send_data(chunk, false)
                         .map_err(GrpcError::H2)?;
@@ -144,6 +166,14 @@ pub async fn serve(
                     .await
                     .map_err(GrpcError::H2)?
                 {
+                    if let Some(code) = trailers
+                        .get("grpc-status")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .map(velda_observability::LogGrpcStatus::from_u8)
+                    {
+                        grpc_status = code;
+                    }
                     downstream_send_stream
                         .send_trailers(trailers)
                         .map_err(GrpcError::H2)?;
@@ -157,20 +187,40 @@ pub async fn serve(
                 }
             }
 
-            Ok::<(), GrpcError>(())
+            Ok::<(u64, velda_observability::LogGrpcStatus), GrpcError>((bytes_tx, grpc_status))
         };
 
         // Step 5: Concurrently drive both stream directions
-        tokio::try_join!(client_to_upstream, upstream_to_client)?;
+        let (bytes_rx, (bytes_tx, grpc_status)) =
+            tokio::try_join!(client_to_upstream, upstream_to_client)?;
 
-        Ok(())
+        Ok::<_, GrpcError>((bytes_rx, bytes_tx, grpc_status))
     };
 
     match tokio::time::timeout(timeout, workflow).await {
-        Ok(res) => res,
-        Err(_) => Err(GrpcError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "gRPC duplex streaming session timed out",
-        ))),
+        Ok(Ok((rx, tx, status))) => PipeOutcome::grpc(
+            200,
+            status,
+            rx,
+            tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
+        Ok(Err(_)) => PipeOutcome::grpc(
+            200,
+            velda_observability::LogGrpcStatus::Unavailable,
+            0,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        ),
+        Err(_) => PipeOutcome::grpc(
+            200,
+            velda_observability::LogGrpcStatus::DeadlineExceeded,
+            0,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Timeout,
+        ),
     }
 }

@@ -103,7 +103,7 @@ where
     let h2_config = Http2Config::auto();
 
     // 5. Acquire upstream multiplexed connection
-    let (mut client, _lease) = match upstream.acquire(&h2_config).await {
+    let (mut client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -124,6 +124,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(lease.endpoint);
 
     // 6. Forward buffered request over HTTP/2 stream with self-healing retry
     let is_tls = upstream.is_tls();
@@ -145,7 +146,8 @@ where
             upstream = %upstream.id(),
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
+        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
+            conn.last_upstream_addr = Some(fresh_lease.endpoint);
             pipe_res = send_h2_buffered(
                 &mut fresh_client,
                 &req_head,

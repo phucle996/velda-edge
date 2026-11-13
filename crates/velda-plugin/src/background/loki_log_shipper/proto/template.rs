@@ -34,8 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
-    UaFamily, UaOs,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
 };
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_u64};
@@ -162,16 +161,13 @@ impl LokiProtoFormatter {
         for batch in batches {
             for rec in batch.iter() {
                 total_records += 1;
-                let proto = LogProtocol::from_u8(rec.downstream_proto);
-                let up_proto = LogProtocol::from_u8(rec.upstream_proto);
-                let pipe = PipeStrategy::from_discriminant(rec.pipe_strategy)
-                    .unwrap_or(PipeStrategy::Buffered);
+                let downstream_protocol = rec.downstream_protocol();
                 let completion = LogCompletionReason::from_u8(rec.completion);
                 let seconds = rec.timestamp_sec as i64;
 
                 self.line_buf.clear();
 
-                match proto {
+                match downstream_protocol {
                     LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
                         let method = LogHttpMethod::from_u8(rec.method);
                         let ua_fam = UaFamily::from_u8(rec.ua_family);
@@ -183,38 +179,37 @@ impl LokiProtoFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.line_buf.extend_from_slice(b" proto=");
-                        self.line_buf.extend_from_slice(proto.as_str().as_bytes());
-                        self.line_buf.extend_from_slice(b" up_proto=");
-                        self.line_buf
-                            .extend_from_slice(up_proto.as_str().as_bytes());
                         self.line_buf.extend_from_slice(b" pipe=");
-                        self.line_buf.extend_from_slice(pipe.as_str().as_bytes());
+                        self.line_buf.extend_from_slice(rec.pipe_name().as_bytes());
                         self.line_buf.extend_from_slice(b" method=");
                         self.line_buf.extend_from_slice(method.as_str().as_bytes());
+                        self.line_buf.extend_from_slice(b" url=");
+                        self.line_buf.extend_from_slice(rec.url().as_bytes());
+                        self.line_buf.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.line_buf.extend_from_slice(name.as_bytes());
+                        });
                         self.line_buf.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.line_buf, rec.status_code as u64);
-                        self.line_buf.extend_from_slice(b" route_id=");
-                        fast_write_u64(&mut self.line_buf, rec.route_id as u64);
-                        self.line_buf.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.line_buf, rec.duration_us as u64);
-                        self.line_buf.extend_from_slice(b" rx=");
+                        self.line_buf.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.line_buf, rec.duration_ns);
+                        self.line_buf.extend_from_slice(b" bytes_rx=");
                         fast_write_u64(&mut self.line_buf, rec.bytes_rx as u64);
-                        self.line_buf.extend_from_slice(b" tx=");
+                        self.line_buf.extend_from_slice(b" bytes_tx=");
                         fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
-                        self.line_buf.extend_from_slice(b" peer=");
+                        self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
-                        self.line_buf.extend_from_slice(b" upstream=");
+                        self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.upstream_port as u64);
-                        self.line_buf.extend_from_slice(b" ua=");
+                        self.line_buf.extend_from_slice(b" user_agent=");
                         self.line_buf.extend_from_slice(ua_fam.as_str().as_bytes());
                         self.line_buf.push(b'/');
                         fast_write_u64(&mut self.line_buf, rec.ua_major_version as u64);
-                        self.line_buf.extend_from_slice(b" os=");
+                        self.line_buf.extend_from_slice(b" client_os=");
                         self.line_buf.extend_from_slice(ua_os.as_str().as_bytes());
                         self.line_buf.extend_from_slice(b" completion=");
                         self.line_buf
@@ -237,31 +232,35 @@ impl LokiProtoFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.line_buf.extend_from_slice(b" proto=");
-                        self.line_buf.extend_from_slice(proto.as_str().as_bytes());
+                        self.line_buf.extend_from_slice(b" pipe=");
+                        self.line_buf.extend_from_slice(rec.pipe_name().as_bytes());
+                        self.line_buf.extend_from_slice(b" method=POST url=");
+                        self.line_buf.extend_from_slice(rec.url().as_bytes());
+                        self.line_buf.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.line_buf.extend_from_slice(name.as_bytes());
+                        });
                         self.line_buf.extend_from_slice(b" grpc_status=");
                         self.line_buf.extend_from_slice(grpc_st.as_str().as_bytes());
-                        self.line_buf.extend_from_slice(b" http_status=");
+                        self.line_buf.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.line_buf, rec.status_code as u64);
-                        self.line_buf.extend_from_slice(b" route_id=");
-                        fast_write_u64(&mut self.line_buf, rec.route_id as u64);
-                        self.line_buf.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.line_buf, rec.duration_us as u64);
-                        self.line_buf.extend_from_slice(b" rx=");
-                        fast_write_u64(&mut self.line_buf, rec.bytes_rx as u64);
-                        self.line_buf.extend_from_slice(b" tx=");
-                        fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
-                        self.line_buf.extend_from_slice(b" msgs=");
+                        self.line_buf.extend_from_slice(b" rpc_messages=");
                         fast_write_u64(&mut self.line_buf, rec.rpc_msgs_or_flags as u64);
-                        self.line_buf.extend_from_slice(b" peer=");
+                        self.line_buf.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.line_buf, rec.duration_ns);
+                        self.line_buf.extend_from_slice(b" bytes_rx=");
+                        fast_write_u64(&mut self.line_buf, rec.bytes_rx as u64);
+                        self.line_buf.extend_from_slice(b" bytes_tx=");
+                        fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
+                        self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
-                        self.line_buf.extend_from_slice(b" upstream=");
+                        self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.upstream_port as u64);
-                        self.line_buf.extend_from_slice(b" ua=");
+                        self.line_buf.extend_from_slice(b" user_agent=");
                         self.line_buf.extend_from_slice(ua_fam.as_str().as_bytes());
                         self.line_buf.push(b'/');
                         fast_write_u64(&mut self.line_buf, rec.ua_major_version as u64);
@@ -283,19 +282,23 @@ impl LokiProtoFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.line_buf.extend_from_slice(b" proto=");
-                        self.line_buf.extend_from_slice(proto.as_str().as_bytes());
-                        self.line_buf.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.line_buf, rec.duration_us as u64);
-                        self.line_buf.extend_from_slice(b" rx=");
+                        self.line_buf.extend_from_slice(b" pipe=");
+                        self.line_buf.extend_from_slice(rec.pipe_name().as_bytes());
+                        self.line_buf.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.line_buf.extend_from_slice(name.as_bytes());
+                        });
+                        self.line_buf.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.line_buf, rec.duration_ns);
+                        self.line_buf.extend_from_slice(b" bytes_rx=");
                         fast_write_u64(&mut self.line_buf, rec.bytes_rx as u64);
-                        self.line_buf.extend_from_slice(b" tx=");
+                        self.line_buf.extend_from_slice(b" bytes_tx=");
                         fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
-                        self.line_buf.extend_from_slice(b" peer=");
+                        self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
-                        self.line_buf.extend_from_slice(b" upstream=");
+                        self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
                         fast_write_u64(&mut self.line_buf, rec.upstream_port as u64);
@@ -407,6 +410,7 @@ mod tests {
     use super::super::model::PushRequest;
     use super::*;
     use prost::Message;
+    use velda_observability::PipeKind;
 
     #[test]
     fn test_proto_wire_formatter_decodes_cleanly() {
@@ -425,9 +429,7 @@ mod tests {
             200,
             1,
             0,
-            LogProtocol::H2,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH2H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -445,9 +447,7 @@ mod tests {
             200,
             2,
             4,
-            LogProtocol::GrpcTcp,
-            LogProtocol::GrpcTcp,
-            PipeStrategy::Duplex,
+            PipeKind::DuplexGrpcTcpTcp,
             LogCompletionReason::Complete,
             LogHttpMethod::Post,
             LogGrpcStatus::Ok,
@@ -477,7 +477,7 @@ mod tests {
             e0.line
                 .contains("request_id=0000000065ec8781aaaabbbbccccdddd")
         );
-        assert!(e0.line.contains("peer=192.168.1.10:50000"));
+        assert!(e0.line.contains("client=192.168.1.10:50000"));
 
         // Verify Stream 2 (gRPC)
         let s1 = &decoded.streams[1];
@@ -492,7 +492,7 @@ mod tests {
             e1.line
                 .contains("request_id=0000000065ec87821111222233334444")
         );
-        assert!(e1.line.contains("peer=::1:50001"));
+        assert!(e1.line.contains("client=::1:50001"));
         assert!(e1.line.contains("grpc_status=OK"));
     }
 }

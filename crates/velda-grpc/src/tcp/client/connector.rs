@@ -334,9 +334,22 @@ impl GrpcAccelerationPath {
 #[derive(Clone)]
 pub struct GrpcUpstreamConnector {
     send_request: SendRequest<Bytes>,
+    target: Option<SocketAddr>,
 }
 
 impl GrpcUpstreamConnector {
+    /// Returns the physical backend endpoint address if established to a socket address.
+    #[inline(always)]
+    pub fn target(&self) -> Option<SocketAddr> {
+        self.target
+    }
+
+    /// Attaches the physical backend endpoint address to a stream-handshaked connector.
+    #[inline(always)]
+    pub fn with_target(mut self, target: SocketAddr) -> Self {
+        self.target = Some(target);
+        self
+    }
     /// Polls or awaits readiness of the underlying HTTP/2 connection to accept a new request stream.
     pub async fn ready(&mut self) -> Result<(), GrpcError> {
         let ready_send = self
@@ -473,7 +486,10 @@ impl GrpcUpstreamConnector {
             send_request
         };
 
-        Ok(Self { send_request })
+        Ok(Self {
+            send_request,
+            target: Some(target),
+        })
     }
 
     /// Performs the gRPC HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. RDMA stream).
@@ -508,7 +524,10 @@ impl GrpcUpstreamConnector {
             let _ = connection.await;
         });
 
-        Ok(Self { send_request })
+        Ok(Self {
+            send_request,
+            target: None,
+        })
     }
 
     /// Submits a raw streaming gRPC request to the upstream backend.

@@ -17,11 +17,12 @@ use crate::upstream::lb::EdgeUpstream;
 #[derive(Clone, Debug)]
 pub struct Http2ClientResource {
     pub client: h2::client::SendRequest<Bytes>,
+    pub endpoint: SocketAddr,
 }
 
 impl Http2ClientResource {
-    pub fn new(client: h2::client::SendRequest<Bytes>) -> Self {
-        Self { client }
+    pub fn new(client: h2::client::SendRequest<Bytes>, endpoint: SocketAddr) -> Self {
+        Self { client, endpoint }
     }
 }
 
@@ -232,7 +233,7 @@ impl Http2Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                let res = Http2ClientResource::new(fresh);
+                let res = Http2ClientResource::new(fresh, endpoint);
                 let lease = self.pool.register(endpoint, res, max_streams);
 
                 let ready_client = lease.client.clone();
@@ -285,7 +286,7 @@ impl Http2Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                let res = Http2ClientResource::new(fresh);
+                let res = Http2ClientResource::new(fresh, endpoint);
                 let lease = self.pool.register(endpoint, res, max_streams);
 
                 let ready_client = lease.client.clone();
@@ -361,7 +362,7 @@ impl Http2Upstream {
                     Ok(fresh) => {
                         let ready_res = tokio::time::timeout(connect_timeout, fresh.ready()).await;
                         if let Ok(Ok(ready_client)) = ready_res {
-                            let res = Http2ClientResource::new(ready_client);
+                            let res = Http2ClientResource::new(ready_client, addr);
                             self.pool.register_warmed_to_lane(
                                 addr,
                                 lane,
@@ -492,7 +493,7 @@ impl Http2Upstream {
                                 self.pool.register_warmed_to_lane(
                                     addr,
                                     lane,
-                                    Http2ClientResource::new(client),
+                                    Http2ClientResource::new(client, addr),
                                     self.max_concurrent_streams,
                                 );
                             }

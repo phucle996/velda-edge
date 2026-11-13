@@ -17,7 +17,7 @@ use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Serves a full-duplex bidirectional HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
@@ -29,9 +29,9 @@ pub async fn serve(
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Fail-fast: Acquire upstream multiplexed connection before duplex loop
-    let (mut client, _lease) = match upstream.acquire(&config).await {
+    let (mut client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -53,9 +53,16 @@ pub async fn serve(
             } else {
                 let _ = responder.send_response(&err_resp);
             }
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     // 3. Pipe duplex frames concurrently
     let duplex_res = async {
@@ -79,7 +86,7 @@ pub async fn serve(
 
         let upload_task = async move {
             if is_empty_upload {
-                return Ok::<(), Http2Error>(());
+                return Ok::<u64, Http2Error>(0);
             }
             let mut sent_end_stream = false;
             while !receiver.is_end_stream() {
@@ -102,10 +109,10 @@ pub async fn serve(
                         match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
                             Some(Ok(_)) => {}
                             Some(Err(err)) => return Err(err.into()),
-                            None => return Ok(()),
+                            None => return Ok(receiver.bytes_received() as u64),
                         }
                         if send_stream.capacity() == 0 {
-                            return Ok(());
+                            return Ok(receiver.bytes_received() as u64);
                         }
                         continue;
                     }
@@ -114,7 +121,7 @@ pub async fn serve(
                     let is_last = receiver.is_end_stream() && to_send == chunk.len();
                     let slice = chunk.split_to(to_send);
                     if send_stream.send_data(slice, is_last).is_err() {
-                        return Ok(());
+                        return Ok(receiver.bytes_received() as u64);
                     }
                     if is_last {
                         sent_end_stream = true;
@@ -128,7 +135,7 @@ pub async fn serve(
             if !sent_end_stream {
                 let _ = send_stream.send_data(Bytes::new(), true);
             }
-            Ok::<(), Http2Error>(())
+            Ok::<u64, Http2Error>(receiver.bytes_received() as u64)
         };
 
         let config_max_body = config.max_body_size;
@@ -156,7 +163,7 @@ pub async fn serve(
                 let resp =
                     L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
                 responder.send_response_and_cancel_upload(&resp)?;
-                return Ok(());
+                return Ok::<(u16, u64), Http2Error>((responder.last_status, 0));
             }
 
             let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
@@ -192,7 +199,7 @@ pub async fn serve(
                             .flow_control()
                             .release_capacity(unreleased_bytes);
                     }
-                    return Ok(());
+                    return Ok((responder.last_status, sender.bytes_sent()));
                 }
             }
 
@@ -202,22 +209,39 @@ pub async fn serve(
                     .release_capacity(unreleased_bytes);
             }
 
+            let tx = sender.bytes_sent();
             let _ = sender.finish();
-            Ok(())
+            Ok((responder.last_status, tx))
         };
 
         let (up_res, down_res) = tokio::join!(upload_task, download_task);
-        up_res?;
-        down_res?;
-        Ok::<(), Http2Error>(())
+        let rx = up_res?;
+        let (status, tx) = down_res?;
+        Ok::<(u16, u64, u64), Http2Error>((status, rx, tx))
     }
     .await;
 
-    if let Err(e) = duplex_res {
-        tracing::warn!(
-            error = %e,
-            upstream = %upstream.id(),
-            "HTTP/2 upstream duplex pipe failed"
-        );
+    match duplex_res {
+        Ok((status, rx, tx)) => PipeOutcome::http(
+            status,
+            rx,
+            tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                upstream = %upstream.id(),
+                "HTTP/2 upstream duplex pipe failed"
+            );
+            PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                0,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            )
+        }
     }
 }

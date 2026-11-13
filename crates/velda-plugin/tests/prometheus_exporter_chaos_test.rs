@@ -13,8 +13,8 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use velda_observability::{
-    DownstreamProto, MetricsStore, PipeStrategy, PipelineSnapshot, TOTAL_PIPELINE_SLOTS,
-    UpstreamProto,
+    DownstreamProtocol, MetricsStore, PipeStrategy, PipelineSnapshot, TOTAL_PIPELINE_SLOTS,
+    UpstreamProtocol,
 };
 use velda_plugin::background::prometheus_exporter::lut::DIGIT_PAIRS;
 use velda_plugin::background::prometheus_exporter::server::BufferPool;
@@ -97,11 +97,15 @@ fn test_chaos_all_36_pipeline_slots_boundary_values() {
 
         // Verify all 36 slot coordinates are present in the output
         for d in &[
-            DownstreamProto::H1,
-            DownstreamProto::H2,
-            DownstreamProto::H3,
+            DownstreamProtocol::H1,
+            DownstreamProtocol::H2,
+            DownstreamProtocol::H3,
         ] {
-            for u in &[UpstreamProto::H1, UpstreamProto::H2, UpstreamProto::H3] {
+            for u in &[
+                UpstreamProtocol::H1,
+                UpstreamProtocol::H2,
+                UpstreamProtocol::H3,
+            ] {
                 for p in &[
                     PipeStrategy::Buffered,
                     PipeStrategy::ServerStream,

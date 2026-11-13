@@ -86,6 +86,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(upstream_lease.endpoint);
 
     let cfg = *conn.config();
     sanitize_headers(&mut req_head.headers);
@@ -212,6 +213,7 @@ where
                         conn.upstream_read_buf.advance(len);
                     }
                     conn.stream.write_all(&conn.write_buf).await?;
+                    conn.last_bytes_tx += len as u64;
                     if resp_head
                         .headers
                         .get(http::header::CONNECTION)
@@ -264,6 +266,7 @@ where
             velda_http1::encode_chunked_end(&mut conn.upstream_write_buf);
             sent_terminal = true;
         }
+        conn.last_bytes_rx += total_body_bytes as u64;
 
         // Single atomic write combining request head and initial chunks
         upstream_lease
@@ -283,6 +286,7 @@ where
                     if total_body_bytes > cfg.max_body_size {
                         return Err(Http1Error::PayloadTooLarge(total_body_bytes));
                     }
+                    conn.last_bytes_rx += slice.len() as u64;
                     send_chunk(&mut *upstream_lease, &slice).await?;
                 }
 

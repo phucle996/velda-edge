@@ -1,7 +1,7 @@
 //! Cacheline-Aligned In-Memory Pipeline Metrics Slot.
 //!
 //! Provides thread-safe, lock-free atomic counters and histogram buckets
-//! dedicated to a single `(DownstreamProto, UpstreamProto, PipeStrategy)` tuple.
+//! dedicated to a single `(DownstreamProtocol, UpstreamProtocol, PipeStrategy)` tuple.
 //!
 //! # Hardware Invariants
 //! - `#[repr(align(64))]`: Aligned strictly to a 64-byte boundary (L1 CPU cacheline length

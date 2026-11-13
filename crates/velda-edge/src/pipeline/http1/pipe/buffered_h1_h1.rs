@@ -117,6 +117,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(upstream_lease.endpoint);
 
     let cfg = *conn.config();
     let req_timeout = upstream.request_timeout();
@@ -125,6 +126,7 @@ where
 
     // 5. Execute full Upstream transaction guarded by an authoritative end-to-end deadline
     let mut lease_guard = LeaseGuard::new(upstream_lease);
+    let mut fresh_endpoint = None;
     let upstream_exchange = async {
         // Send request and read response head with self-healing retry on stale pooled connection
         let (mut resp_head, resp_framing) = {
@@ -143,6 +145,7 @@ where
 
                     match upstream.acquire_fresh().await {
                         Ok(mut fresh_lease) => {
+                            fresh_endpoint = Some(fresh_lease.endpoint);
                             let retry_attempt = async {
                                 send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
                                     .await?;
@@ -246,29 +249,32 @@ where
         Ok((resp_head, body_len, decoded_chunk_bytes))
     };
 
-    let (mut resp_head, body_len, decoded_chunk_bytes) =
-        match tokio::time::timeout(req_timeout, upstream_exchange).await {
-            Ok(Ok(res)) => res,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                tracing::warn!(
-                    upstream = %upstream.id(),
-                    timeout_ms = req_timeout.as_millis(),
-                    "Upstream transaction deadline exceeded"
-                );
-                let err_resp = Http1ServerResponse::from_bytes(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    b"504 Gateway Timeout: upstream request timeout exceeded\n".to_vec(),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
-                );
-                conn.mark_close();
-                let _ = conn.send_response(&err_resp).await;
-                return Err(Http1Error::Timeout);
-            }
-        };
+    let exchange_res = tokio::time::timeout(req_timeout, upstream_exchange).await;
+    if let Some(ep) = fresh_endpoint {
+        conn.last_upstream_addr = Some(ep);
+    }
+    let (mut resp_head, body_len, decoded_chunk_bytes) = match exchange_res {
+        Ok(Ok(res)) => res,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            tracing::warn!(
+                upstream = %upstream.id(),
+                timeout_ms = req_timeout.as_millis(),
+                "Upstream transaction deadline exceeded"
+            );
+            let err_resp = Http1ServerResponse::from_bytes(
+                StatusCode::GATEWAY_TIMEOUT,
+                b"504 Gateway Timeout: upstream request timeout exceeded\n".to_vec(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            conn.mark_close();
+            let _ = conn.send_response(&err_resp).await;
+            return Err(Http1Error::Timeout);
+        }
+    };
 
     // Upstream exchange succeeded completely: commit clean lease for reuse!
     let upstream_lease = lease_guard.commit();
@@ -377,6 +383,7 @@ where
             }
         }
         conn.upstream_read_buf.clear();
+        conn.last_bytes_tx += actual_body_len as u64;
     } else {
         conn.upstream_read_buf.clear();
         conn.stream.write_all(&conn.write_buf).await?;

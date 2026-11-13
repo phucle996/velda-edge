@@ -15,7 +15,7 @@ use velda_core::L7Response;
 use velda_http1::is_connection_close;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
 
 /// Serves a buffered HTTP/2 downstream stream forwarded to an HTTP/1.1 upstream backend.
@@ -26,7 +26,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Consume downstream body
     let body = match receiver.consume_all_into_slab(Some(&meta.slab_pool)).await {
         Ok(b) => b,
@@ -40,9 +40,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = receiver.bytes_received() as u64;
 
     // 2. Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
     if !req_head.headers.contains_key(http::header::HOST)
@@ -71,9 +78,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     // 5. Serialize & send HTTP/1.1 request using pre-allocated pooled lease.write_buf
     let (stream, write_buf) = lease.split_write();
@@ -103,7 +117,13 @@ pub async fn serve(
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
         let _ = responder.send_response(&err_resp);
-        return;
+        return PipeOutcome::http(
+            responder.last_status,
+            bytes_rx,
+            responder.last_bytes_tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        );
     }
 
     // 6. Read and decode HTTP/1.1 response using pre-allocated pooled lease.read_buf (zero heap allocations)
@@ -123,7 +143,13 @@ pub async fn serve(
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         };
 
@@ -139,7 +165,13 @@ pub async fn serve(
                     b"413 Payload Too Large\n".to_vec(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
             if body_len > 0 {
                 if lease.read_buf.len() < body_len {
@@ -207,7 +239,13 @@ pub async fn serve(
                     b"502 Bad Gateway: upstream chunked read failed\n".to_vec(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
             velda_core::Body::Bytes(chunked_body.freeze())
         }
@@ -239,4 +277,11 @@ pub async fn serve(
     }
     meta.inject_response_headers(&mut l7_resp.headers);
     let _ = responder.send_response_owned(l7_resp);
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        responder.last_bytes_tx,
+        upstream_addr,
+        velda_observability::LogCompletionReason::Complete,
+    )
 }

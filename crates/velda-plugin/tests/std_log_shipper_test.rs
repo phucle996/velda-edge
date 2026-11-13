@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, LogStore,
-    PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogStore, PipeKind,
 };
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::std_log_shipper::config::TargetStream;
@@ -28,9 +27,7 @@ fn test_std_log_shipper_formatting_all_protocols() {
         200,
         10,
         0,
-        LogProtocol::H1,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,
@@ -48,9 +45,7 @@ fn test_std_log_shipper_formatting_all_protocols() {
         200,
         11,
         0,
-        LogProtocol::H2,
-        LogProtocol::H2,
-        PipeStrategy::ServerStream,
+        PipeKind::ServerStreamH2H2,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::NonGrpc,
@@ -68,9 +63,7 @@ fn test_std_log_shipper_formatting_all_protocols() {
         200,
         12,
         10,
-        LogProtocol::GrpcTcp,
-        LogProtocol::GrpcTcp,
-        PipeStrategy::Duplex,
+        PipeKind::DuplexGrpcTcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::Ok,
@@ -88,9 +81,7 @@ fn test_std_log_shipper_formatting_all_protocols() {
         0,
         13,
         0,
-        LogProtocol::RawTcp,
-        LogProtocol::RawTcp,
-        PipeStrategy::Buffered,
+        PipeKind::TcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Unknown,
         LogGrpcStatus::NonGrpc,
@@ -105,22 +96,25 @@ fn test_std_log_shipper_formatting_all_protocols() {
     assert_eq!(count, 4);
     let text = String::from_utf8(text_buf).unwrap();
     assert!(text.contains("10.0.0.1:12345"));
-    assert!(text.contains("\"GET http/1.1\" 200 1024 150us"));
-    assert!(text.contains("\"POST http/2\" 200 4096 220us"));
-    assert!(text.contains("grpc_status=OK msgs=10"));
-    assert!(text.contains("raw/tcp"));
+    assert!(text.contains("duration_ns=150 pipe=buffered_h1_h1"));
+    assert!(text.contains("duration_ns=220 pipe=server_stream_h2_h2"));
+    assert!(text.contains("grpc_status=OK rpc_messages=10"));
+    assert!(text.contains("pipe=tcp_tcp"));
 
     // Verify JSON format
     let mut json_buf = Vec::new();
     let count = format_std_log_payload(&batches, "json", &mut json_buf);
     assert_eq!(count, 4);
     let json_str = String::from_utf8(json_buf).unwrap();
-    assert!(json_str.contains("\"proto\":\"http/1.1\""));
-    assert!(json_str.contains("\"proto\":\"http/2\""));
-    assert!(json_str.contains("\"proto\":\"grpc/tcp\""));
-    assert!(json_str.contains("\"proto\":\"raw/tcp\""));
+    assert!(json_str.contains("\"pipe\":\"buffered_h1_h1\""));
+    assert!(json_str.contains("\"pipe\":\"server_stream_h2_h2\""));
+    assert!(json_str.contains("\"pipe\":\"duplex_grpc_tcp_tcp\""));
+    assert!(json_str.contains("\"pipe\":\"tcp_tcp\""));
+    assert!(json_str.contains("\"duration_ns\":150"));
+    assert!(!json_str.contains("\"downstream_protocol\""));
+    assert!(!json_str.contains("\"upstream_protocol\""));
     assert!(json_str.contains("\"grpc_status\":\"OK\""));
-    assert!(json_str.contains("\"msgs\":10"));
+    assert!(json_str.contains("\"rpc_messages\":10"));
 }
 
 #[tokio::test]
@@ -170,7 +164,7 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
         let rec = AccessLogRecord::from_scalars(
             i as u64,
             1_710_000_000 + i as u32,
-            100 + i as u32,
+            100 + i as u64,
             "127.0.0.1:8080".parse().unwrap(),
             None,
             10,
@@ -178,9 +172,7 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,

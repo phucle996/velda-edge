@@ -11,7 +11,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
 use velda_observability::{
-    DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProtocol,
 };
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
@@ -155,8 +155,8 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
         let core_id = (i & 1) as usize;
         let slot = store.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -171,8 +171,8 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
         let core_id = (i & 1) as usize;
         let slot = store.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -209,8 +209,8 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
         let core_id = (i & 1) as usize;
         let slot = store.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -344,8 +344,8 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
     for _ in 0..20_000 {
         let slot = store.slot_on_core(
             0,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -364,8 +364,8 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
         for _ in 0..WORKER_REQUESTS {
             let slot = store_b.slot_on_core(
                 0,
-                DownstreamProto::H1,
-                UpstreamProto::H1,
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
                 PipeStrategy::Buffered,
             );
             slot.stream_started();
@@ -419,8 +419,8 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
         for _ in 0..WORKER_REQUESTS {
             let slot = store_a.slot_on_core(
                 0,
-                DownstreamProto::H1,
-                UpstreamProto::H1,
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
                 PipeStrategy::Buffered,
             );
             slot.stream_started();
@@ -495,8 +495,8 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
     for i in 0..10_000u64 {
         let slot = store.slot_on_core(
             (i % 12) as usize,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -510,8 +510,8 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
     for _ in 0..SAMPLE_COUNT {
         let slot = store.slot_on_core(
             0,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         let t0 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -538,8 +538,8 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
             for i in 0..ops_per_thread_4 {
                 let slot = store_c.slot_on_core(
                     core_id,
-                    DownstreamProto::H1,
-                    UpstreamProto::H1,
+                    DownstreamProtocol::H1,
+                    UpstreamProtocol::H1,
                     PipeStrategy::Buffered,
                 );
                 if i < SAMPLE_COUNT {
@@ -579,8 +579,8 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
             for i in 0..ops_per_thread_8 {
                 let slot = store_c.slot_on_core(
                     core_id,
-                    DownstreamProto::H1,
-                    UpstreamProto::H1,
+                    DownstreamProtocol::H1,
+                    UpstreamProtocol::H1,
                     PipeStrategy::Buffered,
                 );
                 if i < SAMPLE_COUNT {
@@ -682,8 +682,8 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
         for _ in 0..TEST_OPS {
             let slot = store_3a.slot_on_core(
                 0,
-                DownstreamProto::H1,
-                UpstreamProto::H1,
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
                 PipeStrategy::Buffered,
             );
             let t0 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -710,8 +710,8 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
         for _ in 0..TEST_OPS {
             let slot = store_3b.slot_on_core(
                 2,
-                DownstreamProto::H1,
-                UpstreamProto::H1,
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
                 PipeStrategy::Buffered,
             );
             let t0 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -738,8 +738,8 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
     for _ in 0..CLFLUSH_SAMPLES {
         let slot = store.slot_on_core(
             0,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         // Force flush slot cacheline to DRAM

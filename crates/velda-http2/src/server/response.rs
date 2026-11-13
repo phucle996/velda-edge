@@ -107,6 +107,10 @@ pub struct Http2Responder {
     respond: SendResponse<Bytes>,
     request_id: Option<HeaderValue>,
     alt_svc: Option<HeaderValue>,
+    /// Status code of the response sent on this stream (`0` if none sent yet).
+    pub last_status: u16,
+    /// Total response body bytes sent on this stream (for single-shot responses).
+    pub last_bytes_tx: u64,
 }
 
 impl Http2Responder {
@@ -117,6 +121,8 @@ impl Http2Responder {
             respond,
             request_id: None,
             alt_svc: None,
+            last_status: 0,
+            last_bytes_tx: 0,
         }
     }
 
@@ -195,6 +201,7 @@ impl Http2Responder {
     /// completely bypassing `DATA` frame overhead and flow control window calculations.
     #[inline]
     pub fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http2Error> {
+        self.last_status = status.as_u16();
         super::early_response::send_early_error(
             &mut self.respond,
             status,
@@ -210,6 +217,7 @@ impl Http2Responder {
         &mut self,
         status: StatusCode,
     ) -> Result<(), Http2Error> {
+        self.last_status = status.as_u16();
         super::early_response::send_early_error_and_cancel_upload(
             &mut self.respond,
             status,
@@ -220,11 +228,15 @@ impl Http2Responder {
 
     /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning and header copying.
     pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
+        self.last_status = response.status.as_u16();
         let is_no_body = response.status.is_informational()
             || response.status == StatusCode::NO_CONTENT
             || response.status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !response.body.is_empty();
+        if has_body {
+            self.last_bytes_tx += response.body.len() as u64;
+        }
         let http_response =
             self.prepare_h2_response_owned(response.status, response.headers.into())?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
@@ -241,10 +253,14 @@ impl Http2Responder {
         &mut self,
         response: &L7Response,
     ) -> Result<(), Http2Error> {
+        self.last_status = response.status.as_u16();
         let is_no_body = response.status.is_informational()
             || response.status == StatusCode::NO_CONTENT
             || response.status == StatusCode::NOT_MODIFIED;
         let has_body = !is_no_body && !response.body.is_empty();
+        if has_body {
+            self.last_bytes_tx += response.body.len() as u64;
+        }
         let http_response = self.prepare_h2_response(response.status, &response.headers)?;
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
 
@@ -268,11 +284,15 @@ impl Http2Responder {
         headers: &HeaderMap,
         body: &Body,
     ) -> Result<(), Http2Error> {
+        self.last_status = status.as_u16();
         let is_no_body = status.is_informational()
             || status == StatusCode::NO_CONTENT
             || status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !body.is_empty();
+        if has_body {
+            self.last_bytes_tx += body.len() as u64;
+        }
         let http_response = self.prepare_h2_response(status, headers)?;
 
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
@@ -291,11 +311,15 @@ impl Http2Responder {
         headers: &HeaderMap,
         body: Body,
     ) -> Result<(), Http2Error> {
+        self.last_status = status.as_u16();
         let is_no_body = status.is_informational()
             || status == StatusCode::NO_CONTENT
             || status == StatusCode::NOT_MODIFIED;
 
         let has_body = !is_no_body && !body.is_empty();
+        if has_body {
+            self.last_bytes_tx += body.len() as u64;
+        }
         let http_response = self.prepare_h2_response(status, headers)?;
 
         let mut send_stream = self.respond.send_response(http_response, !has_body)?;
@@ -314,6 +338,7 @@ impl Http2Responder {
         headers: &HeaderMap,
         end_stream: bool,
     ) -> Result<SendStream<Bytes>, Http2Error> {
+        self.last_status = status.as_u16();
         let http_response = self.prepare_h2_response(status, headers)?;
         let send_stream = self.respond.send_response(http_response, end_stream)?;
         Ok(send_stream)
@@ -326,6 +351,7 @@ impl Http2Responder {
         headers: HeaderMap,
         end_stream: bool,
     ) -> Result<SendStream<Bytes>, Http2Error> {
+        self.last_status = status.as_u16();
         let http_response = self.prepare_h2_response_owned(status, headers)?;
         let send_stream = self.respond.send_response(http_response, end_stream)?;
         Ok(send_stream)
@@ -356,13 +382,23 @@ impl Http2Responder {
 #[derive(Debug)]
 pub struct Http2StreamSender {
     send_stream: SendStream<Bytes>,
+    bytes_sent: u64,
 }
 
 impl Http2StreamSender {
     /// Creates a new [`Http2StreamSender`].
     #[inline]
     pub fn new(send_stream: SendStream<Bytes>) -> Self {
-        Self { send_stream }
+        Self {
+            send_stream,
+            bytes_sent: 0,
+        }
+    }
+
+    /// Returns the total number of response DATA bytes transmitted on this stream.
+    #[inline]
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
     }
 
     /// Sends a DATA frame chunk downstream with RFC 9113 flow-control backpressure.
@@ -392,6 +428,7 @@ impl Http2StreamSender {
             let to_send = chunk.len().min(available);
             let slice = chunk.split_to(to_send);
             self.send_stream.send_data(slice, false)?;
+            self.bytes_sent += to_send as u64;
         }
         Ok(())
     }

@@ -29,9 +29,7 @@
 //! ```
 
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
-};
+use velda_observability::{AccessLogRecord, LogGrpcStatus, LogHttpMethod, UaFamily, UaOs};
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ts_nano, fast_write_u64};
 
@@ -52,7 +50,7 @@ impl OtlpJsonEnvelope {
         let mut prefix = Vec::with_capacity(512);
         prefix.extend_from_slice(b"{\"resourceLogs\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"");
         prefix.extend_from_slice(service_name.as_bytes());
-        prefix.extend_from_slice(b"\"}},{\"key\":\"telemetry.sdk.name\",\"value\":{\"stringValue\":\"velda-edge\"}}]},\"schemaUrl\":\"");
+        prefix.extend_from_slice(b"\"}},{\"key\":\"telemetry.sdk.name\",\"value\":{\"stringValue\":\"velda-edge\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"rust\"}}]},\"schemaUrl\":\"");
         prefix.extend_from_slice(OTLP_SCHEMA_URL);
         prefix.extend_from_slice(b"\",\"scopeLogs\":[{\"scope\":{\"name\":\"velda.access_log\",\"version\":\"0.1.0\"},\"schemaUrl\":\"");
         prefix.extend_from_slice(OTLP_SCHEMA_URL);
@@ -74,11 +72,12 @@ const JSON_SEV_INFO_BODY_REQ: &[u8] = b"\",\"severityNumber\":9,\"severityText\"
 const JSON_SEV_WARN_BODY_REQ: &[u8] = b"\",\"severityNumber\":13,\"severityText\":\"WARN\",\"body\":{\"stringValue\":\"HTTP access log\"},\"attributes\":[{\"key\":\"request_id\",\"value\":{\"stringValue\":\"";
 const JSON_SEV_ERROR_BODY_REQ: &[u8] = b"\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"body\":{\"stringValue\":\"HTTP access log\"},\"attributes\":[{\"key\":\"request_id\",\"value\":{\"stringValue\":\"";
 
-const OTLP_K6: &[u8] = b"\"}},{\"key\":\"network.protocol.name\",\"value\":{\"stringValue\":\"";
+const OTLP_K6: &[u8] = b"\"}},{\"key\":\"downstream_protocol\",\"value\":{\"stringValue\":\"";
+const OTLP_K6_UP: &[u8] = b"\"}},{\"key\":\"upstream_protocol\",\"value\":{\"stringValue\":\"";
 const OTLP_K7: &[u8] = b"\"}},{\"key\":\"http.request.method\",\"value\":{\"stringValue\":\"";
 const OTLP_K8: &[u8] = b"\"}},{\"key\":\"http.response.status_code\",\"value\":{\"intValue\":\"";
 const OTLP_K9: &[u8] = b"\"}},{\"key\":\"rpc.grpc.status_code\",\"value\":{\"stringValue\":\"";
-const OTLP_K10: &[u8] = b"\"}},{\"key\":\"duration_us\",\"value\":{\"intValue\":\"";
+const OTLP_K10: &[u8] = b"\"}},{\"key\":\"duration_ns\",\"value\":{\"intValue\":\"";
 const OTLP_K11: &[u8] = b"\"}},{\"key\":\"http.response.body.size\",\"value\":{\"intValue\":\"";
 const OTLP_K12: &[u8] = b"\"}},{\"key\":\"http.request.body.size\",\"value\":{\"intValue\":\"";
 const OTLP_K13: &[u8] = b"\"}},{\"key\":\"velda.route_id\",\"value\":{\"intValue\":\"";
@@ -117,7 +116,8 @@ pub fn format_otlp_records_json(
             }
             total_records += 1;
 
-            let proto = LogProtocol::from_u8(rec.downstream_proto);
+            let downstream_protocol = rec.downstream_protocol();
+            let upstream_protocol = rec.upstream_protocol();
             let method = LogHttpMethod::from_u8(rec.method);
             let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
             let ua_fam = UaFamily::from_u8(rec.ua_family);
@@ -146,9 +146,13 @@ pub fn format_otlp_records_json(
             fast_write_hex32(out, req_hi, req_lo);
 
             // 4. Attributes:
-            // Attr: network.protocol.name
+            // Attr: downstream_protocol
             out.extend_from_slice(OTLP_K6);
-            out.extend_from_slice(proto.as_str().as_bytes());
+            out.extend_from_slice(downstream_protocol.as_str().as_bytes());
+
+            // Attr: upstream_protocol
+            out.extend_from_slice(OTLP_K6_UP);
+            out.extend_from_slice(upstream_protocol.as_str().as_bytes());
 
             // Attr: http.request.method
             out.extend_from_slice(OTLP_K7);
@@ -162,9 +166,9 @@ pub fn format_otlp_records_json(
             out.extend_from_slice(OTLP_K9);
             out.extend_from_slice(grpc_st.as_str().as_bytes());
 
-            // Attr: duration_us
+            // Attr: duration_ns
             out.extend_from_slice(OTLP_K10);
-            fast_write_u64(out, rec.duration_us as u64);
+            fast_write_u64(out, rec.duration_ns);
 
             // Attr: http.response.body.size (bytes_tx)
             out.extend_from_slice(OTLP_K11);
@@ -212,7 +216,7 @@ pub fn format_otlp_records_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::PipeStrategy;
+    use velda_observability::PipeKind;
 
     #[test]
     fn test_format_otlp_records_json_schema_and_req_id() {
@@ -228,9 +232,7 @@ mod tests {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             velda_observability::LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -250,5 +252,14 @@ mod tests {
         );
         // 32-char hex check
         assert!(json_str.contains("0000000065ec87804bf92f3577b34da6"));
+
+        // Anti-circular check: deserialize OTLP/JSON via official opentelemetry-proto serde schema
+        let official: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest =
+            serde_json::from_slice(&out).expect(
+                "OTLP JSON must deserialize cleanly into official opentelemetry-proto schema",
+            );
+        let off_rec = &official.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(off_rec.attributes.len(), 15);
+        assert_eq!(off_rec.severity_number, 9);
     }
 }

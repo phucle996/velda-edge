@@ -13,6 +13,7 @@ use velda_http1::server::request::Http1BodyFraming;
 
 use velda_plugin::RoutePluginPlan;
 
+use crate::pipeline::PipeOutcome;
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http1Upstream;
 
@@ -30,7 +31,7 @@ pub async fn serve(
     responder: Http3Responder,
     upstream: &Arc<Http1Upstream>,
     plan: &Arc<RoutePluginPlan>,
-) {
+) -> PipeOutcome {
     let mut headers = req.headers.clone();
 
     // Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
@@ -58,9 +59,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     // Send HTTP/1.1 request head and body using pooled write buffer
     lease.write_buf.clear();
@@ -91,7 +99,13 @@ pub async fn serve(
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
         let _ = responder.send_response(err_resp).await;
-        return;
+        return PipeOutcome::http(
+            StatusCode::BAD_GATEWAY.as_u16(),
+            req.body.len() as u64,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        );
     }
 
     // Read HTTP/1.1 response head from upstream using pooled read buffer
@@ -116,7 +130,13 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 );
                 let _ = responder.send_response(err_resp).await;
-                return;
+                return PipeOutcome::http(
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                    req.body.len() as u64,
+                    0,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         }
     };
@@ -150,7 +170,13 @@ pub async fn serve(
                 upstream = %upstream.id(),
                 "Failed to initiate downstream HTTP/3 streaming response"
             );
-            return;
+            return PipeOutcome::http(
+                status.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::ClientCancel,
+            );
         }
     };
 
@@ -214,5 +240,19 @@ pub async fn serve(
     lease.read_buf.clear();
     drop(lease);
 
+    let bytes_tx = stream_sender.bytes_sent();
     let _ = stream_sender.finish().await;
+    PipeOutcome::http(
+        status.as_u16(),
+        req.body.len() as u64,
+        bytes_tx,
+        upstream_addr,
+        if stream_res.is_err() {
+            velda_observability::LogCompletionReason::ClientCancel
+        } else if lease_closed {
+            velda_observability::LogCompletionReason::UpstreamError
+        } else {
+            velda_observability::LogCompletionReason::Complete
+        },
+    )
 }

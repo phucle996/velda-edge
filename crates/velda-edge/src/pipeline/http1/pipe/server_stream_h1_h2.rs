@@ -118,7 +118,7 @@ where
     let h2_config = Http2Config::auto();
 
     // 5. Acquire upstream multiplexed connection
-    let (mut client, _lease) = match upstream.acquire(&h2_config).await {
+    let (mut client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -139,6 +139,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(lease.endpoint);
 
     // 6. Forward request over HTTP/2 stream
     let scheme = if upstream.is_tls() { "https" } else { "http" };
@@ -325,6 +326,7 @@ where
             tracing::debug!(error = %e, "Downstream client disconnected during streaming");
             return Err(Http1Error::ConnectionClosed);
         }
+        conn.last_bytes_tx += batch_bytes as u64;
 
         if reached_eof {
             break;

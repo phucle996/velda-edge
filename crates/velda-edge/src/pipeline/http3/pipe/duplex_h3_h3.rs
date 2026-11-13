@@ -10,6 +10,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
 use velda_plugin::RoutePluginPlan;
 
+use crate::pipeline::PipeOutcome;
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http3Upstream;
 
@@ -19,7 +20,7 @@ pub async fn serve(
     responder: Http3Responder,
     upstream: &Arc<Http3Upstream>,
     plan: &Arc<RoutePluginPlan>,
-) {
+) -> PipeOutcome {
     let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
@@ -37,9 +38,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(client.target());
 
     let mut stream_res = client.send_stream_request_ref(req).await;
     let mut _fresh_lease_guard = None;
@@ -55,6 +63,7 @@ pub async fn serve(
             "HTTP/3 connection closed; self-healing with fresh QUIC connection for duplex bridge"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            upstream_addr = Some(fresh_client.target());
             stream_res = fresh_client.send_stream_request_ref(req).await;
             if stream_res.is_err() {
                 fresh_lease.mark_goaway();
@@ -80,7 +89,13 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
 
@@ -109,7 +124,13 @@ pub async fn serve(
             Body::Empty,
         );
         let _ = responder.send_response(resp).await;
-        return;
+        return PipeOutcome::http(
+            stream_resp.status.as_u16(),
+            req.body.len() as u64,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        );
     }
 
     let mut stream_sender = match responder
@@ -123,24 +144,45 @@ pub async fn serve(
                 upstream = %upstream.id(),
                 "Failed to initiate downstream HTTP/3 streaming response for duplex bridge"
             );
-            return;
+            return PipeOutcome::http(
+                stream_resp.status.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::ClientCancel,
+            );
         }
     };
 
+    let mut failed = false;
     while let Some(chunk_res) = stream_resp.next_chunk().await {
         let chunk = match chunk_res {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "HTTP/3 upstream chunk read error in duplex bridge");
-                return;
+                failed = true;
+                break;
             }
         };
 
         if stream_sender.send_chunk(chunk).await.is_err() {
             tracing::debug!("Downstream client disconnected during H3 duplex streaming");
-            return;
+            failed = true;
+            break;
         }
     }
 
+    let bytes_tx = stream_sender.bytes_sent();
     let _ = stream_sender.finish().await;
+    PipeOutcome::http(
+        stream_resp.status.as_u16(),
+        req.body.len() as u64,
+        bytes_tx,
+        upstream_addr,
+        if failed {
+            velda_observability::LogCompletionReason::UpstreamError
+        } else {
+            velda_observability::LogCompletionReason::Complete
+        },
+    )
 }

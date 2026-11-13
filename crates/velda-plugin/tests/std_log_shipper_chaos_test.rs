@@ -14,8 +14,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
-    UaFamily, UaOs, encode_ip_u128,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeKind,
+    PipeStrategy, UaFamily, UaOs, encode_ip_u128,
 };
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
@@ -26,7 +26,7 @@ use velda_plugin::background::std_log_shipper::sink::StdLogSink;
 fn build_chaos_record(
     request_id: u64,
     timestamp_sec: u32,
-    duration_us: u32,
+    duration_ns: u64,
     peer_ip: u128,
     peer_port: u16,
     upstream_ip: u32,
@@ -36,9 +36,7 @@ fn build_chaos_record(
     status_code: u16,
     route_id: u16,
     rpc_msgs_or_flags: u16,
-    downstream_proto: LogProtocol,
-    upstream_proto: LogProtocol,
-    pipe_strategy: PipeStrategy,
+    pipe: PipeKind,
     completion: LogCompletionReason,
     method: LogHttpMethod,
     grpc_status: LogGrpcStatus,
@@ -49,7 +47,7 @@ fn build_chaos_record(
     AccessLogRecord {
         request_id,
         timestamp_sec,
-        duration_us,
+        duration_ns,
         peer_ip,
         bytes_rx,
         bytes_tx,
@@ -60,14 +58,14 @@ fn build_chaos_record(
         route_id,
         ua_major_version,
         rpc_msgs_or_flags,
-        downstream_proto: downstream_proto as u8,
-        upstream_proto: upstream_proto as u8,
-        pipe_strategy: pipe_strategy as u8,
+        pipe,
         completion: completion as u8,
         method: method as u8,
         grpc_status: grpc_status as u8,
         ua_family: ua_family as u8,
         ua_os: ua_os as u8,
+        url_len: 0,
+        url_bytes: [0; 188],
     }
 }
 
@@ -104,9 +102,7 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -151,8 +147,8 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
 // ============================================================================
 #[test]
 fn test_chaos_timestamps_duration_and_counters() {
-    let test_matrix: &[(u32, u32, u32, u32, u16, u16, u16)] = &[
-        // (ts, dur_us, rx, tx, status, route_id, msgs)
+    let test_matrix: &[(u32, u64, u32, u32, u16, u16, u16)] = &[
+        // (ts, dur_ns, rx, tx, status, route_id, msgs)
         (0, 0, 0, 0, 0, 0, 0),
         (1, 1, 1, 1, 200, 1, 1),
         (0x7FFF_FFFF, 999, 1024, 2048, 404, 100, 5), // Year 2038
@@ -165,7 +161,7 @@ fn test_chaos_timestamps_duration_and_counters() {
             u16::MAX,
             u16::MAX,
         ),
-        (1_710_000_000, u32::MAX, 65535, 131072, 999, 42, 1000),
+        (1_710_000_000, u32::MAX as u64, 65535, 131072, 999, 42, 1000),
     ];
 
     let mut records = Vec::new();
@@ -183,9 +179,7 @@ fn test_chaos_timestamps_duration_and_counters() {
             status,
             route_id,
             msgs,
-            LogProtocol::H2,
-            LogProtocol::H2,
-            PipeStrategy::ServerStream,
+            PipeKind::ServerStreamH2H2,
             LogCompletionReason::Complete,
             LogHttpMethod::Post,
             LogGrpcStatus::NonGrpc,
@@ -202,15 +196,14 @@ fn test_chaos_timestamps_duration_and_counters() {
     let json_text = String::from_utf8(json_out).unwrap();
     let lines: Vec<&str> = json_text.lines().collect();
 
-    for (i, &(ts, dur, rx, tx, status, route_id, msgs)) in test_matrix.iter().enumerate() {
+    for (i, &(ts, dur, rx, tx, status, _route_id, _msgs)) in test_matrix.iter().enumerate() {
         let v: serde_json::Value = serde_json::from_str(lines[i]).unwrap();
-        assert_eq!(v["ts"].as_u64().unwrap(), ts as u64);
-        assert_eq!(v["dur_us"].as_u64().unwrap(), dur as u64);
-        assert_eq!(v["rx"].as_u64().unwrap(), rx as u64);
-        assert_eq!(v["tx"].as_u64().unwrap(), tx as u64);
+        assert_eq!(v["timestamp_epoch_sec"].as_u64().unwrap(), ts as u64);
+        assert_eq!(v["duration_ns"].as_u64().unwrap(), dur);
+        assert_eq!(v["bytes_rx"].as_u64().unwrap(), rx as u64);
+        assert_eq!(v["bytes_tx"].as_u64().unwrap(), tx as u64);
         assert_eq!(v["status"].as_u64().unwrap(), status as u64);
-        assert_eq!(v["route_id"].as_u64().unwrap(), route_id as u64);
-        assert_eq!(v["msgs"].as_u64().unwrap(), msgs as u64);
+        assert_eq!(v["route"].as_str().unwrap(), "unmatched");
     }
 }
 
@@ -295,9 +288,7 @@ fn test_chaos_ip_addresses_rfc4291_rfc5952() {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -319,7 +310,7 @@ fn test_chaos_ip_addresses_rfc4291_rfc5952() {
         let v: serde_json::Value =
             serde_json::from_str(lines[i]).expect("JSON syntax must remain valid");
         assert_eq!(
-            v["peer"].as_str().unwrap(),
+            v["client"].as_str().unwrap(),
             expected_peer,
             "Peer IP mismatch on index {i}"
         );
@@ -421,7 +412,7 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
             records.push(build_chaos_record(
                 0x1000 + counter,
                 1_710_000_000 + (counter as u32),
-                200 + (counter as u32),
+                200 + counter,
                 encode_ip_u128(IpAddr::V4(Ipv4Addr::new(10, 0, 1, (counter % 250) as u8))),
                 10000 + (counter as u16),
                 0x7F00_0001,
@@ -431,9 +422,7 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
                 status,
                 (counter % 100) as u16,
                 (counter % 50) as u16,
-                proto,
-                proto,
-                strat,
+                PipeKind::from_protocols(proto as u8, proto as u8, strat as u8),
                 comp,
                 method,
                 grpc_st,
@@ -478,8 +467,8 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
         );
         assert!(line.contains("route="), "Line {i} missing 'route=': {line}");
         assert!(
-            line.contains(" upstream="),
-            "Line {i} missing ' upstream=': {line}"
+            line.contains(" endpoint="),
+            "Line {i} missing ' endpoint=': {line}"
         );
         assert!(
             line.contains("completion="),
@@ -505,8 +494,10 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
 // 5. Xác Minh Cú Pháp 100% (Round-Trip Schema & Key Completeness)
 // ============================================================================
 #[test]
-fn test_chaos_syntax_roundtrip_parsing_all_17_keys() {
-    let rec = build_chaos_record(
+fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
+    velda_observability::register_route_name(77, "api-upload");
+
+    let mut rec = build_chaos_record(
         0xDEAD_BEEF_CAFE_BABE,
         1_710_500_000,
         12345,
@@ -519,9 +510,7 @@ fn test_chaos_syntax_roundtrip_parsing_all_17_keys() {
         201,
         77,
         15,
-        LogProtocol::H3,
-        LogProtocol::H3,
-        PipeStrategy::Duplex,
+        PipeKind::DuplexH3H3,
         LogCompletionReason::ClientCancel,
         LogHttpMethod::Put,
         LogGrpcStatus::NonGrpc,
@@ -529,6 +518,9 @@ fn test_chaos_syntax_roundtrip_parsing_all_17_keys() {
         UaOs::MacOs,
         125,
     );
+    let (p_len, p_bytes) = AccessLogRecord::from_url_bytes(b"/api/v1/upload");
+    rec.url_len = p_len;
+    rec.url_bytes = p_bytes;
 
     let batches = vec![Arc::from(vec![rec])];
     let mut out = Vec::new();
@@ -538,23 +530,21 @@ fn test_chaos_syntax_roundtrip_parsing_all_17_keys() {
     let v: serde_json::Value = serde_json::from_str(&json_str).expect("Valid JSON object");
 
     let required_keys = [
+        "timestamp",
+        "timestamp_epoch_sec",
         "request_id",
-        "ts",
-        "dur_us",
-        "proto",
-        "up_proto",
-        "pipe",
+        "client",
+        "endpoint",
         "method",
+        "url",
+        "route",
         "status",
-        "grpc_status",
-        "rx",
-        "tx",
-        "msgs",
-        "peer",
-        "upstream",
-        "route_id",
-        "ua",
-        "os",
+        "duration_ns",
+        "bytes_rx",
+        "bytes_tx",
+        "user_agent",
+        "client_os",
+        "pipe",
         "completion",
     ];
 
@@ -569,21 +559,22 @@ fn test_chaos_syntax_roundtrip_parsing_all_17_keys() {
         v["request_id"].as_str().unwrap(),
         "0000000065f428a0deadbeefcafebabe"
     );
-    assert_eq!(v["ts"].as_u64().unwrap(), 1_710_500_000);
-    assert_eq!(v["dur_us"].as_u64().unwrap(), 12345);
-    assert_eq!(v["proto"].as_str().unwrap(), "http/3");
-    assert_eq!(v["pipe"].as_str().unwrap(), "duplex");
+    assert_eq!(v["timestamp_epoch_sec"].as_u64().unwrap(), 1_710_500_000);
+    assert_eq!(v["duration_ns"].as_u64().unwrap(), 12345);
+    assert_eq!(v["pipe"].as_str().unwrap(), "duplex_h3_h3");
     assert_eq!(v["method"].as_str().unwrap(), "PUT");
+    assert_eq!(v["url"].as_str().unwrap(), "/api/v1/upload");
+    assert_eq!(v["route"].as_str().unwrap(), "api-upload");
     assert_eq!(v["status"].as_u64().unwrap(), 201);
-    assert_eq!(v["grpc_status"].as_str().unwrap(), "NONE");
-    assert_eq!(v["rx"].as_u64().unwrap(), 5000);
-    assert_eq!(v["tx"].as_u64().unwrap(), 10000);
-    assert_eq!(v["msgs"].as_u64().unwrap(), 15);
-    assert_eq!(v["peer"].as_str().unwrap(), "2001:db8::8a2e:370:7334:54321");
-    assert_eq!(v["upstream"].as_str().unwrap(), "192.168.1.2:9090");
-    assert_eq!(v["route_id"].as_u64().unwrap(), 77);
-    assert_eq!(v["ua"].as_str().unwrap(), "firefox/125");
-    assert_eq!(v["os"].as_str().unwrap(), "macos");
+    assert_eq!(v["bytes_rx"].as_u64().unwrap(), 5000);
+    assert_eq!(v["bytes_tx"].as_u64().unwrap(), 10000);
+    assert_eq!(
+        v["client"].as_str().unwrap(),
+        "2001:db8::8a2e:370:7334:54321"
+    );
+    assert_eq!(v["endpoint"].as_str().unwrap(), "192.168.1.2:9090");
+    assert_eq!(v["user_agent"].as_str().unwrap(), "firefox/125");
+    assert_eq!(v["client_os"].as_str().unwrap(), "macos");
     assert_eq!(v["completion"].as_str().unwrap(), "client_cancel");
 }
 
@@ -613,7 +604,7 @@ async fn test_chaos_persistent_file_sink_stress_10000_records() {
             records.push(build_chaos_record(
                 id,
                 1_710_000_000 + (id as u32),
-                (id % 1000) as u32,
+                id % 1000,
                 encode_ip_u128(IpAddr::V4(Ipv4Addr::new(
                     192,
                     168,
@@ -628,9 +619,7 @@ async fn test_chaos_persistent_file_sink_stress_10000_records() {
                 200,
                 1,
                 0,
-                LogProtocol::H1,
-                LogProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 LogCompletionReason::Complete,
                 LogHttpMethod::Get,
                 LogGrpcStatus::NonGrpc,

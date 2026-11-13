@@ -82,9 +82,9 @@ pub struct Span {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct Status {
-    #[prost(string, tag = "1")]
+    #[prost(string, tag = "2")]
     pub message: String,
-    #[prost(int32, tag = "2")]
+    #[prost(int32, tag = "3")]
     pub code: i32,
 }
 
@@ -305,5 +305,12 @@ mod tests {
         assert_eq!(s.span_id.len(), 8);
         assert_eq!(s.parent_span_id.len(), 8);
         assert_eq!(s.kind, 2);
+
+        // Anti-circular check against canonical OpenTelemetry upstream protobuf schema
+        let official = <opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest as prost_otlp::Message>::decode(&bytes[..])
+            .expect("Must decode with official opentelemetry_proto::trace");
+        let off_span = &official.resource_spans[0].scope_spans[0].spans[0];
+        assert_eq!(off_span.name, "GET /api/v1/checkout");
+        assert_eq!(off_span.status.as_ref().unwrap().code, 1);
     }
 }

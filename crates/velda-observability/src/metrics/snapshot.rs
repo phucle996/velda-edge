@@ -11,16 +11,16 @@
 
 use std::time::Instant;
 
-use super::types::{DownstreamProto, PipeStrategy, UpstreamProto};
+use super::types::{DownstreamProtocol, PipeStrategy, UpstreamProtocol};
 use super::vector::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineSnapshot {
     /// Downstream ingress protocol.
-    pub downstream: DownstreamProto,
+    pub downstream: DownstreamProtocol,
     /// Upstream egress protocol.
-    pub upstream: UpstreamProto,
+    pub upstream: UpstreamProtocol,
     /// Payload streaming strategy.
     pub pipe: PipeStrategy,
 
@@ -319,12 +319,337 @@ impl MetricsSnapshot {
     /// Finds a specific pipeline snapshot by its coordinates.
     pub fn find_pipeline(
         &self,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) -> Option<&PipelineSnapshot> {
         self.pipelines
             .iter()
             .find(|p| p.downstream == downstream && p.upstream == upstream && p.pipe == pipe)
+    }
+
+    /// Creates a zero-initialized snapshot covering all 36 pipeline coordinate slots.
+    pub fn zero() -> Self {
+        let mut pipelines = Vec::with_capacity(super::store::TOTAL_PIPELINE_SLOTS);
+        for slot_idx in 0..super::store::TOTAL_PIPELINE_SLOTS {
+            let (downstream, upstream, pipe) =
+                super::store::MetricsStore::decode_slot_index(slot_idx);
+            pipelines.push(PipelineSnapshot {
+                downstream,
+                upstream,
+                pipe,
+                requests_2xx: 0,
+                requests_3xx: 0,
+                requests_4xx: 0,
+                requests_5xx: 0,
+                requests_other: 0,
+                active_streams: 0,
+                bytes_rx: 0,
+                bytes_tx: 0,
+                duration_le_1ms: 0,
+                duration_le_5ms: 0,
+                duration_le_10ms: 0,
+                duration_le_50ms: 0,
+                duration_le_250ms: 0,
+                duration_le_1000ms: 0,
+                duration_gt_1000ms: 0,
+                ttfb_le_1ms: 0,
+                ttfb_le_5ms: 0,
+                ttfb_le_10ms: 0,
+                ttfb_le_50ms: 0,
+                ttfb_le_250ms: 0,
+                ttfb_gt_250ms: 0,
+            });
+        }
+        Self {
+            captured_at: Instant::now(),
+            pipelines,
+            global: GlobalSnapshot {
+                connections_total: 0,
+                connections_active: 0,
+                connections_rejected: 0,
+                tls_handshakes_total: 0,
+                tls_handshake_errors: 0,
+                h2_rst_stream_total: 0,
+                config_reloads_total: 0,
+                config_reload_errors: 0,
+            },
+            pool: PoolSnapshot {
+                pool_containers_total: 0,
+                connections_idle: 0,
+                connections_leased: 0,
+                connections_multiplexed: 0,
+                multiplexed_active_streams: 0,
+                lease_hits_total: 0,
+                lease_misses_total: 0,
+                lease_timeouts_total: 0,
+                lease_releases_total: 0,
+                connections_created_total: 0,
+                evictions_idle_timeout: 0,
+                evictions_max_lifetime: 0,
+                evictions_goaway: 0,
+                evictions_unhealthy: 0,
+                evictions_capacity_exceeded: 0,
+                lifespan_le_5s: 0,
+                lifespan_le_30s: 0,
+                lifespan_le_5m: 0,
+                lifespan_le_30m: 0,
+                lifespan_le_1h: 0,
+                lifespan_gt_1h: 0,
+            },
+        }
+    }
+
+    /// Computes an interval delta snapshot against an earlier snapshot (`self - prev`).
+    ///
+    /// Monotonic cumulative counters are subtracted (`saturating_sub`) so delta-based sinks
+    /// like StatsD (`|c`) receive only the increment since `prev`, while instantaneous gauges
+    /// (`|g`) preserve their current point-in-time values from `self`.
+    pub fn delta_since(&self, prev: &Self) -> Self {
+        let pipelines = self
+            .pipelines
+            .iter()
+            .enumerate()
+            .map(|(i, curr)| {
+                let p = prev.pipelines.get(i).filter(|p| {
+                    p.downstream == curr.downstream
+                        && p.upstream == curr.upstream
+                        && p.pipe == curr.pipe
+                });
+                match p {
+                    Some(prev_p) => PipelineSnapshot {
+                        downstream: curr.downstream,
+                        upstream: curr.upstream,
+                        pipe: curr.pipe,
+                        requests_2xx: curr.requests_2xx.saturating_sub(prev_p.requests_2xx),
+                        requests_3xx: curr.requests_3xx.saturating_sub(prev_p.requests_3xx),
+                        requests_4xx: curr.requests_4xx.saturating_sub(prev_p.requests_4xx),
+                        requests_5xx: curr.requests_5xx.saturating_sub(prev_p.requests_5xx),
+                        requests_other: curr.requests_other.saturating_sub(prev_p.requests_other),
+                        active_streams: curr.active_streams,
+                        bytes_rx: curr.bytes_rx.saturating_sub(prev_p.bytes_rx),
+                        bytes_tx: curr.bytes_tx.saturating_sub(prev_p.bytes_tx),
+                        duration_le_1ms: curr
+                            .duration_le_1ms
+                            .saturating_sub(prev_p.duration_le_1ms),
+                        duration_le_5ms: curr
+                            .duration_le_5ms
+                            .saturating_sub(prev_p.duration_le_5ms),
+                        duration_le_10ms: curr
+                            .duration_le_10ms
+                            .saturating_sub(prev_p.duration_le_10ms),
+                        duration_le_50ms: curr
+                            .duration_le_50ms
+                            .saturating_sub(prev_p.duration_le_50ms),
+                        duration_le_250ms: curr
+                            .duration_le_250ms
+                            .saturating_sub(prev_p.duration_le_250ms),
+                        duration_le_1000ms: curr
+                            .duration_le_1000ms
+                            .saturating_sub(prev_p.duration_le_1000ms),
+                        duration_gt_1000ms: curr
+                            .duration_gt_1000ms
+                            .saturating_sub(prev_p.duration_gt_1000ms),
+                        ttfb_le_1ms: curr.ttfb_le_1ms.saturating_sub(prev_p.ttfb_le_1ms),
+                        ttfb_le_5ms: curr.ttfb_le_5ms.saturating_sub(prev_p.ttfb_le_5ms),
+                        ttfb_le_10ms: curr.ttfb_le_10ms.saturating_sub(prev_p.ttfb_le_10ms),
+                        ttfb_le_50ms: curr.ttfb_le_50ms.saturating_sub(prev_p.ttfb_le_50ms),
+                        ttfb_le_250ms: curr.ttfb_le_250ms.saturating_sub(prev_p.ttfb_le_250ms),
+                        ttfb_gt_250ms: curr.ttfb_gt_250ms.saturating_sub(prev_p.ttfb_gt_250ms),
+                    },
+                    None => *curr,
+                }
+            })
+            .collect();
+
+        Self {
+            captured_at: self.captured_at,
+            pipelines,
+            global: GlobalSnapshot {
+                connections_total: self
+                    .global
+                    .connections_total
+                    .saturating_sub(prev.global.connections_total),
+                connections_active: self.global.connections_active,
+                connections_rejected: self
+                    .global
+                    .connections_rejected
+                    .saturating_sub(prev.global.connections_rejected),
+                tls_handshakes_total: self
+                    .global
+                    .tls_handshakes_total
+                    .saturating_sub(prev.global.tls_handshakes_total),
+                tls_handshake_errors: self
+                    .global
+                    .tls_handshake_errors
+                    .saturating_sub(prev.global.tls_handshake_errors),
+                h2_rst_stream_total: self
+                    .global
+                    .h2_rst_stream_total
+                    .saturating_sub(prev.global.h2_rst_stream_total),
+                config_reloads_total: self
+                    .global
+                    .config_reloads_total
+                    .saturating_sub(prev.global.config_reloads_total),
+                config_reload_errors: self
+                    .global
+                    .config_reload_errors
+                    .saturating_sub(prev.global.config_reload_errors),
+            },
+            pool: PoolSnapshot {
+                pool_containers_total: self.pool.pool_containers_total,
+                connections_idle: self.pool.connections_idle,
+                connections_leased: self.pool.connections_leased,
+                connections_multiplexed: self.pool.connections_multiplexed,
+                multiplexed_active_streams: self.pool.multiplexed_active_streams,
+                lease_hits_total: self
+                    .pool
+                    .lease_hits_total
+                    .saturating_sub(prev.pool.lease_hits_total),
+                lease_misses_total: self
+                    .pool
+                    .lease_misses_total
+                    .saturating_sub(prev.pool.lease_misses_total),
+                lease_timeouts_total: self
+                    .pool
+                    .lease_timeouts_total
+                    .saturating_sub(prev.pool.lease_timeouts_total),
+                lease_releases_total: self
+                    .pool
+                    .lease_releases_total
+                    .saturating_sub(prev.pool.lease_releases_total),
+                connections_created_total: self
+                    .pool
+                    .connections_created_total
+                    .saturating_sub(prev.pool.connections_created_total),
+                evictions_idle_timeout: self
+                    .pool
+                    .evictions_idle_timeout
+                    .saturating_sub(prev.pool.evictions_idle_timeout),
+                evictions_max_lifetime: self
+                    .pool
+                    .evictions_max_lifetime
+                    .saturating_sub(prev.pool.evictions_max_lifetime),
+                evictions_goaway: self
+                    .pool
+                    .evictions_goaway
+                    .saturating_sub(prev.pool.evictions_goaway),
+                evictions_unhealthy: self
+                    .pool
+                    .evictions_unhealthy
+                    .saturating_sub(prev.pool.evictions_unhealthy),
+                evictions_capacity_exceeded: self
+                    .pool
+                    .evictions_capacity_exceeded
+                    .saturating_sub(prev.pool.evictions_capacity_exceeded),
+                lifespan_le_5s: self
+                    .pool
+                    .lifespan_le_5s
+                    .saturating_sub(prev.pool.lifespan_le_5s),
+                lifespan_le_30s: self
+                    .pool
+                    .lifespan_le_30s
+                    .saturating_sub(prev.pool.lifespan_le_30s),
+                lifespan_le_5m: self
+                    .pool
+                    .lifespan_le_5m
+                    .saturating_sub(prev.pool.lifespan_le_5m),
+                lifespan_le_30m: self
+                    .pool
+                    .lifespan_le_30m
+                    .saturating_sub(prev.pool.lifespan_le_30m),
+                lifespan_le_1h: self
+                    .pool
+                    .lifespan_le_1h
+                    .saturating_sub(prev.pool.lifespan_le_1h),
+                lifespan_gt_1h: self
+                    .pool
+                    .lifespan_gt_1h
+                    .saturating_sub(prev.pool.lifespan_gt_1h),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::MetricsStore;
+    use std::time::Duration;
+
+    #[test]
+    fn test_snapshot_delta_since_preserves_gauges_and_subtracts_counters() {
+        let store = MetricsStore::new();
+        store.global().connection_opened();
+        store.record_stream_start(
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
+            PipeStrategy::Buffered,
+        );
+        store.record_stream_completion(
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
+            PipeStrategy::Buffered,
+            crate::metrics::StreamCompletion::new(200, 100, 250, Duration::from_millis(2), None),
+        );
+
+        let snap1 = store.snapshot();
+        let d1 = snap1.delta_since(&MetricsSnapshot::zero());
+        assert_eq!(d1.global.connections_total, 1);
+        assert_eq!(d1.global.connections_active, 1);
+        let p1 = d1
+            .find_pipeline(
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
+                PipeStrategy::Buffered,
+            )
+            .unwrap();
+        assert_eq!(p1.requests_2xx, 1);
+        assert_eq!(p1.bytes_rx, 100);
+        assert_eq!(p1.bytes_tx, 250);
+
+        // Idle interval: counters must be 0, active gauges keep current state
+        let snap2 = store.snapshot();
+        let d2 = snap2.delta_since(&snap1);
+        assert_eq!(d2.global.connections_total, 0);
+        assert_eq!(d2.global.connections_active, 1);
+        let p2 = d2
+            .find_pipeline(
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
+                PipeStrategy::Buffered,
+            )
+            .unwrap();
+        assert_eq!(p2.requests_2xx, 0);
+        assert_eq!(p2.bytes_rx, 0);
+        assert_eq!(p2.bytes_tx, 0);
+
+        // Second request + connection closed
+        store.global().connection_closed();
+        store.record_stream_start(
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
+            PipeStrategy::Buffered,
+        );
+        store.record_stream_completion(
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
+            PipeStrategy::Buffered,
+            crate::metrics::StreamCompletion::new(404, 50, 75, Duration::from_millis(3), None),
+        );
+        let snap3 = store.snapshot();
+        let d3 = snap3.delta_since(&snap2);
+        assert_eq!(d3.global.connections_active, 0);
+        let p3 = d3
+            .find_pipeline(
+                DownstreamProtocol::H1,
+                UpstreamProtocol::H1,
+                PipeStrategy::Buffered,
+            )
+            .unwrap();
+        assert_eq!(p3.requests_2xx, 0);
+        assert_eq!(p3.requests_4xx, 1);
+        assert_eq!(p3.bytes_rx, 50);
+        assert_eq!(p3.bytes_tx, 75);
     }
 }

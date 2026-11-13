@@ -59,9 +59,7 @@ pub fn format_std_log_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::{
-        LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
-    };
+    use velda_observability::{LogCompletionReason, LogGrpcStatus, LogHttpMethod, PipeKind};
 
     #[test]
     fn test_format_std_log_payload_all_modes() {
@@ -76,9 +74,7 @@ mod tests {
             200,
             1,
             0,
-            LogProtocol::H1,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -94,14 +90,17 @@ mod tests {
         assert_eq!(count, 1);
         let text_str = String::from_utf8(text_out).unwrap();
         assert!(text_str.contains("192.168.1.100:44321"));
-        assert!(text_str.contains("\"GET http/1.1\" 200 512 250us"));
+        assert!(text_str.contains("duration_ns=250 pipe=buffered_h1_h1"));
 
         // 2. JSON Format
         let mut json_out = Vec::new();
         let count = format_std_log_payload(&batches, "json", &mut json_out);
         assert_eq!(count, 1);
         let json_str = String::from_utf8(json_out).unwrap();
-        assert!(json_str.contains("\"proto\":\"http/1.1\""));
+        assert!(json_str.contains("\"pipe\":\"buffered_h1_h1\""));
+        assert!(json_str.contains("\"duration_ns\":250"));
+        assert!(!json_str.contains("\"downstream_protocol\""));
+        assert!(!json_str.contains("\"upstream_protocol\""));
         assert!(json_str.contains("\"status\":200"));
         // 32-char hex request ID check (timestamp 1_710_000_000 = 0x65ec8780, id = 0x12345678)
         assert!(json_str.contains("\"request_id\":\"0000000065ec87800000000012345678\""));
@@ -111,6 +110,9 @@ mod tests {
         let count = format_std_log_payload(&batches, "clf", &mut clf_out);
         assert_eq!(count, 1);
         let clf_str = String::from_utf8(clf_out).unwrap();
-        assert!(clf_str.contains("192.168.1.100 - - [1710000000] \"GET http/1.1\" 200 512\n"));
+        assert!(
+            clf_str
+                .contains("192.168.1.100 - - [2024-03-09T16:00:00Z] \"GET - http/1.1\" 200 512\n")
+        );
     }
 }

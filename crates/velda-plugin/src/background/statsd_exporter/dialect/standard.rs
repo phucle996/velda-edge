@@ -25,7 +25,7 @@
 //! ```
 
 use velda_observability::{
-    DownstreamProto, MetricsSnapshot, PipeStrategy, PipelineSnapshot, UpstreamProto,
+    DownstreamProtocol, MetricsSnapshot, PipeStrategy, PipelineSnapshot, UpstreamProtocol,
 };
 
 use super::StatsdBatchWriter;
@@ -51,7 +51,12 @@ pub struct StandardSlotSkeleton {
 }
 
 impl StandardSlotSkeleton {
-    pub fn new(prefix: &str, down: DownstreamProto, up: UpstreamProto, pipe: PipeStrategy) -> Self {
+    pub fn new(
+        prefix: &str,
+        down: DownstreamProtocol,
+        up: UpstreamProtocol,
+        pipe: PipeStrategy,
+    ) -> Self {
         let pfx = prefix.trim();
         let d = down.as_str();
         let u = up.as_str();
@@ -149,10 +154,10 @@ impl StandardTemplate {
         let pfx = prefix.trim();
 
         let mut slots_vec = Vec::with_capacity(36);
-        for down_idx in 0..DownstreamProto::COUNT {
-            let down = DownstreamProto::from_discriminant(down_idx as u8).unwrap();
-            for up_idx in 0..UpstreamProto::COUNT {
-                let up = UpstreamProto::from_discriminant(up_idx as u8).unwrap();
+        for down_idx in 0..DownstreamProtocol::COUNT {
+            let down = DownstreamProtocol::from_discriminant(down_idx as u8).unwrap();
+            for up_idx in 0..UpstreamProtocol::COUNT {
+                let up = UpstreamProtocol::from_discriminant(up_idx as u8).unwrap();
                 for pipe_idx in 0..PipeStrategy::COUNT {
                     let pipe = PipeStrategy::from_discriminant(pipe_idx as u8).unwrap();
                     slots_vec.push(StandardSlotSkeleton::new(pfx, down, up, pipe));

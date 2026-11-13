@@ -17,8 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, LogStore,
-    PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogStore, PipeKind,
 };
 
 use velda_plugin::background::BackgroundPlugin;
@@ -40,9 +39,7 @@ fn create_sample_http_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord 
         200,
         1,
         0,
-        LogProtocol::H2,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH2H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,
@@ -62,9 +59,7 @@ fn create_sample_grpc_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord 
         200,
         2,
         4,
-        LogProtocol::GrpcTcp,
-        LogProtocol::GrpcTcp,
-        PipeStrategy::Duplex,
+        PipeKind::DuplexGrpcTcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Post,
         LogGrpcStatus::Ok,
@@ -84,9 +79,7 @@ fn create_sample_raw_record(id: u64, ts: u32) -> AccessLogRecord {
         0,
         3,
         0,
-        LogProtocol::RawTcp,
-        LogProtocol::RawTcp,
-        PipeStrategy::Duplex,
+        PipeKind::TcpTcp,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,
@@ -163,7 +156,7 @@ async fn test_loki_log_shipper_multi_protocol_end_to_end() {
     assert!(raw_req.contains("X-Scope-OrgID: velda-tenant"));
     assert!(raw_req.contains("\"protocol\":\"http\""));
     assert!(raw_req.contains("\"protocol\":\"grpc\""));
-    assert!(raw_req.contains("ua=curl/8"));
+    assert!(raw_req.contains("user_agent=curl/8"));
     assert!(raw_req.contains("grpc_status=OK"));
 
     // Verify 32-character lowercase hex Request ID:
@@ -171,7 +164,7 @@ async fn test_loki_log_shipper_multi_protocol_end_to_end() {
     assert!(raw_req.contains("request_id=0000000065ec87821111222233334444"));
 
     // Verify IPv6 zero-compression:
-    assert!(raw_req.contains("peer=::1:50001"));
+    assert!(raw_req.contains("client=::1:50001"));
 }
 
 #[tokio::test]
@@ -299,7 +292,7 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
             .line
             .contains("request_id=0000000065ec878a5555666677778888")
     );
-    assert!(stream0.entries[0].line.contains("peer=10.1.2.3:4433"));
+    assert!(stream0.entries[0].line.contains("client=10.1.2.3:4433"));
 
     let stream1 = &push.streams[1];
     assert!(stream1.labels.contains("protocol=\"raw\""));

@@ -85,6 +85,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(upstream_lease.endpoint);
 
     let cfg = *conn.config();
     sanitize_headers(&mut req_head.headers);
@@ -97,19 +98,23 @@ where
     // Fast-path: If downstream request body is already fully buffered in memory,
     // dispatch request to upstream and stream response downstream directly on conn without tokio::io::split overhead.
     let mut chunked_coalesced_wire_len = 0usize;
+    let mut chunked_coalesced_payload_len = 0usize;
     let is_fully_buffered_request = match framing {
         Http1BodyFraming::Empty => true,
         Http1BodyFraming::ContentLength(total_len) => conn.read_buf.len() >= total_len,
         Http1BodyFraming::Chunked => {
             let mut wire_len = 0usize;
+            let mut payload_len = 0usize;
             let mut has_term = false;
             while wire_len < conn.read_buf.len() {
                 match parse_single_chunk(&conn.read_buf[wire_len..]) {
-                    Ok(Some((needed, _, is_term))) => {
+                    Ok(Some((needed, payload, is_term))) => {
                         wire_len += needed;
+                        payload_len += payload.len();
                         if is_term {
                             has_term = true;
                             chunked_coalesced_wire_len = wire_len;
+                            chunked_coalesced_payload_len = payload_len;
                             break;
                         }
                     }
@@ -143,6 +148,7 @@ where
                     conn.upstream_write_buf
                         .extend_from_slice(&conn.read_buf[..total_len]);
                     conn.read_buf.advance(total_len);
+                    conn.last_bytes_rx += total_len as u64;
                 }
             }
             Http1BodyFraming::Chunked => {
@@ -151,6 +157,7 @@ where
                     conn.upstream_write_buf
                         .extend_from_slice(&conn.read_buf[..chunked_coalesced_wire_len]);
                     conn.read_buf.advance(chunked_coalesced_wire_len);
+                    conn.last_bytes_rx += chunked_coalesced_payload_len as u64;
                 }
             }
         }
@@ -191,6 +198,7 @@ where
 
         let server_head =
             Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
+        conn.last_status = server_head.status.as_u16();
 
         if is_no_body {
             let close = velda_http1::server::response::send_response_parts(
@@ -261,6 +269,7 @@ where
                         if conn.upstream_read_buf.is_empty() {
                             conn.upstream_read_buf.clear();
                         }
+                        conn.last_bytes_tx += total_len as u64;
                     } else {
                         conn.stream.write_all(&conn.write_buf).await?;
                     }
@@ -272,6 +281,7 @@ where
                 if available > 0 {
                     let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
                     send_chunk(&mut conn.stream, &first_chunk).await?;
+                    conn.last_bytes_tx += available as u64;
                 }
                 let mut remaining = total_len - available;
                 while remaining > 0 {
@@ -286,6 +296,7 @@ where
                         Some(chunk) => {
                             remaining = remaining.saturating_sub(chunk.len());
                             send_chunk(&mut conn.stream, &chunk).await?;
+                            conn.last_bytes_tx += chunk.len() as u64;
                         }
                         None => {
                             upstream_lease.mark_closed();
@@ -314,6 +325,7 @@ where
                             _ => (false, wire1),
                         };
 
+                    conn.last_bytes_tx += payload1.len() as u64;
                     let close = velda_http1::send_head_coalesced(
                         &mut conn.stream,
                         &mut conn.write_buf,
@@ -342,6 +354,7 @@ where
                     read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
                 {
                     send_chunk(&mut conn.stream, &chunk).await?;
+                    conn.last_bytes_tx += chunk.len() as u64;
                 }
                 send_chunked_end(&mut conn.stream).await?;
                 return Ok(());
@@ -372,6 +385,9 @@ where
         ref mut upstream_read_buf,
         ref mut upstream_write_buf,
         ref mut close_requested,
+        ref mut last_status,
+        ref mut last_bytes_rx,
+        ref mut last_bytes_tx,
         ..
     } = *conn;
 
@@ -417,6 +433,7 @@ where
                     if total_req_bytes > max_body_size {
                         return Err(Http1Error::PayloadTooLarge(total_req_bytes));
                     }
+                    *last_bytes_rx += coalesced_payload_bytes as u64;
                     upstream_write_buf.extend_from_slice(&read_buf[..coalesced_wire_len]);
                     let remaining_len = read_buf.len() - coalesced_wire_len;
                     if remaining_len == 0 {
@@ -464,6 +481,7 @@ where
                             if total_req_bytes > max_body_size {
                                 return Err(Http1Error::PayloadTooLarge(total_req_bytes));
                             }
+                            *last_bytes_rx += payload_bytes as u64;
 
                             if !early_response {
                                 tokio::select! {
@@ -550,6 +568,7 @@ where
                     upstream_write_buf.extend_from_slice(&read_buf[..initial_avail]);
                     read_buf.advance(initial_avail);
                     remaining -= initial_avail;
+                    *last_bytes_rx += initial_avail as u64;
                 }
 
                 up_write.write_all(upstream_write_buf).await?;
@@ -575,6 +594,7 @@ where
                         }
                         read_buf.advance(available);
                         remaining -= available;
+                        *last_bytes_rx += available as u64;
                         if remaining == 0 {
                             break;
                         }
@@ -665,6 +685,7 @@ where
             || resp_head.status == StatusCode::NOT_MODIFIED;
 
         if is_head || is_no_body_status {
+            *last_status = resp_head.status.as_u16();
             let server_head = Http1ServerResponseHead::new(
                 resp_head.status,
                 resp_head.version,
@@ -687,6 +708,7 @@ where
 
         let server_head =
             Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
+        *last_status = server_head.status.as_u16();
 
         match resp_framing {
             Http1BodyFraming::ContentLength(total_len) => {
@@ -713,6 +735,7 @@ where
                     }
                     if total_len > 0 {
                         upstream_read_buf.advance(total_len);
+                        *last_bytes_tx += total_len as u64;
                     }
                     let _ = resp_done_tx.send(());
                     return Ok(());
@@ -734,6 +757,7 @@ where
                 if available > 0 {
                     let first_chunk = upstream_read_buf.split_to(available).freeze();
                     send_chunk(&mut down_write, &first_chunk).await?;
+                    *last_bytes_tx += available as u64;
                 }
 
                 let mut remaining = total_len - available;
@@ -743,6 +767,7 @@ where
                         Some(chunk) => {
                             remaining = remaining.saturating_sub(chunk.len());
                             send_chunk(&mut down_write, &chunk).await?;
+                            *last_bytes_tx += chunk.len() as u64;
                         }
                         None => {
                             return Err(Http1Error::Parse(
@@ -783,6 +808,7 @@ where
                             _ => (false, wire1),
                         };
 
+                    *last_bytes_tx += payload1.len() as u64;
                     let close =
                         velda_http1::server::response::send_response_head_chunked_coalesced(
                             &mut down_write,
@@ -821,6 +847,7 @@ where
 
                 while let Some(chunk) = read_next_chunk(&mut up_read, upstream_read_buf).await? {
                     send_chunk(&mut down_write, &chunk).await?;
+                    *last_bytes_tx += chunk.len() as u64;
                 }
             }
             Http1BodyFraming::Empty => {

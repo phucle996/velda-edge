@@ -10,6 +10,7 @@ use http::{StatusCode, Version};
 use velda_core::{Body, L7Request, L7Response};
 use velda_plugin::RoutePluginPlan;
 
+use crate::pipeline::PipeOutcome;
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http2Upstream;
 
@@ -27,7 +28,7 @@ pub async fn serve(
     responder: Http3Responder,
     upstream: &Arc<Http2Upstream>,
     plan: &Arc<RoutePluginPlan>,
-) {
+) -> PipeOutcome {
     let mut headers = req.headers.clone().into_inner();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
@@ -48,9 +49,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(lease.endpoint);
     let mut lease = Some(lease);
 
     let mut h2_req = http::Request::builder()
@@ -74,6 +82,7 @@ pub async fn serve(
             );
             match upstream.acquire_fresh(&upstream.config).await {
                 Ok((mut fresh_client, fresh_lease)) => {
+                    upstream_addr = Some(fresh_lease.endpoint);
                     lease = Some(fresh_lease);
                     let mut fresh_req = http::Request::builder()
                         .method(req.method.clone())
@@ -99,7 +108,13 @@ pub async fn serve(
                                 HeaderValue::from_static("text/plain; charset=utf-8"),
                             );
                             let _ = responder.send_response(err_resp).await;
-                            return;
+                            return PipeOutcome::http(
+                                StatusCode::BAD_GATEWAY.as_u16(),
+                                req.body.len() as u64,
+                                0,
+                                upstream_addr,
+                                velda_observability::LogCompletionReason::UpstreamError,
+                            );
                         }
                     }
                 }
@@ -109,7 +124,13 @@ pub async fn serve(
                         format!("502 Bad Gateway: {e}\n").into_bytes(),
                     );
                     let _ = responder.send_response(err_resp).await;
-                    return;
+                    return PipeOutcome::http(
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        req.body.len() as u64,
+                        0,
+                        upstream_addr,
+                        velda_observability::LogCompletionReason::UpstreamError,
+                    );
                 }
             }
         }
@@ -131,7 +152,13 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
 
@@ -159,7 +186,13 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(err_resp).await;
-            return;
+            return PipeOutcome::http(
+                StatusCode::BAD_GATEWAY.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
 
@@ -181,7 +214,13 @@ pub async fn serve(
     if is_head || is_no_body {
         let resp = L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
         let _ = responder.send_response(resp).await;
-        return;
+        return PipeOutcome::http(
+            parts.status.as_u16(),
+            req.body.len() as u64,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        );
     }
 
     let mut stream_sender = match responder
@@ -195,7 +234,13 @@ pub async fn serve(
                 upstream = %upstream.id(),
                 "Failed to initiate downstream HTTP/3 streaming response for duplex bridge"
             );
-            return;
+            return PipeOutcome::http(
+                parts.status.as_u16(),
+                req.body.len() as u64,
+                0,
+                upstream_addr,
+                velda_observability::LogCompletionReason::ClientCancel,
+            );
         }
     };
 
@@ -203,6 +248,7 @@ pub async fn serve(
     let batch_threshold = (upstream.config.initial_stream_window_size as usize / 4)
         .clamp(MIN_H2_WINDOW_UPDATE_BATCH, MAX_H2_WINDOW_UPDATE_BATCH);
     let mut unreleased_bytes = 0;
+    let mut failed = false;
 
     while let Some(chunk) = body_stream.data().await {
         let data = match chunk {
@@ -212,7 +258,8 @@ pub async fn serve(
                 let _ = body_stream
                     .flow_control()
                     .release_capacity(unreleased_bytes);
-                return;
+                failed = true;
+                break;
             }
         };
 
@@ -224,7 +271,8 @@ pub async fn serve(
             let _ = body_stream
                 .flow_control()
                 .release_capacity(unreleased_bytes);
-            return;
+            failed = true;
+            break;
         }
 
         if unreleased_bytes >= batch_threshold {
@@ -241,7 +289,19 @@ pub async fn serve(
             .release_capacity(unreleased_bytes);
     }
 
+    let bytes_tx = stream_sender.bytes_sent();
     let _ = stream_sender.finish().await;
+    PipeOutcome::http(
+        parts.status.as_u16(),
+        req.body.len() as u64,
+        bytes_tx,
+        upstream_addr,
+        if failed {
+            velda_observability::LogCompletionReason::UpstreamError
+        } else {
+            velda_observability::LogCompletionReason::Complete
+        },
+    )
 }
 
 #[inline]

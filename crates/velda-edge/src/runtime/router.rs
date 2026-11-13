@@ -15,6 +15,13 @@ pub fn build_router(
     upstreams: &[UpstreamConfig],
     listeners: &[ListenerConfig],
 ) -> Result<Router, EdgeError> {
+    // Register all route human names into the global route catalog for zero-alloc access logging
+    velda_observability::set_route_catalog(
+        routes
+            .iter()
+            .map(|r| (r.route_id().0 as u16, r.id.as_str())),
+    );
+
     let mut builder = RouterBuilder::new();
 
     for route in routes {

@@ -150,11 +150,12 @@ impl OtlpProtoTemplate {
         let mut rx_datapoints = Vec::with_capacity(36);
         let mut tx_datapoints = Vec::with_capacity(36);
         for slot_idx in 0..36 {
-            let (down, up, _pipe) = MetricsStore::decode_slot_index(slot_idx);
+            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
             rx_datapoints.push(NumberDataPoint {
                 attributes: vec![
                     KeyValue::new_string("downstream", down.as_str()),
                     KeyValue::new_string("upstream", up.as_str()),
+                    KeyValue::new_string("pipe", pipe.as_str()),
                 ],
                 start_time_unix_nano: 0,
                 time_unix_nano: MAGIC_TIMESTAMP,
@@ -165,6 +166,7 @@ impl OtlpProtoTemplate {
                 attributes: vec![
                     KeyValue::new_string("downstream", down.as_str()),
                     KeyValue::new_string("upstream", up.as_str()),
+                    KeyValue::new_string("pipe", pipe.as_str()),
                 ],
                 start_time_unix_nano: 0,
                 time_unix_nano: MAGIC_TIMESTAMP,
@@ -450,6 +452,40 @@ mod tests {
         assert_eq!(metrics[1].name, "velda.active_streams");
         assert_eq!(metrics[2].name, "velda.bytes_received_total");
         assert_eq!(metrics[3].name, "velda.bytes_transmitted_total");
+
+        // Anti-circular check against canonical OpenTelemetry upstream protobuf schema
+        let official = <opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest as prost_otlp::Message>::decode(&bytes[..])
+            .expect("OTLP Proto metrics must decode against official opentelemetry-proto schema");
+        let off_metrics = &official.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(off_metrics.len(), 4);
+        assert_eq!(
+            off_metrics[2].description,
+            "Total bytes received from downstream clients"
+        );
+        assert_eq!(
+            off_metrics[3].description,
+            "Total bytes transmitted to downstream clients"
+        );
+        // Verify NumberDataPoint.attributes (tag 7) are preserved and non-empty
+        if let Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(sum)) =
+            &off_metrics[0].data
+        {
+            assert_eq!(sum.data_points.len(), 180);
+            assert_eq!(sum.data_points[0].attributes.len(), 4);
+            assert_eq!(sum.data_points[0].attributes[0].key, "downstream");
+            assert_eq!(sum.data_points[0].attributes[3].key, "status_class");
+        } else {
+            panic!("Expected Sum metric");
+        }
+        if let Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(rx_sum)) =
+            &off_metrics[2].data
+        {
+            assert_eq!(rx_sum.data_points.len(), 36);
+            assert_eq!(rx_sum.data_points[0].attributes.len(), 3);
+            assert_eq!(rx_sum.data_points[0].attributes[2].key, "pipe");
+        } else {
+            panic!("Expected rx Sum metric");
+        }
     }
 
     #[test]

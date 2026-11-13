@@ -22,7 +22,14 @@ use velda_http1::server::request::Http1BodyFraming;
 use crate::upstream::Http1Upstream;
 
 /// Serves a client-streaming HTTP/3 downstream request bridged to an HTTP/1.1 backend.
-pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response {
+pub async fn serve(
+    req: &L7Request,
+    upstream: &Arc<Http1Upstream>,
+) -> (
+    L7Response,
+    Option<std::net::SocketAddr>,
+    velda_observability::LogCompletionReason,
+) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1) for upstream HTTP/1.1
     let mut headers = req.headers.clone();
     if !headers.contains_key(http::header::HOST)
@@ -41,16 +48,21 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                 upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/1.1 connection for H3->H1 client stream bridge"
             );
-            return L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
+            return (
+                L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
             );
         }
     };
+    let mut upstream_addr = Some(lease.endpoint);
 
     // 3. Transmit request and read response head with self-healing retry on stale connection
     let (head, framing) = {
@@ -80,6 +92,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                 );
                 match upstream.acquire_fresh().await {
                     Ok(mut fresh_lease) => {
+                        upstream_addr = Some(fresh_lease.endpoint);
                         let (f_stream, f_read_buf, f_write_buf) = fresh_lease.split_all();
                         f_write_buf.clear();
                         let retry_res = async {
@@ -113,13 +126,17 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                                     upstream = %upstream.id(),
                                     "HTTP/1.1 upstream client stream bridge pipe failed after retry"
                                 );
-                                return L7Response::from_bytes(
-                                    StatusCode::BAD_GATEWAY,
-                                    format!("502 Bad Gateway: {retry_err}\n").into_bytes(),
-                                )
-                                .with_header(
-                                    CONTENT_TYPE,
-                                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                                return (
+                                    L7Response::from_bytes(
+                                        StatusCode::BAD_GATEWAY,
+                                        format!("502 Bad Gateway: {retry_err}\n").into_bytes(),
+                                    )
+                                    .with_header(
+                                        CONTENT_TYPE,
+                                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                                    ),
+                                    upstream_addr,
+                                    velda_observability::LogCompletionReason::UpstreamError,
                                 );
                             }
                         }
@@ -130,13 +147,17 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                             upstream = %upstream.id(),
                             "Failed to acquire fresh connection for self-healing retry"
                         );
-                        return L7Response::from_bytes(
-                            StatusCode::BAD_GATEWAY,
-                            format!("502 Bad Gateway: {fresh_err}\n").into_bytes(),
-                        )
-                        .with_header(
-                            CONTENT_TYPE,
-                            HeaderValue::from_static("text/plain; charset=utf-8"),
+                        return (
+                            L7Response::from_bytes(
+                                StatusCode::BAD_GATEWAY,
+                                format!("502 Bad Gateway: {fresh_err}\n").into_bytes(),
+                            )
+                            .with_header(
+                                CONTENT_TYPE,
+                                HeaderValue::from_static("text/plain; charset=utf-8"),
+                            ),
+                            upstream_addr,
+                            velda_observability::LogCompletionReason::UpstreamError,
                         );
                     }
                 }
@@ -148,13 +169,17 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                     upstream = %upstream.id(),
                     "HTTP/1.1 upstream client stream bridge pipe failed"
                 );
-                return L7Response::from_bytes(
-                    StatusCode::BAD_GATEWAY,
-                    format!("502 Bad Gateway: {e}\n").into_bytes(),
-                )
-                .with_header(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                return (
+                    L7Response::from_bytes(
+                        StatusCode::BAD_GATEWAY,
+                        format!("502 Bad Gateway: {e}\n").into_bytes(),
+                    )
+                    .with_header(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                    ),
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
                 );
             }
         }
@@ -172,9 +197,13 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
         Http1BodyFraming::ContentLength(body_len) => {
             if body_len > upstream.config.max_body_size {
                 lease.mark_closed();
-                return L7Response::from_bytes(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    b"413 Payload Too Large\n".to_vec(),
+                return (
+                    L7Response::from_bytes(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        b"413 Payload Too Large\n".to_vec(),
+                    ),
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
                 );
             }
             if body_len > 0 {
@@ -185,17 +214,25 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                         match stream.read_buf(read_buf).await {
                             Ok(0) => {
                                 lease.mark_closed();
-                                return L7Response::from_bytes(
-                                    StatusCode::BAD_GATEWAY,
-                                    b"502 Bad Gateway: Premature connection EOF while reading body\n".to_vec(),
+                                return (
+                                    L7Response::from_bytes(
+                                        StatusCode::BAD_GATEWAY,
+                                        b"502 Bad Gateway: Premature connection EOF while reading body\n".to_vec(),
+                                    ),
+                                    upstream_addr,
+                                    velda_observability::LogCompletionReason::UpstreamError,
                                 );
                             }
                             Ok(_) => {}
                             Err(e) => {
                                 lease.mark_closed();
-                                return L7Response::from_bytes(
-                                    StatusCode::BAD_GATEWAY,
-                                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                                return (
+                                    L7Response::from_bytes(
+                                        StatusCode::BAD_GATEWAY,
+                                        format!("502 Bad Gateway: {e}\n").into_bytes(),
+                                    ),
+                                    upstream_addr,
+                                    velda_observability::LogCompletionReason::UpstreamError,
                                 );
                             }
                         }
@@ -221,9 +258,13 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                     Ok(Some(chunk)) => {
                         if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
                             lease.mark_closed();
-                            return L7Response::from_bytes(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                b"413 Payload Too Large\n".to_vec(),
+                            return (
+                                L7Response::from_bytes(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    b"413 Payload Too Large\n".to_vec(),
+                                ),
+                                upstream_addr,
+                                velda_observability::LogCompletionReason::UpstreamError,
                             );
                         }
                         chunked_body.extend_from_slice(&chunk);
@@ -231,9 +272,13 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
                     Ok(None) => break,
                     Err(e) => {
                         lease.mark_closed();
-                        return L7Response::from_bytes(
-                            StatusCode::BAD_GATEWAY,
-                            format!("502 Bad Gateway: {e}\n").into_bytes(),
+                        return (
+                            L7Response::from_bytes(
+                                StatusCode::BAD_GATEWAY,
+                                format!("502 Bad Gateway: {e}\n").into_bytes(),
+                            ),
+                            upstream_addr,
+                            velda_observability::LogCompletionReason::UpstreamError,
                         );
                     }
                 }
@@ -250,5 +295,9 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http1Upstream>) -> L7Response
     read_buf.clear();
     drop(lease);
 
-    L7Response::new(head.status, head.version, head.headers, body)
+    (
+        L7Response::new(head.status, head.version, head.headers, body),
+        upstream_addr,
+        velda_observability::LogCompletionReason::Complete,
+    )
 }

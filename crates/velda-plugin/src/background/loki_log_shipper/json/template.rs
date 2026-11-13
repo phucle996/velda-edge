@@ -16,7 +16,7 @@
 //!        ▼                                                                                ▼
 //! ┌────────────────────────────────────────┐                            ┌────────────────────────────────────────┐
 //! │ AccessLogRecord (64B SPSC Ring)        │                            │ Persistent Scratch Buffers (0 alloc)   │
-//! │ ├─ downstream_proto                    │ ──► Protocol Slicing ──►   │ ├─ http_values.clear()                 │
+//! │ ├─ downstream_protocol                    │ ──► Protocol Slicing ──►   │ ├─ http_values.clear()                 │
 //! │ ├─ 128-bit (ts_sec, request_id)        │                            │ ├─ grpc_values.clear()                 │
 //! │ ├─ peer_ip: u128 (RFC 4291 / 5952)     │                            │ └─ raw_values.clear()                  │
 //! │ └─ division-free status, port, rx, tx  │                            └────────────────────────────────────────┘
@@ -34,8 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
-    UaFamily, UaOs,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
 };
 
 use super::super::lut::{
@@ -134,13 +133,10 @@ impl LokiJsonFormatter {
         for batch in batches {
             for rec in batch.iter() {
                 total_records += 1;
-                let proto = LogProtocol::from_u8(rec.downstream_proto);
-                let up_proto = LogProtocol::from_u8(rec.upstream_proto);
-                let pipe = PipeStrategy::from_discriminant(rec.pipe_strategy)
-                    .unwrap_or(PipeStrategy::Buffered);
+                let downstream_protocol = rec.downstream_protocol();
                 let completion = LogCompletionReason::from_u8(rec.completion);
 
-                match proto {
+                match downstream_protocol {
                     LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
                         if !self.http_values.is_empty() {
                             self.http_values.push(b',');
@@ -157,41 +153,40 @@ impl LokiJsonFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.http_values.extend_from_slice(b" proto=");
-                        self.http_values
-                            .extend_from_slice(proto.as_str().as_bytes());
-                        self.http_values.extend_from_slice(b" up_proto=");
-                        self.http_values
-                            .extend_from_slice(up_proto.as_str().as_bytes());
                         self.http_values.extend_from_slice(b" pipe=");
-                        self.http_values.extend_from_slice(pipe.as_str().as_bytes());
+                        self.http_values
+                            .extend_from_slice(rec.pipe_name().as_bytes());
                         self.http_values.extend_from_slice(b" method=");
                         self.http_values
                             .extend_from_slice(method.as_str().as_bytes());
+                        self.http_values.extend_from_slice(b" url=");
+                        self.http_values.extend_from_slice(rec.url().as_bytes());
+                        self.http_values.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.http_values.extend_from_slice(name.as_bytes());
+                        });
                         self.http_values.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.http_values, rec.status_code as u64);
-                        self.http_values.extend_from_slice(b" route_id=");
-                        fast_write_u64(&mut self.http_values, rec.route_id as u64);
-                        self.http_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.http_values, rec.duration_us as u64);
-                        self.http_values.extend_from_slice(b" rx=");
+                        self.http_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.http_values, rec.duration_ns);
+                        self.http_values.extend_from_slice(b" bytes_rx=");
                         fast_write_u64(&mut self.http_values, rec.bytes_rx as u64);
-                        self.http_values.extend_from_slice(b" tx=");
+                        self.http_values.extend_from_slice(b" bytes_tx=");
                         fast_write_u64(&mut self.http_values, rec.bytes_tx as u64);
-                        self.http_values.extend_from_slice(b" peer=");
+                        self.http_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.http_values, rec.peer_ip);
                         self.http_values.push(b':');
                         fast_write_u64(&mut self.http_values, rec.peer_port as u64);
-                        self.http_values.extend_from_slice(b" upstream=");
+                        self.http_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.http_values, rec.upstream_ip);
                         self.http_values.push(b':');
                         fast_write_u64(&mut self.http_values, rec.upstream_port as u64);
-                        self.http_values.extend_from_slice(b" ua=");
+                        self.http_values.extend_from_slice(b" user_agent=");
                         self.http_values
                             .extend_from_slice(ua_fam.as_str().as_bytes());
                         self.http_values.push(b'/');
                         fast_write_u64(&mut self.http_values, rec.ua_major_version as u64);
-                        self.http_values.extend_from_slice(b" os=");
+                        self.http_values.extend_from_slice(b" client_os=");
                         self.http_values
                             .extend_from_slice(ua_os.as_str().as_bytes());
                         self.http_values.extend_from_slice(b" completion=");
@@ -214,33 +209,37 @@ impl LokiJsonFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.grpc_values.extend_from_slice(b" proto=");
+                        self.grpc_values.extend_from_slice(b" pipe=");
                         self.grpc_values
-                            .extend_from_slice(proto.as_str().as_bytes());
+                            .extend_from_slice(rec.pipe_name().as_bytes());
+                        self.grpc_values.extend_from_slice(b" method=POST url=");
+                        self.grpc_values.extend_from_slice(rec.url().as_bytes());
+                        self.grpc_values.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.grpc_values.extend_from_slice(name.as_bytes());
+                        });
                         self.grpc_values.extend_from_slice(b" grpc_status=");
                         self.grpc_values
                             .extend_from_slice(grpc_st.as_str().as_bytes());
-                        self.grpc_values.extend_from_slice(b" http_status=");
+                        self.grpc_values.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.grpc_values, rec.status_code as u64);
-                        self.grpc_values.extend_from_slice(b" route_id=");
-                        fast_write_u64(&mut self.grpc_values, rec.route_id as u64);
-                        self.grpc_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.grpc_values, rec.duration_us as u64);
-                        self.grpc_values.extend_from_slice(b" rx=");
-                        fast_write_u64(&mut self.grpc_values, rec.bytes_rx as u64);
-                        self.grpc_values.extend_from_slice(b" tx=");
-                        fast_write_u64(&mut self.grpc_values, rec.bytes_tx as u64);
-                        self.grpc_values.extend_from_slice(b" msgs=");
+                        self.grpc_values.extend_from_slice(b" rpc_messages=");
                         fast_write_u64(&mut self.grpc_values, rec.rpc_msgs_or_flags as u64);
-                        self.grpc_values.extend_from_slice(b" peer=");
+                        self.grpc_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.grpc_values, rec.duration_ns);
+                        self.grpc_values.extend_from_slice(b" bytes_rx=");
+                        fast_write_u64(&mut self.grpc_values, rec.bytes_rx as u64);
+                        self.grpc_values.extend_from_slice(b" bytes_tx=");
+                        fast_write_u64(&mut self.grpc_values, rec.bytes_tx as u64);
+                        self.grpc_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.grpc_values, rec.peer_ip);
                         self.grpc_values.push(b':');
                         fast_write_u64(&mut self.grpc_values, rec.peer_port as u64);
-                        self.grpc_values.extend_from_slice(b" upstream=");
+                        self.grpc_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.grpc_values, rec.upstream_ip);
                         self.grpc_values.push(b':');
                         fast_write_u64(&mut self.grpc_values, rec.upstream_port as u64);
-                        self.grpc_values.extend_from_slice(b" ua=");
+                        self.grpc_values.extend_from_slice(b" user_agent=");
                         self.grpc_values
                             .extend_from_slice(ua_fam.as_str().as_bytes());
                         self.grpc_values.push(b'/');
@@ -262,19 +261,24 @@ impl LokiJsonFormatter {
                             rec.timestamp_sec as u64,
                             rec.request_id,
                         );
-                        self.raw_values.extend_from_slice(b" proto=");
-                        self.raw_values.extend_from_slice(proto.as_str().as_bytes());
-                        self.raw_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(&mut self.raw_values, rec.duration_us as u64);
-                        self.raw_values.extend_from_slice(b" rx=");
+                        self.raw_values.extend_from_slice(b" pipe=");
+                        self.raw_values
+                            .extend_from_slice(rec.pipe_name().as_bytes());
+                        self.raw_values.extend_from_slice(b" route=");
+                        velda_observability::with_route_name(rec.route_id, |name| {
+                            self.raw_values.extend_from_slice(name.as_bytes());
+                        });
+                        self.raw_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(&mut self.raw_values, rec.duration_ns);
+                        self.raw_values.extend_from_slice(b" bytes_rx=");
                         fast_write_u64(&mut self.raw_values, rec.bytes_rx as u64);
-                        self.raw_values.extend_from_slice(b" tx=");
+                        self.raw_values.extend_from_slice(b" bytes_tx=");
                         fast_write_u64(&mut self.raw_values, rec.bytes_tx as u64);
-                        self.raw_values.extend_from_slice(b" peer=");
+                        self.raw_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.raw_values, rec.peer_ip);
                         self.raw_values.push(b':');
                         fast_write_u64(&mut self.raw_values, rec.peer_port as u64);
-                        self.raw_values.extend_from_slice(b" upstream=");
+                        self.raw_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.raw_values, rec.upstream_ip);
                         self.raw_values.push(b':');
                         fast_write_u64(&mut self.raw_values, rec.upstream_port as u64);
@@ -356,13 +360,10 @@ pub fn format_loki_push_payload(
         for batch in batches {
             for rec in batch.iter() {
                 total_records += 1;
-                let proto = LogProtocol::from_u8(rec.downstream_proto);
-                let up_proto = LogProtocol::from_u8(rec.upstream_proto);
-                let pipe = PipeStrategy::from_discriminant(rec.pipe_strategy)
-                    .unwrap_or(PipeStrategy::Buffered);
+                let downstream_protocol = rec.downstream_protocol();
                 let completion = LogCompletionReason::from_u8(rec.completion);
 
-                match proto {
+                match downstream_protocol {
                     LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
                         if !http_values.is_empty() {
                             http_values.push(b',');
@@ -375,29 +376,25 @@ pub fn format_loki_push_payload(
                         fast_write_ts_nano(http_values, rec.timestamp_sec);
                         http_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(http_values, rec.timestamp_sec as u64, rec.request_id);
-                        http_values.extend_from_slice(b" proto=");
-                        http_values.extend_from_slice(proto.as_str().as_bytes());
-                        http_values.extend_from_slice(b" up_proto=");
-                        http_values.extend_from_slice(up_proto.as_str().as_bytes());
                         http_values.extend_from_slice(b" pipe=");
-                        http_values.extend_from_slice(pipe.as_str().as_bytes());
+                        http_values.extend_from_slice(rec.pipe_name().as_bytes());
                         http_values.extend_from_slice(b" method=");
                         http_values.extend_from_slice(method.as_str().as_bytes());
                         http_values.extend_from_slice(b" status=");
                         fast_write_u64(http_values, rec.status_code as u64);
                         http_values.extend_from_slice(b" route_id=");
                         fast_write_u64(http_values, rec.route_id as u64);
-                        http_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(http_values, rec.duration_us as u64);
+                        http_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(http_values, rec.duration_ns);
                         http_values.extend_from_slice(b" rx=");
                         fast_write_u64(http_values, rec.bytes_rx as u64);
                         http_values.extend_from_slice(b" tx=");
                         fast_write_u64(http_values, rec.bytes_tx as u64);
-                        http_values.extend_from_slice(b" peer=");
+                        http_values.extend_from_slice(b" client=");
                         fast_write_ip(http_values, rec.peer_ip);
                         http_values.push(b':');
                         fast_write_u64(http_values, rec.peer_port as u64);
-                        http_values.extend_from_slice(b" upstream=");
+                        http_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(http_values, rec.upstream_ip);
                         http_values.push(b':');
                         fast_write_u64(http_values, rec.upstream_port as u64);
@@ -422,27 +419,27 @@ pub fn format_loki_push_payload(
                         fast_write_ts_nano(grpc_values, rec.timestamp_sec);
                         grpc_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(grpc_values, rec.timestamp_sec as u64, rec.request_id);
-                        grpc_values.extend_from_slice(b" proto=");
-                        grpc_values.extend_from_slice(proto.as_str().as_bytes());
+                        grpc_values.extend_from_slice(b" pipe=");
+                        grpc_values.extend_from_slice(rec.pipe_name().as_bytes());
                         grpc_values.extend_from_slice(b" grpc_status=");
                         grpc_values.extend_from_slice(grpc_st.as_str().as_bytes());
                         grpc_values.extend_from_slice(b" http_status=");
                         fast_write_u64(grpc_values, rec.status_code as u64);
                         grpc_values.extend_from_slice(b" route_id=");
                         fast_write_u64(grpc_values, rec.route_id as u64);
-                        grpc_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(grpc_values, rec.duration_us as u64);
+                        grpc_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(grpc_values, rec.duration_ns);
                         grpc_values.extend_from_slice(b" rx=");
                         fast_write_u64(grpc_values, rec.bytes_rx as u64);
                         grpc_values.extend_from_slice(b" tx=");
                         fast_write_u64(grpc_values, rec.bytes_tx as u64);
                         grpc_values.extend_from_slice(b" msgs=");
                         fast_write_u64(grpc_values, rec.rpc_msgs_or_flags as u64);
-                        grpc_values.extend_from_slice(b" peer=");
+                        grpc_values.extend_from_slice(b" client=");
                         fast_write_ip(grpc_values, rec.peer_ip);
                         grpc_values.push(b':');
                         fast_write_u64(grpc_values, rec.peer_port as u64);
-                        grpc_values.extend_from_slice(b" upstream=");
+                        grpc_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(grpc_values, rec.upstream_ip);
                         grpc_values.push(b':');
                         fast_write_u64(grpc_values, rec.upstream_port as u64);
@@ -462,19 +459,19 @@ pub fn format_loki_push_payload(
                         fast_write_ts_nano(raw_values, rec.timestamp_sec);
                         raw_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(raw_values, rec.timestamp_sec as u64, rec.request_id);
-                        raw_values.extend_from_slice(b" proto=");
-                        raw_values.extend_from_slice(proto.as_str().as_bytes());
-                        raw_values.extend_from_slice(b" dur_us=");
-                        fast_write_u64(raw_values, rec.duration_us as u64);
+                        raw_values.extend_from_slice(b" pipe=");
+                        raw_values.extend_from_slice(rec.pipe_name().as_bytes());
+                        raw_values.extend_from_slice(b" duration_ns=");
+                        fast_write_u64(raw_values, rec.duration_ns);
                         raw_values.extend_from_slice(b" rx=");
                         fast_write_u64(raw_values, rec.bytes_rx as u64);
                         raw_values.extend_from_slice(b" tx=");
                         fast_write_u64(raw_values, rec.bytes_tx as u64);
-                        raw_values.extend_from_slice(b" peer=");
+                        raw_values.extend_from_slice(b" client=");
                         fast_write_ip(raw_values, rec.peer_ip);
                         raw_values.push(b':');
                         fast_write_u64(raw_values, rec.peer_port as u64);
-                        raw_values.extend_from_slice(b" upstream=");
+                        raw_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(raw_values, rec.upstream_ip);
                         raw_values.push(b':');
                         fast_write_u64(raw_values, rec.upstream_port as u64);
@@ -527,6 +524,7 @@ pub fn format_loki_push_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_observability::PipeKind;
 
     #[test]
     fn test_loki_json_formatter_hex32_and_ipv6() {
@@ -545,9 +543,7 @@ mod tests {
             200,
             1,
             0,
-            LogProtocol::H2,
-            LogProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH2H1,
             LogCompletionReason::Complete,
             LogHttpMethod::Get,
             LogGrpcStatus::NonGrpc,
@@ -565,9 +561,7 @@ mod tests {
             200,
             2,
             4,
-            LogProtocol::GrpcTcp,
-            LogProtocol::GrpcTcp,
-            PipeStrategy::Duplex,
+            PipeKind::DuplexGrpcTcpTcp,
             LogCompletionReason::Complete,
             LogHttpMethod::Post,
             LogGrpcStatus::Ok,
@@ -591,8 +585,8 @@ mod tests {
         assert!(json_str.contains("request_id=0000000065ec87821111222233334444"));
 
         // Verify RFC 5952 IPv6 compression
-        assert!(json_str.contains("peer=::1:50001"));
-        assert!(json_str.contains("peer=192.168.1.10:50000"));
+        assert!(json_str.contains("client=::1:50001"));
+        assert!(json_str.contains("client=192.168.1.10:50000"));
     }
 
     #[test]

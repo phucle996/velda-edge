@@ -24,7 +24,7 @@ use super::slot::{
     IDX_TTFB_INF, PipelineSlot,
 };
 use super::snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
-use super::types::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+use super::types::{DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol};
 use super::vector::PIPELINE_COUNTERS_LEN;
 
 /// Maximum number of hardware worker core shards supported.
@@ -58,7 +58,7 @@ pub fn current_worker_lane() -> usize {
 /// Total number of distinct pipeline combinations:
 /// 3 (Downstream) * 3 (Upstream) * 4 (PipeStrategy) = 36 slots.
 pub const TOTAL_PIPELINE_SLOTS: usize =
-    DownstreamProto::COUNT * UpstreamProto::COUNT * PipeStrategy::COUNT;
+    DownstreamProtocol::COUNT * UpstreamProtocol::COUNT * PipeStrategy::COUNT;
 
 /// Contiguous, lock-free metrics store housing all pipeline, global, and pool metrics.
 pub struct MetricsStore {
@@ -157,30 +157,32 @@ impl MetricsStore {
     /// Zero bounds checking failure risk, zero hashing, zero allocations.
     #[inline(always)]
     pub const fn slot_index(
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) -> usize {
-        (downstream as usize) * (UpstreamProto::COUNT * PipeStrategy::COUNT)
+        (downstream as usize) * (UpstreamProtocol::COUNT * PipeStrategy::COUNT)
             + (upstream as usize) * PipeStrategy::COUNT
             + (pipe as usize)
     }
 
     /// Decodes a slot index back to its constituent enum components.
     #[inline(always)]
-    pub const fn decode_slot_index(index: usize) -> (DownstreamProto, UpstreamProto, PipeStrategy) {
+    pub const fn decode_slot_index(
+        index: usize,
+    ) -> (DownstreamProtocol, UpstreamProtocol, PipeStrategy) {
         let pipe_idx = (index % PipeStrategy::COUNT) as u8;
         let rem = index / PipeStrategy::COUNT;
-        let up_idx = (rem % UpstreamProto::COUNT) as u8;
-        let down_idx = (rem / UpstreamProto::COUNT) as u8;
+        let up_idx = (rem % UpstreamProtocol::COUNT) as u8;
+        let down_idx = (rem / UpstreamProtocol::COUNT) as u8;
 
-        let down = match DownstreamProto::from_discriminant(down_idx) {
+        let down = match DownstreamProtocol::from_discriminant(down_idx) {
             Some(d) => d,
-            None => DownstreamProto::H1,
+            None => DownstreamProtocol::H1,
         };
-        let up = match UpstreamProto::from_discriminant(up_idx) {
+        let up = match UpstreamProtocol::from_discriminant(up_idx) {
             Some(u) => u,
-            None => UpstreamProto::H1,
+            None => UpstreamProtocol::H1,
         };
         let pipe = match PipeStrategy::from_discriminant(pipe_idx) {
             Some(p) => p,
@@ -195,8 +197,8 @@ impl MetricsStore {
     pub fn slot_on_core(
         &self,
         core_id: usize,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) -> &PipelineSlot {
         let core_idx = core_id % self.active_cores;
@@ -209,8 +211,8 @@ impl MetricsStore {
     #[inline(always)]
     pub fn slot(
         &self,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) -> &PipelineSlot {
         self.slot_on_core(current_worker_lane(), downstream, upstream, pipe)
@@ -232,8 +234,8 @@ impl MetricsStore {
     #[inline(always)]
     pub fn record_stream_start(
         &self,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) {
         self.slot(downstream, upstream, pipe).stream_started();
@@ -244,8 +246,8 @@ impl MetricsStore {
     pub fn record_stream_start_on_core(
         &self,
         core_id: usize,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
     ) {
         self.slot_on_core(core_id, downstream, upstream, pipe)
@@ -256,8 +258,8 @@ impl MetricsStore {
     #[inline(always)]
     pub fn record_stream_completion(
         &self,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
         completion: StreamCompletion,
     ) {
@@ -266,13 +268,29 @@ impl MetricsStore {
         target_slot.record_completion(&completion);
     }
 
+    /// Records an early stream rejection/error that terminated before `record_stream_start`.
+    ///
+    /// Preserves request status, transferred bytes, and latency metrics without decrementing
+    /// `active_streams` (preventing negative active-stream gauge drift on early 4xx/5xx exits).
+    #[inline(always)]
+    pub fn record_early_completion(
+        &self,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
+        pipe: PipeStrategy,
+        completion: StreamCompletion,
+    ) {
+        self.slot(downstream, upstream, pipe)
+            .record_completion(&completion);
+    }
+
     /// Records stream completion across the designated pipeline slot on an explicit worker core.
     #[inline(always)]
     pub fn record_stream_completion_on_core(
         &self,
         core_id: usize,
-        downstream: DownstreamProto,
-        upstream: UpstreamProto,
+        downstream: DownstreamProtocol,
+        upstream: UpstreamProtocol,
         pipe: PipeStrategy,
         completion: StreamCompletion,
     ) {

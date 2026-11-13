@@ -14,7 +14,7 @@ use std::sync::Arc;
 use prost::Message;
 use serde_json::Value;
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeKind,
 };
 
 use velda_plugin::background::loki_log_shipper::json::{
@@ -45,9 +45,7 @@ fn build_record(
         200,
         1,
         0,
-        proto,
-        proto,
-        PipeStrategy::Buffered,
+        PipeKind::from_protocols(proto as u8, proto as u8, 0),
         LogCompletionReason::Complete,
         method,
         grpc_status,
@@ -136,21 +134,21 @@ fn test_chaos_request_id_boundaries() {
 fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
     let test_cases: Vec<(&str, &str)> = vec![
         // IPv4 extreme boundaries
-        ("0.0.0.0:0", "peer=0.0.0.0:0"),
-        ("255.255.255.255:65535", "peer=255.255.255.255:65535"),
-        ("127.0.0.1:80", "peer=127.0.0.1:80"),
-        ("10.0.0.1:8080", "peer=10.0.0.1:8080"),
-        ("192.168.1.1:443", "peer=192.168.1.1:443"),
+        ("0.0.0.0:0", "client=0.0.0.0:0"),
+        ("255.255.255.255:65535", "client=255.255.255.255:65535"),
+        ("127.0.0.1:80", "client=127.0.0.1:80"),
+        ("10.0.0.1:8080", "client=10.0.0.1:8080"),
+        ("192.168.1.1:443", "client=192.168.1.1:443"),
         // IPv6 RFC 5952 compression scenarios
-        ("[::1]:5000", "peer=::1:5000"),
-        ("[::]:80", "peer=:::80"),
-        ("[2001:0:0:1:0:0:0:1]:8080", "peer=2001:0:0:1::1:8080"),
+        ("[::1]:5000", "client=::1:5000"),
+        ("[::]:80", "client=:::80"),
+        ("[2001:0:0:1:0:0:0:1]:8080", "client=2001:0:0:1::1:8080"),
         (
             "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:443",
-            "peer=2001:db8:85a3:8d3:1319:8a2e:370:7348:443",
+            "client=2001:db8:85a3:8d3:1319:8a2e:370:7348:443",
         ),
-        ("[fe80::1]:22", "peer=fe80::1:22"),
-        ("[2001:db8::]:9090", "peer=2001:db8:::9090"),
+        ("[fe80::1]:22", "client=fe80::1:22"),
+        ("[2001:db8::]:9090", "client=2001:db8:::9090"),
     ];
 
     let mut labels = HashMap::new();
@@ -412,9 +410,9 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
                 let ts_parsed: u64 = ts_str.parse().expect("Timestamp must be integer nanos");
                 assert!(ts_parsed >= 1_710_000_100_000_000_000);
 
-                // Line string must contain request_id, peer, and completion
+                // Line string must contain request_id, client, and completion
                 assert!(line_str.contains("request_id="));
-                assert!(line_str.contains("peer="));
+                assert!(line_str.contains("client="));
                 assert!(line_str.contains("completion="));
             }
         }

@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use velda_observability::{
-    DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProtocol,
 };
 use velda_plugin::background::otlp_metrics_exporter::json::{
     OtlpJsonTemplate, OtlpMetricsClient, format_otlp_metrics_into,
@@ -219,8 +219,8 @@ async fn test_ab_comparative_traffic_coexistence() {
         store_b.global().connection_opened();
         let slot = store_b.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -306,8 +306,8 @@ async fn test_ab_comparative_traffic_coexistence() {
         store_a.global().connection_opened();
         let slot = store_a.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();

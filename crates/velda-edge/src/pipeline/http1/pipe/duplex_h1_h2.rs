@@ -69,7 +69,7 @@ where
     let h2_config = Http2Config::auto();
 
     // 4. Acquire pooled HTTP/2 client
-    let (mut client, _lease) = match upstream.acquire(&h2_config).await {
+    let (mut client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -90,6 +90,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(lease.endpoint);
 
     // 5. Initiate HTTP/2 stream
     let scheme = if upstream.is_tls() { "https" } else { "http" };
@@ -139,6 +140,9 @@ where
     // 6. Split downstream IO into concurrent Read and Write halves
     let (mut client_read, mut client_write) = tokio::io::split(&mut conn.stream);
     let read_buf = &mut conn.read_buf;
+    let last_status = &mut conn.last_status;
+    let last_bytes_rx = &mut conn.last_bytes_rx;
+    let last_bytes_tx = &mut conn.last_bytes_tx;
 
     // Asymmetric coordination channel
     let (resp_done_tx, mut resp_done_rx) = tokio::sync::oneshot::channel::<()>();
@@ -160,6 +164,7 @@ where
                     }
 
                     while let Some(chunk) = decoder.decode_step(read_buf)? {
+                        *last_bytes_rx += chunk.len() as u64;
                         send_stream.reserve_capacity(chunk.len());
                         send_stream
                             .send_data(chunk, false)
@@ -205,6 +210,7 @@ where
                         let chunk_len = available.min(remaining);
                         let chunk = read_buf.split_to(chunk_len).freeze();
                         remaining = remaining.saturating_sub(chunk_len);
+                        *last_bytes_rx += chunk_len as u64;
                         send_stream.reserve_capacity(chunk_len);
                         send_stream
                             .send_data(chunk, false)
@@ -228,6 +234,7 @@ where
                             let chunk_len = n.min(remaining);
                             let chunk = read_buf.split_to(chunk_len).freeze();
                             remaining = remaining.saturating_sub(chunk_len);
+                            *last_bytes_rx += chunk_len as u64;
                             send_stream.reserve_capacity(chunk_len);
                             send_stream
                                 .send_data(chunk, false)
@@ -276,6 +283,7 @@ where
             parts.headers = l7_resp.headers.into();
         }
         meta.inject_response_headers(&mut parts.headers);
+        *last_status = parts.status.as_u16();
 
         let is_no_body_status = parts.status.is_informational()
             || parts.status == http::StatusCode::NO_CONTENT
@@ -335,6 +343,7 @@ where
             write_buf.extend_from_slice(&body_buf);
             client_write.write_all(&write_buf).await?;
             client_write.flush().await?;
+            *last_bytes_tx += body_buf.len() as u64;
             let _ = resp_done_tx.send(());
             return Ok::<(), Http1Error>(());
         }
@@ -359,6 +368,7 @@ where
             let chunk = chunk.map_err(|_| Http1Error::ConnectionClosed)?;
             let _ = body_stream.flow_control().release_capacity(chunk.len());
             send_chunk(&mut client_write, &chunk).await?;
+            *last_bytes_tx += chunk.len() as u64;
         }
 
         send_chunked_end(&mut client_write).await?;

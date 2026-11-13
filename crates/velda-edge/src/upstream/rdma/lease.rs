@@ -106,6 +106,12 @@ impl Drop for RdmaLease {
 }
 
 impl RdmaLease {
+    /// Returns the physical backend endpoint address backing this lease.
+    #[inline(always)]
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
     /// Constructs a new `RdmaLease`.
     pub fn new(
         channel: RdmaChannel,

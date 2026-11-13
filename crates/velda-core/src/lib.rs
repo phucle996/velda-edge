@@ -27,6 +27,7 @@ pub mod hardware;
 pub mod l4;
 pub mod l7;
 pub mod lifecycle;
+pub mod pipe;
 pub mod protocol;
 pub mod provenance;
 pub mod request_id;
@@ -51,9 +52,10 @@ pub use buffer::{
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 
 // -----------------------------------------------------------------------------
-// Protocol Family
+// Protocol Family & Pipeline Variants
 // -----------------------------------------------------------------------------
 
+pub use pipe::{PIPE_NAMES, PipeKind};
 pub use protocol::ProtocolFamily;
 
 // -----------------------------------------------------------------------------

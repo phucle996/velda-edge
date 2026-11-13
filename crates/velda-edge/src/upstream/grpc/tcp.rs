@@ -115,7 +115,7 @@ impl GrpcTcpUpstream {
             .inner
             .execute(|endpoint| async move {
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let mut connector = lease.client.clone();
+                    let mut connector = lease.client.clone().with_target(endpoint);
                     match connector.ready().await {
                         Ok(()) => return Ok::<_, String>((connector, endpoint)),
                         Err(_) => {
@@ -132,7 +132,8 @@ impl GrpcTcpUpstream {
                     Some(connect_timeout),
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+                .with_target(endpoint);
 
                 fresh
                     .ready()
@@ -182,7 +183,8 @@ impl GrpcTcpUpstream {
                     Some(connect_timeout),
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+                .with_target(endpoint);
 
                 fresh
                     .ready()

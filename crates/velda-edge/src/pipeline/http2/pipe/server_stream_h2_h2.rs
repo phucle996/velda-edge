@@ -18,7 +18,7 @@ use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Forward a request over active H2 client and stream response chunks downstream.
@@ -98,6 +98,7 @@ async fn forward_server_stream(
                 let _ = body_stream
                     .flow_control()
                     .release_capacity(unreleased_bytes);
+                responder.last_bytes_tx = sender.bytes_sent();
                 return Ok(());
             }
         } else {
@@ -109,6 +110,7 @@ async fn forward_server_stream(
                     let _ = body_stream
                         .flow_control()
                         .release_capacity(unreleased_bytes);
+                    responder.last_bytes_tx = sender.bytes_sent();
                     return Ok(());
                 }
             }
@@ -129,6 +131,7 @@ async fn forward_server_stream(
             let _ = body_stream
                 .flow_control()
                 .release_capacity(unreleased_bytes);
+            responder.last_bytes_tx = sender.bytes_sent();
             return Ok(());
         }
     }
@@ -139,6 +142,7 @@ async fn forward_server_stream(
             .release_capacity(unreleased_bytes);
     }
 
+    responder.last_bytes_tx = sender.bytes_sent();
     let _ = sender.finish();
     Ok(())
 }
@@ -152,7 +156,7 @@ pub async fn serve(
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
         Ok(b) => b,
@@ -167,12 +171,19 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = receiver.bytes_received() as u64;
 
     // 2. Acquire upstream multiplexed connection
-    let (mut client, _lease) = match upstream.acquire(&config).await {
+    let (mut client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -190,9 +201,16 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(lease.endpoint);
 
     // 4. Pipe server-streaming response with automatic self-healing retry
     let mut res = forward_server_stream(
@@ -213,7 +231,8 @@ pub async fn serve(
             error = %e,
             "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, _fresh_lease)) = upstream.acquire_fresh(&config).await {
+        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&config).await {
+            upstream_addr = Some(fresh_lease.endpoint);
             res = forward_server_stream(
                 &req_head,
                 &body,
@@ -227,21 +246,32 @@ pub async fn serve(
         }
     }
 
-    if let Err(e) = res {
-        tracing::warn!(
-            error = %e,
-            upstream = %upstream.id(),
-            "HTTP/2 upstream pipe failed"
-        );
-        let mut err_resp = L7Response::from_bytes(
-            StatusCode::BAD_GATEWAY,
-            format!("502 Bad Gateway: {e}\n").into_bytes(),
-        )
-        .with_header(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        meta.inject_response_headers(&mut err_resp.headers);
-        let _ = responder.send_response(&err_resp);
-    }
+    let completion = match res {
+        Ok(()) => velda_observability::LogCompletionReason::Complete,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                upstream = %upstream.id(),
+                "HTTP/2 upstream pipe failed"
+            );
+            let mut err_resp = L7Response::from_bytes(
+                StatusCode::BAD_GATEWAY,
+                format!("502 Bad Gateway: {e}\n").into_bytes(),
+            )
+            .with_header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            meta.inject_response_headers(&mut err_resp.headers);
+            let _ = responder.send_response(&err_resp);
+            velda_observability::LogCompletionReason::UpstreamError
+        }
+    };
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        responder.last_bytes_tx,
+        upstream_addr,
+        completion,
+    )
 }

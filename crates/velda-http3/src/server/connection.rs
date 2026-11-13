@@ -90,6 +90,9 @@ pub struct Http3Engine {
     config: Http3Config,
     transmit_buf: Vec<u8>,
     resp_buf: Vec<u8>,
+    accepted_delta: u32,
+    closed_delta: u32,
+    handshake_delta: u32,
 }
 
 impl std::fmt::Debug for Http3Engine {
@@ -124,7 +127,20 @@ impl Http3Engine {
             config,
             transmit_buf: Vec::with_capacity(65535),
             resp_buf: Vec::with_capacity(2048),
+            accepted_delta: 0,
+            closed_delta: 0,
+            handshake_delta: 0,
         }
+    }
+
+    /// Takes and resets accumulated connection lifecycle deltas `(accepted, closed, handshakes_completed)`.
+    #[inline]
+    pub fn take_telemetry_deltas(&mut self) -> (u32, u32, u32) {
+        let deltas = (self.accepted_delta, self.closed_delta, self.handshake_delta);
+        self.accepted_delta = 0;
+        self.closed_delta = 0;
+        self.handshake_delta = 0;
+        deltas
     }
 
     /// Returns the maximum aggregate pending outbound response bytes allowed in this worker,
@@ -189,6 +205,7 @@ impl Http3Engine {
                             });
                         }
                         self.connections.insert(handle, conn);
+                        self.accepted_delta = self.accepted_delta.saturating_add(1);
                         active_handle = Some(handle);
                     }
                 }
@@ -229,7 +246,9 @@ impl Http3Engine {
                     ];
                     encode_frame(&Http3Frame::Settings(settings), &mut ctrl_buf);
                     let _ = conn.send_stream(ctrl_stream_id).write(&ctrl_buf);
-                    self.control_streams.insert(handle);
+                    if self.control_streams.insert(handle) {
+                        self.handshake_delta = self.handshake_delta.saturating_add(1);
+                    }
                 }
 
                 // Drain outgoing transmits for this connection with GSO batching
@@ -364,7 +383,9 @@ impl Http3Engine {
             }
 
             if is_lost {
-                self.connections.remove(&handle);
+                if self.connections.remove(&handle).is_some() {
+                    self.closed_delta = self.closed_delta.saturating_add(1);
+                }
                 self.control_streams.remove(&handle);
                 self.streams.retain(|(h, _), _| *h != handle);
                 self.pending_writes.retain(|(h, _), write| {
@@ -621,7 +642,9 @@ impl Http3Engine {
         }
 
         for handle in closed_handles {
-            self.connections.remove(&handle);
+            if self.connections.remove(&handle).is_some() {
+                self.closed_delta = self.closed_delta.saturating_add(1);
+            }
             self.control_streams.remove(&handle);
             self.streams.retain(|(h, _), _| *h != handle);
             self.pending_writes.retain(|(h, _), write| {

@@ -8,7 +8,7 @@ use velda_observability::*;
 
 #[test]
 fn test_record_size_and_ipv4_ipv6_encoding() {
-    assert_eq!(std::mem::size_of::<AccessLogRecord>(), 64);
+    assert_eq!(std::mem::size_of::<AccessLogRecord>(), 256);
     assert_eq!(std::mem::align_of::<AccessLogRecord>(), 64);
 
     let ipv4: IpAddr = "192.168.1.42".parse().unwrap();
@@ -62,9 +62,7 @@ fn test_ref_counted_multi_exporter_fanout_and_auto_drop() {
         200,
         7,
         0,
-        LogProtocol::H2,
-        LogProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH2H1,
         LogCompletionReason::Complete,
         LogHttpMethod::Get,
         LogGrpcStatus::NonGrpc,

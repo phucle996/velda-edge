@@ -21,6 +21,7 @@ use velda_grpc::tcp::client::GrpcUpstreamConnector;
 use velda_grpc::tcp::server::{GrpcResponder, GrpcServerStream};
 use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
 
+use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcTcpUpstream;
 
 /// Pipes a Unary (non-streaming) gRPC call between downstream responder and upstream connector.
@@ -30,7 +31,7 @@ async fn pipe_buffered_wire(
     respond: &mut GrpcResponder,
     connector: &mut GrpcUpstreamConnector,
     config: &GrpcConfig,
-) -> Result<(), GrpcError> {
+) -> Result<(u64, velda_observability::LogGrpcStatus), GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
@@ -71,16 +72,25 @@ async fn pipe_buffered_wire(
             }
         }
 
+        let mut grpc_status = resp_parts
+            .headers
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u8>().ok())
+            .map(velda_observability::LogGrpcStatus::from_u8)
+            .unwrap_or(velda_observability::LogGrpcStatus::Ok);
+
         let is_end_of_stream = upstream_recv_stream.is_end_stream();
         let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
         let mut downstream_send_stream = respond
             .send_response(resp, is_end_of_stream)
             .map_err(GrpcError::H2)?;
 
+        let mut resp_len = 0;
+
         // Step 4: Forward response chunks and trailers downstream
         if !is_end_of_stream {
             let mut has_trailers = false;
-            let mut resp_len = 0;
             let mut checked_resp_lpm = false;
             let mut resp_head = BytesMut::new();
 
@@ -123,6 +133,14 @@ async fn pipe_buffered_wire(
                 .await
                 .map_err(GrpcError::H2)?
             {
+                if let Some(code) = trailers
+                    .get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .map(velda_observability::LogGrpcStatus::from_u8)
+                {
+                    grpc_status = code;
+                }
                 downstream_send_stream
                     .send_trailers(trailers)
                     .map_err(GrpcError::H2)?;
@@ -136,7 +154,7 @@ async fn pipe_buffered_wire(
             }
         }
 
-        Ok(())
+        Ok((resp_len as u64, grpc_status))
     };
 
     match tokio::time::timeout(timeout, workflow).await {
@@ -159,7 +177,7 @@ pub async fn serve(
     mut server_stream: GrpcServerStream,
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
-) -> Result<(), GrpcError> {
+) -> PipeOutcome {
     // Stage 1: Ingest downstream raw request payload and enforce max_message_size limit.
     let req_data = match server_stream
         .read_raw_message(config.max_message_size)
@@ -171,9 +189,17 @@ pub async fn serve(
                 GrpcStatus::ResourceExhausted,
                 Some("request message size exceeds limit"),
             );
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::ResourceExhausted,
+                0,
+                0,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = req_data.len() as u64;
 
     // Stage 2: Lease a pre-warmed connection handle from the worker core's local lane shard without cross-thread lock contention.
     let mut client = match upstream.acquire(config).await {
@@ -187,9 +213,17 @@ pub async fn serve(
             let _ = server_stream
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
-            return Ok(());
+            return PipeOutcome::grpc(
+                200,
+                velda_observability::LogGrpcStatus::Unavailable,
+                bytes_rx,
+                0,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = client.target();
 
     // Stage 3: Forward unary call over HTTP/2 wire protocol.
     let mut res = pipe_buffered_wire(
@@ -213,6 +247,7 @@ pub async fn serve(
             "gRPC upstream connection dropped or refused; self-healing with fresh connection"
         );
         if let Ok(mut fresh_client) = upstream.acquire_fresh(config).await {
+            upstream_addr = fresh_client.target();
             res = pipe_buffered_wire(
                 &server_stream.parts,
                 &req_data,
@@ -224,5 +259,22 @@ pub async fn serve(
         }
     }
 
-    res
+    match res {
+        Ok((bytes_tx, grpc_status)) => PipeOutcome::grpc(
+            200,
+            grpc_status,
+            bytes_rx,
+            bytes_tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
+        Err(_) => PipeOutcome::grpc(
+            200,
+            velda_observability::LogGrpcStatus::Unavailable,
+            bytes_rx,
+            0,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        ),
+    }
 }

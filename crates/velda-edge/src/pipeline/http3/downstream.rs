@@ -12,11 +12,15 @@ use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 use velda_http3::server::connection::OutgoingDatagram;
+use velda_observability::{
+    DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol, global_metrics,
+};
 use velda_router::Http3RouteRequest;
 use velda_sock::{Datagram, UdpSocket};
 
 use super::engine::{Http3WorkerPool, get_or_init_h3_workers};
 use super::pipe;
+use crate::pipeline::PipeOutcome;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
 
@@ -182,6 +186,15 @@ pub async fn handle_http3_udp(
             let mut req = req_event.request;
             req.state.client_ip = Some(peer.ip());
             let req_id_header = req.headers.request_id().clone();
+            let (log_url_len, log_url_bytes) = {
+                let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
+                let pq = req
+                    .uri
+                    .path_and_query()
+                    .map(|x| x.as_str())
+                    .unwrap_or(req.path());
+                velda_observability::AccessLogRecord::encode_url(true, host, pq)
+            };
 
             let responder = super::engine::Http3Responder::new(
                 req_event.handle,
@@ -217,6 +230,45 @@ pub async fn handle_http3_udp(
                         Some(&req_id_header),
                     ))
                     .await;
+                global_metrics().record_early_completion(
+                    DownstreamProtocol::H3,
+                    UpstreamProtocol::H3,
+                    PipeStrategy::Buffered,
+                    StreamCompletion::new(
+                        StatusCode::TOO_EARLY.as_u16(),
+                        req.body.len() as u64,
+                        0,
+                        std::time::Duration::ZERO,
+                        None,
+                    ),
+                );
+                let log_method =
+                    velda_observability::LogHttpMethod::from_bytes(req.method.as_str().as_bytes());
+                velda_observability::global_log_store().emit(
+                    &velda_observability::AccessLogRecord {
+                        request_id: req.state.request_id.entropy(),
+                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+                        duration_ns: 0,
+                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        bytes_rx: req.body.len() as u32,
+                        bytes_tx: 0,
+                        upstream_ip: 0,
+                        peer_port: peer.port(),
+                        upstream_port: 0,
+                        status_code: StatusCode::TOO_EARLY.as_u16(),
+                        route_id: 0,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+                        completion: velda_observability::LogCompletionReason::Complete as u8,
+                        method: log_method as u8,
+                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                        ua_family: velda_observability::UaFamily::None as u8,
+                        ua_os: velda_observability::UaOs::Unknown as u8,
+                        url_len: log_url_len,
+                        url_bytes: log_url_bytes,
+                    },
+                );
                 return;
             }
             if let Err(e) = velda_http3::server::path::normalize_path(&mut req.uri) {
@@ -232,6 +284,45 @@ pub async fn handle_http3_udp(
                         Some(&req_id_header),
                     ))
                     .await;
+                global_metrics().record_early_completion(
+                    DownstreamProtocol::H3,
+                    UpstreamProtocol::H3,
+                    PipeStrategy::Buffered,
+                    StreamCompletion::new(
+                        StatusCode::BAD_REQUEST.as_u16(),
+                        req.body.len() as u64,
+                        0,
+                        std::time::Duration::ZERO,
+                        None,
+                    ),
+                );
+                let log_method =
+                    velda_observability::LogHttpMethod::from_bytes(req.method.as_str().as_bytes());
+                velda_observability::global_log_store().emit(
+                    &velda_observability::AccessLogRecord {
+                        request_id: req.state.request_id.entropy(),
+                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+                        duration_ns: 0,
+                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        bytes_rx: req.body.len() as u32,
+                        bytes_tx: 0,
+                        upstream_ip: 0,
+                        peer_port: peer.port(),
+                        upstream_port: 0,
+                        status_code: StatusCode::BAD_REQUEST.as_u16(),
+                        route_id: 0,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+                        completion: velda_observability::LogCompletionReason::Complete as u8,
+                        method: log_method as u8,
+                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                        ua_family: velda_observability::UaFamily::None as u8,
+                        ua_os: velda_observability::UaOs::Unknown as u8,
+                        url_len: log_url_len,
+                        url_bytes: log_url_bytes,
+                    },
+                );
                 return;
             }
 
@@ -263,6 +354,24 @@ async fn process_http3_request(
     }
     http_req = http_req.with_method(req.method.as_str());
 
+    let (ua_family, ua_os, ua_major_version) = req
+        .headers
+        .get(http::header::USER_AGENT)
+        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
+        .unwrap_or((
+            velda_observability::UaFamily::None,
+            velda_observability::UaOs::Unknown,
+            0,
+        ));
+    let log_method = velda_observability::LogHttpMethod::from_bytes(req.method.as_str().as_bytes());
+    let pq = req
+        .uri
+        .path_and_query()
+        .map(|x| x.as_str())
+        .unwrap_or(req.path());
+    let (mut log_url_len, mut log_url_bytes) =
+        velda_observability::AccessLogRecord::encode_url(true, host, pq);
+
     let rt = runtime.load();
     let Some(route) = rt.router.route_http3(listener_id, &http_req) else {
         tracing::debug!(
@@ -278,6 +387,42 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
+        let elapsed = req_start.elapsed();
+        global_metrics().record_early_completion(
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H3,
+            PipeStrategy::Buffered,
+            StreamCompletion::new(
+                StatusCode::NOT_FOUND.as_u16(),
+                req.body.len() as u64,
+                0,
+                elapsed,
+                None,
+            ),
+        );
+        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+            request_id: req.state.request_id.entropy(),
+            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            bytes_rx: req.body.len() as u32,
+            bytes_tx: 0,
+            upstream_ip: 0,
+            peer_port: peer.port(),
+            upstream_port: 0,
+            status_code: StatusCode::NOT_FOUND.as_u16(),
+            route_id: 0,
+            ua_major_version,
+            rpc_msgs_or_flags: 0,
+            pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+            completion: velda_observability::LogCompletionReason::Complete as u8,
+            method: log_method as u8,
+            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+            ua_family: ua_family as u8,
+            ua_os: ua_os as u8,
+            url_len: log_url_len,
+            url_bytes: log_url_bytes,
+        });
         return;
     };
 
@@ -322,7 +467,47 @@ async fn process_http3_request(
                     );
                     resp.headers
                         .set_request_id(req.headers.request_id().clone());
+                    let status = resp.status.as_u16();
+                    let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
+                    let elapsed = req_start.elapsed();
+                    global_metrics().record_early_completion(
+                        DownstreamProtocol::H3,
+                        UpstreamProtocol::H3,
+                        PipeStrategy::Buffered,
+                        StreamCompletion::new(
+                            status,
+                            req.body.len() as u64,
+                            bytes_tx,
+                            elapsed,
+                            None,
+                        ),
+                    );
+                    velda_observability::global_log_store().emit(
+                        &velda_observability::AccessLogRecord {
+                            request_id: req.state.request_id.entropy(),
+                            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+                            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                            bytes_rx: req.body.len() as u32,
+                            bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
+                            upstream_ip: 0,
+                            peer_port: peer.port(),
+                            upstream_port: 0,
+                            status_code: status,
+                            route_id: route.id.0 as u16,
+                            ua_major_version,
+                            rpc_msgs_or_flags: 0,
+                            pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+                            completion: velda_observability::LogCompletionReason::Complete as u8,
+                            method: log_method as u8,
+                            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                            ua_family: ua_family as u8,
+                            ua_os: ua_os as u8,
+                            url_len: log_url_len,
+                            url_bytes: log_url_bytes,
+                        },
+                    );
                     return;
                 }
                 Action::Delay { .. } => unreachable!(),
@@ -364,7 +549,47 @@ async fn process_http3_request(
                     );
                     resp.headers
                         .set_request_id(req.headers.request_id().clone());
+                    let status = resp.status.as_u16();
+                    let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
+                    let elapsed = req_start.elapsed();
+                    global_metrics().record_early_completion(
+                        DownstreamProtocol::H3,
+                        UpstreamProtocol::H3,
+                        PipeStrategy::Buffered,
+                        StreamCompletion::new(
+                            status,
+                            req.body.len() as u64,
+                            bytes_tx,
+                            elapsed,
+                            None,
+                        ),
+                    );
+                    velda_observability::global_log_store().emit(
+                        &velda_observability::AccessLogRecord {
+                            request_id: req.state.request_id.entropy(),
+                            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+                            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                            bytes_rx: req.body.len() as u32,
+                            bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
+                            upstream_ip: 0,
+                            peer_port: peer.port(),
+                            upstream_port: 0,
+                            status_code: status,
+                            route_id: route.id.0 as u16,
+                            ua_major_version,
+                            rpc_msgs_or_flags: 0,
+                            pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+                            completion: velda_observability::LogCompletionReason::Complete as u8,
+                            method: log_method as u8,
+                            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                            ua_family: ua_family as u8,
+                            ua_os: ua_os as u8,
+                            url_len: log_url_len,
+                            url_bytes: log_url_bytes,
+                        },
+                    );
                     return;
                 }
                 Action::Delay { .. } => unreachable!(),
@@ -385,10 +610,54 @@ async fn process_http3_request(
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
             }
+            let status = resp.status.as_u16();
+            let bytes_tx = resp.body.len() as u64;
             let _ = responder.send_response(resp).await;
+            let elapsed = req_start.elapsed();
+            global_metrics().record_early_completion(
+                DownstreamProtocol::H3,
+                UpstreamProtocol::H3,
+                PipeStrategy::Buffered,
+                StreamCompletion::new(status, req.body.len() as u64, bytes_tx, elapsed, None),
+            );
+            velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+                request_id: req.state.request_id.entropy(),
+                timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                bytes_rx: req.body.len() as u32,
+                bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
+                upstream_ip: 0,
+                peer_port: peer.port(),
+                upstream_port: 0,
+                status_code: status,
+                route_id: route.id.0 as u16,
+                ua_major_version,
+                rpc_msgs_or_flags: 0,
+                pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+                completion: velda_observability::LogCompletionReason::Complete as u8,
+                method: log_method as u8,
+                grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+                ua_family: ua_family as u8,
+                ua_os: ua_os as u8,
+                url_len: log_url_len,
+                url_bytes: log_url_bytes,
+            });
             return;
         }
     }
+
+    let (re_len, re_bytes) = {
+        let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
+        let pq = req
+            .uri
+            .path_and_query()
+            .map(|x| x.as_str())
+            .unwrap_or(req.path());
+        velda_observability::AccessLogRecord::encode_url(true, host, pq)
+    };
+    log_url_len = re_len;
+    log_url_bytes = re_bytes;
 
     let Some(upstream_target) = rt.upstreams.http.get(target_upstream) else {
         tracing::error!(
@@ -403,6 +672,42 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
+        let elapsed = req_start.elapsed();
+        global_metrics().record_early_completion(
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H3,
+            PipeStrategy::Buffered,
+            StreamCompletion::new(
+                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                req.body.len() as u64,
+                0,
+                elapsed,
+                None,
+            ),
+        );
+        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+            request_id: req.state.request_id.entropy(),
+            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            bytes_rx: req.body.len() as u32,
+            bytes_tx: 0,
+            upstream_ip: 0,
+            peer_port: peer.port(),
+            upstream_port: 0,
+            status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            route_id: route.id.0 as u16,
+            ua_major_version,
+            rpc_msgs_or_flags: 0,
+            pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+            completion: velda_observability::LogCompletionReason::Complete as u8,
+            method: log_method as u8,
+            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+            ua_family: ua_family as u8,
+            ua_os: ua_os as u8,
+            url_len: log_url_len,
+            url_bytes: log_url_bytes,
+        });
         return;
     };
 
@@ -421,6 +726,42 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
+        let elapsed = req_start.elapsed();
+        global_metrics().record_early_completion(
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H3,
+            PipeStrategy::Buffered,
+            StreamCompletion::new(
+                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                req.body.len() as u64,
+                0,
+                elapsed,
+                None,
+            ),
+        );
+        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+            request_id: req.state.request_id.entropy(),
+            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            bytes_rx: req.body.len() as u32,
+            bytes_tx: 0,
+            upstream_ip: 0,
+            peer_port: peer.port(),
+            upstream_port: 0,
+            status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            route_id: route.id.0 as u16,
+            ua_major_version,
+            rpc_msgs_or_flags: 0,
+            pipe: velda_core::pipe::PipeKind::BufferedH3H1,
+            completion: velda_observability::LogCompletionReason::Complete as u8,
+            method: log_method as u8,
+            grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
+            ua_family: ua_family as u8,
+            ua_os: ua_os as u8,
+            url_len: log_url_len,
+            url_bytes: log_url_bytes,
+        });
         return;
     }
 
@@ -446,151 +787,253 @@ async fn process_http3_request(
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     });
 
-    match upstream_target.as_ref() {
+    let (upstream_protocol, pipe_strat, pipe_kind) = match upstream_target.as_ref() {
+        HttpUpstream::Http3(u) => match u.strategy.effective(has_upload_body, is_sse) {
+            Http3PipeStrategy::Buffered => (
+                UpstreamProtocol::H3,
+                PipeStrategy::Buffered,
+                velda_core::pipe::PipeKind::BufferedH3H3,
+            ),
+            Http3PipeStrategy::ServerStream => (
+                UpstreamProtocol::H3,
+                PipeStrategy::ServerStream,
+                velda_core::pipe::PipeKind::ServerStreamH3H3,
+            ),
+            Http3PipeStrategy::ClientStream => (
+                UpstreamProtocol::H3,
+                PipeStrategy::ClientStream,
+                velda_core::pipe::PipeKind::ClientStreamH3H3,
+            ),
+            Http3PipeStrategy::Duplex => (
+                UpstreamProtocol::H3,
+                PipeStrategy::Duplex,
+                velda_core::pipe::PipeKind::DuplexH3H3,
+            ),
+        },
+        HttpUpstream::Http2(u) => match u.strategy.effective(has_upload_body, is_sse) {
+            Http2PipeStrategy::Buffered => (
+                UpstreamProtocol::H2,
+                PipeStrategy::Buffered,
+                velda_core::pipe::PipeKind::BufferedH3H2,
+            ),
+            Http2PipeStrategy::ServerStream => (
+                UpstreamProtocol::H2,
+                PipeStrategy::ServerStream,
+                velda_core::pipe::PipeKind::ServerStreamH3H2,
+            ),
+            Http2PipeStrategy::ClientStream => (
+                UpstreamProtocol::H2,
+                PipeStrategy::ClientStream,
+                velda_core::pipe::PipeKind::ClientStreamH3H2,
+            ),
+            Http2PipeStrategy::Duplex => (
+                UpstreamProtocol::H2,
+                PipeStrategy::Duplex,
+                velda_core::pipe::PipeKind::DuplexH3H2,
+            ),
+        },
+        HttpUpstream::Http1(u) => match u.strategy.effective(has_upload_body, is_sse) {
+            Http1PipeStrategy::Buffered => (
+                UpstreamProtocol::H1,
+                PipeStrategy::Buffered,
+                velda_core::pipe::PipeKind::BufferedH3H1,
+            ),
+            Http1PipeStrategy::ServerStream => (
+                UpstreamProtocol::H1,
+                PipeStrategy::ServerStream,
+                velda_core::pipe::PipeKind::ServerStreamH3H1,
+            ),
+            Http1PipeStrategy::ClientStream => (
+                UpstreamProtocol::H1,
+                PipeStrategy::ClientStream,
+                velda_core::pipe::PipeKind::ClientStreamH3H1,
+            ),
+            Http1PipeStrategy::Duplex => (
+                UpstreamProtocol::H1,
+                PipeStrategy::Duplex,
+                velda_core::pipe::PipeKind::DuplexH3H1,
+            ),
+        },
+    };
+
+    global_metrics().record_stream_start(DownstreamProtocol::H3, upstream_protocol, pipe_strat);
+
+    let outcome: PipeOutcome = match upstream_target.as_ref() {
         HttpUpstream::Http3(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http3PipeStrategy::Buffered => {
-                let mut resp = pipe::buffered_h3_h3::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::buffered_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h3::serve(&req, responder, upstream, plan).await;
+                pipe::server_stream_h3_h3::serve(&req, responder, upstream, plan).await
             }
             Http3PipeStrategy::ClientStream => {
-                let mut resp = pipe::client_stream_h3_h3::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::client_stream_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http3PipeStrategy::Duplex => {
-                pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await;
+                pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await
             }
         },
         HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http2PipeStrategy::Buffered => {
-                let mut resp = pipe::buffered_h3_h2::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::buffered_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http2PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h2::serve(&req, responder, upstream, plan).await;
+                pipe::server_stream_h3_h2::serve(&req, responder, upstream, plan).await
             }
             Http2PipeStrategy::ClientStream => {
-                let mut resp = pipe::client_stream_h3_h2::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::client_stream_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http2PipeStrategy::Duplex => {
-                pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await;
+                pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await
             }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http1PipeStrategy::Buffered => {
-                let mut resp = pipe::buffered_h3_h1::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::buffered_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h1::serve(&req, responder, upstream, plan).await;
+                pipe::server_stream_h3_h1::serve(&req, responder, upstream, plan).await
             }
             Http1PipeStrategy::ClientStream => {
-                let mut resp = pipe::client_stream_h3_h1::serve(&req, upstream).await;
+                let (mut resp, upstream_addr, completion) =
+                    pipe::client_stream_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
                 }
+                let status = resp.status.as_u16();
+                let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
+                PipeOutcome::http(
+                    status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    upstream_addr,
+                    completion,
+                )
             }
             Http1PipeStrategy::Duplex => {
-                pipe::duplex_h3_h1::serve(&req, responder, upstream, plan).await;
+                pipe::duplex_h3_h1::serve(&req, responder, upstream, plan).await
             }
         },
-    }
-
-    let (ua_family, ua_os, ua_major_version) = req
-        .headers
-        .get(http::header::USER_AGENT)
-        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
-        .unwrap_or((
-            velda_observability::UaFamily::None,
-            velda_observability::UaOs::Unknown,
-            0,
-        ));
-    let (up_proto, pipe_strat) = match upstream_target.as_ref() {
-        HttpUpstream::Http3(u) => (
-            velda_observability::LogProtocol::H3 as u8,
-            match u.strategy.effective(has_upload_body, is_sse) {
-                Http3PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
-                Http3PipeStrategy::ServerStream => {
-                    velda_observability::PipeStrategy::ServerStream as u8
-                }
-                Http3PipeStrategy::ClientStream => {
-                    velda_observability::PipeStrategy::ClientStream as u8
-                }
-                Http3PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
-            },
-        ),
-        HttpUpstream::Http2(u) => (
-            velda_observability::LogProtocol::H2 as u8,
-            match u.strategy.effective(has_upload_body, is_sse) {
-                Http2PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
-                Http2PipeStrategy::ServerStream => {
-                    velda_observability::PipeStrategy::ServerStream as u8
-                }
-                Http2PipeStrategy::ClientStream => {
-                    velda_observability::PipeStrategy::ClientStream as u8
-                }
-                Http2PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
-            },
-        ),
-        HttpUpstream::Http1(u) => (
-            velda_observability::LogProtocol::H1 as u8,
-            match u.strategy.effective(has_upload_body, is_sse) {
-                Http1PipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered as u8,
-                Http1PipeStrategy::ServerStream => {
-                    velda_observability::PipeStrategy::ServerStream as u8
-                }
-                Http1PipeStrategy::ClientStream => {
-                    velda_observability::PipeStrategy::ClientStream as u8
-                }
-                Http1PipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex as u8,
-            },
-        ),
     };
+
+    let elapsed = req_start.elapsed();
+    global_metrics().record_stream_completion(
+        DownstreamProtocol::H3,
+        upstream_protocol,
+        pipe_strat,
+        StreamCompletion::new(
+            outcome.status_code,
+            outcome.bytes_rx,
+            outcome.bytes_tx,
+            elapsed,
+            None,
+        ),
+    );
+    let (upstream_ip, upstream_port) = outcome
+        .upstream_addr
+        .map(|a| {
+            (
+                velda_observability::encode_upstream_ip_u32(a.ip()),
+                a.port(),
+            )
+        })
+        .unwrap_or((0, 0));
     velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
         request_id: req.state.request_id.entropy(),
-        timestamp_sec: velda_core::coarse_now_sec() as u32,
-        duration_us: req_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
+        duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
         peer_ip: velda_observability::encode_ip_u128(peer.ip()),
-        bytes_rx: req.body.len() as u32,
-        bytes_tx: 0,
-        upstream_ip: 0,
+        bytes_rx: outcome.bytes_rx.min(u32::MAX as u64) as u32,
+        bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
+        upstream_ip,
         peer_port: peer.port(),
-        upstream_port: 0,
-        status_code: 200,
+        upstream_port,
+        status_code: outcome.status_code,
         route_id: route.id.0 as u16,
         ua_major_version,
         rpc_msgs_or_flags: 0,
-        downstream_proto: velda_observability::LogProtocol::H3 as u8,
-        upstream_proto: up_proto,
-        pipe_strategy: pipe_strat,
-        completion: velda_observability::LogCompletionReason::Complete as u8,
-        method: velda_observability::LogHttpMethod::from_bytes(req.method.as_str().as_bytes())
-            as u8,
+        pipe: pipe_kind,
+        completion: outcome.completion as u8,
+        method: log_method as u8,
         grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
         ua_family: ua_family as u8,
         ua_os: ua_os as u8,
+        url_len: log_url_len,
+        url_bytes: log_url_bytes,
     });
 }
 

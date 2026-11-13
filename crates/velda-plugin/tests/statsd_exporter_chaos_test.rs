@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use velda_observability::{
-    DownstreamProto, MetricsSnapshot, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, MetricsSnapshot, MetricsStore, PipeStrategy, StreamCompletion,
+    UpstreamProtocol,
 };
 use velda_plugin::background::statsd_exporter::dialect::{
     DogStatsdTemplate, StandardTemplate, StatsdDialect, format_statsd_snapshot,
@@ -17,10 +18,10 @@ use velda_plugin::background::statsd_exporter::dialect::{
 
 /// Helper to populate all 36 pipeline slots in a MetricsStore.
 fn populate_all_36_pipeline_slots(store: &MetricsStore) {
-    for down_idx in 0..DownstreamProto::COUNT {
-        let down = DownstreamProto::from_discriminant(down_idx as u8).unwrap();
-        for up_idx in 0..UpstreamProto::COUNT {
-            let up = UpstreamProto::from_discriminant(up_idx as u8).unwrap();
+    for down_idx in 0..DownstreamProtocol::COUNT {
+        let down = DownstreamProtocol::from_discriminant(down_idx as u8).unwrap();
+        for up_idx in 0..UpstreamProtocol::COUNT {
+            let up = UpstreamProtocol::from_discriminant(up_idx as u8).unwrap();
             for pipe_idx in 0..PipeStrategy::COUNT {
                 let pipe = PipeStrategy::from_discriminant(pipe_idx as u8).unwrap();
 
@@ -100,12 +101,12 @@ fn test_chaos_all_36_pipeline_slots_dogstatsd() {
     assert!(text.contains("velda_chaos.pool.evictions.total:0|c|#reason:idle_timeout\n"));
 
     // Verify all 36 combinations have their specific tags
-    for down_idx in 0..DownstreamProto::COUNT {
-        let d = DownstreamProto::from_discriminant(down_idx as u8)
+    for down_idx in 0..DownstreamProtocol::COUNT {
+        let d = DownstreamProtocol::from_discriminant(down_idx as u8)
             .unwrap()
             .as_str();
-        for up_idx in 0..UpstreamProto::COUNT {
-            let u = UpstreamProto::from_discriminant(up_idx as u8)
+        for up_idx in 0..UpstreamProtocol::COUNT {
+            let u = UpstreamProtocol::from_discriminant(up_idx as u8)
                 .unwrap()
                 .as_str();
             for pipe_idx in 0..PipeStrategy::COUNT {
@@ -186,12 +187,12 @@ fn test_chaos_all_36_pipeline_slots_standard() {
     assert!(text.contains("velda_chaos.pool.evictions.idle_timeout:0|c\n"));
 
     // Verify all 36 combinations have their specific dot notation paths
-    for down_idx in 0..DownstreamProto::COUNT {
-        let d = DownstreamProto::from_discriminant(down_idx as u8)
+    for down_idx in 0..DownstreamProtocol::COUNT {
+        let d = DownstreamProtocol::from_discriminant(down_idx as u8)
             .unwrap()
             .as_str();
-        for up_idx in 0..UpstreamProto::COUNT {
-            let u = UpstreamProto::from_discriminant(up_idx as u8)
+        for up_idx in 0..UpstreamProtocol::COUNT {
+            let u = UpstreamProtocol::from_discriminant(up_idx as u8)
                 .unwrap()
                 .as_str();
             for pipe_idx in 0..PipeStrategy::COUNT {
@@ -340,8 +341,8 @@ fn test_chaos_extreme_boundary_values() {
     snapshot
         .pipelines
         .push(velda_observability::PipelineSnapshot {
-            downstream: DownstreamProto::H1,
-            upstream: UpstreamProto::H1,
+            downstream: DownstreamProtocol::H1,
+            upstream: UpstreamProtocol::H1,
             pipe: PipeStrategy::Buffered,
             requests_2xx: u64::MAX,
             requests_3xx: 0,

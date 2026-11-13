@@ -13,6 +13,7 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
@@ -26,7 +27,7 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
+) -> Result<(L7Response, Option<SocketAddr>), GrpcError> {
     // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 
@@ -42,6 +43,7 @@ pub async fn serve(
             e.to_string(),
         ))
     })?;
+    let mut upstream_addr = client.target();
 
     // Step 3: Forward bidirectional request over hardware RDMA link and await final response.
     let mut res = client.invoke_client_request(&client_req, config).await;
@@ -58,6 +60,7 @@ pub async fn serve(
             "gRPC RDMA upstream connection dropped; self-healing with fresh connection"
         );
         if let Ok(mut fresh_client) = upstream.acquire_fresh(config).await {
+            upstream_addr = fresh_client.target();
             res = fresh_client
                 .invoke_client_request(&client_req, config)
                 .await;
@@ -65,5 +68,5 @@ pub async fn serve(
     }
 
     // Step 5: Convert response into downstream L7Response for UDP datagram egress.
-    res.map(|resp| resp.into_l7())
+    res.map(|resp| (resp.into_l7(), upstream_addr))
 }

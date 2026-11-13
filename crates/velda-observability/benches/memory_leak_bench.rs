@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use velda_observability::{
-    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
+    UpstreamProtocol,
 };
 
 #[global_allocator]
@@ -42,8 +43,8 @@ fn bench_sustained_request_serving_zero_leak() {
     // Warm-up
     for _ in 0..10_000 {
         store.record_stream_completion(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             completion,
         );
@@ -55,8 +56,8 @@ fn bench_sustained_request_serving_zero_leak() {
 
     for _ in 0..iters {
         store.record_stream_completion(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
             completion,
         );
@@ -187,8 +188,8 @@ fn bench_snapshot_generation_zero_retention() {
 
     // Populate initial state
     store.record_stream_completion(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
         StreamCompletion::new(200, 64, 512, Duration::from_millis(1), None),
     );

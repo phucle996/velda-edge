@@ -117,6 +117,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(upstream_lease.endpoint);
 
     let cfg = *conn.config();
     let mut req = Http1ServerRequest::from_parts(req_head, body);
@@ -151,6 +152,7 @@ where
 
                 match upstream.acquire_fresh().await {
                     Ok(mut fresh_lease) => {
+                        conn.last_upstream_addr = Some(fresh_lease.endpoint);
                         let retry_res = async {
                             send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
                                 .await?;
@@ -356,6 +358,7 @@ where
                     if conn.upstream_read_buf.is_empty() {
                         conn.upstream_read_buf.clear();
                     }
+                    conn.last_bytes_tx += total_len as u64;
                 } else {
                     conn.stream.write_all(&conn.write_buf).await?;
                 }
@@ -374,6 +377,8 @@ where
                         "Downstream client disconnected while writing initial chunk"
                     );
                     client_disconnected = true;
+                } else {
+                    conn.last_bytes_tx += available as u64;
                 }
                 conn.upstream_read_buf.advance(available);
                 if conn.upstream_read_buf.is_empty() {
@@ -402,6 +407,7 @@ where
                                 client_disconnected = true;
                                 break;
                             }
+                            conn.last_bytes_tx += chunk.len() as u64;
                         }
                         None => {
                             upstream_lease.mark_closed();
@@ -436,6 +442,8 @@ where
                         _ => (false, wire1),
                     };
 
+                conn.last_status = server_head.status.as_u16();
+                conn.last_bytes_tx += payload1.len() as u64;
                 let close = velda_http1::send_head_coalesced(
                     &mut conn.stream,
                     &mut conn.write_buf,
@@ -475,6 +483,7 @@ where
                         client_disconnected = true;
                         break;
                     }
+                    conn.last_bytes_tx += chunk.len() as u64;
                 }
             }
 
@@ -492,6 +501,7 @@ where
                         client_disconnected = true;
                         break;
                     }
+                    conn.last_bytes_tx += chunk.len() as u64;
                 }
             }
         }

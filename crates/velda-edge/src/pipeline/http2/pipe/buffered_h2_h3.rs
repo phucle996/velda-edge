@@ -12,7 +12,7 @@ use velda_core::{L7Request, L7Response};
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http3::sanitize_headers;
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
 
 /// Serves a buffered HTTP/2 downstream stream forwarded to an HTTP/3 QUIC upstream backend.
@@ -23,7 +23,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Consume downstream body
     let body = match receiver.consume_all_into_slab(Some(&meta.slab_pool)).await {
         Ok(b) => b,
@@ -37,9 +37,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = receiver.bytes_received() as u64;
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
@@ -71,9 +78,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(client.target());
 
     // 5. Send request directly with self-healing on connection close
     let mut pipe_res = client.send_request_ref(&l7_req).await;
@@ -90,6 +104,7 @@ pub async fn serve(
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            upstream_addr = Some(fresh_client.target());
             pipe_res = fresh_client.send_request(l7_req.clone()).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
@@ -97,7 +112,7 @@ pub async fn serve(
         drop(lease);
     }
 
-    match pipe_res {
+    let completion = match pipe_res {
         Ok(mut resp) => {
             // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
             if let Some(post_hooks) = &plan.post_response_hooks {
@@ -105,6 +120,7 @@ pub async fn serve(
             }
             meta.inject_response_headers(&mut resp.headers);
             let _ = responder.send_response(&resp);
+            velda_observability::LogCompletionReason::Complete
         }
         Err(e) => {
             tracing::warn!(
@@ -122,6 +138,14 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
+            velda_observability::LogCompletionReason::UpstreamError
         }
-    }
+    };
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        responder.last_bytes_tx,
+        upstream_addr,
+        completion,
+    )
 }

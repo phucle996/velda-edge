@@ -13,7 +13,7 @@ use velda_core::L7Response;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http3::sanitize_headers;
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream bridged to an HTTP/3 QUIC backend.
@@ -24,7 +24,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
 
@@ -57,9 +57,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(client.target());
 
     // 4. Fast-path: Ingest initial payload with opportunistic coalescing
     let (first_chunk, mut is_fin) = match receiver
@@ -77,7 +84,13 @@ pub async fn serve(
                 format!("400 Bad Request: {e}\n").into_bytes(),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                upstream_addr,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
 
@@ -104,7 +117,13 @@ pub async fn serve(
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
 
@@ -131,7 +150,13 @@ pub async fn serve(
                                     b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
                                 );
                                 let _ = responder.send_response(&err_resp);
-                                return;
+                                return PipeOutcome::http(
+                                    responder.last_status,
+                                    receiver.bytes_received() as u64,
+                                    responder.last_bytes_tx,
+                                    upstream_addr,
+                                    velda_observability::LogCompletionReason::UpstreamError,
+                                );
                             }
                             if chunk_fin {
                                 is_fin = true;
@@ -139,7 +164,15 @@ pub async fn serve(
                             }
                         }
                         Ok(None) => break 'upload,
-                        Err(_) => return,
+                        Err(_) => {
+                            return PipeOutcome::http(
+                                responder.last_status,
+                                receiver.bytes_received() as u64,
+                                responder.last_bytes_tx,
+                                upstream_addr,
+                                velda_observability::LogCompletionReason::ClientCancel,
+                            );
+                        }
                     }
                 }
             }
@@ -160,7 +193,13 @@ pub async fn serve(
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    receiver.bytes_received() as u64,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
             Err(_) => {
                 let err_resp = L7Response::from_bytes(
@@ -168,7 +207,13 @@ pub async fn serve(
                     b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    receiver.bytes_received() as u64,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         },
         None => match response_rx.await {
@@ -180,7 +225,13 @@ pub async fn serve(
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    receiver.bytes_received() as u64,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
             Err(_) => {
                 let err_resp = L7Response::from_bytes(
@@ -188,7 +239,13 @@ pub async fn serve(
                     b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    receiver.bytes_received() as u64,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         },
     };
@@ -206,7 +263,13 @@ pub async fn serve(
                         b"413 Payload Too Large\n".to_vec(),
                     );
                     let _ = responder.send_response(&err_resp);
-                    return;
+                    return PipeOutcome::http(
+                        responder.last_status,
+                        receiver.bytes_received() as u64,
+                        responder.last_bytes_tx,
+                        upstream_addr,
+                        velda_observability::LogCompletionReason::UpstreamError,
+                    );
                 }
                 resp_body.extend_from_slice(&chunk);
             }
@@ -217,7 +280,13 @@ pub async fn serve(
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    receiver.bytes_received() as u64,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         }
     }
@@ -241,7 +310,15 @@ pub async fn serve(
     }
     meta.inject_response_headers(&mut resp.headers);
     let _ = responder.send_response(&resp);
+    let bytes_rx = receiver.bytes_received() as u64;
     if !receiver.is_end_stream() {
         tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
     }
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        responder.last_bytes_tx,
+        upstream_addr,
+        velda_observability::LogCompletionReason::Complete,
+    )
 }

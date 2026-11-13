@@ -15,7 +15,7 @@ use velda_core::StreamingMode;
 /// Ingress protocol on the downstream client connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub enum DownstreamProto {
+pub enum DownstreamProtocol {
     /// HTTP/1.1 downstream traffic (RFC 9112).
     H1 = 0,
     /// HTTP/2 downstream multiplexed traffic (RFC 9113).
@@ -24,7 +24,7 @@ pub enum DownstreamProto {
     H3 = 2,
 }
 
-impl DownstreamProto {
+impl DownstreamProtocol {
     /// Number of distinct downstream protocol variants.
     pub const COUNT: usize = 3;
 
@@ -53,7 +53,7 @@ impl DownstreamProto {
 /// Egress protocol used to forward traffic to the upstream backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub enum UpstreamProto {
+pub enum UpstreamProtocol {
     /// HTTP/1.1 upstream keep-alive / pooled connection.
     H1 = 0,
     /// HTTP/2 multiplexed upstream stream.
@@ -62,7 +62,7 @@ pub enum UpstreamProto {
     H3 = 2,
 }
 
-impl UpstreamProto {
+impl UpstreamProtocol {
     /// Number of distinct upstream protocol variants.
     pub const COUNT: usize = 3;
 

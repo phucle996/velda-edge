@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_duration, format_throughput};
 use velda_observability::{
-    DownstreamProto, EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, PipeStrategy,
-    StreamCompletion, Telemetry, UpstreamProto,
+    DownstreamProtocol, EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, PipeStrategy,
+    StreamCompletion, Telemetry, UpstreamProtocol,
 };
 
 #[global_allocator]
@@ -100,8 +100,8 @@ fn bench_direct_slot_completion() {
     // Warm-up
     for _ in 0..10_000 {
         store.record_stream_completion(
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
             completion,
         );
@@ -110,20 +110,20 @@ fn bench_direct_slot_completion() {
     let pipelines = [
         (
             "H1 -> H1 Buffered",
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         ),
         (
             "H2 -> H1 ServerStream",
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         ),
         (
             "H3 -> H3 Duplex",
-            DownstreamProto::H3,
-            UpstreamProto::H3,
+            DownstreamProtocol::H3,
+            UpstreamProtocol::H3,
             PipeStrategy::Duplex,
         ),
     ];
@@ -184,8 +184,8 @@ fn bench_live_telemetry_lifecycle() {
     for _ in 0..iters {
         let mut tel = LiveTelemetry::new(
             Arc::clone(&store),
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         );
         tel.on_start();

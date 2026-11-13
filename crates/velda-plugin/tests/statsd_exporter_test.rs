@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
 use velda_observability::{
-    DownstreamProto, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProtocol,
 };
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
@@ -56,13 +56,13 @@ fn test_dogstatsd_formatting_and_tags() {
 
     // Record sample completions
     store.record_stream_start(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
     );
     store.record_stream_completion(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
         StreamCompletion::new(200, 1024, 2048, Duration::from_millis(15), None),
     );
@@ -109,13 +109,13 @@ fn test_standard_statsd_formatting_dot_notation() {
     let store = MetricsStore::new();
 
     store.record_stream_start(
-        DownstreamProto::H2,
-        UpstreamProto::H2,
+        DownstreamProtocol::H2,
+        UpstreamProtocol::H2,
         PipeStrategy::ServerStream,
     );
     store.record_stream_completion(
-        DownstreamProto::H2,
-        UpstreamProto::H2,
+        DownstreamProtocol::H2,
+        UpstreamProtocol::H2,
         PipeStrategy::ServerStream,
         StreamCompletion::new(503, 500, 1500, Duration::from_millis(2), None),
     );
@@ -192,13 +192,13 @@ async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
     // 2. Setup MetricsStore with sample data
     let store = Arc::new(MetricsStore::new());
     store.record_stream_start(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
     );
     store.record_stream_completion(
-        DownstreamProto::H1,
-        UpstreamProto::H1,
+        DownstreamProtocol::H1,
+        UpstreamProtocol::H1,
         PipeStrategy::Buffered,
         StreamCompletion::new(200, 4096, 8192, Duration::from_millis(5), None),
     );

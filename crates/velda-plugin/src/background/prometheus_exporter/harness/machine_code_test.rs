@@ -134,7 +134,9 @@ async fn test_ab_comparative_traffic_coexistence() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::watch;
-    use velda_observability::{DownstreamProto, PipeStrategy, StreamCompletion, UpstreamProto};
+    use velda_observability::{
+        DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol,
+    };
     use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
     use velda_sync::{
         AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
@@ -159,8 +161,8 @@ async fn test_ab_comparative_traffic_coexistence() {
         store_b.global().connection_opened();
         let slot = store_b.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();
@@ -262,8 +264,8 @@ async fn test_ab_comparative_traffic_coexistence() {
         store_a.global().connection_opened();
         let slot = store_a.slot_on_core(
             core_id,
-            DownstreamProto::H1,
-            UpstreamProto::H1,
+            DownstreamProtocol::H1,
+            UpstreamProtocol::H1,
             PipeStrategy::Buffered,
         );
         slot.stream_started();

@@ -13,7 +13,7 @@ use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamRec
 use velda_http3::error::Http3Error;
 use velda_http3::sanitize_headers;
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
 
 /// Serves a server-streaming HTTP/2 downstream stream bridged to an HTTP/3 QUIC backend.
@@ -24,7 +24,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Consume downstream body
     let body = match receiver.consume_all().await {
         Ok(b) => b,
@@ -38,9 +38,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = receiver.bytes_received() as u64;
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
@@ -72,9 +79,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let mut upstream_addr = Some(client.target());
 
     // 5. Pipe server-streaming response with self-healing on connection close
     let mut stream_res = client.send_stream_request(l7_req.clone()).await;
@@ -84,6 +98,7 @@ pub async fn serve(
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
+            upstream_addr = Some(fresh_client.target());
             stream_res = fresh_client.send_stream_request(l7_req.clone()).await;
         }
     }
@@ -105,7 +120,13 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
 
@@ -135,7 +156,13 @@ pub async fn serve(
             velda_core::Body::Empty,
         );
         let _ = responder.send_response(&resp);
-        return;
+        return PipeOutcome::http(
+            responder.last_status,
+            bytes_rx,
+            responder.last_bytes_tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        );
     }
 
     // Immediately open streaming response downstream and transmit headers frame
@@ -143,7 +170,13 @@ pub async fn serve(
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(error = %e, "Failed to initiate downstream HTTP/2 streaming response");
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                upstream_addr,
+                velda_observability::LogCompletionReason::ClientCancel,
+            );
         }
     };
 
@@ -152,16 +185,35 @@ pub async fn serve(
             Ok(chunk) => {
                 if let Err(e) = stream_sender.send_chunk(chunk).await {
                     tracing::debug!(error = %e, "Downstream HTTP/2 client disconnected");
-                    return;
+                    return PipeOutcome::http(
+                        responder.last_status,
+                        bytes_rx,
+                        stream_sender.bytes_sent(),
+                        upstream_addr,
+                        velda_observability::LogCompletionReason::ClientCancel,
+                    );
                 }
             }
             Err(e) => {
                 tracing::debug!(error = %e, "Error reading upstream HTTP/3 chunk");
                 responder.send_reset(h2::Reason::INTERNAL_ERROR);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    stream_sender.bytes_sent(),
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         }
     }
 
     let _ = stream_sender.finish();
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        stream_sender.bytes_sent(),
+        upstream_addr,
+        velda_observability::LogCompletionReason::Complete,
+    )
 }

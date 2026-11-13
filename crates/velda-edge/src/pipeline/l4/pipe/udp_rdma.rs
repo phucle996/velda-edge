@@ -143,32 +143,41 @@ pub async fn serve(
         let (request_id, _) = velda_core::next_request_id();
         let emit_log =
             |peer: std::net::SocketAddr,
+             upstream_addr: Option<std::net::SocketAddr>,
              rx: u64,
              tx: u64,
              completion: velda_observability::LogCompletionReason| {
+                let (upstream_ip, upstream_port) = upstream_addr
+                    .map(|a| {
+                        (
+                            velda_observability::encode_upstream_ip_u32(a.ip()),
+                            a.port(),
+                        )
+                    })
+                    .unwrap_or((0, 0));
                 velda_observability::global_log_store().emit(
                     &velda_observability::AccessLogRecord {
                         request_id: request_id.entropy(),
                         timestamp_sec: request_id.timestamp_secs() as u32,
-                        duration_us: started.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                        duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                         peer_ip: velda_observability::encode_ip_u128(peer.ip()),
                         bytes_rx: rx.min(u32::MAX as u64) as u32,
                         bytes_tx: tx.min(u32::MAX as u64) as u32,
-                        upstream_ip: 0,
+                        upstream_ip,
                         peer_port: peer.port(),
-                        upstream_port: 0,
+                        upstream_port,
                         status_code: 0,
                         route_id: route_id.0 as u16,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
-                        downstream_proto: velda_observability::LogProtocol::RawUdp as u8,
-                        upstream_proto: velda_observability::LogProtocol::RawUdp as u8,
-                        pipe_strategy: 3, // PipeStrategy::Duplex
+                        pipe: velda_core::pipe::PipeKind::UdpRdma,
                         completion: completion as u8,
                         method: velda_observability::LogHttpMethod::Unknown as u8,
                         grpc_status: velda_observability::LogGrpcStatus::NonGrpc as u8,
                         ua_family: velda_observability::UaFamily::None as u8,
                         ua_os: velda_observability::UaOs::Unknown as u8,
+                        url_len: 0,
+                        url_bytes: [0; 188],
                     },
                 );
             };
@@ -186,6 +195,7 @@ pub async fn serve(
                 get_udp_session_table().remove(&session_key);
                 emit_log(
                     client_addr,
+                    None,
                     0,
                     0,
                     velda_observability::LogCompletionReason::UpstreamError,
@@ -193,6 +203,7 @@ pub async fn serve(
                 return;
             }
         };
+        let upstream_addr = lease.endpoint();
 
         // Decouple RDMA send and receive halves ("minh bạch và tách biệt 2 luồng")
         let (rdma_sender, rdma_receiver) = lease.split();
@@ -215,6 +226,7 @@ pub async fn serve(
             get_udp_session_table().remove(&session_key);
             emit_log(
                 client_addr,
+                Some(upstream_addr),
                 0,
                 0,
                 velda_observability::LogCompletionReason::UpstreamError,
@@ -366,6 +378,12 @@ pub async fn serve(
         let final_peer = *session_peer.read();
         lease.mark_broken();
         get_udp_session_table().remove(&session_key);
-        emit_log(final_peer, bytes_rx, bytes_tx, completion);
+        emit_log(
+            final_peer,
+            Some(upstream_addr),
+            bytes_rx,
+            bytes_tx,
+            completion,
+        );
     });
 }

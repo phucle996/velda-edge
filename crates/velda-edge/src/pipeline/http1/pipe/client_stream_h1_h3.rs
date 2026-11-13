@@ -89,6 +89,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(client.target());
 
     // 5. Decode any opportunistic initial payload chunk already buffered in conn.read_buf
     let mut initial_chunk: Option<bytes::Bytes> = None;
@@ -116,6 +117,7 @@ where
                     initial_is_fin = true;
                 }
                 if !acc.is_empty() {
+                    conn.last_bytes_rx += acc.len() as u64;
                     initial_chunk = Some(acc.freeze());
                 }
             }
@@ -123,6 +125,7 @@ where
         Http1BodyFraming::ContentLength(total_len) => {
             if !conn.read_buf.is_empty() {
                 let chunk_len = conn.read_buf.len().min(total_len);
+                conn.last_bytes_rx += chunk_len as u64;
                 initial_chunk = Some(conn.read_buf.split_to(chunk_len).freeze());
                 initial_is_fin = chunk_len == total_len;
             }
@@ -167,6 +170,7 @@ where
                     return Err(Http1Error::ConnectionClosed);
                 }
             };
+            conn.last_upstream_addr = Some(fresh_client.target());
             _lease_guard = Some(fresh_lease);
             match fresh_client
                 .open_stream(
@@ -224,6 +228,7 @@ where
                 loop {
                     // 1. Drain all available chunk payload slices currently in memory
                     while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
+                        conn.last_bytes_rx += chunk.len() as u64;
                         sender
                             .send_chunk(chunk)
                             .await
@@ -262,6 +267,7 @@ where
                         let chunk_len = available.min(remaining);
                         let chunk = conn.read_buf.split_to(chunk_len).freeze();
                         remaining = remaining.saturating_sub(chunk_len);
+                        conn.last_bytes_rx += chunk_len as u64;
                         let is_fin = remaining == 0;
                         sender
                             .send_chunk_fin(chunk, is_fin)
@@ -364,6 +370,7 @@ where
         );
         conn.write_buf.extend_from_slice(&body_buf);
         conn.stream.write_all(&conn.write_buf).await?;
+        conn.last_bytes_tx += body_buf.len() as u64;
         return Ok(());
     }
 
@@ -381,6 +388,7 @@ where
         match chunk_res {
             Ok(chunk) => {
                 send_chunk(&mut conn.stream, &chunk[..]).await?;
+                conn.last_bytes_tx += chunk.len() as u64;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Error reading response chunk from HTTP/3 upstream");

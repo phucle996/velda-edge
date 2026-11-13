@@ -400,6 +400,9 @@ pub async fn handle_l4_udp(
     // 2. Resource Saturation Circuit Breaker (Overload Protection)
     let overload_lvl = rt.overload.level();
     if overload_lvl.is_shedding() {
+        velda_observability::global_metrics()
+            .global()
+            .connection_rejected();
         tracing::trace!(
             listener = %listener_id,
             peer = %client_addr,

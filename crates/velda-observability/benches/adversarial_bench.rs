@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
 use velda_observability::{
-    DownstreamProto, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProto,
+    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
+    UpstreamProtocol,
 };
 
 // ============================================================================
@@ -37,8 +38,8 @@ fn bench_rapid_reset_flood() {
     for _ in 0..iters {
         // Stream begins
         store.record_stream_start(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         );
 
@@ -47,8 +48,8 @@ fn bench_rapid_reset_flood() {
 
         // Stream completed with 499 (Client Closed Request) and 0 bytes transferred
         store.record_stream_completion(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
             StreamCompletion::new(499, 0, 0, Duration::from_micros(50), None),
         );
@@ -59,8 +60,8 @@ fn bench_rapid_reset_flood() {
     let snap = store.snapshot();
     let pipe = snap
         .find_pipeline(
-            DownstreamProto::H2,
-            UpstreamProto::H1,
+            DownstreamProtocol::H2,
+            UpstreamProtocol::H1,
             PipeStrategy::ServerStream,
         )
         .unwrap();

@@ -68,7 +68,7 @@ where
     let h2_config = Http2Config::auto();
 
     // 4. Acquire upstream multiplexed connection before upload begins
-    let (mut client, _lease) = match upstream.acquire(&h2_config).await {
+    let (mut client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -89,6 +89,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(lease.endpoint);
 
     // 5. Initiate HTTP/2 stream
     let scheme = if upstream.is_tls() { "https" } else { "http" };
@@ -138,6 +139,7 @@ where
             const TARGET_RESERVE: usize = 65536;
             loop {
                 while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
+                    conn.last_bytes_rx += chunk.len() as u64;
                     send_stream.reserve_capacity(chunk.len());
                     send_stream
                         .send_data(chunk, false)
@@ -172,6 +174,7 @@ where
                     let chunk_len = available.min(remaining);
                     let chunk = conn.read_buf.split_to(chunk_len).freeze();
                     remaining = remaining.saturating_sub(chunk_len);
+                    conn.last_bytes_rx += chunk_len as u64;
                     send_stream.reserve_capacity(chunk_len);
                     send_stream
                         .send_data(chunk, false)
@@ -190,6 +193,7 @@ where
                 let chunk_len = n.min(remaining);
                 let chunk = conn.read_buf.split_to(chunk_len).freeze();
                 remaining = remaining.saturating_sub(chunk_len);
+                conn.last_bytes_rx += chunk_len as u64;
                 send_stream.reserve_capacity(chunk_len);
                 send_stream
                     .send_data(chunk, false)

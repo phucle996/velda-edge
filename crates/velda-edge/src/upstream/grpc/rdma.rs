@@ -110,7 +110,8 @@ impl GrpcRdmaUpstream {
                             Some(connect_timeout),
                         )
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| e.to_string())?
+                        .with_target(endpoint);
 
                         fresh.ready().await.map_err(|err| {
                             format!("Reconnected gRPC RDMA client not ready: {err}")
@@ -157,7 +158,8 @@ impl GrpcRdmaUpstream {
                         Some(connect_timeout),
                     )
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                    .with_target(endpoint);
 
                     fresh
                         .ready()
@@ -181,17 +183,19 @@ impl GrpcRdmaUpstream {
             let max_streams = self.max_concurrent_streams;
 
             if let Ok(stream) = RdmaConnector::connect_stream(endpoint, &rdma_config).await
-                && let Ok(mut connector) =
+                && let Ok(connector) =
                     GrpcUpstreamConnector::handshake_stream(stream, config, Some(connect_timeout))
                         .await
-                && connector.ready().await.is_ok()
             {
-                self.pool.register_warmed_to_lane(
-                    endpoint,
-                    lane,
-                    GrpcTcpClientResource { client: connector },
-                    max_streams,
-                );
+                let mut connector = connector.with_target(endpoint);
+                if connector.ready().await.is_ok() {
+                    self.pool.register_warmed_to_lane(
+                        endpoint,
+                        lane,
+                        GrpcTcpClientResource { client: connector },
+                        max_streams,
+                    );
+                }
             }
         }
     }

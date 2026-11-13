@@ -44,6 +44,9 @@ pub async fn handle_l4_tcp(
     // 1. Ingress Admission: Reject if connection capacity reached or memory is saturating
     let current_conns = ACTIVE_L4_TCP_CONNS.load(Ordering::Acquire);
     if current_conns >= config.max_connections || rt.overload.level().is_shedding() {
+        velda_observability::global_metrics()
+            .global()
+            .connection_rejected();
         tracing::trace!(
             listener = %listener_id,
             peer = %peer,
@@ -56,6 +59,7 @@ pub async fn handle_l4_tcp(
 
     ACTIVE_L4_TCP_CONNS.fetch_add(1, Ordering::Release);
     let _conn_guard = L4TcpConnGuard;
+    let _metric_guard = crate::pipeline::ConnMetricGuard::enter();
 
     let Some(route) = rt.router.route_tcp(&listener_id) else {
         tracing::warn!(

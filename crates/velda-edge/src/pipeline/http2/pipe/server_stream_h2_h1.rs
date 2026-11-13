@@ -13,7 +13,7 @@ use velda_http1::is_connection_close;
 use velda_http1::server::request::Http1BodyFraming;
 use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
 
-use crate::pipeline::DownstreamMeta;
+use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
 
 /// Serves a server-streaming HTTP/2 downstream stream bridged to an HTTP/1.1 backend.
@@ -24,7 +24,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
     plan: &velda_plugin::RoutePluginPlan,
-) {
+) -> PipeOutcome {
     // 1. Consume downstream request body
     let body = match receiver.consume_all().await {
         Ok(b) => b,
@@ -38,9 +38,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                receiver.bytes_received() as u64,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::Rejected,
+            );
         }
     };
+    let bytes_rx = receiver.bytes_received() as u64;
 
     // 2. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
@@ -69,9 +76,16 @@ pub async fn serve(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             let _ = responder.send_response(&err_resp);
-            return;
+            return PipeOutcome::http(
+                responder.last_status,
+                bytes_rx,
+                responder.last_bytes_tx,
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
+            );
         }
     };
+    let upstream_addr = Some(lease.endpoint);
 
     // 5. Send HTTP/1.1 request head and body using pre-allocated pooled write_buf
     let (stream, write_buf) = lease.split_write();
@@ -101,7 +115,13 @@ pub async fn serve(
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
         let _ = responder.send_response(&err_resp);
-        return;
+        return PipeOutcome::http(
+            responder.last_status,
+            bytes_rx,
+            responder.last_bytes_tx,
+            upstream_addr,
+            velda_observability::LogCompletionReason::UpstreamError,
+        );
     }
 
     // 6. Read HTTP/1.1 response head from upstream using pre-allocated pooled read_buf
@@ -121,7 +141,13 @@ pub async fn serve(
                     format!("502 Bad Gateway: {e}\n").into_bytes(),
                 );
                 let _ = responder.send_response(&err_resp);
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::UpstreamError,
+                );
             }
         };
 
@@ -158,7 +184,13 @@ pub async fn serve(
                     upstream = %upstream.id(),
                     "Failed to initiate downstream HTTP/2 streaming response"
                 );
-                return;
+                return PipeOutcome::http(
+                    responder.last_status,
+                    bytes_rx,
+                    responder.last_bytes_tx,
+                    upstream_addr,
+                    velda_observability::LogCompletionReason::ClientCancel,
+                );
             }
         };
 
@@ -222,4 +254,11 @@ pub async fn serve(
     drop(lease);
 
     let _ = stream_sender.finish();
+    PipeOutcome::http(
+        responder.last_status,
+        bytes_rx,
+        stream_sender.bytes_sent(),
+        upstream_addr,
+        velda_observability::LogCompletionReason::Complete,
+    )
 }

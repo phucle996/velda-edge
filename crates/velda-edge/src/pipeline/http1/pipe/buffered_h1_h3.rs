@@ -135,6 +135,7 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
+    conn.last_upstream_addr = Some(client.target());
 
     // 7. Send request directly with self-healing on connection close
     let mut pipe_res = client.send_request_ref(&l7_req).await;
@@ -151,6 +152,7 @@ where
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
+            conn.last_upstream_addr = Some(fresh_client.target());
             pipe_res = fresh_client.send_request_ref(&l7_req).await;
             _fresh_lease_guard = Some(fresh_lease);
         }

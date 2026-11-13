@@ -154,6 +154,7 @@ impl Http3Responder {
             stream_id: self.stream_id,
             response_tx: self.response_tx,
             semaphore,
+            bytes_sent: 0,
         })
     }
 }
@@ -164,12 +165,20 @@ pub struct Http3StreamSender {
     stream_id: StreamId,
     response_tx: tokio::sync::mpsc::Sender<Http3ResponseMsg>,
     semaphore: Arc<tokio::sync::Semaphore>,
+    bytes_sent: u64,
 }
 
 impl Http3StreamSender {
+    /// Returns the total payload bytes transmitted on this stream so far.
+    #[inline]
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
     /// Sends a DATA frame chunk downstream with channel-driven async backpressure.
     #[inline]
     pub async fn send_chunk(&mut self, chunk: bytes::Bytes) -> Result<(), EdgeError> {
+        let chunk_len = chunk.len() as u64;
         let permit = self
             .semaphore
             .clone()
@@ -186,6 +195,9 @@ impl Http3StreamSender {
                 permit: Some(permit),
             })
             .await
+            .map(|()| {
+                self.bytes_sent = self.bytes_sent.saturating_add(chunk_len);
+            })
             .map_err(|_| EdgeError::Internal("HTTP/3 worker response channel closed".into()))
     }
 
@@ -347,6 +359,10 @@ impl Http3Worker {
                                         if let Some(t) = engine.poll_timeout() && t <= now && engine.connection_count() > 0 {
                                             all_outgoing.extend(engine.handle_timeouts(now));
                                         }
+                                        let (_, closed, _) = engine.take_telemetry_deltas();
+                                        for _ in 0..closed {
+                                            velda_observability::global_metrics().global().connection_closed();
+                                        }
                                         next_timeout = engine.poll_timeout();
                                     }
 
@@ -376,6 +392,10 @@ impl Http3Worker {
                                 } else {
                                     Vec::new()
                                 };
+                                let (_, closed, _) = engine.take_telemetry_deltas();
+                                for _ in 0..closed {
+                                    velda_observability::global_metrics().global().connection_closed();
+                                }
                                 next_timeout = engine.poll_timeout();
                                 pkts
                             };
@@ -408,6 +428,10 @@ impl Http3Worker {
                                     let now = Instant::now();
                                     engine.handle_timeouts(now)
                                 };
+                                let (_, closed, _) = engine.take_telemetry_deltas();
+                                for _ in 0..closed {
+                                    velda_observability::global_metrics().global().connection_closed();
+                                }
                                 next_timeout = engine.poll_timeout();
                                 pkts
                             };

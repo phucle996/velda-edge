@@ -13,7 +13,14 @@ use velda_core::{L7Request, L7Response};
 use crate::upstream::Http2Upstream;
 
 /// Serves a client-streaming HTTP/3 downstream request bridged to an HTTP/2 backend.
-pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response {
+pub async fn serve(
+    req: &L7Request,
+    upstream: &Arc<Http2Upstream>,
+) -> (
+    L7Response,
+    Option<std::net::SocketAddr>,
+    velda_observability::LogCompletionReason,
+) {
     let mut headers = req.headers.clone().into_inner();
     velda_http2::client::sanitize_h2_headers(&mut headers);
 
@@ -27,16 +34,21 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
                 upstream = %upstream.id(),
                 "Failed to acquire upstream HTTP/2 connection for H3->H2 client stream bridge"
             );
-            return L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
+            return (
+                L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                None,
+                velda_observability::LogCompletionReason::UpstreamError,
             );
         }
     };
+    let mut upstream_addr = Some(lease.endpoint);
 
     let mut pipe_res = send_h2_client_stream(&mut client, req, &headers, &body_bytes).await;
     let mut _fresh_lease_guard = None;
@@ -51,6 +63,7 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
         );
         if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
         {
+            upstream_addr = Some(fresh_lease.endpoint);
             pipe_res = send_h2_client_stream(&mut fresh_client, req, &headers, &body_bytes).await;
             if pipe_res.is_err() {
                 fresh_lease.mark_goaway();
@@ -60,20 +73,28 @@ pub async fn serve(req: &L7Request, upstream: &Arc<Http2Upstream>) -> L7Response
     }
 
     match pipe_res {
-        Ok(resp) => resp,
+        Ok(resp) => (
+            resp,
+            upstream_addr,
+            velda_observability::LogCompletionReason::Complete,
+        ),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 upstream = %upstream.id(),
                 "HTTP/2 upstream client-stream pipe failed"
             );
-            L7Response::from_bytes(
-                StatusCode::BAD_GATEWAY,
-                format!("502 Bad Gateway: {e}\n").into_bytes(),
-            )
-            .with_header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
+            (
+                L7Response::from_bytes(
+                    StatusCode::BAD_GATEWAY,
+                    format!("502 Bad Gateway: {e}\n").into_bytes(),
+                )
+                .with_header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                upstream_addr,
+                velda_observability::LogCompletionReason::UpstreamError,
             )
         }
     }

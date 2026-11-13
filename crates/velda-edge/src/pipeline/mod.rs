@@ -11,6 +11,81 @@ pub use l4::{tcp, udp};
 /// Canonical request correlation ID header propagated across downstream pipelines.
 pub use velda_core::X_REQUEST_ID;
 
+/// Zero-allocation scalar transfer summary returned on stack by isolated protocol pipes
+/// to their `downstream.rs` workflow owner for metrics and access log emission.
+#[derive(Debug, Clone, Copy)]
+pub struct PipeOutcome {
+    pub status_code: u16,
+    pub bytes_rx: u64,
+    pub bytes_tx: u64,
+    pub upstream_addr: Option<std::net::SocketAddr>,
+    pub grpc_status: velda_observability::LogGrpcStatus,
+    pub completion: velda_observability::LogCompletionReason,
+}
+
+impl PipeOutcome {
+    /// Constructs a standard completed HTTP pipe outcome.
+    #[inline(always)]
+    pub const fn http(
+        status_code: u16,
+        bytes_rx: u64,
+        bytes_tx: u64,
+        upstream_addr: Option<std::net::SocketAddr>,
+        completion: velda_observability::LogCompletionReason,
+    ) -> Self {
+        Self {
+            status_code,
+            bytes_rx,
+            bytes_tx,
+            upstream_addr,
+            grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+            completion,
+        }
+    }
+
+    /// Constructs a gRPC pipe outcome carrying canonical wire `grpc-status`.
+    #[inline(always)]
+    pub const fn grpc(
+        status_code: u16,
+        grpc_status: velda_observability::LogGrpcStatus,
+        bytes_rx: u64,
+        bytes_tx: u64,
+        upstream_addr: Option<std::net::SocketAddr>,
+        completion: velda_observability::LogCompletionReason,
+    ) -> Self {
+        Self {
+            status_code,
+            bytes_rx,
+            bytes_tx,
+            upstream_addr,
+            grpc_status,
+            completion,
+        }
+    }
+}
+
+/// Zero-cost RAII guard tracking global L4 TCP connection open/close lifecycle.
+pub struct ConnMetricGuard;
+
+impl ConnMetricGuard {
+    #[inline(always)]
+    pub fn enter() -> Self {
+        velda_observability::global_metrics()
+            .global()
+            .connection_opened();
+        Self
+    }
+}
+
+impl Drop for ConnMetricGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        velda_observability::global_metrics()
+            .global()
+            .connection_closed();
+    }
+}
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -343,6 +418,7 @@ async fn handle_http_auto_stream(
         return;
     }
 
+    let _conn_guard = ConnMetricGuard::enter();
     let rt = runtime.load();
     let peer = connection.peer();
     let local_addr = connection.local_addr();
@@ -358,6 +434,9 @@ async fn handle_http_auto_stream(
 
     match tls_server.accept_with_timeout(connection).await {
         Ok(tls_stream) => {
+            velda_observability::global_metrics()
+                .global()
+                .tls_handshake_success();
             // Zero-allocation ALPN extraction avoiding SNI String and peer certificate cloning
             let alpn = velda_tls::TlsServerEngine::extract_alpn(&tls_stream);
             tracing::debug!(
@@ -403,6 +482,9 @@ async fn handle_http_auto_stream(
             }
         }
         Err(e) => {
+            velda_observability::global_metrics()
+                .global()
+                .tls_handshake_error();
             tracing::debug!(
                 listener = %listener_id,
                 peer = %peer,

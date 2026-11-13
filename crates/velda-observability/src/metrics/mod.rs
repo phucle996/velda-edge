@@ -22,7 +22,7 @@ pub use store::{
 };
 pub use telemetry::{LiveTelemetry, NoopTelemetry, Telemetry};
 pub use types::{
-    AlpnProtocol, DownstreamProto, PipeStrategy, StatusClass, StreamCompletion, UpstreamProto,
+    AlpnProtocol, DownstreamProtocol, PipeStrategy, StatusClass, StreamCompletion, UpstreamProtocol,
 };
 pub use vector::{
     AGGREGATE_COUNTERS, AccumulateCountersFn, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals,

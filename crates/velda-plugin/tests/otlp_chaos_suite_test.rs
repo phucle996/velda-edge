@@ -15,7 +15,7 @@
 use prost::Message;
 use std::sync::Arc;
 use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeStrategy,
+    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeKind,
     UaFamily, UaOs,
 };
 use velda_plugin::background::otlp_log_shipper::json::{
@@ -34,7 +34,7 @@ fn make_record(
     method: LogHttpMethod,
     status: u16,
     grpc: LogGrpcStatus,
-    dur_us: u32,
+    dur_ns: u64,
     tx: u32,
     rx: u32,
     route: u16,
@@ -47,7 +47,7 @@ fn make_record(
     AccessLogRecord {
         request_id: req_id,
         timestamp_sec: ts_sec,
-        duration_us: dur_us,
+        duration_ns: dur_ns,
         peer_ip: ip,
         bytes_rx: rx,
         bytes_tx: tx,
@@ -58,14 +58,22 @@ fn make_record(
         route_id: route,
         ua_major_version: ua_major,
         rpc_msgs_or_flags: 0,
-        downstream_proto: proto as u8,
-        upstream_proto: 0,
-        pipe_strategy: PipeStrategy::Buffered as u8,
+        pipe: match proto {
+            LogProtocol::H1 => PipeKind::BufferedH1H1,
+            LogProtocol::H2 => PipeKind::BufferedH2H1,
+            LogProtocol::H3 => PipeKind::BufferedH3H1,
+            LogProtocol::GrpcTcp => PipeKind::BufferedGrpcTcpTcp,
+            LogProtocol::GrpcUdp => PipeKind::BufferedGrpcUdpTcp,
+            LogProtocol::RawTcp => PipeKind::TcpTcp,
+            LogProtocol::RawUdp => PipeKind::UdpUdp,
+        },
         completion: LogCompletionReason::Complete as u8,
         method: method as u8,
         grpc_status: grpc as u8,
         ua_family: ua_fam as u8,
         ua_os: ua_os as u8,
+        url_len: 0,
+        url_bytes: [0; 188],
     }
 }
 
@@ -260,9 +268,9 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
         let decoded = ExportLogsServiceRequest::decode(&out[..]).unwrap();
         let log_rec = &decoded.resource_logs[0].scope_logs[0].log_records[0];
 
-        // Attribute 9: client.address
-        assert_eq!(log_rec.attributes[9].key, "client.address");
-        if let Some(any_value::Value::StringValue(s)) = log_rec.attributes[9]
+        // Attribute 10: client.address
+        assert_eq!(log_rec.attributes[10].key, "client.address");
+        if let Some(any_value::Value::StringValue(s)) = log_rec.attributes[10]
             .value
             .as_ref()
             .and_then(|v| v.value.as_ref())
@@ -272,9 +280,9 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
             panic!("Expected StringValue for client.address");
         }
 
-        // Attribute 10: client.port
-        assert_eq!(log_rec.attributes[10].key, "client.port");
-        if let Some(any_value::Value::IntValue(p)) = log_rec.attributes[10]
+        // Attribute 11: client.port
+        assert_eq!(log_rec.attributes[11].key, "client.port");
+        if let Some(any_value::Value::IntValue(p)) = log_rec.attributes[11]
             .value
             .as_ref()
             .and_then(|v| v.value.as_ref())
@@ -290,8 +298,8 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
 
         let parsed: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
         let j_attrs = &parsed["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"];
-        assert_eq!(j_attrs[9]["value"]["stringValue"], expected_ip_str);
-        assert_eq!(j_attrs[10]["value"]["intValue"], port.to_string());
+        assert_eq!(j_attrs[10]["value"]["stringValue"], expected_ip_str);
+        assert_eq!(j_attrs[11]["value"]["intValue"], port.to_string());
     }
 }
 
@@ -371,14 +379,14 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
             );
 
             // Check http.response.status_code and rpc.grpc.status_code
-            if let Some(any_value::Value::IntValue(sc)) = log_rec.attributes[3]
+            if let Some(any_value::Value::IntValue(sc)) = log_rec.attributes[4]
                 .value
                 .as_ref()
                 .and_then(|v| v.value.as_ref())
             {
                 assert_eq!(*sc, status as i64);
             }
-            if let Some(any_value::Value::StringValue(gs)) = log_rec.attributes[4]
+            if let Some(any_value::Value::StringValue(gs)) = log_rec.attributes[5]
                 .value
                 .as_ref()
                 .and_then(|v| v.value.as_ref())
@@ -395,11 +403,11 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
             assert_eq!(j_rec["severityNumber"], expected_sev_num);
             assert_eq!(j_rec["severityText"], expected_sev_text);
             assert_eq!(
-                j_rec["attributes"][3]["value"]["intValue"],
+                j_rec["attributes"][4]["value"]["intValue"],
                 status.to_string()
             );
             assert_eq!(
-                j_rec["attributes"][4]["value"]["stringValue"],
+                j_rec["attributes"][5]["value"]["stringValue"],
                 grpc.as_str()
             );
         }
@@ -415,14 +423,14 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
     let json_env = OtlpJsonEnvelope::new("velda-varint-chaos");
 
     let durations = [
-        0_u32,
-        1_u32,
-        127_u32,   // 1-byte varint boundary
-        128_u32,   // 2-byte varint boundary
-        16383_u32, // 2-byte varint boundary
-        16384_u32, // 3-byte varint boundary
-        1_000_000_u32,
-        u32::MAX,
+        0_u64,
+        1_u64,
+        127_u64,   // 1-byte varint boundary
+        128_u64,   // 2-byte varint boundary
+        16383_u64, // 2-byte varint boundary
+        16384_u64, // 3-byte varint boundary
+        1_000_000_u64,
+        u64::MAX,
     ];
 
     let bytes_transfers = [
@@ -472,24 +480,24 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
                 let decoded = ExportLogsServiceRequest::decode(&out[..]).unwrap();
                 let log_rec = &decoded.resource_logs[0].scope_logs[0].log_records[0];
 
-                // Duration (attr 5)
-                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[5]
+                // Duration (attr 6)
+                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[6]
                     .value
                     .as_ref()
                     .and_then(|v| v.value.as_ref())
                 {
                     assert_eq!(*v, dur as i64);
                 }
-                // Resp size (attr 6)
-                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[6]
+                // Resp size (attr 7)
+                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[7]
                     .value
                     .as_ref()
                     .and_then(|v| v.value.as_ref())
                 {
                     assert_eq!(*v, tx as i64);
                 }
-                // Route ID (attr 8)
-                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[8]
+                // Route ID (attr 9)
+                if let Some(any_value::Value::IntValue(v)) = log_rec.attributes[9]
                     .value
                     .as_ref()
                     .and_then(|v| v.value.as_ref())
@@ -503,9 +511,9 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
                 let parsed: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
                 let j_attrs =
                     &parsed["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"];
-                assert_eq!(j_attrs[5]["value"]["intValue"], dur.to_string());
-                assert_eq!(j_attrs[6]["value"]["intValue"], tx.to_string());
-                assert_eq!(j_attrs[8]["value"]["intValue"], route.to_string());
+                assert_eq!(j_attrs[6]["value"]["intValue"], dur.to_string());
+                assert_eq!(j_attrs[7]["value"]["intValue"], tx.to_string());
+                assert_eq!(j_attrs[9]["value"]["intValue"], route.to_string());
             }
         }
     }
@@ -607,14 +615,14 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                         log_rec.attributes[1].value.as_ref().unwrap().value.as_ref(),
                         Some(&any_value::Value::StringValue(proto.as_str().to_string()))
                     );
-                    // Method (attr 2)
+                    // Method (attr 3)
                     assert_eq!(
-                        log_rec.attributes[2].value.as_ref().unwrap().value.as_ref(),
+                        log_rec.attributes[3].value.as_ref().unwrap().value.as_ref(),
                         Some(&any_value::Value::StringValue(method.as_str().to_string()))
                     );
-                    // UA family (attr 11)
+                    // UA family (attr 12)
                     assert_eq!(
-                        log_rec.attributes[11]
+                        log_rec.attributes[12]
                             .value
                             .as_ref()
                             .unwrap()
@@ -622,9 +630,9 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                             .as_ref(),
                         Some(&any_value::Value::StringValue(ua_fam.as_str().to_string()))
                     );
-                    // UA OS (attr 13)
+                    // UA OS (attr 14)
                     assert_eq!(
-                        log_rec.attributes[13]
+                        log_rec.attributes[14]
                             .value
                             .as_ref()
                             .unwrap()
@@ -640,9 +648,9 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                     let j_attrs =
                         &parsed["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"];
                     assert_eq!(j_attrs[1]["value"]["stringValue"], proto.as_str());
-                    assert_eq!(j_attrs[2]["value"]["stringValue"], method.as_str());
-                    assert_eq!(j_attrs[11]["value"]["stringValue"], ua_fam.as_str());
-                    assert_eq!(j_attrs[13]["value"]["stringValue"], ua_os.as_str());
+                    assert_eq!(j_attrs[3]["value"]["stringValue"], method.as_str());
+                    assert_eq!(j_attrs[12]["value"]["stringValue"], ua_fam.as_str());
+                    assert_eq!(j_attrs[14]["value"]["stringValue"], ua_os.as_str());
                 }
             }
         }
@@ -727,7 +735,7 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
             m,
             sc,
             g,
-            (i * 10) as u32,
+            (i * 10) as u64,
             (i * 100) as u32,
             (i * 50) as u32,
             (i % 50) as u16,
@@ -820,7 +828,7 @@ fn test_otlp_chaos_rdtsc_cycle_stability() {
             LogHttpMethod::from_u8((i % 10) as u8),
             sc,
             LogGrpcStatus::from_u8((i % 18) as u8),
-            (i * 15) as u32,
+            (i * 15) as u64,
             (i * 128) as u32,
             (i * 64) as u32,
             (i % 10) as u16,

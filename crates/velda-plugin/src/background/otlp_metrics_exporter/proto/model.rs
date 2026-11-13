@@ -93,7 +93,7 @@ pub struct Sum {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct NumberDataPoint {
-    #[prost(message, repeated, tag = "1")]
+    #[prost(message, repeated, tag = "7")]
     pub attributes: Vec<KeyValue>,
     #[prost(fixed64, tag = "2")]
     pub start_time_unix_nano: u64,
