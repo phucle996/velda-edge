@@ -84,7 +84,7 @@ impl TcpAccelerationPath {
     /// Pre-compiles socket acceleration path based on host hardware/kernel topology,
     /// upstream timeouts, and whether TLS encryption is active.
     pub fn for_topology(
-        topo: &velda_core::HardwareTopology,
+        topo: &velda_core::hardware::HardwareTopology,
         timeouts: &velda_upstream::UpstreamTimeouts,
         is_tls: bool,
     ) -> Self {

@@ -24,7 +24,7 @@ static H2_HOP_BY_HOP_NAMES: [HeaderName; 5] = [
 ];
 
 /// Standard correlation ID header propagated across HTTP/2 streams.
-pub use velda_core::X_REQUEST_ID;
+pub use velda_core::buffer::X_REQUEST_ID;
 
 /// Returns true if a header field is prohibited under RFC 9113 Section 8.2.2.
 ///

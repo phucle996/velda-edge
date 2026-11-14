@@ -87,7 +87,7 @@ impl Http2AccelerationPath {
     /// Fast Open is only enabled for TLS endpoints because raw HTTP requests (like POST) are not
     /// idempotent and could suffer from TCP retransmission replays.
     pub fn for_topology(
-        topo: &velda_core::HardwareTopology,
+        topo: &velda_core::hardware::HardwareTopology,
         connect_timeout: std::time::Duration,
         idle_timeout: std::time::Duration,
         is_tls: bool,
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_http2_acceleration_path_for_topology() {
-        let topo = velda_core::global_hardware_topology();
+        let topo = velda_core::hardware::global_hardware_topology();
         let connect_to = std::time::Duration::from_millis(500);
         let idle_to = std::time::Duration::from_secs(30);
 

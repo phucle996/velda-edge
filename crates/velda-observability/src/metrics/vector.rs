@@ -159,7 +159,7 @@ pub fn add_counters_64(dst: &mut [u64], src: &[u64]) {
 
 /// Selects the appropriate counter accumulation function pointer for a workload target width.
 pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
-    let caps = velda_core::global_hardware_topology()
+    let caps = velda_core::hardware::global_hardware_topology()
         .cpu
         .register_capabilities;
     match caps.select_for_workload(target) {
@@ -178,7 +178,7 @@ pub fn resolve_counters_fn(target: RegisterWidth) -> AccumulateCountersFn {
 /// - `len < 2`: Adapts directly to 64-bit scalar ALU (zero SIMD setup waste).
 #[inline]
 pub fn resolve_counters_fn_for_len(len: usize) -> AccumulateCountersFn {
-    let caps = velda_core::global_hardware_topology()
+    let caps = velda_core::hardware::global_hardware_topology()
         .cpu
         .register_capabilities;
     match caps.select_for_workload_size(len) {

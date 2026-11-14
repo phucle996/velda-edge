@@ -203,7 +203,7 @@ impl Http3Client {
 /// In all cases, failure (e.g. unprivileged container, older kernel) gracefully falls back
 /// to standard unaccelerated socket options without interrupting connection establishment.
 fn tune_udp_socket(sock: &socket2::Socket) {
-    let topology = velda_core::global_hardware_topology();
+    let topology = velda_core::hardware::global_hardware_topology();
     let total_ram = topology.memory.total_bytes;
     // Upstream client socket: conservative buffer allocation (256KB to 2MB)
     // to prevent socket memory exhaustion when multiplexing multiple client connections.

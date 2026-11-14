@@ -62,7 +62,7 @@ impl Http1Config {
         Self {
             max_body_size: clamp_usize(max_chunk_size * 100, 10 * 1024 * 1024, 100 * 1024 * 1024),
             max_header_size,
-            max_headers: velda_core::MAX_WIRE_HEADERS,
+            max_headers: velda_core::buffer::MAX_WIRE_HEADERS,
             idle_timeout_ms: 30_000,
             max_keepalive_requests: 10_000_000,
             header_read_timeout_ms: 10_000,
@@ -73,13 +73,13 @@ impl Http1Config {
     }
 
     /// Creates configuration sized appropriately from hardware topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
     /// Auto-probes the host hardware topology and returns the appropriate config.
     pub fn auto() -> Self {
-        Self::for_topology(velda_core::global_hardware_topology())
+        Self::for_topology(velda_core::hardware::global_hardware_topology())
     }
 
     /// Sets the maximum request body size in bytes for buffered requests.
@@ -154,7 +154,10 @@ mod tests {
 
     #[test]
     fn test_http1_config_for_topology() {
-        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
+        let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            4,
+            4 * 1024 * 1024 * 1024,
+        );
         let cfg = Http1Config::for_topology(&topo);
         assert!(cfg.max_body_size >= 10 * 1024 * 1024);
         assert!(cfg.max_header_size >= 8 * 1024);

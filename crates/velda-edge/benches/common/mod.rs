@@ -337,8 +337,8 @@ pub fn build_mock_runtime(
         plugins: plugin_table,
         tls_server: None,
         tls_client: None,
-        overload: std::sync::Arc::new(velda_core::OverloadTracker::auto()),
-        buffer_pool: std::sync::Arc::new(velda_core::ShardedBufferPool::default()),
+        overload: std::sync::Arc::new(velda_core::hardware::OverloadTracker::auto()),
+        buffer_pool: std::sync::Arc::new(velda_core::buffer::ShardedBufferPool::default()),
     }
 }
 

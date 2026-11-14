@@ -39,7 +39,7 @@ async fn main() {
 // ============================================================================
 
 fn bench_multi_thread_request_decoding_scaling() {
-    let topo = velda_core::global_hardware_topology();
+    let topo = velda_core::hardware::global_hardware_topology();
     let cores = topo.available_cores();
     let workers = topo.worker_threads();
 
@@ -140,7 +140,7 @@ fn bench_multi_thread_request_decoding_scaling() {
 // ============================================================================
 
 fn bench_multi_thread_response_encoding_scaling() {
-    let topo = velda_core::global_hardware_topology();
+    let topo = velda_core::hardware::global_hardware_topology();
     let workers = topo.worker_threads();
 
     println!("### 2. Multicore Response Encoding Scaling (`encode_response`)\n");

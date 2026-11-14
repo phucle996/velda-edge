@@ -80,7 +80,9 @@ impl Default for LogStore {
 
 impl LogStore {
     pub fn new() -> Self {
-        let detected_cores = velda_core::global_hardware_topology().cpu.available_cores;
+        let detected_cores = velda_core::hardware::global_hardware_topology()
+            .cpu
+            .available_cores;
         Self::with_cores_and_capacity(detected_cores, DEFAULT_CORE_RING_CAPACITY)
     }
 

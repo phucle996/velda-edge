@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::StatusCode;
-use velda_core::coarse_now_sec;
+use velda_core::coarse_time::coarse_now_sec;
 
 /// Pre-compressed wire payload variants for a cached entry.
 ///

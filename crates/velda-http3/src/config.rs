@@ -51,7 +51,7 @@ impl Http3Config {
 
     /// Probes host hardware topology and derives the configuration smoothly from CPU cores and RAM bytes.
     pub fn auto() -> Self {
-        let hw = velda_core::global_hardware_topology();
+        let hw = velda_core::hardware::global_hardware_topology();
         Self::from_hardware(hw.available_cores, hw.memory.total_bytes)
     }
 
@@ -119,7 +119,7 @@ impl Http3Config {
     /// Derives an [`Http3Config`] scaled smoothly from actual host/container RAM bytes.
     #[inline]
     pub fn from_ram_bytes(ram_bytes: usize) -> Self {
-        let cores = velda_core::global_hardware_topology().available_cores;
+        let cores = velda_core::hardware::global_hardware_topology().available_cores;
         Self::from_hardware(cores, ram_bytes)
     }
 

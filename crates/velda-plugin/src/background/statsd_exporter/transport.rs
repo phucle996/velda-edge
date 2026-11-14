@@ -1,6 +1,6 @@
 //! Non-Blocking UDP Transport for StatsD / DogStatsD Telemetry.
 //!
-//! Manages the client UDP socket acquired through [`velda_core::global_socket_manager()`],
+//! Manages the client UDP socket acquired through [`velda_core::socket::global_socket_manager()`],
 //! executes kernel fast-path `connect()`, and transmits MTU-bounded metric datagrams.
 //!
 //! # Architecture & Kernel Fast-Path
@@ -55,7 +55,7 @@ impl StatsdTransport {
         };
 
         // 3. Acquire UDP socket through Core SocketManager (Single Source of Truth)
-        let std_socket = velda_core::global_socket_manager()
+        let std_socket = velda_core::socket::global_socket_manager()
             .acquire_shadow_udp(bind_addr, &plugin_id)
             .map_err(|e| {
                 PluginError::Config(format!("Failed to acquire shadow UDP socket: {e}"))
@@ -153,7 +153,7 @@ impl StatsdTransport {
 
     /// Releases socket registration from the Core SocketManager.
     pub fn release(&self) {
-        velda_core::global_socket_manager().release_shadow_udp(&self.plugin_id);
+        velda_core::socket::global_socket_manager().release_shadow_udp(&self.plugin_id);
     }
 }
 

@@ -165,12 +165,12 @@ async fn dispatch_grpc_tcp_request_stream(
         .parts
         .headers
         .get(http::header::USER_AGENT)
-        .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+        .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
 
     // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
-    if server_stream.parts.headers.len() > velda_core::MAX_WIRE_HEADERS {
-        let (request_id, _) = velda_core::next_request_id();
+    if server_stream.parts.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
+        let (request_id, _) = velda_core::request_id::next_request_id();
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::ResourceExhausted,
             Some("too many request headers"),
@@ -210,7 +210,7 @@ async fn dispatch_grpc_tcp_request_stream(
     // [INGRESS W3C REQUEST ID GENERATION]
     // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
     // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-    let (request_id, req_id_header) = velda_core::next_request_id();
+    let (request_id, req_id_header) = velda_core::request_id::next_request_id();
     server_stream
         .parts
         .headers

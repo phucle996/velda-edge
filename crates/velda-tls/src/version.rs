@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock};
 ///   `CHACHA20_POLY1305` (256-bit/128-bit ARX vector cipher) to the top of the preference list.
 static HARDWARE_CRYPTO_PROVIDER: LazyLock<Arc<CryptoProvider>> = LazyLock::new(|| {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    let reg_caps = velda_core::global_hardware_topology()
+    let reg_caps = velda_core::hardware::global_hardware_topology()
         .cpu
         .register_capabilities;
 

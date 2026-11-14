@@ -47,7 +47,7 @@ pub async fn serve(
     );
 
     let started = std::time::Instant::now();
-    let (request_id, _) = velda_core::next_request_id();
+    let (request_id, _) = velda_core::request_id::next_request_id();
     let emit_log = |upstream_addr: Option<SocketAddr>,
                     rx: u64,
                     tx: u64,

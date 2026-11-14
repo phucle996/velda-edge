@@ -215,7 +215,7 @@ where
     pub async fn read_body_into_slab(
         &mut self,
         framing: Http1BodyFraming,
-        slab_pool: Option<&std::sync::Arc<velda_core::PayloadSlabPool>>,
+        slab_pool: Option<&std::sync::Arc<velda_core::buffer::PayloadSlabPool>>,
     ) -> Result<Body, Http1Error> {
         if framing == Http1BodyFraming::Empty {
             return Ok(Body::Empty);

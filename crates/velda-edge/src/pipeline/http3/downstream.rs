@@ -355,7 +355,7 @@ async fn process_http3_request(
     let (ua_family, ua_os, ua_major_version) = req
         .headers
         .get(http::header::USER_AGENT)
-        .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+        .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
     let log_method = velda_core::HttpMethod::from_bytes(req.method.as_str().as_bytes());
     let pq = req

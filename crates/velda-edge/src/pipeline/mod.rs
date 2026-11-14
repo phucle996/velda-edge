@@ -9,7 +9,7 @@ pub mod l4;
 pub use l4::{tcp, udp};
 
 /// Canonical request correlation ID header propagated across downstream pipelines.
-pub use velda_core::X_REQUEST_ID;
+pub use velda_core::buffer::X_REQUEST_ID;
 
 /// Zero-allocation scalar transfer summary returned on stack by isolated protocol pipes
 /// to their `downstream.rs` workflow owner for metrics and access log emission.
@@ -106,7 +106,7 @@ pub struct DownstreamMeta {
     pub client_ip_header: http::HeaderValue,
     pub client_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
-    pub slab_pool: Arc<velda_core::PayloadSlabPool>,
+    pub slab_pool: Arc<velda_core::buffer::PayloadSlabPool>,
 }
 
 /// Trait abstraction allowing in-place injection of connection-level headers
@@ -146,7 +146,7 @@ impl DownstreamMeta {
         local_addr: SocketAddr,
         is_tls: bool,
         alt_svc_header: Option<http::HeaderValue>,
-        buffer_pool: &velda_core::ShardedBufferPool,
+        buffer_pool: &velda_core::buffer::ShardedBufferPool,
     ) -> Self {
         let client_ip_header = http::HeaderValue::from_str(&peer.ip().to_string())
             .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));

@@ -140,7 +140,7 @@ pub async fn serve(
     // Step 4: Spawn background session worker driving bidirectional UDP <-> RDMA bridging.
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let (request_id, _) = velda_core::next_request_id();
+        let (request_id, _) = velda_core::request_id::next_request_id();
         let emit_log = |peer: std::net::SocketAddr,
                         upstream_addr: Option<std::net::SocketAddr>,
                         rx: u64,

@@ -61,7 +61,7 @@ const fn max_usize(a: usize, b: usize) -> usize {
 impl Http2Config {
     /// Probes host hardware topology and derives the configuration smoothly from CPU cores and RAM bytes.
     pub fn auto() -> Self {
-        let hw = velda_core::global_hardware_topology();
+        let hw = velda_core::hardware::global_hardware_topology();
         Self::from_hardware(hw.available_cores, hw.memory.total_bytes)
     }
 
@@ -128,7 +128,7 @@ impl Http2Config {
     }
 
     /// Derives an [`Http2Config`] scaled deterministically from host hardware topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
@@ -281,7 +281,10 @@ mod tests {
 
     #[test]
     fn test_for_topology() {
-        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            4,
+            8 * 1024 * 1024 * 1024,
+        );
         let config = Http2Config::for_topology(&topo);
         assert_eq!(config.max_concurrent_streams, 256);
         assert_eq!(config.initial_stream_window_size, 1024 * 1024);

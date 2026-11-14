@@ -45,7 +45,7 @@ pub async fn run_gateway(
         total_cores = partition.traffic_cores.len(),
         "Established zero-waste hardware core partition (all-worker balanced sharding)"
     );
-    let nic = &velda_core::global_hardware_topology().nic;
+    let nic = &velda_core::hardware::global_hardware_topology().nic;
     tracing::info!(
         ingress_hash = ?nic.authority,
         verified_interfaces = nic.verified_interfaces,
@@ -55,7 +55,7 @@ pub async fn run_gateway(
     );
 
     // Register UDS IPC socket claim in host SocketManager
-    if let Err(e) = velda_core::global_socket_manager()
+    if let Err(e) = velda_core::socket::global_socket_manager()
         .register_management_uds(socket_path.to_string_lossy().to_string(), "gateway_ipc")
     {
         tracing::warn!(error = %e, "Gateway IPC UDS socket claim collision");

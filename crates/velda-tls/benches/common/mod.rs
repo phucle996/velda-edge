@@ -125,7 +125,7 @@ pub fn make_test_server(cores: usize, ram_bytes: usize) -> (TlsServerEngine, Str
         client_ca_pem: None,
     };
 
-    let topo = velda_core::HardwareTopology::with_workers_and_memory(cores, ram_bytes);
+    let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(cores, ram_bytes);
     let params = TlsServerParams::for_topology(&topo);
     let engine = TlsServerEngine::new_with_params(&[config], &params).unwrap();
     (engine, cert_pem)

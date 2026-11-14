@@ -37,30 +37,16 @@ pub mod types;
 pub mod worker;
 
 // -----------------------------------------------------------------------------
-// Pre-warmed Buffer & Slab Pools
+// Core Request Buffer Workspace
 // -----------------------------------------------------------------------------
 
-pub use buffer::{
-    AdaptiveBufferDimensions, AdaptivePoolConfig, AdaptiveSlabLimits, COPY_NON_TEMPORAL_FN,
-    CopyNonTemporalFn, CoreBufferPool, HeaderPool, HeaderWorkspace, HeaderWorkspaceLease,
-    KEY_X_REQUEST_ID, MAX_BYPASS_HEADERS, MAX_NUMERIC_HEADERS, MAX_WIRE_HEADERS, NumericFmt,
-    NumericHeaderEntry, NumericOp, PayloadSlab, PayloadSlabLease, PayloadSlabPool,
-    ShardedBufferPool, SlabClass, X_REQUEST_ID, ZERO_NON_TEMPORAL_FN, ZeroNonTemporalFn,
-    copy_non_temporal, header_key, prefetch_l2_range, prefetch_l3_range, prefetch_nta_range,
-    resolve_u64_header_value, zero_non_temporal,
-};
-pub use coarse_time::{coarse_now_sec, init_coarse_clock};
+pub use buffer::HeaderWorkspace;
 
 // -----------------------------------------------------------------------------
-// Canonical L1D Lookup Tables & Vocabulary (lut)
+// Canonical L1D Vocabulary
 // -----------------------------------------------------------------------------
 
-pub use lut::{
-    COMPLETION_REASON_NAMES, CompletionReason, GRPC_STATUS_NAMES, GrpcStatus, HTTP_METHOD_NAMES,
-    HttpMethod, PIPE_NAMES, PipeKind, REJECT_STATIC_METAS, RejectStaticMeta, UA_FAMILY_NAMES,
-    UA_OS_NAMES, UaFamily, UaOs, WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol,
-    classify_user_agent, get_reject_meta,
-};
+pub use lut::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol};
 pub use protocol::ProtocolFamily;
 
 // -----------------------------------------------------------------------------
@@ -95,19 +81,12 @@ pub use error::{Error, ErrorKind, RejectReason, Result};
 // Lifecycle
 // -----------------------------------------------------------------------------
 
-pub use lifecycle::{Action, CachedResponseDirective, Hook, HookPhase, Phase};
+pub use lifecycle::{Action, CachedResponseDirective, HookPhase, Phase};
 
 // -----------------------------------------------------------------------------
-// Shared identifiers & Endpoints
+// Shared Identifiers & Endpoints
 // -----------------------------------------------------------------------------
 
 pub use endpoint::{Endpoint, EndpointId};
-pub use hardware::{
-    HardwareTopology, OverloadConfig, OverloadLevel, OverloadTracker, global_hardware_topology,
-    init_hardware_topology,
-};
 pub use provenance::Provenance;
-pub use request_id::{RequestIdPool, next_request_id};
-pub use socket::{SocketManager, global_socket_manager};
-pub use types::{ConnectionId, ListenerId, RequestId, RouteId, UpstreamId, fnv1a_hash_32};
-pub use worker::{CorePartition, WorkerId, WorkerRegistry, global_worker_registry};
+pub use types::{ConnectionId, ListenerId, RequestId, RouteId, UpstreamId};

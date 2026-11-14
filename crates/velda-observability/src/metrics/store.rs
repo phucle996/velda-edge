@@ -82,7 +82,9 @@ impl MetricsStore {
     /// canonical workload size (`PIPELINE_COUNTERS_LEN = 20`) and host machine's hardware vector
     /// capabilities (AVX2 256-bit -> SSE2/NEON 128-bit -> Scalar 64-bit -> SWAR 32-bit).
     pub fn new() -> Self {
-        let detected_cores = velda_core::global_hardware_topology().cpu.available_cores;
+        let detected_cores = velda_core::hardware::global_hardware_topology()
+            .cpu
+            .available_cores;
         let active_cores = detected_cores.clamp(1, MAX_METRIC_WORKERS);
         let mut core_slots = Vec::with_capacity(active_cores);
         for _ in 0..active_cores {

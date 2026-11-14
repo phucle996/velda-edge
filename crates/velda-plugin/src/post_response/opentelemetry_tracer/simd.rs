@@ -10,7 +10,7 @@
 //! - **Portable (Scalar)**: Non-overlapping pointer block copy fallback.
 //!
 //! The optimal implementation is resolved **once at gateway bootstrap** via `LazyLock`
-//! probing the probed `velda_core::global_hardware_topology().cpu.register_capabilities`.
+//! probing the probed `velda_core::hardware::global_hardware_topology().cpu.register_capabilities`.
 
 use super::span::PackedOtlpSpan;
 

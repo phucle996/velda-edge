@@ -42,7 +42,7 @@ impl OpentelemetryTracerPlugin {
     /// Constructs a new `OpentelemetryTracerPlugin` and starts the asynchronous Shadow flusher.
     pub fn new(id: impl Into<String>, config: OpentelemetryTracerConfig) -> Self {
         let id_str = id.into();
-        let topology = velda_core::global_hardware_topology();
+        let topology = velda_core::hardware::global_hardware_topology();
         let num_workers = topology.worker_threads.max(1);
 
         let ring_buffer = Arc::new(ShardedRingBuffer::new(
@@ -146,7 +146,9 @@ impl PostResponsePlugin for OpentelemetryTracerPlugin {
         let now_nano = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
-            .unwrap_or_else(|_| velda_core::coarse_now_sec().saturating_mul(1_000_000_000));
+            .unwrap_or_else(|_| {
+                velda_core::coarse_time::coarse_now_sec().saturating_mul(1_000_000_000)
+            });
         span.end_time_unix_nano = now_nano;
 
         if let Some(lat) = resp

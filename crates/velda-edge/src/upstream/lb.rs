@@ -67,7 +67,7 @@ impl LbAlgorithm {
             "random" => Self::Random(Random::new()),
             "ip_hash" | "hash" => Self::IpHash(IpHash::new()),
             "weighted_round_robin" | "wrr" => {
-                let workers = velda_core::global_hardware_topology().worker_threads;
+                let workers = velda_core::hardware::global_hardware_topology().worker_threads;
                 Self::WeightedRoundRobin(WeightedRoundRobin::for_workload(workers, endpoint_count))
             }
             "p2c" | "power_of_two_choices" => Self::PowerOfTwoChoices(PowerOfTwoChoices::new()),

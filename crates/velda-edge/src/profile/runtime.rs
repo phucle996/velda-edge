@@ -18,8 +18,8 @@ pub struct RuntimeProfile {
     pub discovery: DiscoveryRuntimeConfig,
     pub transport: TransportRuntimeConfig,
     pub tls: TlsRuntimeConfig,
-    #[serde(default = "velda_core::OverloadConfig::default")]
-    pub overload: velda_core::OverloadConfig,
+    #[serde(default = "velda_core::hardware::OverloadConfig::default")]
+    pub overload: velda_core::hardware::OverloadConfig,
 }
 
 impl RuntimeProfile {
@@ -91,7 +91,9 @@ impl RuntimeProfile {
                 send_tls13_tickets: tls_params.send_tls13_tickets,
                 handshake_timeout_secs: tls_params.handshake_timeout.as_secs(),
             },
-            overload: velda_core::OverloadConfig::from_memory_bytes(hardware.memory_bytes()),
+            overload: velda_core::hardware::OverloadConfig::from_memory_bytes(
+                hardware.memory_bytes(),
+            ),
         }
     }
 

@@ -21,7 +21,7 @@ use crate::upstream::UpstreamTable;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use velda_core::OverloadTracker;
+use velda_core::hardware::OverloadTracker;
 use velda_ingress::IngressBinding;
 use velda_router::Router;
 use velda_sock::{TcpListenerConfig, UdpSocketConfig};
@@ -89,7 +89,7 @@ pub struct Runtime {
     /// Thread-safe resource saturation and overload circuit breaker.
     pub overload: Arc<OverloadTracker>,
     /// Pre-warmed sharded user-space buffer and object pool for zero-allocation serving.
-    pub buffer_pool: Arc<velda_core::ShardedBufferPool>,
+    pub buffer_pool: Arc<velda_core::buffer::ShardedBufferPool>,
 }
 
 /// Thread-safe, lock-free container for the active [`Runtime`] snapshot.

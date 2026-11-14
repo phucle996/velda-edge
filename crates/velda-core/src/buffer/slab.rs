@@ -19,7 +19,7 @@
 //! 4. **Tier 2 (Transient Burst Standby Queue with 15s TTL)**:
 //!    - Dynamic heap allocations (`Box<[u8]>`) created dynamically during traffic spikes exceeding
 //!      the baseline floor.
-//!    - Excess slabs are stored with a return timestamp from [`crate::coarse_now_sec`] and reused
+//!    - Excess slabs are stored with a return timestamp from [`crate::coarse_time::coarse_now_sec`] and reused
 //!      across multi-wave micro-bursts, eliminating allocator heap churn (`malloc`/`free` thrashing).
 //!    - When burst traffic subsides, `sweep_expired()` drops these excess slabs so jemalloc and the
 //!      operating system can reclaim dirty pages across the process RSS decay window.
@@ -1016,7 +1016,7 @@ impl PayloadSlabPool {
         guard.baseline.len() + guard.burst.len()
     }
 
-    /// Performs non-blocking maintenance on this core's slab pool using [`crate::coarse_now_sec`].
+    /// Performs non-blocking maintenance on this core's slab pool using [`crate::coarse_time::coarse_now_sec`].
     ///
     /// # Strict Core-Jailing & Coarse Clock Invariant
     /// Executed exclusively by `velda-shadow-{core_id}` companion worker pinned to the same CPU core.
@@ -1039,7 +1039,7 @@ impl PayloadSlabPool {
     /// Returns `(slabs_evicted, slabs_replenished)`.
     #[inline(always)]
     pub fn maintain(&self) -> (usize, usize) {
-        let now_sec = crate::coarse_now_sec();
+        let now_sec = crate::coarse_time::coarse_now_sec();
         let mut evicted = 0;
         let mut replenished = 0;
 
@@ -1088,7 +1088,7 @@ impl PayloadSlabPool {
     /// Evicts burst slabs across all classes that have been idle longer than `idle_ttl_secs`.
     #[inline(always)]
     pub fn sweep_expired(&self) -> usize {
-        let now_sec = crate::coarse_now_sec();
+        let now_sec = crate::coarse_time::coarse_now_sec();
         let mut evicted = 0;
         for class in [
             SlabClass::Small4K,
@@ -1136,7 +1136,7 @@ impl PayloadSlabPool {
         } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
             // Priority 2: Retain dynamic slab in Tier 2 burst standby queue.
             // Stamped with coarse integer clock (relaxed atomic load without syscall overhead).
-            let now_sec = crate::coarse_now_sec();
+            let now_sec = crate::coarse_time::coarse_now_sec();
             guard.burst.push_back((now_sec, slab));
         }
         // Priority 3: Above max_burst_limit -> slab drops and frees its Box<[u8]> back to jemalloc RSS arena

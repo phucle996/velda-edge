@@ -9,7 +9,7 @@
 //! 2. **Shadow Worker Execution**: Operates strictly on Shadow Worker runtimes under `SCHED_IDLE`,
 //!    never touching frontline traffic worker pins or causing cacheline invalidations.
 //! 3. **Non-blocking Telemetry**: Extracts point-in-time atomics via lock-free [`MetricsStore::snapshot`].
-//! 4. **Socket Safety Invariant**: Strictly uses [`velda_core::global_socket_manager`] via
+//! 4. **Socket Safety Invariant**: Strictly uses [`velda_core::socket::global_socket_manager`] via
 //!    `acquire_shadow_tcp` and `release_shadow_tcp`.
 
 use std::pin::Pin;
@@ -281,7 +281,7 @@ impl PrometheusExporter {
                     self.config.listen
                 ))
             })?;
-        let std_listener = velda_core::global_socket_manager()
+        let std_listener = velda_core::socket::global_socket_manager()
             .acquire_shadow_tcp(addr, "prometheus_exporter")
             .map_err(|e| PluginError::Config(format!("Failed to acquire shadow socket: {e}")))?;
         std_listener.set_nonblocking(true).map_err(|e| {
@@ -329,7 +329,7 @@ impl PrometheusExporter {
             }
         }
 
-        velda_core::global_socket_manager().release_shadow_tcp("prometheus_exporter");
+        velda_core::socket::global_socket_manager().release_shadow_tcp("prometheus_exporter");
         Ok(())
     }
 

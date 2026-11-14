@@ -31,11 +31,11 @@ impl Default for GrpcConfig {
 impl GrpcConfig {
     /// Probes host hardware topology and derives the configuration.
     pub fn auto() -> Self {
-        Self::for_topology(velda_core::global_hardware_topology())
+        Self::for_topology(velda_core::hardware::global_hardware_topology())
     }
 
     /// Derives a [`GrpcConfig`] scaled deterministically from host hardware topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         Self::from_hardware(topo.available_cores, topo.memory_bytes)
     }
 
@@ -157,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_for_topology() {
-        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            4,
+            8 * 1024 * 1024 * 1024,
+        );
         let config = GrpcConfig::for_topology(&topo);
         assert_eq!(config.max_message_size, 32 * 1024 * 1024);
         assert_eq!(config.max_concurrent_streams, 256);

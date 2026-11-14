@@ -122,7 +122,7 @@ impl PostResponsePlugin for AiTokenMeteringPlugin {
         consumer_id.hash(&mut hasher);
         let consumer_hash = hasher.finish();
 
-        let now_sec = velda_core::coarse_now_sec();
+        let now_sec = velda_core::coarse_time::coarse_now_sec();
 
         // Strict Pricing Lookup: NEVER fallback to another model silently!
         if let Some(pricing) = self.config.model_pricing.get(&model_lower) {

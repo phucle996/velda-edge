@@ -35,7 +35,7 @@ impl EngineConfig {
     /// The number of network I/O workers and listener concurrency shards are set 1:1 to the exact
     /// number of available CPU cores (`available_cores().max(1)`), eliminating under-utilization
     /// on odd core topologies (e.g. 1, 3, 6, 12 vCPUs) and avoiding CPU contention or over-subscription.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         let exact_cores = topo.available_cores().max(1);
         let reconcile_channel_capacity = (exact_cores * 32).clamp(64, 4096);
         Self {
@@ -51,7 +51,7 @@ impl EngineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_core::HardwareTopology;
+    use velda_core::hardware::HardwareTopology;
 
     #[test]
     fn test_engine_config_exact_cores() {

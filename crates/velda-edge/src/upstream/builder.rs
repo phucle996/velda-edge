@@ -175,7 +175,7 @@ pub fn build_upstreams(
         );
 
         // Concurrency-driven Pool Sizing pre-computed during bootstrap:
-        let topology = velda_core::global_hardware_topology();
+        let topology = velda_core::hardware::global_hardware_topology();
         let cores = topology.available_cores().max(1);
 
         let default_shards = topology.concurrency_shards;
@@ -496,7 +496,7 @@ pub fn build_upstreams_default(
     configs: &[UpstreamConfig],
     tls_client: Option<&TlsClientEngine>,
 ) -> UpstreamTable {
-    let topo = velda_core::global_hardware_topology();
+    let topo = velda_core::hardware::global_hardware_topology();
     let dns_config = DnsResolverConfig::for_topology(topo);
     build_upstreams(configs, tls_client, &dns_config)
 }

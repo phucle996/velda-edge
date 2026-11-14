@@ -268,7 +268,7 @@ impl BackgroundPlugin for HealthProbePlugin {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PluginError>> + Send>> {
         Box::pin(async move {
             let bg_id = format!("health_probe:{}", self.id);
-            let std_listener = velda_core::global_socket_manager()
+            let std_listener = velda_core::socket::global_socket_manager()
                 .acquire_shadow_tcp(self.config.listen_addr, &bg_id)
                 .map_err(|e| {
                     PluginError::Config(format!(
@@ -327,7 +327,7 @@ impl BackgroundPlugin for HealthProbePlugin {
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
-            velda_core::global_socket_manager().release_shadow_tcp(&bg_id);
+            velda_core::socket::global_socket_manager().release_shadow_tcp(&bg_id);
             Ok(())
         })
     }

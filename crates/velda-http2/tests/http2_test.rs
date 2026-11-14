@@ -561,7 +561,7 @@ fn test_build_h2_response_zero_allocation_filtering() {
 
 #[tokio::test]
 async fn test_http2_consume_all_into_slab_lifecycle() {
-    use velda_core::{PayloadSlabPool, SlabClass};
+    use velda_core::buffer::{PayloadSlabPool, SlabClass};
 
     let (client_io, server_io) = duplex(64 * 1024);
     let slab_pool = PayloadSlabPool::new(2, 2, 2, 2);

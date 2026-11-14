@@ -170,7 +170,7 @@ pub async fn run_http2_loop<IO>(
                         }
                     }
 
-                    let (request_id, req_id_header) = velda_core::next_request_id();
+                    let (request_id, req_id_header) = velda_core::request_id::next_request_id();
                     req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
                     let host =
                         velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri);
@@ -185,12 +185,12 @@ pub async fn run_http2_loop<IO>(
                         .with_request_id(Some(req_id_header.clone()))
                         .with_alt_svc(meta.alt_svc_header.clone());
 
-                    if req_head.headers.len() > velda_core::MAX_WIRE_HEADERS {
+                    if req_head.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
                         tracing::warn!(
                             listener = %meta.listener_id,
                             peer = %meta.peer,
                             headers = req_head.headers.len(),
-                            max = velda_core::MAX_WIRE_HEADERS,
+                            max = velda_core::buffer::MAX_WIRE_HEADERS,
                             "Rejecting HTTP/2 request exceeding MAX_WIRE_HEADERS"
                         );
                         let _ =
@@ -567,7 +567,7 @@ async fn serve_http2_stream(
     let (ua_family, ua_os, ua_major_version) = req_head
         .headers
         .get(http::header::USER_AGENT)
-        .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+        .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
     let (mut log_url_len, mut log_url_bytes) = {
         let host = velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri);

@@ -73,7 +73,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
         ];
         for code in test_codes {
-            let hv = velda_core::resolve_u64_header_value(code.as_u16() as u64);
+            let hv = velda_core::buffer::resolve_u64_header_value(code.as_u16() as u64);
             assert_eq!(hv.to_str().unwrap(), code.as_str());
         }
     }

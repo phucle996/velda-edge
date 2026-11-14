@@ -96,7 +96,7 @@ impl AdaptiveBufferDimensions {
 
     /// Derives per-core adaptive buffer dimensions from a [`HardwareTopology`].
     #[inline]
-    pub fn for_topology(topo: &crate::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &crate::hardware::HardwareTopology) -> Self {
         Self::from_hardware(
             topo.optimal_max_idle_per_key,
             topo.memory_bytes,

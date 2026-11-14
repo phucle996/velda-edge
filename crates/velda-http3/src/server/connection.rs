@@ -457,10 +457,10 @@ impl Http3Engine {
                 Ok(Some(frame)) => match frame {
                     Http3Frame::Headers(payload) => match decode_qpack(&payload) {
                         Ok(mut decoded) => {
-                            if decoded.headers.len() > velda_core::MAX_WIRE_HEADERS {
+                            if decoded.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
                                 tracing::warn!(
                                     headers = decoded.headers.len(),
-                                    max = velda_core::MAX_WIRE_HEADERS,
+                                    max = velda_core::buffer::MAX_WIRE_HEADERS,
                                     "Rejecting HTTP/3 request exceeding MAX_WIRE_HEADERS"
                                 );
                                 let _ = conn.recv_stream(id).stop(quinn_proto::VarInt::from_u32(
@@ -473,8 +473,10 @@ impl Http3Engine {
                             // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
                             // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers
                             // preserves it directly in Slot 0 without double ID generation.
-                            let (_id, req_id) = velda_core::next_request_id();
-                            decoded.headers.insert(velda_core::X_REQUEST_ID, req_id);
+                            let (_id, req_id) = velda_core::request_id::next_request_id();
+                            decoded
+                                .headers
+                                .insert(velda_core::buffer::X_REQUEST_ID, req_id);
                             let req = L7Request::new(
                                 decoded.method.unwrap_or(http::Method::GET),
                                 decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),

@@ -113,9 +113,9 @@ pub fn load_initial_runtime(
         tls,
     };
 
-    let topo = velda_core::global_hardware_topology();
-    let dims = velda_core::AdaptiveBufferDimensions::for_topology(topo);
-    let pool_config = velda_core::AdaptivePoolConfig {
+    let topo = velda_core::hardware::global_hardware_topology();
+    let dims = velda_core::buffer::AdaptiveBufferDimensions::for_topology(topo);
+    let pool_config = velda_core::buffer::AdaptivePoolConfig {
         header_slots: dims.header_baseline,
         header_max_cap: dims.header_max_cap,
         small_slabs: dims.small_baseline,
@@ -128,7 +128,7 @@ pub fn load_initial_runtime(
         large_max_cap: dims.large_max_cap,
         idle_ttl_secs: 15,
     };
-    let buffer_pool = Arc::new(velda_core::ShardedBufferPool::with_adaptive_limits(
+    let buffer_pool = Arc::new(velda_core::buffer::ShardedBufferPool::with_adaptive_limits(
         topo.available_cores,
         pool_config,
     ));
@@ -154,7 +154,9 @@ pub fn load_initial_runtime(
         plugins,
         tls_server,
         tls_client,
-        overload: Arc::new(velda_core::OverloadTracker::with_config(profile.overload)),
+        overload: Arc::new(velda_core::hardware::OverloadTracker::with_config(
+            profile.overload,
+        )),
         buffer_pool,
     })
 }
@@ -232,7 +234,7 @@ pub async fn apply_reload(
 
     // Recompile PipelineTable if listeners changed
     let pipelines = if listeners_changed {
-        let topo = velda_core::global_hardware_topology();
+        let topo = velda_core::hardware::global_hardware_topology();
         crate::runtime::pipeline::PipelineTable::build_with_hardware(
             &config.listeners,
             topo.available_cores,

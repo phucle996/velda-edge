@@ -86,7 +86,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use velda_core::coarse_now_sec;
+use velda_core::coarse_time::coarse_now_sec;
 use velda_router::Router;
 use velda_sync::AcmeCertRotatorConfig;
 

@@ -103,7 +103,7 @@ impl UdpSocketConfig {
     }
 
     /// Pre-compiles UDP socket acceleration settings from probed hardware topology and evolutionary ladder.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
         let udp_buf = (ram_gb * 2 * 1024 * 1024).clamp(1024 * 1024, 32 * 1024 * 1024);
         let mut cfg = Self {
@@ -151,7 +151,10 @@ mod tests {
 
     #[test]
     fn test_udp_config_for_topology() {
-        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 4 * 1024 * 1024 * 1024);
+        let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            4,
+            4 * 1024 * 1024 * 1024,
+        );
         let cfg = UdpSocketConfig::for_topology(&topo);
         assert_eq!(cfg.concurrency_shards, 4);
         assert!(cfg.recv_buffer_size.is_some());

@@ -4,9 +4,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use velda_core::{
-    CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, classify_user_agent,
-};
+use velda_core::lut::classify_user_agent;
+use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
 use velda_observability::*;
 
 #[test]

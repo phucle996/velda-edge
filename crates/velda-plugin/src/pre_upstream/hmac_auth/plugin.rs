@@ -448,7 +448,7 @@ mod tests {
         nonce: &str,
         signed_header_names: &[&str],
     ) -> L7Request {
-        let now = velda_core::coarse_now_sec();
+        let now = velda_core::coarse_time::coarse_now_sec();
         let payload_hash = to_hex(&compute_sha256(body_bytes));
         let mut headers = HeaderMap::new();
         let uri: Uri = uri_str.parse().unwrap();

@@ -23,7 +23,7 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        let hw = velda_core::global_hardware_topology();
+        let hw = velda_core::hardware::global_hardware_topology();
         Self {
             max_idle_per_key: hw.optimal_max_idle_per_key,
             max_concurrent_streams: ((hw.available_cores.max(1) * 64) as u32).clamp(128, 1024),
@@ -35,7 +35,7 @@ impl Default for PoolConfig {
 
 impl PoolConfig {
     /// Returns pool configuration and concurrency shards directly using pre-computed values from [`HardwareTopology`].
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> (Self, usize) {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> (Self, usize) {
         let config = Self {
             max_idle_per_key: topo.optimal_max_idle_per_key,
             max_concurrent_streams: ((topo.available_cores.max(1) * 64) as u32).clamp(128, 1024),
@@ -79,23 +79,28 @@ mod tests {
     #[test]
     fn test_pool_config_for_topology() {
         // Small 2-core edge
-        let topo_2 = velda_core::HardwareTopology::with_workers_and_memory(2, 512 * 1024 * 1024);
+        let topo_2 =
+            velda_core::hardware::HardwareTopology::with_workers_and_memory(2, 512 * 1024 * 1024);
         let (cfg, shards) = PoolConfig::for_topology(&topo_2);
         assert_eq!(shards, 8);
         assert_eq!(cfg.max_idle_per_key, 256);
         assert_eq!(cfg.max_concurrent_streams, 128);
 
         // 16-core regional edge (4GB RAM)
-        let topo_16 =
-            velda_core::HardwareTopology::with_workers_and_memory(16, 4 * 1024 * 1024 * 1024);
+        let topo_16 = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            16,
+            4 * 1024 * 1024 * 1024,
+        );
         let (cfg, shards) = PoolConfig::for_topology(&topo_16);
         assert_eq!(shards, 32);
         assert_eq!(cfg.max_idle_per_key, 256);
         assert_eq!(cfg.max_concurrent_streams, 1024);
 
         // 64-core hyperscale node (64GB RAM)
-        let topo_64 =
-            velda_core::HardwareTopology::with_workers_and_memory(64, 64 * 1024 * 1024 * 1024);
+        let topo_64 = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            64,
+            64 * 1024 * 1024 * 1024,
+        );
         let (cfg, shards) = PoolConfig::for_topology(&topo_64);
         assert_eq!(shards, 128);
         assert_eq!(cfg.max_idle_per_key, 256);

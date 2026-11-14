@@ -58,7 +58,7 @@ fn test_profile_continuous_scaling() {
 
         assert_eq!(
             profile.overload,
-            velda_core::OverloadConfig::from_memory_bytes(hardware.memory_bytes())
+            velda_core::hardware::OverloadConfig::from_memory_bytes(hardware.memory_bytes())
         );
     }
 }

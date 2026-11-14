@@ -397,7 +397,8 @@ async fn test_resolve_ips_and_resolve() {
 
 #[test]
 fn test_dns_resolver_config_for_topology() {
-    let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+    let topo =
+        velda_core::hardware::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
     let cfg = DnsResolverConfig::for_topology(&topo);
     assert_eq!(
         cfg.cache_capacity,

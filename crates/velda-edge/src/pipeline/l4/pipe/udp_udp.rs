@@ -227,7 +227,7 @@ pub async fn serve(
             peer = %client_addr,
             "Forwarding UDP datagram unidirectionally"
         );
-        let (request_id, _) = velda_core::next_request_id();
+        let (request_id, _) = velda_core::request_id::next_request_id();
         let started = std::time::Instant::now();
         let completion = match downstream_socket.send_to(&initial_bytes, target_addr).await {
             Ok(_) => velda_core::CompletionReason::Complete,
@@ -310,7 +310,7 @@ pub async fn serve(
     // Step 5: Spawn background session worker driving bidirectional packet pumping.
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let (request_id, _) = velda_core::next_request_id();
+        let (request_id, _) = velda_core::request_id::next_request_id();
         let emit_log = |peer: std::net::SocketAddr,
                         rx: u64,
                         tx: u64,

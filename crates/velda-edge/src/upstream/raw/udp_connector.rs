@@ -36,7 +36,7 @@ pub struct UdpAccelerationPath {
 
 impl UdpAccelerationPath {
     /// Pre-compiles UDP acceleration path based on host hardware/kernel topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         let ladder = topo.acceleration_ladder();
 
         let bind_address_no_port = ladder.outbound_port_scaling

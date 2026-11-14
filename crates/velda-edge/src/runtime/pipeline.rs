@@ -255,7 +255,7 @@ pub struct PipelineTable {
 impl PipelineTable {
     /// Compiles a pipeline table from listener configurations using default hardware topology.
     pub fn build(listeners: &[ListenerConfig]) -> Result<Self, EdgeError> {
-        let hw = velda_core::global_hardware_topology();
+        let hw = velda_core::hardware::global_hardware_topology();
         Self::build_with_hardware(listeners, hw.available_cores, hw.memory_bytes)
     }
 
@@ -279,7 +279,7 @@ impl PipelineTable {
             // Layer 4 (Raw) listeners pre-compiled explicitly without L7 protocol overhead
             if app == "raw" {
                 if transport == "udp" {
-                    let max_sessions = velda_core::global_hardware_topology()
+                    let max_sessions = velda_core::hardware::global_hardware_topology()
                         .worker_threads
                         .max(4)
                         .saturating_mul(16_384)
@@ -291,7 +291,7 @@ impl PipelineTable {
                     };
                     udp.insert(lid, UdpPipeline::Raw { config });
                 } else {
-                    let topo = velda_core::global_hardware_topology();
+                    let topo = velda_core::hardware::global_hardware_topology();
                     let default_buffer_size =
                         (topo.available_cores * 8 * 1024).clamp(16 * 1024, 64 * 1024);
                     let copy_buffer_size = listener
@@ -301,7 +301,7 @@ impl PipelineTable {
                     let idle_timeout = listener
                         .raw
                         .and_then(|r| r.idle_timeout_ms.map(std::time::Duration::from_millis));
-                    let max_connections = velda_core::global_hardware_topology()
+                    let max_connections = velda_core::hardware::global_hardware_topology()
                         .worker_threads
                         .max(4)
                         .saturating_mul(16_384)

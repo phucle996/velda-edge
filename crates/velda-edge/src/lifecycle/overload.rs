@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use velda_core::OverloadTracker;
+use velda_core::hardware::OverloadTracker;
 
 /// Default sampling interval for resource overload monitoring (1000 ms / 1 second).
 pub const DEFAULT_OVERLOAD_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::sync::watch;
-    use velda_core::OverloadConfig;
+    use velda_core::hardware::OverloadConfig;
 
     #[tokio::test]
     async fn test_overload_monitor_shutdown() {

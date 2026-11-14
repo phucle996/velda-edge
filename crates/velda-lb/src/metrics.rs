@@ -68,7 +68,7 @@ impl EndpointMetrics {
     /// Creates a new sharded metric container reading worker concurrency from RAM.
     #[inline]
     pub fn new() -> Self {
-        Self::with_workers(velda_core::global_hardware_topology().worker_threads)
+        Self::with_workers(velda_core::hardware::global_hardware_topology().worker_threads)
     }
 
     /// Creates a new sharded metric container configured with explicit worker count

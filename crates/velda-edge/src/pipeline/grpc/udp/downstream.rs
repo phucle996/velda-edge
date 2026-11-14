@@ -120,11 +120,11 @@ pub async fn process_grpc_udp_request(
     let (ua_family, ua_os, ua_major_version) = req
         .headers
         .get(http::header::USER_AGENT)
-        .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+        .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
 
     // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
-    if req.headers.len() > velda_core::MAX_WIRE_HEADERS {
+    if req.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
         velda_observability::global_metrics().record_early_completion(
             velda_observability::DownstreamProtocol::H3,
             velda_observability::UpstreamProtocol::H3,

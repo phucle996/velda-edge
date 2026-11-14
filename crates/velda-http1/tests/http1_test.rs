@@ -183,7 +183,7 @@ fn test_too_many_headers_rejection() {
 
 #[test]
 fn test_two_tier_large_headers_spillover_success() {
-    let config = TEST_CONFIG.with_max_headers(velda_core::MAX_WIRE_HEADERS);
+    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::MAX_WIRE_HEADERS);
     let mut raw = Vec::from(&b"GET /large HTTP/1.1\r\nHost: localhost\r\n"[..]);
     for i in 0..150 {
         raw.extend_from_slice(format!("X-Custom-{i:03}: value-{i}\r\n").as_bytes());
@@ -199,7 +199,7 @@ fn test_two_tier_large_headers_spillover_success() {
 
 #[test]
 fn test_wire_ceiling_rejection_at_1024() {
-    let config = TEST_CONFIG.with_max_headers(velda_core::MAX_WIRE_HEADERS);
+    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::MAX_WIRE_HEADERS);
     let mut raw = Vec::from(&b"GET /bomb HTTP/1.1\r\nHost: localhost\r\n"[..]);
     for i in 0..1030 {
         raw.extend_from_slice(format!("X-Bomb-{i:04}: val\r\n").as_bytes());
@@ -676,7 +676,7 @@ async fn test_send_coalesced_chunks_single_wire_block() {
 
 #[tokio::test]
 async fn test_http1_read_body_into_slab_pool_lifecycle() {
-    use velda_core::{PayloadSlabPool, SlabClass};
+    use velda_core::buffer::{PayloadSlabPool, SlabClass};
 
     let (mut client, server) = duplex(4096);
     let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);

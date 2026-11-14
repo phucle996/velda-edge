@@ -48,7 +48,7 @@ pub async fn serve(
     let buffer_size = config.copy_buffer_size;
 
     let started = std::time::Instant::now();
-    let (request_id, _) = velda_core::next_request_id();
+    let (request_id, _) = velda_core::request_id::next_request_id();
 
     // Step 2: Dispatch connection from upstream pool and bridge byte streams.
     // Utilizes Linux splice(2) kernel zero-copy where available, falling back to chunked user-space copy.

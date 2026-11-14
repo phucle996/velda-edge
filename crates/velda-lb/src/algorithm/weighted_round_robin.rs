@@ -129,7 +129,10 @@ impl Default for WeightedRoundRobin {
 impl WeightedRoundRobin {
     /// Creates a new weighted round-robin balancer reading worker concurrency from RAM.
     pub fn new() -> Self {
-        Self::for_workload(velda_core::global_hardware_topology().worker_threads, 0)
+        Self::for_workload(
+            velda_core::hardware::global_hardware_topology().worker_threads,
+            0,
+        )
     }
 
     /// Creates a new weighted round-robin balancer with explicit worker count

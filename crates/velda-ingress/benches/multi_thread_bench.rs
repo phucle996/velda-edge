@@ -34,7 +34,7 @@ async fn main() {
 // ============================================================================
 
 fn bench_multi_thread_connection_id_scaling() {
-    let topo = velda_core::global_hardware_topology();
+    let topo = velda_core::hardware::global_hardware_topology();
     let cores = topo.available_cores();
     let workers = topo.worker_threads();
 
@@ -155,7 +155,7 @@ async fn bench_udp_atomic_counter_contention() {
         UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
     );
 
-    let topo = velda_core::global_hardware_topology();
+    let topo = velda_core::hardware::global_hardware_topology();
     let workers = topo.worker_threads();
     let half_workers = (workers / 2).max(1);
     let iters_per_worker = 2_000_000;

@@ -44,7 +44,7 @@ pub struct TlsServerParams {
 
 impl TlsServerParams {
     /// Creates parameters sized appropriately for the host hardware topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         Self {
             session_cache_capacity: ((topo.memory_bytes / (1024 * 1024)) * 2).clamp(1024, 65536),
             session_shards: topo.concurrency_shards,
@@ -60,7 +60,7 @@ impl TlsServerParams {
 
     /// Creates parameters sized using the global hardware topology probe.
     pub fn from_hardware() -> Self {
-        Self::for_topology(velda_core::global_hardware_topology())
+        Self::for_topology(velda_core::hardware::global_hardware_topology())
     }
 
     /// Sets the session cache capacity.
@@ -256,14 +256,16 @@ mod tests {
     #[test]
     fn test_tls_server_params_for_topology() {
         let topo_1c_1g =
-            velda_core::HardwareTopology::with_workers_and_memory(1, 1024 * 1024 * 1024);
+            velda_core::hardware::HardwareTopology::with_workers_and_memory(1, 1024 * 1024 * 1024);
         let p_1c = TlsServerParams::for_topology(&topo_1c_1g);
         assert_eq!(p_1c.session_cache_capacity, 2048);
         assert_eq!(p_1c.session_shards, topo_1c_1g.concurrency_shards);
         assert_eq!(p_1c.handshake_timeout, Duration::from_secs(10));
 
-        let topo_16c_32g =
-            velda_core::HardwareTopology::with_workers_and_memory(16, 32 * 1024 * 1024 * 1024);
+        let topo_16c_32g = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            16,
+            32 * 1024 * 1024 * 1024,
+        );
         let p_16c = TlsServerParams::for_topology(&topo_16c_32g);
         assert_eq!(p_16c.session_cache_capacity, 65536);
         assert_eq!(p_16c.session_shards, topo_16c_32g.concurrency_shards);

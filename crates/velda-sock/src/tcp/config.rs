@@ -212,7 +212,7 @@ impl TcpListenerConfig {
     }
 
     /// Pre-compiles TCP listener acceleration settings from probed hardware topology.
-    pub fn for_topology(topo: &velda_core::HardwareTopology) -> Self {
+    pub fn for_topology(topo: &velda_core::hardware::HardwareTopology) -> Self {
         let mut cfg = Self {
             backlog: ((topo.available_cores * 1024).clamp(1024, 32768)) as u32,
             copy_buffer_size: (topo.available_cores * 8 * 1024).clamp(16 * 1024, 64 * 1024),
@@ -287,7 +287,10 @@ mod tests {
 
     #[test]
     fn test_tcp_config_for_topology() {
-        let topo = velda_core::HardwareTopology::with_workers_and_memory(4, 8 * 1024 * 1024 * 1024);
+        let topo = velda_core::hardware::HardwareTopology::with_workers_and_memory(
+            4,
+            8 * 1024 * 1024 * 1024,
+        );
         let cfg = TcpListenerConfig::for_topology(&topo);
         assert_eq!(cfg.concurrency_shards, 4);
         assert_eq!(cfg.copy_buffer_size, 32 * 1024);

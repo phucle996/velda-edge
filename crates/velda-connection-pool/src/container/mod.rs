@@ -41,7 +41,7 @@ pub fn optimal_max_concurrent_streams(cores: usize, _ram_bytes: usize) -> u32 {
 /// Reads the optimal maximum concurrent streams pre-computed during cold-start bootstrap.
 #[inline]
 pub fn probed_max_concurrent_streams() -> u32 {
-    let hw = velda_core::global_hardware_topology();
+    let hw = velda_core::hardware::global_hardware_topology();
     optimal_max_concurrent_streams(hw.available_cores, hw.memory.total_bytes)
 }
 
@@ -51,7 +51,7 @@ pub fn probed_max_concurrent_streams() -> u32 {
 /// clamped within `[MIN_IDLE_PER_KEY, MAX_IDLE_PER_KEY]` to prevent File Descriptor exhaustion (`EMFILE`).
 #[inline]
 pub fn optimal_max_idle_per_key(workers: usize) -> usize {
-    let hw = velda_core::global_hardware_topology();
+    let hw = velda_core::hardware::global_hardware_topology();
     velda_core::hardware::compute_optimal_pool_concurrency(workers, hw.memory_bytes).0
 }
 

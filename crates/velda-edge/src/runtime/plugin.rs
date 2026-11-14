@@ -80,7 +80,7 @@ pub fn build_plugin_table(
     }
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
-    let socket_manager = velda_core::global_socket_manager();
+    let socket_manager = velda_core::socket::global_socket_manager();
     for l in listeners {
         if let Ok(addr) = l.address.parse::<std::net::SocketAddr>() {
             let proto = match l.transport.protocol.to_ascii_lowercase().as_str() {

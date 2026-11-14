@@ -147,7 +147,7 @@ pub async fn run_http1_loop<IO>(
                     timeout_ms = config.header_read_timeout_ms,
                     "HTTP/1.1 request head read timed out (Slowloris protection)"
                 );
-                let (req_id, req_id_header) = velda_core::next_request_id();
+                let (req_id, req_id_header) = velda_core::request_id::next_request_id();
                 conn.set_request_id(Some(req_id_header));
                 conn.mark_close();
                 let _ = conn.send_early_error(StatusCode::REQUEST_TIMEOUT).await;
@@ -201,7 +201,7 @@ pub async fn run_http1_loop<IO>(
                     Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
                     _ => StatusCode::BAD_REQUEST,
                 };
-                let (req_id, req_id_header) = velda_core::next_request_id();
+                let (req_id, req_id_header) = velda_core::request_id::next_request_id();
                 conn.set_request_id(Some(req_id_header));
                 conn.mark_close();
                 let _ = conn.send_early_error(status).await;
@@ -258,7 +258,7 @@ pub async fn run_http1_loop<IO>(
         // [INGRESS W3C REQUEST ID GENERATION]
         // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
         // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-        let (request_id, req_id_header) = velda_core::next_request_id();
+        let (request_id, req_id_header) = velda_core::request_id::next_request_id();
         conn.set_request_id(Some(req_id_header.clone()));
         let mut req_head = req_head;
         req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
@@ -267,7 +267,7 @@ pub async fn run_http1_loop<IO>(
         let (ua_family, ua_os, ua_major_version) = req_head
             .headers
             .get(http::header::USER_AGENT)
-            .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+            .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
             .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
         let (mut log_url_len, mut log_url_bytes) = {
             let host = velda_http1::server::header::extract_host(&req_head.headers, &req_head.uri);

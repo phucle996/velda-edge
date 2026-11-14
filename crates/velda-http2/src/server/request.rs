@@ -461,11 +461,11 @@ impl Http2StreamReceiver {
         self.consume_all_into_slab(None).await
     }
 
-    /// Accumulates all remaining chunks into a pre-warmed [`velda_core::PayloadSlabPool`] slab
+    /// Accumulates all remaining chunks into a pre-warmed [`velda_core::buffer::PayloadSlabPool`] slab
     /// when payload size is $\le 64\text{ KB}$, falling back to heap [`bytes::BytesMut`] for larger bodies.
     pub async fn consume_all_into_slab(
         &mut self,
-        slab_pool: Option<&std::sync::Arc<velda_core::PayloadSlabPool>>,
+        slab_pool: Option<&std::sync::Arc<velda_core::buffer::PayloadSlabPool>>,
     ) -> Result<Body, crate::error::Http2Error> {
         let first_chunk = loop {
             if self.is_end_stream() {
@@ -558,9 +558,9 @@ impl Http2StreamReceiver {
         }
 
         if !self.is_end_stream()
-            && two_len <= velda_core::SlabClass::Large64K.byte_size()
+            && two_len <= velda_core::buffer::SlabClass::Large64K.byte_size()
             && let Some(pool) = slab_pool
-            && let Some(mut lease) = pool.acquire(velda_core::SlabClass::Large64K)
+            && let Some(mut lease) = pool.acquire(velda_core::buffer::SlabClass::Large64K)
         {
             lease[..first_chunk.len()].copy_from_slice(&first_chunk);
             lease[first_chunk.len()..two_len].copy_from_slice(&second_chunk);

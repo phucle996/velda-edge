@@ -162,12 +162,12 @@ impl Default for UdpSessionTable {
 impl UdpSessionTable {
     /// Creates a new sharded UDP session table scaled to hardware topology.
     pub fn new() -> Self {
-        let count = velda_core::global_hardware_topology()
+        let count = velda_core::hardware::global_hardware_topology()
             .worker_threads
             .max(MIN_SESSION_SHARDS)
             .clamp(MIN_SESSION_SHARDS, MAX_SESSION_SHARDS)
             .next_power_of_two();
-        let max_sessions = velda_core::global_hardware_topology()
+        let max_sessions = velda_core::hardware::global_hardware_topology()
             .worker_threads
             .max(MIN_SESSION_SHARDS)
             .saturating_mul(SESSIONS_PER_WORKER)

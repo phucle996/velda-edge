@@ -293,14 +293,14 @@ impl HeaderWorkspace {
     pub fn new(capacity: usize) -> Self {
         let mut headers = HeaderMap::with_capacity(capacity);
         headers.reserve(capacity);
-        let (id, req_id) = crate::next_request_id();
+        let (id, req_id) = crate::request_id::next_request_id();
         headers.insert(X_REQUEST_ID, req_id);
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
             headers,
             request_id_raw: id.0,
-            ingress_time_sec: crate::coarse_now_sec(),
+            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -321,7 +321,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::coarse_now_sec(),
+            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -337,7 +337,7 @@ impl HeaderWorkspace {
         let raw = if let Some(existing) = headers.get(&X_REQUEST_ID) {
             parse_hex_128(existing.as_bytes()).unwrap_or(0)
         } else {
-            let (id, req_id) = crate::next_request_id();
+            let (id, req_id) = crate::request_id::next_request_id();
             headers.insert(X_REQUEST_ID, req_id);
             id.0
         };
@@ -346,7 +346,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::coarse_now_sec(),
+            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -893,9 +893,9 @@ impl HeaderWorkspace {
     pub fn take(&mut self) -> HeaderMap {
         self.render();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        let (id, req_id) = crate::next_request_id();
+        let (id, req_id) = crate::request_id::next_request_id();
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::coarse_now_sec();
+        self.ingress_time_sec = crate::coarse_time::coarse_now_sec();
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
         let mut new_map = HeaderMap::with_capacity(self.initial_capacity);
@@ -909,9 +909,9 @@ impl HeaderWorkspace {
             self.numeric_entries[i] = None;
         }
         self.numeric_len = 0;
-        let (id, req_id) = crate::next_request_id();
+        let (id, req_id) = crate::request_id::next_request_id();
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::coarse_now_sec();
+        self.ingress_time_sec = crate::coarse_time::coarse_now_sec();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
