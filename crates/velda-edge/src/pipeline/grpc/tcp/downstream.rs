@@ -7,11 +7,12 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use velda_core::GrpcStatus;
 use velda_core::{Action, L7Request, UpstreamId};
+use velda_grpc::GrpcConfig;
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
-use velda_grpc::{GrpcConfig, GrpcStatus};
 use velda_router::GrpcRouteRequest;
 use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
@@ -164,12 +165,8 @@ async fn dispatch_grpc_tcp_request_stream(
         .parts
         .headers
         .get(http::header::USER_AGENT)
-        .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
-        .unwrap_or((
-            velda_observability::UaFamily::None,
-            velda_observability::UaOs::Unknown,
-            0,
-        ));
+        .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+        .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
 
     // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
     if server_stream.parts.headers.len() > velda_core::MAX_WIRE_HEADERS {
@@ -198,10 +195,10 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-            completion: velda_observability::LogCompletionReason::Rejected,
-            method: velda_observability::LogHttpMethod::Post,
-            grpc_status: velda_observability::LogGrpcStatus::ResourceExhausted,
+            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            completion: velda_core::CompletionReason::Rejected,
+            method: velda_core::HttpMethod::Post,
+            grpc_status: velda_core::GrpcStatus::ResourceExhausted,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -249,10 +246,10 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-            completion: velda_observability::LogCompletionReason::Rejected,
-            method: velda_observability::LogHttpMethod::Post,
-            grpc_status: velda_observability::LogGrpcStatus::Unimplemented,
+            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            completion: velda_core::CompletionReason::Rejected,
+            method: velda_core::HttpMethod::Post,
+            grpc_status: velda_core::GrpcStatus::Unimplemented,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -287,10 +284,10 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-            completion: velda_observability::LogCompletionReason::Rejected,
-            method: velda_observability::LogHttpMethod::Post,
-            grpc_status: velda_observability::LogGrpcStatus::Unimplemented,
+            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            completion: velda_core::CompletionReason::Rejected,
+            method: velda_core::HttpMethod::Post,
+            grpc_status: velda_core::GrpcStatus::Unimplemented,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -341,8 +338,7 @@ async fn dispatch_grpc_tcp_request_stream(
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
                         // preserving only Bit-1 bypass headers and grpc-status trailers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status =
-                            velda_observability::LogGrpcStatus::from_u8(grpc_status as u8);
+                        let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
                         let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
                         for (name, val) in l7_req.headers.bypass_headers() {
                             resp.headers.insert(name.clone(), val.clone());
@@ -386,9 +382,9 @@ async fn dispatch_grpc_tcp_request_stream(
                                 route_id: route.id.0 as u16,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 1,
-                                pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_observability::LogCompletionReason::Rejected,
-                                method: velda_observability::LogHttpMethod::Post,
+                                pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+                                completion: velda_core::CompletionReason::Rejected,
+                                method: velda_core::HttpMethod::Post,
                                 grpc_status: log_grpc_status,
                                 ua_family,
                                 ua_os,
@@ -428,8 +424,7 @@ async fn dispatch_grpc_tcp_request_stream(
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
                         // preserving only Bit-1 bypass headers and grpc-status trailers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status =
-                            velda_observability::LogGrpcStatus::from_u8(grpc_status as u8);
+                        let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
                         let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
                         for (name, val) in l7_req.headers.bypass_headers() {
                             resp.headers.insert(name.clone(), val.clone());
@@ -473,9 +468,9 @@ async fn dispatch_grpc_tcp_request_stream(
                                 route_id: route.id.0 as u16,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 1,
-                                pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_observability::LogCompletionReason::Rejected,
-                                method: velda_observability::LogHttpMethod::Post,
+                                pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+                                completion: velda_core::CompletionReason::Rejected,
+                                method: velda_core::HttpMethod::Post,
                                 grpc_status: log_grpc_status,
                                 ua_family,
                                 ua_os,
@@ -543,10 +538,10 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: route.id.0 as u16,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-            completion: velda_observability::LogCompletionReason::UpstreamError,
-            method: velda_observability::LogHttpMethod::Post,
-            grpc_status: velda_observability::LogGrpcStatus::Unavailable,
+            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            completion: velda_core::CompletionReason::UpstreamError,
+            method: velda_core::HttpMethod::Post,
+            grpc_status: velda_core::GrpcStatus::Unavailable,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -587,10 +582,10 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: route.id.0 as u16,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
-            completion: velda_observability::LogCompletionReason::Rejected,
-            method: velda_observability::LogHttpMethod::Post,
-            grpc_status: velda_observability::LogGrpcStatus::ResourceExhausted,
+            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            completion: velda_core::CompletionReason::Rejected,
+            method: velda_core::HttpMethod::Post,
+            grpc_status: velda_core::GrpcStatus::ResourceExhausted,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -630,55 +625,55 @@ async fn dispatch_grpc_tcp_request_stream(
         GrpcUpstream::Tcp(upstream) => match upstream.strategy {
             GrpcPipeStrategy::Buffered => (
                 pipe::buffered_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::BufferedGrpcTcpTcp,
+                velda_core::PipeKind::BufferedGrpcTcpTcp,
             ),
             GrpcPipeStrategy::ServerStream => (
                 pipe::server_stream_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ServerStreamGrpcTcpTcp,
+                velda_core::PipeKind::ServerStreamGrpcTcpTcp,
             ),
             GrpcPipeStrategy::ClientStream => (
                 pipe::client_stream_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ClientStreamGrpcTcpTcp,
+                velda_core::PipeKind::ClientStreamGrpcTcpTcp,
             ),
             GrpcPipeStrategy::Duplex => (
                 pipe::duplex_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::DuplexGrpcTcpTcp,
+                velda_core::PipeKind::DuplexGrpcTcpTcp,
             ),
         },
         GrpcUpstream::Udp(upstream) => match upstream.strategy {
             GrpcUdpPipeStrategy::Buffered => (
                 pipe::buffered_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::BufferedGrpcTcpUdp,
+                velda_core::PipeKind::BufferedGrpcTcpUdp,
             ),
             GrpcUdpPipeStrategy::ServerStream => (
                 pipe::server_stream_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ServerStreamGrpcTcpUdp,
+                velda_core::PipeKind::ServerStreamGrpcTcpUdp,
             ),
             GrpcUdpPipeStrategy::ClientStream => (
                 pipe::client_stream_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ClientStreamGrpcTcpUdp,
+                velda_core::PipeKind::ClientStreamGrpcTcpUdp,
             ),
             GrpcUdpPipeStrategy::Duplex => (
                 pipe::duplex_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::DuplexGrpcTcpUdp,
+                velda_core::PipeKind::DuplexGrpcTcpUdp,
             ),
         },
         GrpcUpstream::Rdma(upstream) => match upstream.strategy {
             GrpcPipeStrategy::Buffered => (
                 pipe::buffered_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::BufferedGrpcTcpRdma,
+                velda_core::PipeKind::BufferedGrpcTcpRdma,
             ),
             GrpcPipeStrategy::ServerStream => (
                 pipe::server_stream_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ServerStreamGrpcTcpRdma,
+                velda_core::PipeKind::ServerStreamGrpcTcpRdma,
             ),
             GrpcPipeStrategy::ClientStream => (
                 pipe::client_stream_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::ClientStreamGrpcTcpRdma,
+                velda_core::PipeKind::ClientStreamGrpcTcpRdma,
             ),
             GrpcPipeStrategy::Duplex => (
                 pipe::duplex_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::pipe::PipeKind::DuplexGrpcTcpRdma,
+                velda_core::PipeKind::DuplexGrpcTcpRdma,
             ),
         },
     };
@@ -721,7 +716,7 @@ async fn dispatch_grpc_tcp_request_stream(
         rpc_msgs_or_flags: 1,
         pipe: pipe_kind,
         completion: outcome.completion,
-        method: velda_observability::LogHttpMethod::Post,
+        method: velda_core::HttpMethod::Post,
         grpc_status: outcome.grpc_status,
         ua_family,
         ua_os,
@@ -734,7 +729,7 @@ async fn dispatch_grpc_tcp_request_stream(
 mod tests {
     use http::HeaderMap;
     use std::net::SocketAddr;
-    use velda_grpc::GrpcStatus;
+    use velda_core::GrpcStatus;
     use velda_grpc::tcp::server::enrich_headers;
 
     #[test]

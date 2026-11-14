@@ -8,10 +8,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use velda_core::GrpcStatus;
 use velda_core::{Body, L7Request, L7Response};
 use velda_grpc::tcp::server::GrpcServerStream;
 use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
+use velda_grpc::{GrpcConfig, GrpcError};
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcUdpUpstream;
@@ -59,11 +60,11 @@ pub async fn serve(
             );
             return PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::ResourceExhausted,
+                velda_core::GrpcStatus::ResourceExhausted,
                 0,
                 0,
                 None,
-                velda_observability::LogCompletionReason::Rejected,
+                velda_core::CompletionReason::Rejected,
             );
         }
     };
@@ -90,11 +91,11 @@ pub async fn serve(
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
             return PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::Unavailable,
+                velda_core::GrpcStatus::Unavailable,
                 bytes_rx,
                 0,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -141,11 +142,11 @@ pub async fn serve(
             );
             PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::from_u8(status as u8),
+                velda_core::GrpcStatus::from_u8(status as u8),
                 bytes_rx,
                 bytes_tx,
                 upstream_addr,
-                velda_observability::LogCompletionReason::Complete,
+                velda_core::CompletionReason::Complete,
             )
         }
         Err(_) => {
@@ -154,11 +155,11 @@ pub async fn serve(
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream bridge failure"));
             PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::Unavailable,
+                velda_core::GrpcStatus::Unavailable,
                 bytes_rx,
                 0,
                 upstream_addr,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             )
         }
     }

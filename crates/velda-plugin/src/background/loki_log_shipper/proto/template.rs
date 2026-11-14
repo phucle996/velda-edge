@@ -33,7 +33,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use velda_observability::{AccessLogRecord, LogProtocol};
+use velda_core::WireProtocol;
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_u64};
 
@@ -166,7 +167,7 @@ impl LokiProtoFormatter {
                 self.line_buf.clear();
 
                 match downstream_protocol {
-                    LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                    WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                         let method = rec.method;
                         let ua_fam = rec.ua_family;
                         let ua_os = rec.ua_os;
@@ -220,7 +221,7 @@ impl LokiProtoFormatter {
                             &self.line_buf,
                         );
                     }
-                    LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                    WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                         let grpc_st = rec.grpc_status;
                         let ua_fam = rec.ua_family;
 
@@ -273,7 +274,7 @@ impl LokiProtoFormatter {
                             &self.line_buf,
                         );
                     }
-                    LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                    WireProtocol::RawTcp | WireProtocol::RawUdp => {
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
                             &mut self.line_buf,
@@ -408,7 +409,7 @@ mod tests {
     use super::super::model::PushRequest;
     use super::*;
     use prost::Message;
-    use velda_observability::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
+    use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_proto_wire_formatter_decodes_cleanly() {

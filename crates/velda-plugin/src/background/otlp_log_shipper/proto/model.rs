@@ -11,7 +11,8 @@
 
 use prost::Message;
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogGrpcStatus};
+use velda_core::GrpcStatus;
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{fast_write_hex32, fast_write_ip};
 
@@ -210,7 +211,7 @@ impl LogRecord {
         let req_lo = rec.request_id;
 
         let (severity_num, severity_txt) = if rec.status_code >= 500
-            || (grpc_st != LogGrpcStatus::Ok && grpc_st != LogGrpcStatus::NonGrpc)
+            || (grpc_st != GrpcStatus::Ok && grpc_st != GrpcStatus::NonGrpc)
         {
             (17, "ERROR")
         } else if rec.status_code >= 400 {

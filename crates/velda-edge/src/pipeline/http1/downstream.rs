@@ -179,12 +179,12 @@ pub async fn run_http1_loop<IO>(
                         route_id: 0,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
-                        pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                        completion: velda_observability::LogCompletionReason::Timeout,
-                        method: velda_observability::LogHttpMethod::Unknown,
-                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
-                        ua_family: velda_observability::UaFamily::None,
-                        ua_os: velda_observability::UaOs::Unknown,
+                        pipe: velda_core::PipeKind::BufferedH1H1,
+                        completion: velda_core::CompletionReason::Timeout,
+                        method: velda_core::HttpMethod::Unknown,
+                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        ua_family: velda_core::UaFamily::None,
+                        ua_os: velda_core::UaOs::Unknown,
                         url_len: 0,
                         url_bytes: [0; 188],
                     },
@@ -232,12 +232,12 @@ pub async fn run_http1_loop<IO>(
                         route_id: 0,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
-                        pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                        completion: velda_observability::LogCompletionReason::Rejected,
-                        method: velda_observability::LogHttpMethod::Unknown,
-                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
-                        ua_family: velda_observability::UaFamily::None,
-                        ua_os: velda_observability::UaOs::Unknown,
+                        pipe: velda_core::PipeKind::BufferedH1H1,
+                        completion: velda_core::CompletionReason::Rejected,
+                        method: velda_core::HttpMethod::Unknown,
+                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        ua_family: velda_core::UaFamily::None,
+                        ua_os: velda_core::UaOs::Unknown,
                         url_len: 0,
                         url_bytes: [0; 188],
                     },
@@ -263,17 +263,12 @@ pub async fn run_http1_loop<IO>(
         let mut req_head = req_head;
         req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
 
-        let log_method =
-            velda_observability::LogHttpMethod::from_bytes(req_head.method.as_str().as_bytes());
+        let log_method = velda_core::HttpMethod::from_bytes(req_head.method.as_str().as_bytes());
         let (ua_family, ua_os, ua_major_version) = req_head
             .headers
             .get(http::header::USER_AGENT)
-            .map(|v| velda_observability::classify_user_agent(v.as_bytes()))
-            .unwrap_or((
-                velda_observability::UaFamily::None,
-                velda_observability::UaOs::Unknown,
-                0,
-            ));
+            .map(|v| velda_core::classify_user_agent(v.as_bytes()))
+            .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
         let (mut log_url_len, mut log_url_bytes) = {
             let host = velda_http1::server::header::extract_host(&req_head.headers, &req_head.uri);
             let pq = req_head
@@ -320,10 +315,10 @@ pub async fn run_http1_loop<IO>(
                 route_id: 0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
-                pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                completion: velda_observability::LogCompletionReason::Rejected,
+                pipe: velda_core::PipeKind::BufferedH1H1,
+                completion: velda_core::CompletionReason::Rejected,
                 method: log_method,
-                grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -369,10 +364,10 @@ pub async fn run_http1_loop<IO>(
                 route_id: 0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
-                pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                completion: velda_observability::LogCompletionReason::Rejected,
+                pipe: velda_core::PipeKind::BufferedH1H1,
+                completion: velda_core::CompletionReason::Rejected,
                 method: log_method,
-                grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -444,10 +439,10 @@ pub async fn run_http1_loop<IO>(
                 route_id: 0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
-                pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                completion: velda_observability::LogCompletionReason::Rejected,
+                pipe: velda_core::PipeKind::BufferedH1H1,
+                completion: velda_core::CompletionReason::Rejected,
                 method: log_method,
-                grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -541,10 +536,10 @@ pub async fn run_http1_loop<IO>(
                                     route_id: route.id.0 as u16,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
-                                    pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                                    completion: velda_observability::LogCompletionReason::Rejected,
+                                    pipe: velda_core::PipeKind::BufferedH1H1,
+                                    completion: velda_core::CompletionReason::Rejected,
                                     method: log_method,
-                                    grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
                                     ua_family,
                                     ua_os,
                                     url_len: log_url_len,
@@ -631,10 +626,10 @@ pub async fn run_http1_loop<IO>(
                                     route_id: route.id.0 as u16,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
-                                    pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                                    completion: velda_observability::LogCompletionReason::Rejected,
+                                    pipe: velda_core::PipeKind::BufferedH1H1,
+                                    completion: velda_core::CompletionReason::Rejected,
                                     method: log_method,
-                                    grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
                                     ua_family,
                                     ua_os,
                                     url_len: log_url_len,
@@ -699,10 +694,10 @@ pub async fn run_http1_loop<IO>(
                             route_id: route.id.0 as u16,
                             ua_major_version,
                             rpc_msgs_or_flags: 0,
-                            pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                            completion: velda_observability::LogCompletionReason::Complete,
+                            pipe: velda_core::PipeKind::BufferedH1H1,
+                            completion: velda_core::CompletionReason::Complete,
                             method: log_method,
-                            grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                            grpc_status: velda_core::GrpcStatus::NonGrpc,
                             ua_family,
                             ua_os,
                             url_len: log_url_len,
@@ -771,10 +766,10 @@ pub async fn run_http1_loop<IO>(
                 route_id: route.id.0 as u16,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
-                pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                completion: velda_observability::LogCompletionReason::UpstreamError,
+                pipe: velda_core::PipeKind::BufferedH1H1,
+                completion: velda_core::CompletionReason::UpstreamError,
                 method: log_method,
-                grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -822,10 +817,10 @@ pub async fn run_http1_loop<IO>(
                 route_id: route.id.0 as u16,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
-                pipe: velda_core::pipe::PipeKind::BufferedH1H1,
-                completion: velda_observability::LogCompletionReason::Rejected,
+                pipe: velda_core::PipeKind::BufferedH1H1,
+                completion: velda_core::CompletionReason::Rejected,
                 method: log_method,
-                grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -851,22 +846,22 @@ pub async fn run_http1_loop<IO>(
                     Http1PipeStrategy::Buffered => (
                         UpstreamProtocol::H1,
                         PipeStrategy::Buffered,
-                        velda_core::pipe::PipeKind::BufferedH1H1,
+                        velda_core::PipeKind::BufferedH1H1,
                     ),
                     Http1PipeStrategy::ServerStream => (
                         UpstreamProtocol::H1,
                         PipeStrategy::ServerStream,
-                        velda_core::pipe::PipeKind::ServerStreamH1H1,
+                        velda_core::PipeKind::ServerStreamH1H1,
                     ),
                     Http1PipeStrategy::ClientStream => (
                         UpstreamProtocol::H1,
                         PipeStrategy::ClientStream,
-                        velda_core::pipe::PipeKind::ClientStreamH1H1,
+                        velda_core::PipeKind::ClientStreamH1H1,
                     ),
                     Http1PipeStrategy::Duplex => (
                         UpstreamProtocol::H1,
                         PipeStrategy::Duplex,
-                        velda_core::pipe::PipeKind::DuplexH1H1,
+                        velda_core::PipeKind::DuplexH1H1,
                     ),
                 }
             }
@@ -875,22 +870,22 @@ pub async fn run_http1_loop<IO>(
                     Http2PipeStrategy::Buffered => (
                         UpstreamProtocol::H2,
                         PipeStrategy::Buffered,
-                        velda_core::pipe::PipeKind::BufferedH1H2,
+                        velda_core::PipeKind::BufferedH1H2,
                     ),
                     Http2PipeStrategy::ServerStream => (
                         UpstreamProtocol::H2,
                         PipeStrategy::ServerStream,
-                        velda_core::pipe::PipeKind::ServerStreamH1H2,
+                        velda_core::PipeKind::ServerStreamH1H2,
                     ),
                     Http2PipeStrategy::ClientStream => (
                         UpstreamProtocol::H2,
                         PipeStrategy::ClientStream,
-                        velda_core::pipe::PipeKind::ClientStreamH1H2,
+                        velda_core::PipeKind::ClientStreamH1H2,
                     ),
                     Http2PipeStrategy::Duplex => (
                         UpstreamProtocol::H2,
                         PipeStrategy::Duplex,
-                        velda_core::pipe::PipeKind::DuplexH1H2,
+                        velda_core::PipeKind::DuplexH1H2,
                     ),
                 }
             }
@@ -899,22 +894,22 @@ pub async fn run_http1_loop<IO>(
                     Http3PipeStrategy::Buffered => (
                         UpstreamProtocol::H3,
                         PipeStrategy::Buffered,
-                        velda_core::pipe::PipeKind::BufferedH1H3,
+                        velda_core::PipeKind::BufferedH1H3,
                     ),
                     Http3PipeStrategy::ServerStream => (
                         UpstreamProtocol::H3,
                         PipeStrategy::ServerStream,
-                        velda_core::pipe::PipeKind::ServerStreamH1H3,
+                        velda_core::PipeKind::ServerStreamH1H3,
                     ),
                     Http3PipeStrategy::ClientStream => (
                         UpstreamProtocol::H3,
                         PipeStrategy::ClientStream,
-                        velda_core::pipe::PipeKind::ClientStreamH1H3,
+                        velda_core::PipeKind::ClientStreamH1H3,
                     ),
                     Http3PipeStrategy::Duplex => (
                         UpstreamProtocol::H3,
                         PipeStrategy::Duplex,
-                        velda_core::pipe::PipeKind::DuplexH1H3,
+                        velda_core::PipeKind::DuplexH1H3,
                     ),
                 }
             }
@@ -1036,9 +1031,9 @@ pub async fn run_http1_loop<IO>(
             None => (0, 0),
         };
         let completion_reason = match &pipe_result {
-            Ok(()) => velda_observability::LogCompletionReason::Complete,
-            Err(Http1Error::Timeout) => velda_observability::LogCompletionReason::Timeout,
-            Err(_) => velda_observability::LogCompletionReason::UpstreamError,
+            Ok(()) => velda_core::CompletionReason::Complete,
+            Err(Http1Error::Timeout) => velda_core::CompletionReason::Timeout,
+            Err(_) => velda_core::CompletionReason::UpstreamError,
         };
 
         let elapsed = req_start.elapsed();
@@ -1071,7 +1066,7 @@ pub async fn run_http1_loop<IO>(
             pipe: pipe_kind,
             completion: completion_reason,
             method: log_method,
-            grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+            grpc_status: velda_core::GrpcStatus::NonGrpc,
             ua_family,
             ua_os,
             url_len: log_url_len,

@@ -57,7 +57,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -276,7 +276,7 @@ pub async fn serve(
     .await;
 
     let (bytes_rx, completion) = match pipe_res {
-        Ok(rx) => (rx, velda_observability::LogCompletionReason::Complete),
+        Ok(rx) => (rx, velda_core::CompletionReason::Complete),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -295,7 +295,7 @@ pub async fn serve(
                 meta.inject_response_headers(&mut err_resp.headers);
                 let _ = responder.send_response(&err_resp);
             }
-            (0, velda_observability::LogCompletionReason::UpstreamError)
+            (0, velda_core::CompletionReason::UpstreamError)
         }
     };
     PipeOutcome::http(

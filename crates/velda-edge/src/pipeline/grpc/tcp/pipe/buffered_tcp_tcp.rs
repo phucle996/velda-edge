@@ -17,9 +17,10 @@ use http::Version;
 use std::sync::Arc;
 use std::time::Duration;
 
+use velda_core::GrpcStatus;
 use velda_grpc::tcp::client::GrpcUpstreamConnector;
 use velda_grpc::tcp::server::{GrpcResponder, GrpcServerStream};
-use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
+use velda_grpc::{GrpcConfig, GrpcError};
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcTcpUpstream;
@@ -31,7 +32,7 @@ async fn pipe_buffered_wire(
     respond: &mut GrpcResponder,
     connector: &mut GrpcUpstreamConnector,
     config: &GrpcConfig,
-) -> Result<(u64, velda_observability::LogGrpcStatus), GrpcError> {
+) -> Result<(u64, velda_core::GrpcStatus), GrpcError> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
@@ -77,8 +78,8 @@ async fn pipe_buffered_wire(
             .get("grpc-status")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u8>().ok())
-            .map(velda_observability::LogGrpcStatus::from_u8)
-            .unwrap_or(velda_observability::LogGrpcStatus::Ok);
+            .map(velda_core::GrpcStatus::from_u8)
+            .unwrap_or(velda_core::GrpcStatus::Ok);
 
         let is_end_of_stream = upstream_recv_stream.is_end_stream();
         let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
@@ -137,7 +138,7 @@ async fn pipe_buffered_wire(
                     .get("grpc-status")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u8>().ok())
-                    .map(velda_observability::LogGrpcStatus::from_u8)
+                    .map(velda_core::GrpcStatus::from_u8)
                 {
                     grpc_status = code;
                 }
@@ -191,11 +192,11 @@ pub async fn serve(
             );
             return PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::ResourceExhausted,
+                velda_core::GrpcStatus::ResourceExhausted,
                 0,
                 0,
                 None,
-                velda_observability::LogCompletionReason::Rejected,
+                velda_core::CompletionReason::Rejected,
             );
         }
     };
@@ -215,11 +216,11 @@ pub async fn serve(
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
             return PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::Unavailable,
+                velda_core::GrpcStatus::Unavailable,
                 bytes_rx,
                 0,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -266,15 +267,15 @@ pub async fn serve(
             bytes_rx,
             bytes_tx,
             upstream_addr,
-            velda_observability::LogCompletionReason::Complete,
+            velda_core::CompletionReason::Complete,
         ),
         Err(_) => PipeOutcome::grpc(
             200,
-            velda_observability::LogGrpcStatus::Unavailable,
+            velda_core::GrpcStatus::Unavailable,
             bytes_rx,
             0,
             upstream_addr,
-            velda_observability::LogCompletionReason::UpstreamError,
+            velda_core::CompletionReason::UpstreamError,
         ),
     }
 }

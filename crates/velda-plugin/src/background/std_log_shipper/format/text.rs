@@ -1,7 +1,8 @@
 //! Text & Common Log Format (CLF) Access Log Formatting (`std_log_shipper::format::text`).
 
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogProtocol};
+use velda_core::WireProtocol;
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_u64};
 
@@ -50,7 +51,7 @@ pub fn format_text_records(
             out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
 
             match downstream_protocol {
-                LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                     out.extend_from_slice(method.as_str().as_bytes());
                     out.push(b' ');
                     if !rec.path().is_empty() {
@@ -84,7 +85,7 @@ pub fn format_text_records(
                     out.extend_from_slice(completion.as_str().as_bytes());
                     out.push(b'\n');
                 }
-                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                     out.extend_from_slice(TEXT_POST);
                     if !rec.path().is_empty() {
                         out.extend_from_slice(rec.path().as_bytes());
@@ -121,7 +122,7 @@ pub fn format_text_records(
                     out.extend_from_slice(completion.as_str().as_bytes());
                     out.push(b'\n');
                 }
-                LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                WireProtocol::RawTcp | WireProtocol::RawUdp => {
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());
                     out.extend_from_slice(TEXT_QUOTE_SPACE);
                     fast_write_u64(out, rec.status_code as u64);
@@ -169,7 +170,7 @@ pub fn format_clf_records(
             out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
 
             match downstream_protocol {
-                LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                     out.extend_from_slice(method.as_str().as_bytes());
                     out.push(b' ');
                     if !rec.path().is_empty() {
@@ -183,7 +184,7 @@ pub fn format_clf_records(
                     fast_write_u64(out, rec.bytes_tx as u64);
                     out.push(b'\n');
                 }
-                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                     out.extend_from_slice(TEXT_POST);
                     if !rec.path().is_empty() {
                         out.extend_from_slice(rec.path().as_bytes());
@@ -196,7 +197,7 @@ pub fn format_clf_records(
                     fast_write_u64(out, rec.bytes_tx as u64);
                     out.push(b'\n');
                 }
-                LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                WireProtocol::RawTcp | WireProtocol::RawUdp => {
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());
                     out.extend_from_slice(TEXT_QUOTE_SPACE);
                     fast_write_u64(out, rec.status_code as u64);

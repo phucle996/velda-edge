@@ -53,7 +53,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_observability::LogCompletionReason::Rejected,
+                velda_core::CompletionReason::Rejected,
             );
         }
     };
@@ -100,7 +100,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -257,7 +257,7 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
-            velda_observability::LogCompletionReason::Complete
+            velda_core::CompletionReason::Complete
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to read upstream HTTP/1.1 response");
@@ -270,7 +270,7 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
-            velda_observability::LogCompletionReason::UpstreamError
+            velda_core::CompletionReason::UpstreamError
         }
     };
     PipeOutcome::http(

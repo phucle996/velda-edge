@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode, Version};
-use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response};
-use velda_grpc::{GrpcStatus, GrpcWire};
+use velda_core::{Action, Body, GrpcStatus, HeaderWorkspace, L7Request, L7Response};
+use velda_grpc::GrpcWire;
 use velda_sync::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};

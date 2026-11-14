@@ -11,17 +11,15 @@ pub mod config;
 pub mod error;
 pub mod frame;
 pub mod slot;
-pub mod status;
 pub mod tcp;
 pub mod udp;
 pub mod wire;
 
-// Common types, framing, status, config, error, and wire namespaces
+// Common types, framing, config, error, and wire namespaces
 pub use config::GrpcConfig;
 pub use error::GrpcError;
 pub use frame::{GrpcFrame, decode_grpc_frame, encode_grpc_frame};
 pub use slot::GrpcMetadataSlot;
-pub use status::GrpcStatus;
 pub use tcp::{
     GrpcAccelerationPath, GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse,
     GrpcClientResponseHead, GrpcPipeStrategy, GrpcResponder, GrpcServerConnection,

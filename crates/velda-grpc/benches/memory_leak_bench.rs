@@ -9,9 +9,9 @@ use common::{CountingAllocator, format_duration, format_throughput};
 use http::Method;
 use http::header::CONTENT_TYPE;
 use tokio::io::duplex;
+use velda_core::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::encode_grpc_frame;
-use velda_grpc::status::GrpcStatus;
 use velda_grpc::tcp::server::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 

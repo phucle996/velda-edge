@@ -77,7 +77,7 @@ pub async fn serve(
                 stats.server_to_client_bytes,
                 up_ip,
                 up_port,
-                velda_observability::LogCompletionReason::Complete,
+                velda_core::CompletionReason::Complete,
                 None,
             )
         }
@@ -95,7 +95,7 @@ pub async fn serve(
                 0,
                 up_ip,
                 up_port,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
                 Some(e.to_string()),
             )
         }
@@ -104,7 +104,7 @@ pub async fn serve(
             0,
             0,
             0,
-            velda_observability::LogCompletionReason::UpstreamError,
+            velda_core::CompletionReason::UpstreamError,
             Some(e.to_string()),
         ),
     };
@@ -122,12 +122,12 @@ pub async fn serve(
         route_id: route_id.0 as u16,
         ua_major_version: 0,
         rpc_msgs_or_flags: 0,
-        pipe: velda_core::pipe::PipeKind::TcpTcp,
+        pipe: velda_core::PipeKind::TcpTcp,
         completion,
-        method: velda_observability::LogHttpMethod::Unknown,
-        grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
-        ua_family: velda_observability::UaFamily::None,
-        ua_os: velda_observability::UaOs::Unknown,
+        method: velda_core::HttpMethod::Unknown,
+        grpc_status: velda_core::GrpcStatus::NonGrpc,
+        ua_family: velda_core::UaFamily::None,
+        ua_os: velda_core::UaOs::Unknown,
         url_len: 0,
         url_bytes: [0; 188],
     });

@@ -4,11 +4,6 @@
 
 use std::net::{IpAddr, Ipv6Addr};
 
-pub use velda_core::lut::{
-    CompletionReason as LogCompletionReason, GrpcStatus as LogGrpcStatus,
-    HttpMethod as LogHttpMethod, WireProtocol as LogProtocol,
-};
-
 /// Encodes an [`IpAddr`] losslessly into a 128-bit integer using RFC 4291 IPv4-mapped encoding
 /// (`0x0000_0000_0000_0000_0000_FFFF_<ipv4_u32>`) so both IPv4 and IPv6 occupy a single
 /// integer field without an extra version discriminator flag.

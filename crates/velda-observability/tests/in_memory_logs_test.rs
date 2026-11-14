@@ -4,6 +4,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use velda_core::{
+    CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, classify_user_agent,
+};
 use velda_observability::*;
 
 #[test]
@@ -63,9 +66,9 @@ fn test_ref_counted_multi_exporter_fanout_and_auto_drop() {
         7,
         0,
         PipeKind::BufferedH2H1,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Get,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Get,
+        GrpcStatus::NonGrpc,
         b"curl/8.5.0",
     );
 

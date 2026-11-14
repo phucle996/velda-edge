@@ -13,9 +13,8 @@ use std::sync::Arc;
 
 use prost::Message;
 use serde_json::Value;
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeKind,
-};
+use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, WireProtocol};
+use velda_observability::AccessLogRecord;
 
 use velda_plugin::background::loki_log_shipper::json::{
     LokiJsonFormatter, LokiStreamTemplate, format_loki_push_payload,
@@ -29,9 +28,9 @@ fn build_record(
     id: u64,
     ts: u32,
     peer_str: &str,
-    proto: LogProtocol,
-    method: LogHttpMethod,
-    grpc_status: LogGrpcStatus,
+    proto: WireProtocol,
+    method: HttpMethod,
+    grpc_status: GrpcStatus,
 ) -> AccessLogRecord {
     let peer: SocketAddr = peer_str.parse().expect("Valid socket address");
     AccessLogRecord::from_scalars(
@@ -46,7 +45,7 @@ fn build_record(
         1,
         0,
         PipeKind::from_protocols(proto as u8, proto as u8, 0),
-        LogCompletionReason::Complete,
+        CompletionReason::Complete,
         method,
         grpc_status,
         b"velda-test-agent/1.0",
@@ -80,9 +79,9 @@ fn test_chaos_request_id_boundaries() {
             id,
             ts,
             "127.0.0.1:8080",
-            LogProtocol::H1,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            WireProtocol::H1,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
         );
         let batches = vec![Arc::from(vec![rec])];
 
@@ -161,9 +160,9 @@ fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
             0x1234_5678,
             1_710_000_000,
             peer_input,
-            LogProtocol::H2,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            WireProtocol::H2,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
         );
         let batches = vec![Arc::from(vec![rec])];
 
@@ -195,13 +194,13 @@ fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
 #[test]
 fn test_chaos_protocol_combinations_multi_stream_partitioning() {
     let protocols = [
-        (LogProtocol::H1, "http"),
-        (LogProtocol::H2, "http"),
-        (LogProtocol::H3, "http"),
-        (LogProtocol::GrpcTcp, "grpc"),
-        (LogProtocol::GrpcUdp, "grpc"),
-        (LogProtocol::RawTcp, "raw"),
-        (LogProtocol::RawUdp, "raw"),
+        (WireProtocol::H1, "http"),
+        (WireProtocol::H2, "http"),
+        (WireProtocol::H3, "http"),
+        (WireProtocol::GrpcTcp, "grpc"),
+        (WireProtocol::GrpcUdp, "grpc"),
+        (WireProtocol::RawTcp, "raw"),
+        (WireProtocol::RawUdp, "raw"),
     ];
 
     // Build 700 records: 100 of each of the 7 protocol variants, interleaved
@@ -209,12 +208,12 @@ fn test_chaos_protocol_combinations_multi_stream_partitioning() {
     for i in 0..100 {
         for &(proto, _expected_bucket) in &protocols {
             let method = match proto {
-                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => LogHttpMethod::Post,
-                _ => LogHttpMethod::Get,
+                WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => HttpMethod::Post,
+                _ => HttpMethod::Get,
             };
             let grpc_status = match proto {
-                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => LogGrpcStatus::Ok,
-                _ => LogGrpcStatus::NonGrpc,
+                WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => GrpcStatus::Ok,
+                _ => GrpcStatus::NonGrpc,
             };
             records.push(build_record(
                 0x1000 + i as u64,
@@ -322,33 +321,33 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
     let proto_labels = LokiProtoLabels::new("velda-edge", &labels);
 
     let methods = [
-        LogHttpMethod::Get,
-        LogHttpMethod::Post,
-        LogHttpMethod::Put,
-        LogHttpMethod::Delete,
-        LogHttpMethod::Patch,
-        LogHttpMethod::Options,
-        LogHttpMethod::Head,
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Patch,
+        HttpMethod::Options,
+        HttpMethod::Head,
     ];
 
     let grpc_statuses = [
-        LogGrpcStatus::Ok,
-        LogGrpcStatus::Cancelled,
-        LogGrpcStatus::Unknown,
-        LogGrpcStatus::InvalidArgument,
-        LogGrpcStatus::DeadlineExceeded,
-        LogGrpcStatus::NotFound,
-        LogGrpcStatus::AlreadyExists,
-        LogGrpcStatus::PermissionDenied,
-        LogGrpcStatus::ResourceExhausted,
-        LogGrpcStatus::FailedPrecondition,
-        LogGrpcStatus::Aborted,
-        LogGrpcStatus::OutOfRange,
-        LogGrpcStatus::Unimplemented,
-        LogGrpcStatus::Internal,
-        LogGrpcStatus::Unavailable,
-        LogGrpcStatus::DataLoss,
-        LogGrpcStatus::Unauthenticated,
+        GrpcStatus::Ok,
+        GrpcStatus::Cancelled,
+        GrpcStatus::Unknown,
+        GrpcStatus::InvalidArgument,
+        GrpcStatus::DeadlineExceeded,
+        GrpcStatus::NotFound,
+        GrpcStatus::AlreadyExists,
+        GrpcStatus::PermissionDenied,
+        GrpcStatus::ResourceExhausted,
+        GrpcStatus::FailedPrecondition,
+        GrpcStatus::Aborted,
+        GrpcStatus::OutOfRange,
+        GrpcStatus::Unimplemented,
+        GrpcStatus::Internal,
+        GrpcStatus::Unavailable,
+        GrpcStatus::DataLoss,
+        GrpcStatus::Unauthenticated,
     ];
 
     let mut records = Vec::new();
@@ -357,9 +356,9 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
             100 + i as u64,
             1_710_000_100 + i as u32,
             "192.168.1.1:8080",
-            LogProtocol::H2,
+            WireProtocol::H2,
             method,
-            LogGrpcStatus::NonGrpc,
+            GrpcStatus::NonGrpc,
         ));
     }
     for (j, &st) in grpc_statuses.iter().enumerate() {
@@ -367,8 +366,8 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
             200 + j as u64,
             1_710_000_200 + j as u32,
             "[::1]:9090",
-            LogProtocol::GrpcTcp,
-            LogHttpMethod::Post,
+            WireProtocol::GrpcTcp,
+            HttpMethod::Post,
             st,
         ));
     }
@@ -465,17 +464,17 @@ fn test_chaos_stress_scratch_buffers_10k_records() {
         let mut cycle_records = Vec::with_capacity(records_per_cycle);
         for i in 0..records_per_cycle {
             let proto = match i % 3 {
-                0 => LogProtocol::H2,
-                1 => LogProtocol::GrpcTcp,
-                _ => LogProtocol::RawTcp,
+                0 => WireProtocol::H2,
+                1 => WireProtocol::GrpcTcp,
+                _ => WireProtocol::RawTcp,
             };
             cycle_records.push(build_record(
                 (cycle * records_per_cycle + i) as u64,
                 1_710_000_000 + cycle as u32,
                 "192.168.1.1:8080",
                 proto,
-                LogHttpMethod::Get,
-                LogGrpcStatus::Ok,
+                HttpMethod::Get,
+                GrpcStatus::Ok,
             ));
         }
 

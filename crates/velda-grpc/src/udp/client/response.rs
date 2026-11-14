@@ -4,7 +4,7 @@ use http::header::HeaderMap;
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
 
-use crate::status::GrpcStatus;
+use velda_core::GrpcStatus;
 
 /// Upstream gRPC client response head metadata over UDP.
 #[derive(Debug, Clone)]

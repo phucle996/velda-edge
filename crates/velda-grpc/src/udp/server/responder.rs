@@ -5,8 +5,8 @@ use http::StatusCode;
 use http::header::HeaderMap;
 use velda_core::{Body, L7Response};
 
-use crate::status::GrpcStatus;
 use crate::udp::wire::{UdpFrame, encode_qpack_response, encode_udp_frame};
+use velda_core::GrpcStatus;
 
 /// Downstream gRPC server response head metadata over UDP.
 #[derive(Debug, Clone)]

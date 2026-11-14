@@ -10,8 +10,8 @@ use http::{HeaderMap, HeaderValue, Response, StatusCode};
 
 use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
-use crate::status::GrpcStatus;
 use crate::wire::{GrpcWire, X_REQUEST_ID};
+use velda_core::GrpcStatus;
 
 /// Downstream gRPC server response head metadata over TCP.
 #[derive(Debug, Clone)]

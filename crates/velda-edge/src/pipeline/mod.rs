@@ -19,8 +19,8 @@ pub struct PipeOutcome {
     pub bytes_rx: u64,
     pub bytes_tx: u64,
     pub upstream_addr: Option<std::net::SocketAddr>,
-    pub grpc_status: velda_observability::LogGrpcStatus,
-    pub completion: velda_observability::LogCompletionReason,
+    pub grpc_status: velda_core::GrpcStatus,
+    pub completion: velda_core::CompletionReason,
 }
 
 impl PipeOutcome {
@@ -31,14 +31,14 @@ impl PipeOutcome {
         bytes_rx: u64,
         bytes_tx: u64,
         upstream_addr: Option<std::net::SocketAddr>,
-        completion: velda_observability::LogCompletionReason,
+        completion: velda_core::CompletionReason,
     ) -> Self {
         Self {
             status_code,
             bytes_rx,
             bytes_tx,
             upstream_addr,
-            grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
+            grpc_status: velda_core::GrpcStatus::NonGrpc,
             completion,
         }
     }
@@ -47,11 +47,11 @@ impl PipeOutcome {
     #[inline(always)]
     pub const fn grpc(
         status_code: u16,
-        grpc_status: velda_observability::LogGrpcStatus,
+        grpc_status: velda_core::GrpcStatus,
         bytes_rx: u64,
         bytes_tx: u64,
         upstream_addr: Option<std::net::SocketAddr>,
-        completion: velda_observability::LogCompletionReason,
+        completion: velda_core::CompletionReason,
     ) -> Self {
         Self {
             status_code,

@@ -15,10 +15,8 @@ use http::{HeaderMap, HeaderValue, Method, Uri, Version};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use velda_core::{Body, L7Request};
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, MetricsStore, PipeKind,
-};
+use velda_core::{Body, CompletionReason, GrpcStatus, HttpMethod, L7Request, PipeKind};
+use velda_observability::{AccessLogRecord, MetricsStore};
 
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json,
@@ -211,9 +209,9 @@ async fn test_otlp_log_shipper_batching_and_send() {
         1,
         0,
         PipeKind::BufferedH1H1,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Get,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Get,
+        GrpcStatus::NonGrpc,
         b"curl/8.6.0",
     );
 
@@ -229,9 +227,9 @@ async fn test_otlp_log_shipper_batching_and_send() {
         2,
         0,
         PipeKind::BufferedH1H1,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Post,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Post,
+        GrpcStatus::NonGrpc,
         b"curl/8.6.0",
     );
 
@@ -455,9 +453,9 @@ async fn test_otlp_logs_and_traces_grpc_export() {
         1,
         0,
         PipeKind::BufferedH2H2,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Post,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Post,
+        GrpcStatus::NonGrpc,
         b"curl/8.6.0",
     );
 

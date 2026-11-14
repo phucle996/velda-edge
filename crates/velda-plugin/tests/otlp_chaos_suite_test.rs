@@ -14,10 +14,10 @@
 
 use prost::Message;
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, PipeKind,
-    UaFamily, UaOs,
+use velda_core::{
+    CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
+use velda_observability::AccessLogRecord;
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, format_otlp_records_json,
 };
@@ -30,10 +30,10 @@ use velda_plugin::background::otlp_log_shipper::proto::{
 fn make_record(
     req_id: u64,
     ts_sec: u32,
-    proto: LogProtocol,
-    method: LogHttpMethod,
+    proto: WireProtocol,
+    method: HttpMethod,
     status: u16,
-    grpc: LogGrpcStatus,
+    grpc: GrpcStatus,
     dur_ns: u64,
     tx: u32,
     rx: u32,
@@ -59,15 +59,15 @@ fn make_record(
         ua_major_version: ua_major,
         rpc_msgs_or_flags: 0,
         pipe: match proto {
-            LogProtocol::H1 => PipeKind::BufferedH1H1,
-            LogProtocol::H2 => PipeKind::BufferedH2H1,
-            LogProtocol::H3 => PipeKind::BufferedH3H1,
-            LogProtocol::GrpcTcp => PipeKind::BufferedGrpcTcpTcp,
-            LogProtocol::GrpcUdp => PipeKind::BufferedGrpcUdpTcp,
-            LogProtocol::RawTcp => PipeKind::TcpTcp,
-            LogProtocol::RawUdp => PipeKind::UdpUdp,
+            WireProtocol::H1 => PipeKind::BufferedH1H1,
+            WireProtocol::H2 => PipeKind::BufferedH2H1,
+            WireProtocol::H3 => PipeKind::BufferedH3H1,
+            WireProtocol::GrpcTcp => PipeKind::BufferedGrpcTcpTcp,
+            WireProtocol::GrpcUdp => PipeKind::BufferedGrpcUdpTcp,
+            WireProtocol::RawTcp => PipeKind::TcpTcp,
+            WireProtocol::RawUdp => PipeKind::UdpUdp,
         },
-        completion: LogCompletionReason::Complete,
+        completion: CompletionReason::Complete,
         method,
         grpc_status: grpc,
         ua_family: ua_fam,
@@ -134,10 +134,10 @@ fn test_otlp_chaos_request_id_and_timestamps() {
             let rec = make_record(
                 req_id,
                 ts_sec,
-                LogProtocol::H2,
-                LogHttpMethod::Get,
+                WireProtocol::H2,
+                HttpMethod::Get,
                 200,
-                LogGrpcStatus::NonGrpc,
+                GrpcStatus::NonGrpc,
                 150,
                 512,
                 128,
@@ -244,10 +244,10 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
         let rec = make_record(
             42,
             1_710_000_000,
-            LogProtocol::H1,
-            LogHttpMethod::Post,
+            WireProtocol::H1,
+            HttpMethod::Post,
             201,
-            LogGrpcStatus::NonGrpc,
+            GrpcStatus::NonGrpc,
             300,
             1024,
             256,
@@ -316,24 +316,24 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
     ];
 
     let grpc_statuses = [
-        LogGrpcStatus::Ok,               // 0
-        LogGrpcStatus::Cancelled,        // 1
-        LogGrpcStatus::Unknown,          // 2
-        LogGrpcStatus::InvalidArgument,  // 3
-        LogGrpcStatus::DeadlineExceeded, // 4
-        LogGrpcStatus::NotFound,         // 5
-        LogGrpcStatus::AlreadyExists,    // 6
-        LogGrpcStatus::PermissionDenied, // 7
-        LogGrpcStatus::Internal,         // 13
-        LogGrpcStatus::Unavailable,      // 14
-        LogGrpcStatus::DataLoss,         // 15
-        LogGrpcStatus::Unauthenticated,  // 16
-        LogGrpcStatus::NonGrpc,          // 255
+        GrpcStatus::Ok,               // 0
+        GrpcStatus::Cancelled,        // 1
+        GrpcStatus::Unknown,          // 2
+        GrpcStatus::InvalidArgument,  // 3
+        GrpcStatus::DeadlineExceeded, // 4
+        GrpcStatus::NotFound,         // 5
+        GrpcStatus::AlreadyExists,    // 6
+        GrpcStatus::PermissionDenied, // 7
+        GrpcStatus::Internal,         // 13
+        GrpcStatus::Unavailable,      // 14
+        GrpcStatus::DataLoss,         // 15
+        GrpcStatus::Unauthenticated,  // 16
+        GrpcStatus::NonGrpc,          // 255
     ];
 
     for &status in &http_statuses {
         for &grpc in &grpc_statuses {
-            let is_grpc_err = grpc != LogGrpcStatus::Ok && grpc != LogGrpcStatus::NonGrpc;
+            let is_grpc_err = grpc != GrpcStatus::Ok && grpc != GrpcStatus::NonGrpc;
             let (expected_sev_num, expected_sev_text) = if status >= 500 || is_grpc_err {
                 (17, "ERROR")
             } else if status >= 400 {
@@ -345,8 +345,8 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
             let rec = make_record(
                 100,
                 1_710_000_000,
-                LogProtocol::H2,
-                LogHttpMethod::Get,
+                WireProtocol::H2,
+                HttpMethod::Get,
                 status,
                 grpc,
                 200,
@@ -452,10 +452,10 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
                 let rec = make_record(
                     999,
                     1_710_000_000,
-                    LogProtocol::H3,
-                    LogHttpMethod::Put,
+                    WireProtocol::H3,
+                    HttpMethod::Put,
                     200,
-                    LogGrpcStatus::NonGrpc,
+                    GrpcStatus::NonGrpc,
                     dur,
                     tx,
                     tx.wrapping_div(2),
@@ -528,26 +528,26 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
     let json_env = OtlpJsonEnvelope::new("velda-combo-chaos");
 
     let all_protocols = [
-        LogProtocol::H1,
-        LogProtocol::H2,
-        LogProtocol::H3,
-        LogProtocol::GrpcTcp,
-        LogProtocol::GrpcUdp,
-        LogProtocol::RawTcp,
-        LogProtocol::RawUdp,
+        WireProtocol::H1,
+        WireProtocol::H2,
+        WireProtocol::H3,
+        WireProtocol::GrpcTcp,
+        WireProtocol::GrpcUdp,
+        WireProtocol::RawTcp,
+        WireProtocol::RawUdp,
     ];
 
     let all_methods = [
-        LogHttpMethod::Unknown,
-        LogHttpMethod::Get,
-        LogHttpMethod::Post,
-        LogHttpMethod::Put,
-        LogHttpMethod::Delete,
-        LogHttpMethod::Head,
-        LogHttpMethod::Options,
-        LogHttpMethod::Patch,
-        LogHttpMethod::Connect,
-        LogHttpMethod::Trace,
+        HttpMethod::Unknown,
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Head,
+        HttpMethod::Options,
+        HttpMethod::Patch,
+        HttpMethod::Connect,
+        HttpMethod::Trace,
     ];
 
     let sample_ua_families = [
@@ -586,7 +586,7 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                         proto,
                         method,
                         200,
-                        LogGrpcStatus::NonGrpc,
+                        GrpcStatus::NonGrpc,
                         50,
                         10,
                         10,
@@ -692,22 +692,22 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     let mut large_batch = Vec::with_capacity(total_stress_records);
 
     let protos = [
-        LogProtocol::H1,
-        LogProtocol::H2,
-        LogProtocol::H3,
-        LogProtocol::GrpcTcp,
+        WireProtocol::H1,
+        WireProtocol::H2,
+        WireProtocol::H3,
+        WireProtocol::GrpcTcp,
     ];
     let methods = [
-        LogHttpMethod::Get,
-        LogHttpMethod::Post,
-        LogHttpMethod::Put,
-        LogHttpMethod::Delete,
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
     ];
     let grpcs = [
-        LogGrpcStatus::Ok,
-        LogGrpcStatus::NotFound,
-        LogGrpcStatus::Internal,
-        LogGrpcStatus::NonGrpc,
+        GrpcStatus::Ok,
+        GrpcStatus::NotFound,
+        GrpcStatus::Internal,
+        GrpcStatus::NonGrpc,
     ];
 
     for i in 0..total_stress_records {
@@ -824,10 +824,10 @@ fn test_otlp_chaos_rdtsc_cycle_stability() {
         chaos_batch.push(make_record(
             (i as u64) ^ 0xDEAD_BEEF_CAFE_BABE,
             1_710_000_000 + i as u32,
-            LogProtocol::from_u8((i % 7) as u8),
-            LogHttpMethod::from_u8((i % 10) as u8),
+            WireProtocol::from_u8((i % 7) as u8),
+            HttpMethod::from_u8((i % 10) as u8),
             sc,
-            LogGrpcStatus::from_u8((i % 18) as u8),
+            GrpcStatus::from_u8((i % 18) as u8),
             (i * 15) as u64,
             (i * 128) as u32,
             (i * 64) as u32,

@@ -29,7 +29,8 @@
 //! ```
 
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogGrpcStatus};
+use velda_core::GrpcStatus;
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ts_nano, fast_write_u64};
 
@@ -133,7 +134,7 @@ pub fn format_otlp_records_json(
 
             // 2. Pre-baked Severity, static Body ("HTTP access log"), and request_id attribute prefix
             if rec.status_code >= 500
-                || (grpc_st != LogGrpcStatus::Ok && grpc_st != LogGrpcStatus::NonGrpc)
+                || (grpc_st != GrpcStatus::Ok && grpc_st != GrpcStatus::NonGrpc)
             {
                 out.extend_from_slice(JSON_SEV_ERROR_BODY_REQ);
             } else if rec.status_code >= 400 {
@@ -216,7 +217,7 @@ pub fn format_otlp_records_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
+    use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_format_otlp_records_json_schema_and_req_id() {

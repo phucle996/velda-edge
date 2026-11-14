@@ -32,9 +32,8 @@
 //! ```
 
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
-};
+use velda_core::{GrpcStatus, HttpMethod, UaFamily, UaOs, WireProtocol};
+use velda_observability::AccessLogRecord;
 
 /// Canonical OpenTelemetry Schema URL byte constant (zero heap allocation).
 pub const OTLP_SCHEMA_URL: &[u8] = b"https://opentelemetry.io/schemas/1.26.0";
@@ -271,7 +270,7 @@ impl OtlpProtoWireEnvelope {
         let mut downstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
         let mut upstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
         for i in 0..7 {
-            let p = LogProtocol::from_u8(i as u8);
+            let p = WireProtocol::from_u8(i as u8);
             let mut down_buf = Vec::new();
             write_str_attribute(
                 &mut down_buf,
@@ -293,7 +292,7 @@ impl OtlpProtoWireEnvelope {
 
         let mut method_attrs: [Vec<u8>; 10] = Default::default();
         for (i, slot) in method_attrs.iter_mut().enumerate() {
-            let m = LogHttpMethod::from_u8(i as u8);
+            let m = HttpMethod::from_u8(i as u8);
             let mut buf = Vec::new();
             write_str_attribute(
                 &mut buf,
@@ -307,9 +306,9 @@ impl OtlpProtoWireEnvelope {
         let mut grpc_attrs: [Vec<u8>; 18] = Default::default();
         for (i, slot) in grpc_attrs.iter_mut().enumerate() {
             let g = if i <= 16 {
-                LogGrpcStatus::from_u8(i as u8)
+                GrpcStatus::from_u8(i as u8)
             } else {
-                LogGrpcStatus::NonGrpc
+                GrpcStatus::NonGrpc
             };
             let mut buf = Vec::new();
             write_str_attribute(
@@ -405,7 +404,7 @@ impl OtlpProtoWireEnvelope {
 
             // 2. Pre-baked wire skeleton: Severity + Body ("HTTP access log") + Request ID attribute prefix
             let skeleton = if rec.status_code >= 500
-                || (grpc_st != LogGrpcStatus::Ok && grpc_st != LogGrpcStatus::NonGrpc)
+                || (grpc_st != GrpcStatus::Ok && grpc_st != GrpcStatus::NonGrpc)
             {
                 SKELETON_ERROR
             } else if rec.status_code >= 400 {
@@ -553,7 +552,7 @@ mod tests {
     use super::super::model::{ExportLogsServiceRequest, any_value};
     use super::*;
     use prost::Message;
-    use velda_observability::PipeKind;
+    use velda_core::{CompletionReason, PipeKind};
 
     #[test]
     fn test_otlp_proto_wire_template() {
@@ -570,9 +569,9 @@ mod tests {
             1,
             0,
             PipeKind::BufferedH1H1,
-            velda_observability::LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"curl/8.6.0",
         );
 
@@ -674,9 +673,9 @@ mod tests {
             1,
             0,
             PipeKind::BufferedH1H1,
-            velda_observability::LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"curl/8.6.0",
         );
         let err_rec = AccessLogRecord::from_scalars(
@@ -691,9 +690,9 @@ mod tests {
             2,
             0,
             PipeKind::BufferedGrpcTcpTcp,
-            velda_observability::LogCompletionReason::UpstreamError,
-            LogHttpMethod::Post,
-            LogGrpcStatus::Unimplemented,
+            CompletionReason::UpstreamError,
+            HttpMethod::Post,
+            GrpcStatus::Unimplemented,
             b"grpc-go/1.64.0",
         );
         let batches = vec![Arc::from(vec![warn_rec, err_rec])];

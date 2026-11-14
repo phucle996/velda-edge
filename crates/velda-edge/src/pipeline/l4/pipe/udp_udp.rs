@@ -230,7 +230,7 @@ pub async fn serve(
         let (request_id, _) = velda_core::next_request_id();
         let started = std::time::Instant::now();
         let completion = match downstream_socket.send_to(&initial_bytes, target_addr).await {
-            Ok(_) => velda_observability::LogCompletionReason::Complete,
+            Ok(_) => velda_core::CompletionReason::Complete,
             Err(e) => {
                 tracing::trace!(
                     error = %e,
@@ -239,7 +239,7 @@ pub async fn serve(
                     peer = %client_addr,
                     "Failed to forward UDP datagram (unidirectional)"
                 );
-                velda_observability::LogCompletionReason::UpstreamError
+                velda_core::CompletionReason::UpstreamError
             }
         };
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
@@ -256,12 +256,12 @@ pub async fn serve(
             route_id: route_id.0 as u16,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
-            pipe: velda_core::pipe::PipeKind::UdpUdp,
+            pipe: velda_core::PipeKind::UdpUdp,
             completion,
-            method: velda_observability::LogHttpMethod::Unknown,
-            grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
-            ua_family: velda_observability::UaFamily::None,
-            ua_os: velda_observability::UaOs::Unknown,
+            method: velda_core::HttpMethod::Unknown,
+            grpc_status: velda_core::GrpcStatus::NonGrpc,
+            ua_family: velda_core::UaFamily::None,
+            ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
             url_bytes: [0; 188],
         });
@@ -311,37 +311,34 @@ pub async fn serve(
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         let (request_id, _) = velda_core::next_request_id();
-        let emit_log =
-            |peer: std::net::SocketAddr,
-             rx: u64,
-             tx: u64,
-             completion: velda_observability::LogCompletionReason| {
-                velda_observability::global_log_store().emit(
-                    &velda_observability::AccessLogRecord {
-                        request_id: request_id.entropy(),
-                        timestamp_sec: request_id.timestamp_secs() as u32,
-                        duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
-                        bytes_rx: rx.min(u32::MAX as u64) as u32,
-                        bytes_tx: tx.min(u32::MAX as u64) as u32,
-                        upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
-                        peer_port: peer.port(),
-                        upstream_port: target_addr.port(),
-                        status_code: 0,
-                        route_id: route_id.0 as u16,
-                        ua_major_version: 0,
-                        rpc_msgs_or_flags: 0,
-                        pipe: velda_core::pipe::PipeKind::UdpUdp,
-                        completion,
-                        method: velda_observability::LogHttpMethod::Unknown,
-                        grpc_status: velda_observability::LogGrpcStatus::NonGrpc,
-                        ua_family: velda_observability::UaFamily::None,
-                        ua_os: velda_observability::UaOs::Unknown,
-                        url_len: 0,
-                        url_bytes: [0; 188],
-                    },
-                );
-            };
+        let emit_log = |peer: std::net::SocketAddr,
+                        rx: u64,
+                        tx: u64,
+                        completion: velda_core::CompletionReason| {
+            velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+                request_id: request_id.entropy(),
+                timestamp_sec: request_id.timestamp_secs() as u32,
+                duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                bytes_rx: rx.min(u32::MAX as u64) as u32,
+                bytes_tx: tx.min(u32::MAX as u64) as u32,
+                upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
+                peer_port: peer.port(),
+                upstream_port: target_addr.port(),
+                status_code: 0,
+                route_id: route_id.0 as u16,
+                ua_major_version: 0,
+                rpc_msgs_or_flags: 0,
+                pipe: velda_core::PipeKind::UdpUdp,
+                completion,
+                method: velda_core::HttpMethod::Unknown,
+                grpc_status: velda_core::GrpcStatus::NonGrpc,
+                ua_family: velda_core::UaFamily::None,
+                ua_os: velda_core::UaOs::Unknown,
+                url_len: 0,
+                url_bytes: [0; 188],
+            });
+        };
         // Step 5a: Open accelerated kernel UDP socket connected to upstream target.
         let upstream_socket = match up_clone.connect_socket(target_addr) {
             Ok(s) => s,
@@ -357,7 +354,7 @@ pub async fn serve(
                     client_addr,
                     0,
                     0,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
                 return;
             }
@@ -378,7 +375,7 @@ pub async fn serve(
                 client_addr,
                 0,
                 0,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
             return;
         }
@@ -520,7 +517,7 @@ pub async fn serve(
             final_peer,
             bytes_rx,
             bytes_tx,
-            velda_observability::LogCompletionReason::Complete,
+            velda_core::CompletionReason::Complete,
         );
     });
 }

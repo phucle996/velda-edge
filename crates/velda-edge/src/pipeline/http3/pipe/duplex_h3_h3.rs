@@ -43,7 +43,7 @@ pub async fn serve(
                 req.body.len() as u64,
                 0,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -94,7 +94,7 @@ pub async fn serve(
                 req.body.len() as u64,
                 0,
                 upstream_addr,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -129,7 +129,7 @@ pub async fn serve(
             req.body.len() as u64,
             0,
             upstream_addr,
-            velda_observability::LogCompletionReason::Complete,
+            velda_core::CompletionReason::Complete,
         );
     }
 
@@ -149,7 +149,7 @@ pub async fn serve(
                 req.body.len() as u64,
                 0,
                 upstream_addr,
-                velda_observability::LogCompletionReason::ClientCancel,
+                velda_core::CompletionReason::ClientCancel,
             );
         }
     };
@@ -180,9 +180,9 @@ pub async fn serve(
         bytes_tx,
         upstream_addr,
         if failed {
-            velda_observability::LogCompletionReason::UpstreamError
+            velda_core::CompletionReason::UpstreamError
         } else {
-            velda_observability::LogCompletionReason::Complete
+            velda_core::CompletionReason::Complete
         },
     )
 }

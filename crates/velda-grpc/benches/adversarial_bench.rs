@@ -51,7 +51,7 @@ async fn bench_oversized_payload_rejection() {
             let res = stream.read_unary_message(MAX_SIZE).await;
             assert!(matches!(res, Err(GrpcError::PayloadTooLarge(_))));
             let _ = stream.respond.send_trailers_only(
-                velda_grpc::status::GrpcStatus::ResourceExhausted,
+                velda_core::GrpcStatus::ResourceExhausted,
                 Some("message exceeds limit"),
             );
         }

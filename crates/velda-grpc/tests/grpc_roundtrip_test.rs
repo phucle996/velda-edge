@@ -2,10 +2,10 @@ use bytes::{Bytes, BytesMut};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use velda_core::GrpcStatus;
 use velda_core::{Body, L7Request};
 use velda_grpc::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
-use velda_grpc::status::GrpcStatus;
 use velda_grpc::tcp::client::GrpcUpstreamConnector;
 use velda_grpc::tcp::server::GrpcServerConnection;
 

@@ -7,7 +7,7 @@ use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
 
 use crate::error::GrpcError;
-use crate::status::GrpcStatus;
+use velda_core::GrpcStatus;
 
 /// Upstream gRPC client response head metadata.
 #[derive(Debug, Clone)]

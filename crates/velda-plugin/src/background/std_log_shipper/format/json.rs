@@ -6,7 +6,8 @@
 //! the global route catalog without hot-path overhead.
 
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogProtocol, with_route_name};
+use velda_core::WireProtocol;
+use velda_observability::{AccessLogRecord, with_route_name};
 
 use super::super::lut::{
     fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_ts_sec,
@@ -81,7 +82,7 @@ pub fn format_ndjson_records(
 
             // 2. Protocol-Isolated Formatting
             match downstream_protocol {
-                LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                     let method = rec.method;
                     out.extend_from_slice(JSON_HTTP_METHOD);
                     out.extend_from_slice(method.as_str().as_bytes());
@@ -111,7 +112,7 @@ pub fn format_ndjson_records(
                     out.extend_from_slice(completion.as_str().as_bytes());
                     out.extend_from_slice(JSON_SUFFIX);
                 }
-                LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                     let grpc_st = rec.grpc_status;
                     out.extend_from_slice(JSON_GRPC_METHOD);
                     out.extend_from_slice(rec.url().as_bytes());
@@ -145,7 +146,7 @@ pub fn format_ndjson_records(
                     out.extend_from_slice(completion.as_str().as_bytes());
                     out.extend_from_slice(JSON_SUFFIX);
                 }
-                LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                WireProtocol::RawTcp | WireProtocol::RawUdp => {
                     out.extend_from_slice(JSON_ROUTE);
                     with_route_name(rec.route_id, |name| {
                         out.extend_from_slice(name.as_bytes());

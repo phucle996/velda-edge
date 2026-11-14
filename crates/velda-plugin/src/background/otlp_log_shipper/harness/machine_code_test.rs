@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogStore, PipeKind,
-};
+use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
+use velda_observability::{AccessLogRecord, LogStore};
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, format_otlp_records_json,
 };
@@ -31,9 +30,9 @@ fn create_sample_http_record(id: u64, ts: u32) -> AccessLogRecord {
         1,
         0,
         PipeKind::BufferedH2H1,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Get,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Get,
+        GrpcStatus::NonGrpc,
         b"curl/8.6.0",
     )
 }
@@ -51,9 +50,9 @@ fn create_sample_grpc_record(id: u64, ts: u32) -> AccessLogRecord {
         2,
         4,
         PipeKind::DuplexGrpcTcpTcp,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Post,
-        LogGrpcStatus::Ok,
+        CompletionReason::Complete,
+        HttpMethod::Post,
+        GrpcStatus::Ok,
         b"grpc-go/1.64.0",
     )
 }

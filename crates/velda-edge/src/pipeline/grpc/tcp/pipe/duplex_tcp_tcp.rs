@@ -17,8 +17,9 @@ use http::Version;
 use std::sync::Arc;
 use std::time::Duration;
 
+use velda_core::GrpcStatus;
 use velda_grpc::tcp::server::GrpcServerStream;
-use velda_grpc::{GrpcConfig, GrpcError, GrpcStatus};
+use velda_grpc::{GrpcConfig, GrpcError};
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcTcpUpstream;
@@ -43,11 +44,11 @@ pub async fn serve(
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
             return PipeOutcome::grpc(
                 200,
-                velda_observability::LogGrpcStatus::Unavailable,
+                velda_core::GrpcStatus::Unavailable,
                 0,
                 0,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -138,8 +139,8 @@ pub async fn serve(
                 .get("grpc-status")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u8>().ok())
-                .map(velda_observability::LogGrpcStatus::from_u8)
-                .unwrap_or(velda_observability::LogGrpcStatus::Ok);
+                .map(velda_core::GrpcStatus::from_u8)
+                .unwrap_or(velda_core::GrpcStatus::Ok);
 
             let is_end_of_stream = upstream_recv_stream.is_end_stream();
             let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
@@ -170,7 +171,7 @@ pub async fn serve(
                         .get("grpc-status")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u8>().ok())
-                        .map(velda_observability::LogGrpcStatus::from_u8)
+                        .map(velda_core::GrpcStatus::from_u8)
                     {
                         grpc_status = code;
                     }
@@ -187,7 +188,7 @@ pub async fn serve(
                 }
             }
 
-            Ok::<(u64, velda_observability::LogGrpcStatus), GrpcError>((bytes_tx, grpc_status))
+            Ok::<(u64, velda_core::GrpcStatus), GrpcError>((bytes_tx, grpc_status))
         };
 
         // Step 5: Concurrently drive both stream directions
@@ -204,23 +205,23 @@ pub async fn serve(
             rx,
             tx,
             upstream_addr,
-            velda_observability::LogCompletionReason::Complete,
+            velda_core::CompletionReason::Complete,
         ),
         Ok(Err(_)) => PipeOutcome::grpc(
             200,
-            velda_observability::LogGrpcStatus::Unavailable,
+            velda_core::GrpcStatus::Unavailable,
             0,
             0,
             upstream_addr,
-            velda_observability::LogCompletionReason::UpstreamError,
+            velda_core::CompletionReason::UpstreamError,
         ),
         Err(_) => PipeOutcome::grpc(
             200,
-            velda_observability::LogGrpcStatus::DeadlineExceeded,
+            velda_core::GrpcStatus::DeadlineExceeded,
             0,
             0,
             upstream_addr,
-            velda_observability::LogCompletionReason::Timeout,
+            velda_core::CompletionReason::Timeout,
         ),
     }
 }

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
-use velda_grpc::{GrpcConfig, GrpcServerConnection, GrpcStatus};
+use velda_core::GrpcStatus;
+use velda_grpc::{GrpcConfig, GrpcServerConnection};
 
 static ORDER_RESP: &[u8] =
     b"{\"order_id\":\"ord_real_azure_12345\",\"status\":\"CONFIRMED\",\"total_amount\":99.99}";

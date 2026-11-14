@@ -68,7 +68,7 @@ pub async fn serve(
 ) -> (
     L7Response,
     Option<std::net::SocketAddr>,
-    velda_observability::LogCompletionReason,
+    velda_core::CompletionReason,
 ) {
     let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
@@ -88,7 +88,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -117,11 +117,7 @@ pub async fn serve(
     }
 
     match pipe_res {
-        Ok(resp) => (
-            resp,
-            upstream_addr,
-            velda_observability::LogCompletionReason::Complete,
-        ),
+        Ok(resp) => (resp, upstream_addr, velda_core::CompletionReason::Complete),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -138,7 +134,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 upstream_addr,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             )
         }
     }

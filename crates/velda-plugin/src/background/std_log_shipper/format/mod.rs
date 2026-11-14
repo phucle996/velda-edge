@@ -59,7 +59,7 @@ pub fn format_std_log_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::{LogCompletionReason, LogGrpcStatus, LogHttpMethod, PipeKind};
+    use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_format_std_log_payload_all_modes() {
@@ -75,9 +75,9 @@ mod tests {
             1,
             0,
             PipeKind::BufferedH1H1,
-            LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"curl/8.6.0",
         );
 

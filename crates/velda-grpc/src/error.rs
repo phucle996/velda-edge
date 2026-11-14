@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::status::GrpcStatus;
+use velda_core::GrpcStatus;
 
 /// Errors produced during gRPC connection lifecycle, framing, or upstream proxying.
 #[derive(Debug, Error)]

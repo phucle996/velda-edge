@@ -62,7 +62,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -89,7 +89,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_observability::LogCompletionReason::Rejected,
+                velda_core::CompletionReason::Rejected,
             );
         }
     };
@@ -122,7 +122,7 @@ pub async fn serve(
                 receiver.bytes_received() as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_observability::LogCompletionReason::UpstreamError,
+                velda_core::CompletionReason::UpstreamError,
             );
         }
     };
@@ -155,7 +155,7 @@ pub async fn serve(
                                     receiver.bytes_received() as u64,
                                     responder.last_bytes_tx,
                                     upstream_addr,
-                                    velda_observability::LogCompletionReason::UpstreamError,
+                                    velda_core::CompletionReason::UpstreamError,
                                 );
                             }
                             if chunk_fin {
@@ -170,7 +170,7 @@ pub async fn serve(
                                 receiver.bytes_received() as u64,
                                 responder.last_bytes_tx,
                                 upstream_addr,
-                                velda_observability::LogCompletionReason::ClientCancel,
+                                velda_core::CompletionReason::ClientCancel,
                             );
                         }
                     }
@@ -198,7 +198,7 @@ pub async fn serve(
                     receiver.bytes_received() as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
             }
             Err(_) => {
@@ -212,7 +212,7 @@ pub async fn serve(
                     receiver.bytes_received() as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
             }
         },
@@ -230,7 +230,7 @@ pub async fn serve(
                     receiver.bytes_received() as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
             }
             Err(_) => {
@@ -244,7 +244,7 @@ pub async fn serve(
                     receiver.bytes_received() as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
             }
         },
@@ -268,7 +268,7 @@ pub async fn serve(
                         receiver.bytes_received() as u64,
                         responder.last_bytes_tx,
                         upstream_addr,
-                        velda_observability::LogCompletionReason::UpstreamError,
+                        velda_core::CompletionReason::UpstreamError,
                     );
                 }
                 resp_body.extend_from_slice(&chunk);
@@ -285,7 +285,7 @@ pub async fn serve(
                     receiver.bytes_received() as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_observability::LogCompletionReason::UpstreamError,
+                    velda_core::CompletionReason::UpstreamError,
                 );
             }
         }
@@ -319,6 +319,6 @@ pub async fn serve(
         bytes_rx,
         responder.last_bytes_tx,
         upstream_addr,
-        velda_observability::LogCompletionReason::Complete,
+        velda_core::CompletionReason::Complete,
     )
 }

@@ -33,7 +33,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use velda_observability::{AccessLogRecord, LogProtocol};
+use velda_core::WireProtocol;
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{
     fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_ts_nano, fast_write_u64,
@@ -135,7 +136,7 @@ impl LokiJsonFormatter {
                 let completion = rec.completion;
 
                 match downstream_protocol {
-                    LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                    WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                         if !self.http_values.is_empty() {
                             self.http_values.push(b',');
                         }
@@ -192,7 +193,7 @@ impl LokiJsonFormatter {
                             .extend_from_slice(completion.as_str().as_bytes());
                         self.http_values.extend_from_slice(b"\"]");
                     }
-                    LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                    WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                         if !self.grpc_values.is_empty() {
                             self.grpc_values.push(b',');
                         }
@@ -247,7 +248,7 @@ impl LokiJsonFormatter {
                             .extend_from_slice(completion.as_str().as_bytes());
                         self.grpc_values.extend_from_slice(b"\"]");
                     }
-                    LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                    WireProtocol::RawTcp | WireProtocol::RawUdp => {
                         if !self.raw_values.is_empty() {
                             self.raw_values.push(b',');
                         }
@@ -362,7 +363,7 @@ pub fn format_loki_push_payload(
                 let completion = rec.completion;
 
                 match downstream_protocol {
-                    LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
+                    WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                         if !http_values.is_empty() {
                             http_values.push(b',');
                         }
@@ -406,7 +407,7 @@ pub fn format_loki_push_payload(
                         http_values.extend_from_slice(completion.as_str().as_bytes());
                         http_values.extend_from_slice(b"\"]");
                     }
-                    LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
+                    WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                         if !grpc_values.is_empty() {
                             grpc_values.push(b',');
                         }
@@ -449,7 +450,7 @@ pub fn format_loki_push_payload(
                         grpc_values.extend_from_slice(completion.as_str().as_bytes());
                         grpc_values.extend_from_slice(b"\"]");
                     }
-                    LogProtocol::RawTcp | LogProtocol::RawUdp => {
+                    WireProtocol::RawTcp | WireProtocol::RawUdp => {
                         if !raw_values.is_empty() {
                             raw_values.push(b',');
                         }
@@ -522,7 +523,7 @@ pub fn format_loki_push_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
+    use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_loki_json_formatter_hex32_and_ipv6() {

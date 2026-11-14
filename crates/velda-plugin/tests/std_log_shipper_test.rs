@@ -5,9 +5,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogStore, PipeKind,
-};
+use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
+use velda_observability::{AccessLogRecord, LogStore};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
@@ -28,9 +27,9 @@ fn test_std_log_shipper_formatting_all_protocols() {
         10,
         0,
         PipeKind::BufferedH1H1,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Get,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Get,
+        GrpcStatus::NonGrpc,
         b"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     );
 
@@ -46,9 +45,9 @@ fn test_std_log_shipper_formatting_all_protocols() {
         11,
         0,
         PipeKind::ServerStreamH2H2,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Post,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Post,
+        GrpcStatus::NonGrpc,
         b"curl/8.6.0",
     );
 
@@ -64,9 +63,9 @@ fn test_std_log_shipper_formatting_all_protocols() {
         12,
         10,
         PipeKind::DuplexGrpcTcpTcp,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Post,
-        LogGrpcStatus::Ok,
+        CompletionReason::Complete,
+        HttpMethod::Post,
+        GrpcStatus::Ok,
         b"grpc-go/1.64.0",
     );
 
@@ -82,9 +81,9 @@ fn test_std_log_shipper_formatting_all_protocols() {
         13,
         0,
         PipeKind::TcpTcp,
-        LogCompletionReason::Complete,
-        LogHttpMethod::Unknown,
-        LogGrpcStatus::NonGrpc,
+        CompletionReason::Complete,
+        HttpMethod::Unknown,
+        GrpcStatus::NonGrpc,
         b"",
     );
 
@@ -173,9 +172,9 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
             1,
             0,
             PipeKind::BufferedH1H1,
-            LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"test-client",
         );
         log_store.emit_on_core(0, &rec);
