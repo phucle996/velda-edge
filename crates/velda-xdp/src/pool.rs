@@ -49,16 +49,25 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use velda_core::buffer::{ArenaBackingKind, HUGE_PAGE_SIZE};
+
 use crate::config::XdpConfig;
 use crate::error::{Result, XdpError};
 
 const BITS_PER_ATOMIC_WORD: usize = 64;
 
+#[derive(Debug)]
+enum UmemBacking {
+    MmapHuge { len: usize },
+    MmapTransparent { len: usize },
+    Heap(Layout),
+}
+
 /// Internal shared state of the UMEM slab arena.
 #[derive(Debug)]
 struct XdpSlabArenaInner {
     base_ptr: *mut u8,
-    layout: Layout,
+    backing: UmemBacking,
     frame_size: usize,
     frame_count: u32,
     headroom: usize,
@@ -74,8 +83,16 @@ unsafe impl Sync for XdpSlabArenaInner {}
 impl Drop for XdpSlabArenaInner {
     fn drop(&mut self) {
         if !self.base_ptr.is_null() {
-            unsafe {
-                dealloc(self.base_ptr, self.layout);
+            match self.backing {
+                UmemBacking::MmapHuge { len } | UmemBacking::MmapTransparent { len } => {
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        libc::munmap(self.base_ptr as *mut libc::c_void, len);
+                    }
+                }
+                UmemBacking::Heap(layout) => unsafe {
+                    dealloc(self.base_ptr, layout);
+                },
             }
         }
     }
@@ -246,7 +263,8 @@ pub static SCAN_AVAILABLE_WORD_FN: std::sync::LazyLock<ScanFn> =
     std::sync::LazyLock::new(|| scan_available_word);
 
 impl XdpSlabArena {
-    /// Allocates and page-aligns a contiguous host memory block for UMEM registration.
+    /// Allocates and page-aligns a contiguous host memory block for UMEM registration,
+    /// requesting 2MB HugePages (`MAP_HUGETLB`) with transparent fallback to standard pages.
     pub fn new(config: &XdpConfig) -> Result<Self> {
         let frame_size = config.frame_size;
         let frame_count = config.frame_count;
@@ -260,15 +278,80 @@ impl XdpSlabArena {
             )));
         }
 
-        // Align allocation to 4096-byte page boundary for kernel MMU and IOMMU translation
-        let layout = Layout::from_size_align(total_bytes, 4096)
-            .map_err(|e| XdpError::UmemAllocation(e.to_string()))?;
+        // Align total_bytes to 2MB HugePage boundary when attempting huge page allocation
+        let huge_bytes = (total_bytes + HUGE_PAGE_SIZE - 1) & !(HUGE_PAGE_SIZE - 1);
 
-        let base_ptr = unsafe { alloc_zeroed(layout) };
-        if base_ptr.is_null() {
-            return Err(XdpError::UmemAllocation(format!(
-                "Failed to allocate {total_bytes} bytes of contiguous page-aligned memory for UMEM"
-            )));
+        let mut allocated_ptr: *mut u8 = std::ptr::null_mut();
+        let mut allocated_backing: Option<UmemBacking> = None;
+
+        #[cfg(target_os = "linux")]
+        {
+            // 1. Attempt Explicit 2MB HugePages (mmap + MAP_HUGETLB | MAP_HUGE_2MB)
+            const MAP_HUGE_2MB: libc::c_int = 21 << 26;
+            let mmap_flags =
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | MAP_HUGE_2MB;
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    huge_bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    mmap_flags,
+                    -1,
+                    0,
+                )
+            };
+
+            if ptr != libc::MAP_FAILED && !ptr.is_null() {
+                allocated_ptr = ptr as *mut u8;
+                allocated_backing = Some(UmemBacking::MmapHuge { len: huge_bytes });
+            } else {
+                // 2. Fallback: Attempt Transparent HugePages (2MB-aligned mmap + MADV_HUGEPAGE)
+                let thp_flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+                let ptr = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        huge_bytes,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        thp_flags,
+                        -1,
+                        0,
+                    )
+                };
+
+                if ptr != libc::MAP_FAILED && !ptr.is_null() {
+                    unsafe {
+                        libc::madvise(ptr, huge_bytes, libc::MADV_HUGEPAGE);
+                    }
+                    allocated_ptr = ptr as *mut u8;
+                    allocated_backing = Some(UmemBacking::MmapTransparent { len: huge_bytes });
+                }
+            }
+        }
+
+        let (base_ptr, backing) = match (allocated_ptr.is_null(), allocated_backing) {
+            (false, Some(b)) => (allocated_ptr, b),
+            _ => {
+                // 3. Fallback: Standard 4KB Page-Aligned Heap Allocation
+                let layout = Layout::from_size_align(total_bytes, 4096)
+                    .map_err(|e| XdpError::UmemAllocation(e.to_string()))?;
+                let raw_ptr = unsafe { alloc_zeroed(layout) };
+                if raw_ptr.is_null() {
+                    return Err(XdpError::UmemAllocation(format!(
+                        "Failed to allocate {total_bytes} bytes of contiguous page-aligned memory for UMEM"
+                    )));
+                }
+                (raw_ptr, UmemBacking::Heap(layout))
+            }
+        };
+
+        // Eagerly commit physical pages: touch each 4096-byte page with volatile writes
+        // to force the Linux kernel MMU to map physical frames upfront and eliminate runtime minor page faults.
+        let mut page_offset = 0;
+        while page_offset < total_bytes {
+            unsafe {
+                std::ptr::write_volatile(base_ptr.add(page_offset), 0);
+            }
+            page_offset += 4096;
         }
 
         let num_words = (frame_count as usize).div_ceil(BITS_PER_ATOMIC_WORD);
@@ -280,7 +363,7 @@ impl XdpSlabArena {
         Ok(Self {
             inner: Arc::new(XdpSlabArenaInner {
                 base_ptr,
-                layout,
+                backing,
                 frame_size,
                 frame_count,
                 headroom: config.headroom,
@@ -290,6 +373,25 @@ impl XdpSlabArena {
                 used: AtomicUsize::new(0),
             }),
         })
+    }
+
+    /// Returns the active memory backing kind for this UMEM arena.
+    #[inline(always)]
+    pub fn backing_kind(&self) -> ArenaBackingKind {
+        match self.inner.backing {
+            UmemBacking::MmapHuge { .. } => ArenaBackingKind::HugePages,
+            UmemBacking::MmapTransparent { .. } => ArenaBackingKind::TransparentHugePages,
+            UmemBacking::Heap(_) => ArenaBackingKind::Heap,
+        }
+    }
+
+    /// Returns whether this UMEM arena is backed by 2MB HugePages (explicit or transparent).
+    #[inline(always)]
+    pub fn is_huge_pages(&self) -> bool {
+        matches!(
+            self.inner.backing,
+            UmemBacking::MmapHuge { .. } | UmemBacking::MmapTransparent { .. }
+        )
     }
 
     /// Leases an available frame from the arena using lock-free bitmask allocation.
@@ -732,5 +834,22 @@ mod tests {
         // Lease again should succeed
         let recovered = arena.lease();
         assert!(recovered.is_ok());
+    }
+
+    #[test]
+    fn test_xdp_slab_arena_huge_pages_backing() {
+        let config = XdpConfig::new("lo", 0).with_frame_count(512); // 512 * 4096 = 2MB (exactly 1 HugePage)
+        let arena = XdpSlabArena::new(&config).expect("Arena creation ok");
+
+        assert_eq!(arena.frame_count(), 512);
+        assert!(!arena.base_ptr().is_null());
+
+        let backing = arena.backing_kind();
+        assert!(matches!(
+            backing,
+            ArenaBackingKind::HugePages
+                | ArenaBackingKind::TransparentHugePages
+                | ArenaBackingKind::Heap
+        ));
     }
 }

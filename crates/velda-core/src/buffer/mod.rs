@@ -17,7 +17,8 @@ pub use pool::{
     AdaptivePoolConfig, CoreBufferPool, HeaderPool, HeaderWorkspaceLease, ShardedBufferPool,
 };
 pub use slab::{
-    AdaptiveSlabLimits, COPY_NON_TEMPORAL_FN, CopyNonTemporalFn, PayloadSlab, PayloadSlabLease,
-    PayloadSlabPool, SlabClass, ZERO_NON_TEMPORAL_FN, ZeroNonTemporalFn, copy_non_temporal,
-    prefetch_l2_range, prefetch_l3_range, prefetch_nta_range, zero_non_temporal,
+    AdaptiveSlabLimits, ArenaBackingKind, COPY_NON_TEMPORAL_FN, ContiguousArena, CopyNonTemporalFn,
+    HUGE_PAGE_SIZE, PayloadSlab, PayloadSlabLease, PayloadSlabPool, SlabClass,
+    ZERO_NON_TEMPORAL_FN, ZeroNonTemporalFn, copy_non_temporal, prefetch_l2_range,
+    prefetch_l3_range, prefetch_nta_range, zero_non_temporal,
 };

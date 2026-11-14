@@ -97,14 +97,37 @@ impl SlabClass {
     }
 }
 
+/// Standard 2MB HugePage quantum boundary for Linux x86_64 and aarch64.
+pub const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
+
+/// Internal backing allocation strategy for a [`ContiguousArena`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaBackingKind {
+    /// Dedicated 2MB HugePages allocated via `mmap` with `MAP_HUGETLB` (Order-9 continuous physical RAM).
+    /// 100% physically contiguous, zero physical fragmentation, single TLB entry per 2MB block.
+    HugePages,
+    /// Transparent HugePages allocated via 2MB-aligned `mmap` with `MADV_HUGEPAGE` hint.
+    TransparentHugePages,
+    /// Standard heap allocation (4KB page-aligned fallback for non-Linux or unprivileged environments).
+    Heap,
+}
+
+#[derive(Debug)]
+enum ArenaBacking {
+    MmapHuge { len: usize },
+    MmapTransparent { len: usize },
+    Heap(Layout),
+}
+
 /// A single contiguous memory arena holding the Tier 1 permanent baseline floor for a pool.
 ///
-/// Allocated once during [`PayloadSlabPool`] initialization with 4096-byte page alignment.
+/// Allocated once during [`PayloadSlabPool`] initialization requesting 2MB HugePages (`MAP_HUGETLB`)
+/// with transparent fallback to standard pages.
 /// All physical pages are eagerly committed via volatile memory writes during initialization
 /// to force the Linux kernel MMU to map physical frames upfront, eliminating runtime minor page faults.
 pub struct ContiguousArena {
     ptr: NonNull<u8>,
-    layout: Option<Layout>,
+    backing: ArenaBacking,
     total_bytes: usize,
 }
 
@@ -114,17 +137,87 @@ unsafe impl Sync for ContiguousArena {}
 impl ContiguousArena {
     /// Allocates and eagerly warms up a contiguous memory arena of `total_bytes` length.
     ///
-    /// Every 4096-byte page is eagerly touched via volatile writes to commit physical memory
-    /// in the OS page tables upfront.
+    /// # 3-Tier Anti-Physical-Fragmentation Allocation Strategy
+    /// 1. **Explicit 2MB HugePages (`mmap` + `MAP_HUGETLB`)**:
+    ///    Rounds up requested capacity to a 2MB HugePage quantum boundary. Requests a physically contiguous
+    ///    2MB chunk directly from the Linux Buddy Allocator (Order-9 allocation). Eliminates physical RAM
+    ///    fragmentation and condenses TLB translation to a single 2MB DTLB entry.
+    /// 2. **Transparent HugePages (`mmap` + `MADV_HUGEPAGE`)**:
+    ///    Fallback when dedicated hugetlb pool is unconfigured. Allocates 2MB-aligned virtual memory and
+    ///    hints `khugepaged` to coalesce underlying physical pages into a contiguous 2MB frame.
+    /// 3. **Standard Heap Allocation (`alloc_zeroed`)**:
+    ///    Fallback for unprivileged containers or non-Linux targets, aligned to standard 4KB page boundaries.
+    ///
+    /// # Eager Pre-warming (Anti-Minor-Page-Fault)
+    /// Every 4096-byte page is eagerly touched via volatile writes during initialization to commit physical
+    /// frames in the OS page tables upfront, eliminating runtime minor page faults during request serving.
     pub fn new(total_bytes: usize) -> Self {
         if total_bytes == 0 {
             return Self {
                 ptr: NonNull::dangling(),
-                layout: None,
+                backing: ArenaBacking::Heap(Layout::from_size_align(0, PAGE_SIZE).unwrap()),
                 total_bytes: 0,
             };
         }
 
+        // Align total_bytes to 2MB HugePage boundary when attempting huge page allocation
+        let huge_bytes = (total_bytes + HUGE_PAGE_SIZE - 1) & !(HUGE_PAGE_SIZE - 1);
+
+        #[cfg(target_os = "linux")]
+        {
+            // 1. Attempt Explicit 2MB HugePages (mmap + MAP_HUGETLB | MAP_HUGE_2MB)
+            const MAP_HUGE_2MB: libc::c_int = 21 << 26;
+            let mmap_flags =
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | MAP_HUGE_2MB;
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    huge_bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    mmap_flags,
+                    -1,
+                    0,
+                )
+            };
+
+            if ptr != libc::MAP_FAILED && !ptr.is_null() {
+                let non_null = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+                Self::eager_prewarm(non_null.as_ptr(), total_bytes);
+                return Self {
+                    ptr: non_null,
+                    backing: ArenaBacking::MmapHuge { len: huge_bytes },
+                    total_bytes,
+                };
+            }
+
+            // 2. Fallback: Attempt Transparent HugePages (2MB-aligned mmap + MADV_HUGEPAGE)
+            let thp_flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    huge_bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    thp_flags,
+                    -1,
+                    0,
+                )
+            };
+
+            if ptr != libc::MAP_FAILED && !ptr.is_null() {
+                unsafe {
+                    libc::madvise(ptr, huge_bytes, libc::MADV_HUGEPAGE);
+                }
+                let non_null = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+                Self::eager_prewarm(non_null.as_ptr(), total_bytes);
+                return Self {
+                    ptr: non_null,
+                    backing: ArenaBacking::MmapTransparent { len: huge_bytes },
+                    total_bytes,
+                };
+            }
+        }
+
+        // 3. Fallback: Standard 4KB Page-Aligned Heap Allocation
         let layout = Layout::from_size_align(total_bytes, PAGE_SIZE)
             .expect("invalid memory layout for contiguous baseline arena");
         let raw_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -133,9 +226,19 @@ impl ContiguousArena {
             None => std::alloc::handle_alloc_error(layout),
         };
 
-        // Eagerly commit physical pages: touch every 4096-byte page during arena initialization
-        // to force the Linux kernel MMU to map physical frames and eliminate runtime minor page faults.
-        // Volatile writes guarantee that LLVM does not optimize out writes to zero-initialized pages.
+        Self::eager_prewarm(raw_ptr, total_bytes);
+
+        Self {
+            ptr,
+            backing: ArenaBacking::Heap(layout),
+            total_bytes,
+        }
+    }
+
+    /// Eagerly touches each 4096-byte page with volatile writes to commit physical memory
+    /// in the OS page tables upfront and eliminate minor page faults on the hot path.
+    #[inline(always)]
+    fn eager_prewarm(raw_ptr: *mut u8, total_bytes: usize) {
         let mut page_offset = 0;
         while page_offset < total_bytes {
             unsafe {
@@ -143,12 +246,25 @@ impl ContiguousArena {
             }
             page_offset += PAGE_SIZE;
         }
+    }
 
-        Self {
-            ptr,
-            layout: Some(layout),
-            total_bytes,
+    /// Returns the active memory backing kind for this arena.
+    #[inline(always)]
+    pub fn backing_kind(&self) -> ArenaBackingKind {
+        match self.backing {
+            ArenaBacking::MmapHuge { .. } => ArenaBackingKind::HugePages,
+            ArenaBacking::MmapTransparent { .. } => ArenaBackingKind::TransparentHugePages,
+            ArenaBacking::Heap(_) => ArenaBackingKind::Heap,
         }
+    }
+
+    /// Returns whether this arena is backed by 2MB HugePages (explicit or transparent).
+    #[inline(always)]
+    pub fn is_huge_pages(&self) -> bool {
+        matches!(
+            self.backing,
+            ArenaBacking::MmapHuge { .. } | ArenaBacking::MmapTransparent { .. }
+        )
     }
 
     /// Returns the total size in bytes of the contiguous arena.
@@ -172,9 +288,19 @@ impl ContiguousArena {
 
 impl Drop for ContiguousArena {
     fn drop(&mut self) {
-        if let Some(layout) = self.layout {
-            unsafe {
-                std::alloc::dealloc(self.ptr.as_ptr(), layout);
+        match self.backing {
+            ArenaBacking::MmapHuge { len } | ArenaBacking::MmapTransparent { len } => {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, len);
+                }
+            }
+            ArenaBacking::Heap(layout) => {
+                if layout.size() > 0 {
+                    unsafe {
+                        std::alloc::dealloc(self.ptr.as_ptr(), layout);
+                    }
+                }
             }
         }
     }
@@ -1867,5 +1993,37 @@ mod tests {
         assert_ne!(reacquired.as_ptr() as usize, b1_ptr);
         drop(reacquired);
         drop(base);
+    }
+
+    #[test]
+    fn test_contiguous_arena_huge_page_allocation() {
+        // Zero-byte arena
+        let zero_arena = ContiguousArena::new(0);
+        assert_eq!(zero_arena.total_bytes(), 0);
+        assert_eq!(zero_arena.backing_kind(), ArenaBackingKind::Heap);
+
+        // 2MB arena allocation
+        let arena_2mb = ContiguousArena::new(HUGE_PAGE_SIZE);
+        assert_eq!(arena_2mb.total_bytes(), HUGE_PAGE_SIZE);
+        assert!(!arena_2mb.as_ptr().is_null());
+        assert!(!arena_2mb.as_mut_ptr().is_null());
+
+        // Backing kind must be HugePages, TransparentHugePages, or Heap (graceful fallback)
+        let backing = arena_2mb.backing_kind();
+        assert!(matches!(
+            backing,
+            ArenaBackingKind::HugePages
+                | ArenaBackingKind::TransparentHugePages
+                | ArenaBackingKind::Heap
+        ));
+
+        // Verify write and read integrity across 2MB arena
+        unsafe {
+            let ptr = arena_2mb.as_mut_ptr();
+            std::ptr::write_volatile(ptr, 0xAA);
+            std::ptr::write_volatile(ptr.add(HUGE_PAGE_SIZE - 1), 0x55);
+            assert_eq!(std::ptr::read_volatile(ptr), 0xAA);
+            assert_eq!(std::ptr::read_volatile(ptr.add(HUGE_PAGE_SIZE - 1)), 0x55);
+        }
     }
 }

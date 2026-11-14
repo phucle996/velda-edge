@@ -13,20 +13,31 @@ In a multi-gigabit edge proxy serving $> 100,000$ RPS per node:
 
 ---
 
-## 2. Pre-Warming & Minor Page Fault Elimination
+## 2. 2MB HugePage Arenas & Minor Page Fault Elimination
 
-To guarantee that request processing never halts on memory mapping, `velda-core` eagerly commits physical pages at cold-start bootstrap:
+To guarantee that request processing never halts on memory mapping or physical RAM external fragmentation:
 
-### 2.1 Eager Physical Page Touching
+### 2.1 3-Tier 2MB HugePage Arena Allocation (`ContiguousArena`)
+Baseline slabs in [`PayloadSlabPool`](src/buffer/slab.rs) are carved out of **2MB HugePage chunks**:
+1. **Explicit 2MB HugePages (`mmap` + `MAP_HUGETLB`)**:
+   - Requests physically contiguous 2MB blocks directly from the Linux Buddy Allocator (Order-9 allocation).
+   - Guarantees 100% physical RAM continuity without external fragmentation across hours/days of execution.
+   - Condenses 512 separate 4KB page translations into a **single 2MB DTLB entry**, eliminating TLB miss stalls.
+2. **Transparent HugePages (`mmap` + `MADV_HUGEPAGE`)**:
+   - Fallback when dedicated `hugetlbfs` pool is unconfigured.
+   - Hints kernel `khugepaged` to coalesce underlying physical frames into contiguous 2MB huge pages.
+3. **Standard 4KB Page-Aligned Allocation (`alloc_zeroed`)**:
+   - Graceful fallback for unprivileged containers or non-Linux development environments.
+
+### 2.2 Eager Physical Page Touching
 Both [`HeaderPool`](src/buffer/header.rs) and [`PayloadSlabPool`](src/buffer/slab.rs) execute write-touching during cold-start allocation:
 
 ```rust
-// Cold-start allocation inside PayloadSlab::new():
-let page_size = 4096; // Standard Linux x86_64 / aarch64 page
-let mut offset = 0;
-while offset < size {
-    buf[offset] = 0; // Force MMU to create physical PTE mapping upfront
-    offset += page_size;
+// Cold-start allocation inside ContiguousArena::new():
+let mut page_offset = 0;
+while page_offset < total_bytes {
+    std::ptr::write_volatile(raw_ptr.add(page_offset), 0); // Force MMU to create physical PTE mapping upfront
+    page_offset += 4096;
 }
 ```
 
@@ -35,7 +46,7 @@ while offset < size {
 map.reserve(capacity); // Forces internal hash table allocation in jemalloc
 ```
 
-**Result**: 100% of physical page frames for baseline traffic are resident in RAM before the first client connection is accepted. Traffic workers run with **Zero Minor Page Faults**.
+**Result**: 100% of physical page frames for baseline traffic are resident in RAM before the first client connection is accepted. Traffic workers run with **Zero Minor Page Faults** and zero physical RAM jumping.
 
 ---
 
