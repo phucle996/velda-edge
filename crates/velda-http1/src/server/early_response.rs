@@ -110,29 +110,8 @@ pub fn precompiled_reject_response(
     reason: velda_core::RejectReason,
     request_id: Option<&HeaderValue>,
 ) -> L7Response {
-    use velda_core::RejectReason;
-    let status = match reason {
-        RejectReason::BadRequest => StatusCode::BAD_REQUEST,
-        RejectReason::Unauthorized => StatusCode::UNAUTHORIZED,
-        RejectReason::Forbidden => StatusCode::FORBIDDEN,
-        RejectReason::NotFound => StatusCode::NOT_FOUND,
-        RejectReason::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-        RejectReason::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
-        RejectReason::Conflict => StatusCode::CONFLICT,
-        RejectReason::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        RejectReason::UriTooLong => StatusCode::URI_TOO_LONG,
-        RejectReason::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        RejectReason::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-        RejectReason::HeaderFieldsTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-        RejectReason::ClientClosedRequest => {
-            StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST)
-        }
-        RejectReason::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-        RejectReason::BadGateway => StatusCode::BAD_GATEWAY,
-        RejectReason::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-        RejectReason::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
-    };
-    precompiled_early_response(status, request_id)
+    let meta = velda_core::lut::get_reject_meta(reason);
+    precompiled_early_response(meta.status, request_id)
 }
 
 /// Serializes a pre-compiled, zero-allocation canonical error response directly into the destination buffer.

@@ -491,19 +491,17 @@ pub async fn run_http1_loop<IO>(
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                            let mut resp = velda_http1::server::precompiled_reject_response(
-                                reason,
-                                Some(&req_id_header),
-                            );
-                            for (name, val) in l7_req.headers.bypass_headers() {
-                                resp.headers.insert(name.clone(), val.clone());
-                            }
-                            resp.headers.set_request_id(req_id_header.clone());
-                            resp.headers.insert(
-                                http::header::CACHE_CONTROL,
-                                HeaderValue::from_static("no-store"),
-                            );
+                            // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                            let reject_meta = velda_core::lut::get_reject_meta(reason);
+                            l7_req.headers.prepare_for_rejection(reject_meta, true);
+                            let resp = velda_core::L7Response {
+                                status: reject_meta.status,
+                                version: http::Version::HTTP_11,
+                                headers: l7_req.headers,
+                                body: velda_core::Body::Bytes(bytes::Bytes::from_static(
+                                    reject_meta.body,
+                                )),
+                            };
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
@@ -581,19 +579,17 @@ pub async fn run_http1_loop<IO>(
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                            let mut resp = velda_http1::server::precompiled_reject_response(
-                                reason,
-                                Some(&req_id_header),
-                            );
-                            for (name, val) in l7_req.headers.bypass_headers() {
-                                resp.headers.insert(name.clone(), val.clone());
-                            }
-                            resp.headers.set_request_id(req_id_header.clone());
-                            resp.headers.insert(
-                                http::header::CACHE_CONTROL,
-                                HeaderValue::from_static("no-store"),
-                            );
+                            // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                            let reject_meta = velda_core::lut::get_reject_meta(reason);
+                            l7_req.headers.prepare_for_rejection(reject_meta, true);
+                            let resp = velda_core::L7Response {
+                                status: reject_meta.status,
+                                version: http::Version::HTTP_11,
+                                headers: l7_req.headers,
+                                body: velda_core::Body::Bytes(bytes::Bytes::from_static(
+                                    reject_meta.body,
+                                )),
+                            };
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);

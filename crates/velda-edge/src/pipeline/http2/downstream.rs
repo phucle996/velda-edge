@@ -625,21 +625,17 @@ async fn serve_http2_stream(
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                        let mut resp = velda_http2::server::precompiled_reject_response(
-                            reason,
-                            Some(l7_req.headers.request_id()),
-                        );
-                        for (name, val) in l7_req.headers.bypass_headers() {
-                            resp.headers.insert(name.clone(), val.clone());
-                        }
-                        resp.headers.insert(
-                            http::header::CACHE_CONTROL,
-                            HeaderValue::from_static("no-store"),
-                        );
-                        resp.headers
-                            .set_request_id(l7_req.headers.request_id().clone());
-                        meta.inject_response_headers(&mut resp.headers);
+                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                        // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
+                        let reject_meta = velda_core::lut::get_reject_meta(reason);
+                        l7_req.headers.prepare_for_rejection(reject_meta, false);
+                        meta.inject_response_headers(&mut l7_req.headers);
+                        let resp = velda_core::L7Response {
+                            status: reject_meta.status,
+                            version: http::Version::HTTP_2,
+                            headers: l7_req.headers,
+                            body: velda_core::Body::Empty,
+                        };
                         let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
@@ -715,21 +711,17 @@ async fn serve_http2_stream(
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                        let mut resp = velda_http2::server::precompiled_reject_response(
-                            reason,
-                            Some(l7_req.headers.request_id()),
-                        );
-                        for (name, val) in l7_req.headers.bypass_headers() {
-                            resp.headers.insert(name.clone(), val.clone());
-                        }
-                        resp.headers.insert(
-                            http::header::CACHE_CONTROL,
-                            HeaderValue::from_static("no-store"),
-                        );
-                        resp.headers
-                            .set_request_id(l7_req.headers.request_id().clone());
-                        meta.inject_response_headers(&mut resp.headers);
+                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                        // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
+                        let reject_meta = velda_core::lut::get_reject_meta(reason);
+                        l7_req.headers.prepare_for_rejection(reject_meta, false);
+                        meta.inject_response_headers(&mut l7_req.headers);
+                        let resp = velda_core::L7Response {
+                            status: reject_meta.status,
+                            version: http::Version::HTTP_2,
+                            headers: l7_req.headers,
+                            body: velda_core::Body::Empty,
+                        };
                         let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {

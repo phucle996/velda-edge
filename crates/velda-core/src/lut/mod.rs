@@ -39,6 +39,7 @@ pub mod grpc_status;
 pub mod method;
 pub mod pipe;
 pub mod protocol;
+pub mod reject;
 pub mod user_agent;
 
 pub use completion::{COMPLETION_REASON_NAMES, CompletionReason};
@@ -46,6 +47,7 @@ pub use grpc_status::{GRPC_STATUS_CODE_STRINGS, GRPC_STATUS_NAMES, GrpcStatus};
 pub use method::{HTTP_METHOD_NAMES, HttpMethod};
 pub use pipe::{PIPE_NAMES, PipeKind};
 pub use protocol::{WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol};
+pub use reject::{REJECT_STATIC_METAS, RejectStaticMeta, get_reject_meta};
 pub use user_agent::{UA_FAMILY_NAMES, UA_OS_NAMES, UaFamily, UaOs, classify_user_agent};
 
 // Compile-time verification that all codebook discriminants fit in 1 byte
@@ -56,8 +58,9 @@ const _: () = assert!(std::mem::size_of::<GrpcStatus>() == 1);
 const _: () = assert!(std::mem::size_of::<CompletionReason>() == 1);
 const _: () = assert!(std::mem::size_of::<UaFamily>() == 1);
 const _: () = assert!(std::mem::size_of::<UaOs>() == 1);
+const _: () = assert!(std::mem::size_of::<crate::error::RejectReason>() == 1);
 
-// Compile-time verification of total string table memory footprint
+// Compile-time verification of total string table & rejection metadata memory footprint
 const TOTAL_LUT_BYTES: usize = (PipeKind::COUNT
     + HttpMethod::COUNT
     + WireProtocol::COUNT
@@ -65,9 +68,10 @@ const TOTAL_LUT_BYTES: usize = (PipeKind::COUNT
     + CompletionReason::COUNT
     + UaFamily::COUNT
     + UaOs::COUNT)
-    * std::mem::size_of::<&str>();
+    * std::mem::size_of::<&str>()
+    + std::mem::size_of::<[RejectStaticMeta; 17]>();
 
-// Total pointer array size must remain under 4 KB (1 OS memory page / 1/8th of 32 KB L1D cache)
+// Total pointer array and static metadata size must remain under 4 KB (1 OS memory page / 1/8th of 32 KB L1D cache)
 const _: () = assert!(TOTAL_LUT_BYTES < 4096);
 
 #[cfg(test)]
@@ -76,6 +80,9 @@ mod tests {
 
     #[test]
     fn test_total_l1_footprint() {
-        assert_eq!(TOTAL_LUT_BYTES, (64 + 10 + 7 + 18 * 2 + 5 + 34 + 8) * 16);
+        assert_eq!(
+            TOTAL_LUT_BYTES,
+            (64 + 10 + 7 + 18 * 2 + 5 + 34 + 8) * 16 + 17 * 40
+        );
     }
 }

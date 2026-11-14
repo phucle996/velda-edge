@@ -83,63 +83,76 @@ impl ErrorKind {
 ///    `velda-http3`, `velda-grpc`) decides *HOW* to format that rejection onto the wire.
 /// 3. **Header Isolation on Reject**: When a pipeline handles `Action::Reject(reason)`, it purges
 ///    100% of Bit 0 internal/upstream headers, merging only Bit 1 bypass headers (including `x-request-id`).
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RejectReason {
     // ── Client-side rejections ──────────────────────────────────
     /// Malformed request line, headers, or frame structure.
-    BadRequest,
+    BadRequest = 0,
 
     /// Authentication credential missing, expired, or invalid.
-    Unauthorized,
+    Unauthorized = 1,
 
     /// Request denied by security policy, IP filter, or ACL.
-    Forbidden,
+    Forbidden = 2,
 
     /// Requested resource or path does not exist.
-    NotFound,
+    NotFound = 3,
 
     /// Call method or RPC verb is not supported.
-    MethodNotAllowed,
+    MethodNotAllowed = 4,
 
     /// Client failed to produce a request within ingress timeout.
-    RequestTimeout,
+    RequestTimeout = 5,
 
     /// Request conflicts with the current resource state.
-    Conflict,
+    Conflict = 6,
 
     /// Request body or message exceeds configured size limit.
-    PayloadTooLarge,
+    PayloadTooLarge = 7,
 
     /// Request URI or path exceeds maximum allowable length.
-    UriTooLong,
+    UriTooLong = 8,
 
     /// Request payload format or MIME type is not supported.
-    UnsupportedMediaType,
+    UnsupportedMediaType = 9,
 
     /// Rate limit or concurrency quota exceeded.
-    TooManyRequests,
+    TooManyRequests = 10,
 
     /// Individual header or header table exceeds limit.
-    HeaderFieldsTooLarge,
+    HeaderFieldsTooLarge = 11,
 
     /// Downstream peer closed connection prematurely.
-    ClientClosedRequest,
+    ClientClosedRequest = 12,
 
     // ── Server / Upstream rejections ────────────────────────────
     /// Unexpected runtime failure on edge hot path.
-    InternalError,
+    InternalError = 13,
 
     /// Upstream backend returned an invalid response or reset.
-    BadGateway,
+    BadGateway = 14,
 
     /// No healthy backend endpoints or circuit breaker open.
-    ServiceUnavailable,
+    ServiceUnavailable = 15,
 
     /// Upstream backend failed to reply within configured deadline.
-    GatewayTimeout,
+    GatewayTimeout = 16,
 }
 
 impl RejectReason {
+    /// Total number of distinct rejection reasons in the canonical codebook.
+    pub const COUNT: usize = 17;
+
+    /// Converts a raw 8-bit integer into a [`RejectReason`] if within range `0..17`.
+    #[inline(always)]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        if (v as usize) < Self::COUNT {
+            Some(unsafe { std::mem::transmute::<u8, Self>(v) })
+        } else {
+            None
+        }
+    }
     /// Returns the canonical ASCII phrase for this rejection reason.
     #[inline(always)]
     pub const fn canonical_phrase(self) -> &'static str {

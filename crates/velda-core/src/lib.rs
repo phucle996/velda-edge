@@ -57,8 +57,9 @@ pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 
 pub use lut::{
     COMPLETION_REASON_NAMES, CompletionReason, GRPC_STATUS_NAMES, GrpcStatus, HTTP_METHOD_NAMES,
-    HttpMethod, PIPE_NAMES, PipeKind, UA_FAMILY_NAMES, UA_OS_NAMES, UaFamily, UaOs,
-    WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol, classify_user_agent,
+    HttpMethod, PIPE_NAMES, PipeKind, REJECT_STATIC_METAS, RejectStaticMeta, UA_FAMILY_NAMES,
+    UA_OS_NAMES, UaFamily, UaOs, WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol,
+    classify_user_agent, get_reject_meta,
 };
 pub use protocol::ProtocolFamily;
 

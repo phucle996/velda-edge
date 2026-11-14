@@ -745,6 +745,150 @@ impl HeaderWorkspace {
         })
     }
 
+    /// In-place transformation of the request's existing HeaderWorkspace into early rejection response headers:
+    ///
+    /// 1. Discards inbound client request headers (Host, User-Agent, Cookie, Authorization, etc.).
+    /// 2. Preserves all Bit-1 bypass headers (x-request-id, rate-limit counters, traceparent).
+    /// 3. Injects anti-CPDoS cache headers (`Cache-Control: no-store`).
+    /// 4. If `include_content_headers` is true (HTTP/1.1 & HTTP/3), injects `Content-Type` and `Content-Length`.
+    /// 5. If `429 Too Many Requests`, injects `Retry-After: 1` if not already present.
+    /// 6. Executes exactly one atomic `render()` pass.
+    pub fn prepare_for_rejection(
+        &mut self,
+        meta: &'static crate::lut::RejectStaticMeta,
+        include_content_headers: bool,
+    ) {
+        let b_len = self.bypass_len as usize;
+
+        // Step 1: Discard non-bypass entries from numeric registers
+        let num_len = self.numeric_len as usize;
+        for i in 0..num_len {
+            if let Some(ref entry) = self.numeric_entries[i]
+                && !matches!(entry.op, NumericOp::SetBypass)
+            {
+                self.numeric_entries[i] = None;
+            }
+        }
+
+        // Step 2: Save Bit-1 bypass headers on the stack (max 8)
+        let mut saved_bypass: [Option<(HeaderName, HeaderValue)>; MAX_BYPASS_HEADERS] =
+            [const { None }; MAX_BYPASS_HEADERS];
+        let mut saved_count = 0;
+        for i in 0..b_len {
+            if let Some(ref key) = self.bypass_keys[i]
+                && let Some(val) = self.headers.get(key)
+            {
+                saved_bypass[saved_count] = Some((key.clone(), val.clone()));
+                saved_count += 1;
+            }
+        }
+
+        // Step 3: Clear all client request headers in-place (preserves bucket heap capacity)
+        self.headers.clear();
+
+        // Step 4: Restore Bit-1 bypass headers
+        for item in saved_bypass.iter_mut().take(saved_count) {
+            if let Some((k, v)) = item.take() {
+                self.headers.insert(k, v);
+            }
+        }
+
+        // Step 5: Inject CPDoS defense header
+        self.headers.insert(
+            http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+
+        // Step 6: Conditionally inject payload headers (HTTP/1 & HTTP/3)
+        if include_content_headers {
+            self.headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            self.headers.insert(
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from_static(meta.content_len_str),
+            );
+        }
+
+        // Step 7: Rate limit retry guidance (RFC 6585)
+        if meta.status == http::StatusCode::TOO_MANY_REQUESTS
+            && !self.headers.contains_key(http::header::RETRY_AFTER)
+        {
+            self.headers
+                .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+
+        // Step 8: Single render pass for any remaining numeric registers (e.g. SetBypass)
+        self.render();
+    }
+
+    /// In-place transformation of the request's existing HeaderWorkspace into gRPC Trailers-Only rejection headers:
+    ///
+    /// 1. Discards inbound client request headers.
+    /// 2. Preserves all Bit-1 bypass headers (x-request-id, rate-limit counters).
+    /// 3. Injects `content-type: application/grpc`, `grpc-status: <code>`, and optional `grpc-message`.
+    /// 4. Executes exactly one atomic `render()` pass.
+    pub fn prepare_for_grpc_rejection(
+        &mut self,
+        status: crate::lut::GrpcStatus,
+        message: Option<&str>,
+    ) {
+        let b_len = self.bypass_len as usize;
+
+        // Step 1: Discard non-bypass entries from numeric registers
+        let num_len = self.numeric_len as usize;
+        for i in 0..num_len {
+            if let Some(ref entry) = self.numeric_entries[i]
+                && !matches!(entry.op, NumericOp::SetBypass)
+            {
+                self.numeric_entries[i] = None;
+            }
+        }
+
+        // Step 2: Save Bit-1 bypass headers on the stack (max 8)
+        let mut saved_bypass: [Option<(HeaderName, HeaderValue)>; MAX_BYPASS_HEADERS] =
+            [const { None }; MAX_BYPASS_HEADERS];
+        let mut saved_count = 0;
+        for i in 0..b_len {
+            if let Some(ref key) = self.bypass_keys[i]
+                && let Some(val) = self.headers.get(key)
+            {
+                saved_bypass[saved_count] = Some((key.clone(), val.clone()));
+                saved_count += 1;
+            }
+        }
+
+        // Step 3: Clear all client request headers in-place (preserves bucket heap capacity)
+        self.headers.clear();
+
+        // Step 4: Restore Bit-1 bypass headers
+        for item in saved_bypass.iter_mut().take(saved_count) {
+            if let Some((k, v)) = item.take() {
+                self.headers.insert(k, v);
+            }
+        }
+
+        // Step 5: Inject gRPC content-type and canonical trailers
+        self.headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/grpc"),
+        );
+        self.headers.insert(
+            http::header::HeaderName::from_static("grpc-status"),
+            HeaderValue::from_static(status.code_str()),
+        );
+        if let Some(msg) = message
+            && let Ok(val) = HeaderValue::from_str(msg)
+        {
+            self.headers
+                .insert(http::header::HeaderName::from_static("grpc-message"), val);
+        }
+
+        // Step 6: Single render pass
+        self.render();
+    }
+
     #[inline(always)]
     pub fn take(&mut self) -> HeaderMap {
         self.render();
@@ -941,5 +1085,95 @@ mod tests {
         ws.reset();
         assert_eq!(ws.len(), 1);
         assert_eq!(ws.bypass_headers().count(), 1);
+    }
+
+    #[test]
+    fn test_header_workspace_prepare_for_rejection_in_place() {
+        use crate::error::RejectReason;
+        use crate::lut::get_reject_meta;
+
+        let mut ws = HeaderWorkspace::new(32);
+        let req_id_str = ws.request_id().to_str().unwrap().to_string();
+
+        // Inbound client request headers
+        ws.insert(http::header::HOST, HeaderValue::from_static("example.com"));
+        ws.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("curl/8.6.0"),
+        );
+        ws.insert(
+            http::header::COOKIE,
+            HeaderValue::from_static("session=abc"),
+        );
+        ws.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token"),
+        );
+
+        // Plugin tagged Bit-1 bypass headers
+        let h_ratelimit = HeaderName::from_static("x-ratelimit-remaining");
+        ws.insert_bypass_u64(h_ratelimit.clone(), 0);
+
+        let meta = get_reject_meta(RejectReason::TooManyRequests);
+        ws.prepare_for_rejection(meta, true);
+
+        // Client request headers MUST be dropped
+        assert!(!ws.contains_key(http::header::HOST));
+        assert!(!ws.contains_key(http::header::USER_AGENT));
+        assert!(!ws.contains_key(http::header::COOKIE));
+        assert!(!ws.contains_key(http::header::AUTHORIZATION));
+
+        // Bit-1 bypass headers MUST be preserved
+        assert_eq!(
+            ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
+            req_id_str.as_str()
+        );
+        assert_eq!(ws.get(&h_ratelimit).unwrap(), "0");
+
+        // Static response headers MUST be injected
+        assert_eq!(ws.get(http::header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(
+            ws.get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(ws.get(http::header::CONTENT_LENGTH).unwrap(), "22");
+        assert_eq!(ws.get(http::header::RETRY_AFTER).unwrap(), "1");
+
+        // Single render pass ensures all registers are materialized
+        assert_eq!(ws.numeric_len, 0);
+    }
+
+    #[test]
+    fn test_header_workspace_prepare_for_grpc_rejection_in_place() {
+        use crate::lut::GrpcStatus;
+
+        let mut ws = HeaderWorkspace::new(32);
+        let req_id_str = ws.request_id().to_str().unwrap().to_string();
+
+        ws.insert(
+            http::header::HOST,
+            HeaderValue::from_static("grpc.example.com"),
+        );
+        ws.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("grpc-go/1.64"),
+        );
+
+        ws.prepare_for_grpc_rejection(GrpcStatus::ResourceExhausted, Some("quota exceeded"));
+
+        assert!(!ws.contains_key(http::header::HOST));
+        assert!(!ws.contains_key(http::header::USER_AGENT));
+
+        assert_eq!(
+            ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
+            req_id_str.as_str()
+        );
+        assert_eq!(
+            ws.get(http::header::CONTENT_TYPE).unwrap(),
+            "application/grpc"
+        );
+        assert_eq!(ws.get("grpc-status").unwrap(), "8");
+        assert_eq!(ws.get("grpc-message").unwrap(), "quota exceeded");
+        assert_eq!(ws.numeric_len, 0);
     }
 }

@@ -447,20 +447,15 @@ async fn process_http3_request(
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                    let mut resp = velda_http3::server::precompiled_reject_response(
-                        reason,
-                        Some(req.headers.request_id()),
-                    );
-                    for (name, val) in req.headers.bypass_headers() {
-                        resp.headers.insert(name.clone(), val.clone());
-                    }
-                    resp.headers.insert(
-                        http::header::CACHE_CONTROL,
-                        HeaderValue::from_static("no-store"),
-                    );
-                    resp.headers
-                        .set_request_id(req.headers.request_id().clone());
+                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    let reject_meta = velda_core::lut::get_reject_meta(reason);
+                    req.headers.prepare_for_rejection(reject_meta, true);
+                    let resp = velda_core::L7Response {
+                        status: reject_meta.status,
+                        version: http::Version::HTTP_3,
+                        headers: req.headers,
+                        body: velda_core::Body::Bytes(bytes::Bytes::from_static(reject_meta.body)),
+                    };
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
@@ -529,20 +524,15 @@ async fn process_http3_request(
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // preserving only Bit-1 bypass headers and Cache-Control: no-store.
-                    let mut resp = velda_http3::server::precompiled_reject_response(
-                        reason,
-                        Some(req.headers.request_id()),
-                    );
-                    for (name, val) in req.headers.bypass_headers() {
-                        resp.headers.insert(name.clone(), val.clone());
-                    }
-                    resp.headers.insert(
-                        http::header::CACHE_CONTROL,
-                        HeaderValue::from_static("no-store"),
-                    );
-                    resp.headers
-                        .set_request_id(req.headers.request_id().clone());
+                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    let reject_meta = velda_core::lut::get_reject_meta(reason);
+                    req.headers.prepare_for_rejection(reject_meta, true);
+                    let resp = velda_core::L7Response {
+                        status: reject_meta.status,
+                        version: http::Version::HTTP_3,
+                        headers: req.headers,
+                        body: velda_core::Body::Bytes(bytes::Bytes::from_static(reject_meta.body)),
+                    };
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;

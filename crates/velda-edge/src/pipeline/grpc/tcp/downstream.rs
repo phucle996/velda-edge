@@ -336,19 +336,17 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // preserving only Bit-1 bypass headers and grpc-status trailers.
+                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
-                        let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
-                        for (name, val) in l7_req.headers.bypass_headers() {
-                            resp.headers.insert(name.clone(), val.clone());
-                        }
-                        resp.headers
-                            .set_request_id(l7_req.headers.request_id().clone());
+                        let log_grpc_status = grpc_status;
+                        l7_req.headers.prepare_for_grpc_rejection(
+                            grpc_status,
+                            Some(reason.canonical_phrase()),
+                        );
                         let mut builder = http::Response::builder()
                             .status(http::StatusCode::OK)
                             .version(http::Version::HTTP_2);
-                        for (name, val) in &resp.headers {
+                        for (name, val) in &l7_req.headers {
                             builder = builder.header(name, val);
                         }
                         if let Ok(r) = builder.body(()) {
@@ -422,19 +420,17 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // preserving only Bit-1 bypass headers and grpc-status trailers.
+                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
-                        let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
-                        for (name, val) in l7_req.headers.bypass_headers() {
-                            resp.headers.insert(name.clone(), val.clone());
-                        }
-                        resp.headers
-                            .set_request_id(l7_req.headers.request_id().clone());
+                        let log_grpc_status = grpc_status;
+                        l7_req.headers.prepare_for_grpc_rejection(
+                            grpc_status,
+                            Some(reason.canonical_phrase()),
+                        );
                         let mut builder = http::Response::builder()
                             .status(http::StatusCode::OK)
                             .version(http::Version::HTTP_2);
-                        for (name, val) in &resp.headers {
+                        for (name, val) in &l7_req.headers {
                             builder = builder.header(name, val);
                         }
                         if let Ok(r) = builder.body(()) {

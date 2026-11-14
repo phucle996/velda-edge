@@ -258,15 +258,17 @@ pub async fn process_grpc_udp_request(
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // preserving only Bit-1 bypass headers and grpc-status trailers.
+                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
-                    let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
-                    let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
-                    for (name, val) in req.headers.bypass_headers() {
-                        resp.headers.insert(name.clone(), val.clone());
-                    }
-                    resp.headers
-                        .set_request_id(req.headers.request_id().clone());
+                    let log_grpc_status = grpc_status;
+                    req.headers
+                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    let resp = velda_core::L7Response {
+                        status: http::StatusCode::OK,
+                        version: http::Version::HTTP_3,
+                        headers: req.headers,
+                        body: velda_core::Body::Empty,
+                    };
                     velda_observability::global_metrics().record_early_completion(
                         velda_observability::DownstreamProtocol::H3,
                         velda_observability::UpstreamProtocol::H3,
@@ -332,15 +334,17 @@ pub async fn process_grpc_udp_request(
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // preserving only Bit-1 bypass headers and grpc-status trailers.
+                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
-                    let log_grpc_status = velda_core::GrpcStatus::from_u8(grpc_status as u8);
-                    let mut resp = grpc_status.to_l7_response(Some(reason.canonical_phrase()));
-                    for (name, val) in req.headers.bypass_headers() {
-                        resp.headers.insert(name.clone(), val.clone());
-                    }
-                    resp.headers
-                        .set_request_id(req.headers.request_id().clone());
+                    let log_grpc_status = grpc_status;
+                    req.headers
+                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    let resp = velda_core::L7Response {
+                        status: http::StatusCode::OK,
+                        version: http::Version::HTTP_3,
+                        headers: req.headers,
+                        body: velda_core::Body::Empty,
+                    };
                     velda_observability::global_metrics().record_early_completion(
                         velda_observability::DownstreamProtocol::H3,
                         velda_observability::UpstreamProtocol::H3,
