@@ -6,10 +6,7 @@
 //! the global route catalog without hot-path overhead.
 
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily,
-    UaOs, with_route_name,
-};
+use velda_observability::{AccessLogRecord, LogProtocol, with_route_name};
 
 use super::super::lut::{
     fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_ts_sec,
@@ -58,9 +55,9 @@ pub fn format_ndjson_records(
     for batch in batches {
         for rec in batch.iter() {
             let downstream_protocol = rec.downstream_protocol();
-            let completion = LogCompletionReason::from_u8(rec.completion);
-            let ua_fam = UaFamily::from_u8(rec.ua_family);
-            let ua_os = UaOs::from_u8(rec.ua_os);
+            let completion = rec.completion;
+            let ua_fam = rec.ua_family;
+            let ua_os = rec.ua_os;
 
             // 1. Common prefix: timestamp, request_id, client socket, endpoint
             out.extend_from_slice(JSON_PREFIX);
@@ -85,7 +82,7 @@ pub fn format_ndjson_records(
             // 2. Protocol-Isolated Formatting
             match downstream_protocol {
                 LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
-                    let method = LogHttpMethod::from_u8(rec.method);
+                    let method = rec.method;
                     out.extend_from_slice(JSON_HTTP_METHOD);
                     out.extend_from_slice(method.as_str().as_bytes());
                     out.extend_from_slice(JSON_URL);
@@ -115,7 +112,7 @@ pub fn format_ndjson_records(
                     out.extend_from_slice(JSON_SUFFIX);
                 }
                 LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
-                    let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
+                    let grpc_st = rec.grpc_status;
                     out.extend_from_slice(JSON_GRPC_METHOD);
                     out.extend_from_slice(rec.url().as_bytes());
                     out.extend_from_slice(JSON_ROUTE);

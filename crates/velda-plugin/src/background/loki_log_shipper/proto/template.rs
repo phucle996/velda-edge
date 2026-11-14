@@ -33,9 +33,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily, UaOs,
-};
+use velda_observability::{AccessLogRecord, LogProtocol};
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_u64};
 
@@ -162,16 +160,16 @@ impl LokiProtoFormatter {
             for rec in batch.iter() {
                 total_records += 1;
                 let downstream_protocol = rec.downstream_protocol();
-                let completion = LogCompletionReason::from_u8(rec.completion);
+                let completion = rec.completion;
                 let seconds = rec.timestamp_sec as i64;
 
                 self.line_buf.clear();
 
                 match downstream_protocol {
                     LogProtocol::H1 | LogProtocol::H2 | LogProtocol::H3 => {
-                        let method = LogHttpMethod::from_u8(rec.method);
-                        let ua_fam = UaFamily::from_u8(rec.ua_family);
-                        let ua_os = UaOs::from_u8(rec.ua_os);
+                        let method = rec.method;
+                        let ua_fam = rec.ua_family;
+                        let ua_os = rec.ua_os;
 
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
@@ -223,8 +221,8 @@ impl LokiProtoFormatter {
                         );
                     }
                     LogProtocol::GrpcTcp | LogProtocol::GrpcUdp => {
-                        let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
-                        let ua_fam = UaFamily::from_u8(rec.ua_family);
+                        let grpc_st = rec.grpc_status;
+                        let ua_fam = rec.ua_family;
 
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
@@ -410,7 +408,7 @@ mod tests {
     use super::super::model::PushRequest;
     use super::*;
     use prost::Message;
-    use velda_observability::PipeKind;
+    use velda_observability::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_proto_wire_formatter_decodes_cleanly() {
@@ -430,9 +428,9 @@ mod tests {
             1,
             0,
             PipeKind::BufferedH2H1,
-            LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"curl/8.6.0",
         );
 
@@ -448,9 +446,9 @@ mod tests {
             2,
             4,
             PipeKind::DuplexGrpcTcpTcp,
-            LogCompletionReason::Complete,
-            LogHttpMethod::Post,
-            LogGrpcStatus::Ok,
+            CompletionReason::Complete,
+            HttpMethod::Post,
+            GrpcStatus::Ok,
             b"grpc-go/1.64.0",
         );
 

@@ -29,7 +29,7 @@
 //! ```
 
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogGrpcStatus, LogHttpMethod, UaFamily, UaOs};
+use velda_observability::{AccessLogRecord, LogGrpcStatus};
 
 use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ts_nano, fast_write_u64};
 
@@ -118,10 +118,10 @@ pub fn format_otlp_records_json(
 
             let downstream_protocol = rec.downstream_protocol();
             let upstream_protocol = rec.upstream_protocol();
-            let method = LogHttpMethod::from_u8(rec.method);
-            let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
-            let ua_fam = UaFamily::from_u8(rec.ua_family);
-            let ua_os = UaOs::from_u8(rec.ua_os);
+            let method = rec.method;
+            let grpc_st = rec.grpc_status;
+            let ua_fam = rec.ua_family;
+            let ua_os = rec.ua_os;
 
             // Reconstruct full 128-bit RequestId: (high 64-bit timestamp, low 64-bit entropy)
             let req_hi = rec.timestamp_sec as u64;
@@ -216,7 +216,7 @@ pub fn format_otlp_records_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_observability::PipeKind;
+    use velda_observability::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
     fn test_format_otlp_records_json_schema_and_req_id() {
@@ -233,9 +233,9 @@ mod tests {
             1,
             0,
             PipeKind::BufferedH1H1,
-            velda_observability::LogCompletionReason::Complete,
-            LogHttpMethod::Get,
-            LogGrpcStatus::NonGrpc,
+            CompletionReason::Complete,
+            HttpMethod::Get,
+            GrpcStatus::NonGrpc,
             b"curl/8.6.0",
         );
         let batches = vec![Arc::from(vec![rec])];

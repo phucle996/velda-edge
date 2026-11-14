@@ -11,7 +11,7 @@
 
 use prost::Message;
 use std::sync::Arc;
-use velda_observability::{AccessLogRecord, LogGrpcStatus, LogHttpMethod, UaFamily, UaOs};
+use velda_observability::{AccessLogRecord, LogGrpcStatus};
 
 use super::super::lut::{fast_write_hex32, fast_write_ip};
 
@@ -200,10 +200,10 @@ impl LogRecord {
     pub fn populate_from_record(&mut self, rec: &AccessLogRecord) {
         let downstream_protocol = rec.downstream_protocol();
         let upstream_protocol = rec.upstream_protocol();
-        let method = LogHttpMethod::from_u8(rec.method);
-        let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
-        let ua_fam = UaFamily::from_u8(rec.ua_family);
-        let ua_os = UaOs::from_u8(rec.ua_os);
+        let method = rec.method;
+        let grpc_st = rec.grpc_status;
+        let ua_fam = rec.ua_family;
+        let ua_os = rec.ua_os;
         let ts_nano = (rec.timestamp_sec as u64).saturating_mul(1_000_000_000);
 
         let req_hi = rec.timestamp_sec as u64;

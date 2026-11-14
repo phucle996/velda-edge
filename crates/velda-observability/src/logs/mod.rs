@@ -13,7 +13,6 @@ mod record;
 mod ring;
 mod store;
 mod types;
-mod user_agent;
 
 pub use catalog::{register_route_name, set_route_catalog, with_route_name};
 pub use record::AccessLogRecord;
@@ -23,5 +22,8 @@ pub use types::{
     LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, decode_ip_u128, encode_ip_u128,
     encode_upstream_ip_u32,
 };
-pub use user_agent::{UaFamily, UaOs, classify_user_agent};
-pub use velda_core::pipe::{PIPE_NAMES, PipeKind};
+pub use velda_core::lut::{
+    COMPLETION_REASON_NAMES, CompletionReason, GRPC_STATUS_NAMES, GrpcStatus, HTTP_METHOD_NAMES,
+    HttpMethod, PIPE_NAMES, PipeKind, UA_FAMILY_NAMES, UA_OS_NAMES, UaFamily, UaOs,
+    WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol, classify_user_agent,
+};

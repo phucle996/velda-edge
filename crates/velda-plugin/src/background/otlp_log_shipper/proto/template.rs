@@ -368,7 +368,7 @@ impl OtlpProtoWireEnvelope {
     pub fn encode_log_record_wire(&self, rec: &AccessLogRecord, out: &mut Vec<u8>) {
         out.reserve(600);
 
-        let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
+        let grpc_st = rec.grpc_status;
         let ts_nano = (rec.timestamp_sec as u64).saturating_mul(1_000_000_000);
         let req_hi = rec.timestamp_sec as u64;
         let req_lo = rec.request_id;

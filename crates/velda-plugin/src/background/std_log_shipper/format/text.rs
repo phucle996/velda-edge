@@ -1,9 +1,7 @@
 //! Text & Common Log Format (CLF) Access Log Formatting (`std_log_shipper::format::text`).
 
 use std::sync::Arc;
-use velda_observability::{
-    AccessLogRecord, LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, UaFamily,
-};
+use velda_observability::{AccessLogRecord, LogProtocol};
 
 use super::super::lut::{fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_u64};
 
@@ -39,10 +37,10 @@ pub fn format_text_records(
     for batch in batches {
         for rec in batch.iter() {
             let downstream_protocol = rec.downstream_protocol();
-            let completion = LogCompletionReason::from_u8(rec.completion);
-            let method = LogHttpMethod::from_u8(rec.method);
-            let grpc_st = LogGrpcStatus::from_u8(rec.grpc_status);
-            let ua_fam = UaFamily::from_u8(rec.ua_family);
+            let completion = rec.completion;
+            let method = rec.method;
+            let grpc_st = rec.grpc_status;
+            let ua_fam = rec.ua_family;
 
             fast_write_ip(out, rec.peer_ip);
             out.push(b':');
@@ -163,7 +161,7 @@ pub fn format_clf_records(
     for batch in batches {
         for rec in batch.iter() {
             let downstream_protocol = rec.downstream_protocol();
-            let method = LogHttpMethod::from_u8(rec.method);
+            let method = rec.method;
 
             fast_write_ip(out, rec.peer_ip);
             out.extend_from_slice(CLF_PREFIX);

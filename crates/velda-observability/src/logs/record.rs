@@ -7,13 +7,12 @@
 
 use std::net::SocketAddr;
 
-use velda_core::pipe::PipeKind;
-
-use super::types::{
-    LogCompletionReason, LogGrpcStatus, LogHttpMethod, LogProtocol, encode_ip_u128,
-    encode_upstream_ip_u32,
+use velda_core::lut::{
+    CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
+    classify_user_agent,
 };
-use super::user_agent::{UaFamily, UaOs, classify_user_agent};
+
+use super::types::{encode_ip_u128, encode_upstream_ip_u32};
 
 /// Canonical 256-byte (exactly 4 CPU cache lines) pure POD Access Log Record.
 ///
@@ -32,7 +31,7 @@ use super::user_agent::{UaFamily, UaOs, classify_user_agent};
 /// - `56..58`:  `ua_major_version: u16`
 /// - `58..60`:  `rpc_msgs_or_flags: u16`
 /// - `60..61`:  `pipe: PipeKind` (`#[repr(u8)]`, 1 byte, strongly typed pipeline variant)
-/// - `61..66`:  5 × `u8` enum discriminants (`completion`, `method`, `grpc_status`, `ua_family`, `ua_os`)
+/// - `61..66`:  5 × `#[repr(u8)]` typed enum discriminants (`completion`, `method`, `grpc_status`, `ua_family`, `ua_os`)
 /// - `66..68`:  `url_len: u16`
 /// - `68..256`: `url_bytes: [u8; 188]` (188 bytes monolithic URL: scheme + host + path_and_query)
 #[repr(C, align(64))]
@@ -52,11 +51,11 @@ pub struct AccessLogRecord {
     pub ua_major_version: u16,
     pub rpc_msgs_or_flags: u16,
     pub pipe: PipeKind,
-    pub completion: u8,
-    pub method: u8,
-    pub grpc_status: u8,
-    pub ua_family: u8,
-    pub ua_os: u8,
+    pub completion: CompletionReason,
+    pub method: HttpMethod,
+    pub grpc_status: GrpcStatus,
+    pub ua_family: UaFamily,
+    pub ua_os: UaOs,
     pub url_len: u16,
     pub url_bytes: [u8; 188],
 }
@@ -98,11 +97,11 @@ impl AccessLogRecord {
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: PipeKind::BufferedH1H1,
-            completion: LogCompletionReason::Complete as u8,
-            method: LogHttpMethod::Unknown as u8,
-            grpc_status: LogGrpcStatus::NonGrpc as u8,
-            ua_family: UaFamily::None as u8,
-            ua_os: UaOs::Unknown as u8,
+            completion: CompletionReason::Complete,
+            method: HttpMethod::Unknown,
+            grpc_status: GrpcStatus::NonGrpc,
+            ua_family: UaFamily::None,
+            ua_os: UaOs::Unknown,
             url_len: 0,
             url_bytes: [0; 188],
         }
@@ -230,14 +229,14 @@ impl AccessLogRecord {
 
     /// Returns the downstream wire protocol derived directly from the `pipe` discriminant.
     #[inline(always)]
-    pub const fn downstream_protocol(&self) -> LogProtocol {
-        LogProtocol::from_u8(self.pipe.downstream_protocol_u8())
+    pub const fn downstream_protocol(&self) -> WireProtocol {
+        self.pipe.downstream_protocol()
     }
 
     /// Returns the upstream wire protocol derived directly from the `pipe` discriminant.
     #[inline(always)]
-    pub const fn upstream_protocol(&self) -> LogProtocol {
-        LogProtocol::from_u8(self.pipe.upstream_protocol_u8())
+    pub const fn upstream_protocol(&self) -> WireProtocol {
+        self.pipe.upstream_protocol()
     }
 
     /// Constructs an integer record from request execution scalars.
@@ -255,9 +254,9 @@ impl AccessLogRecord {
         route_id: u16,
         rpc_msgs_or_flags: u16,
         pipe: PipeKind,
-        completion: LogCompletionReason,
-        method: LogHttpMethod,
-        grpc_status: LogGrpcStatus,
+        completion: CompletionReason,
+        method: HttpMethod,
+        grpc_status: GrpcStatus,
         user_agent_bytes: &[u8],
     ) -> Self {
         let (ua_family, ua_os, ua_major_version) = classify_user_agent(user_agent_bytes);
@@ -281,11 +280,11 @@ impl AccessLogRecord {
             ua_major_version,
             rpc_msgs_or_flags,
             pipe,
-            completion: completion as u8,
-            method: method as u8,
-            grpc_status: grpc_status as u8,
-            ua_family: ua_family as u8,
-            ua_os: ua_os as u8,
+            completion,
+            method,
+            grpc_status,
+            ua_family,
+            ua_os,
             url_len: 0,
             url_bytes: [0; 188],
         }

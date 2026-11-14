@@ -27,6 +27,7 @@ pub mod hardware;
 pub mod l4;
 pub mod l7;
 pub mod lifecycle;
+pub mod lut;
 pub mod pipe;
 pub mod protocol;
 pub mod provenance;
@@ -52,10 +53,14 @@ pub use buffer::{
 pub use coarse_time::{coarse_now_sec, init_coarse_clock};
 
 // -----------------------------------------------------------------------------
-// Protocol Family & Pipeline Variants
+// Canonical L1D Lookup Tables & Vocabulary (lut)
 // -----------------------------------------------------------------------------
 
-pub use pipe::{PIPE_NAMES, PipeKind};
+pub use lut::{
+    COMPLETION_REASON_NAMES, CompletionReason, GRPC_STATUS_NAMES, GrpcStatus, HTTP_METHOD_NAMES,
+    HttpMethod, PIPE_NAMES, PipeKind, UA_FAMILY_NAMES, UA_OS_NAMES, UaFamily, UaOs,
+    WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol, classify_user_agent,
+};
 pub use protocol::ProtocolFamily;
 
 // -----------------------------------------------------------------------------

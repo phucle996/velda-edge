@@ -78,7 +78,7 @@ fn test_ref_counted_multi_exporter_fanout_and_auto_drop() {
     assert_eq!(Arc::strong_count(&batch1), 2);
     assert_eq!(batch1[0].request_id, 0x1234_5678_9abc_def0);
     assert_eq!(batch2[0].status_code, 200);
-    assert_eq!(UaFamily::from_u8(batch2[0].ua_family), UaFamily::Curl);
+    assert_eq!(batch2[0].ua_family, UaFamily::Curl);
 
     drop(batch1);
     assert_eq!(Arc::strong_count(&batch2), 1);
