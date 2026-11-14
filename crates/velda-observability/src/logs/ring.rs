@@ -10,10 +10,12 @@
 //!    to L3/RAM without allocating a cache line in L1d, protecting hot routing and socket state.
 //!    `_mm_sfence()` enforces global visibility of the Write-Combining buffer before the
 //!    `Ordering::Release` store on `head`.
-//! 3. **Non-Temporal Streaming Load on Drain (`_mm256_stream_load_si256` / `VMOVNTDQA`)**:
-//!    `velda-shadow-{id}` drains ring slots directly using Non-Temporal Streaming Loads (`VMOVNTDQA`),
-//!    bypassing L1d cache allocation for dead ring buffer slots so background log draining
-//!    never evicts hot routing tables, connection pools, or metadata of its sibling Frontline thread.
+//! 3. **Full Non-Temporal Pipeline on Drain (`_mm256_stream_load_si256` + `_mm256_stream_si256` + `_mm_sfence()`)**:
+//!    `velda-shadow-{id}` drains ring slots using Non-Temporal Streaming Loads (`VMOVNTDQA`) and writes
+//!    the destination batch slice using Non-Temporal Streaming Stores (`VMOVNTDQ`), completely bypassing L1d
+//!    cache allocation for both the source ring buffer and destination batch slice.
+//!    This guarantees zero L1d pollution and zero LFB starvation on the sibling Frontline serving thread.
+//!    `_mm_sfence()` flushes the Write-Combining buffers before publishing the batch to exporter subscribers.
 //!    Upcoming slots are prefetched ahead into L2/L3 via `_MM_HINT_T1` to eliminate DRAM wait latency.
 
 use std::cell::UnsafeCell;
@@ -142,20 +144,25 @@ impl SpscLogRing {
         count
     }
 
-    /// Drains up to `max_records` from the ring using Non-Temporal Streaming Loads (`VMOVNTDQA` / `MOVNTDQA`)
-    /// and `_MM_HINT_T1` (L2/L3 cache prefetch lookahead).
+    /// Drains up to `max_records` from the ring using a Full Non-Temporal Pipeline:
+    /// - Non-Temporal Streaming Loads (`VMOVNTDQA` / `MOVNTDQA`) from the ring buffer.
+    /// - Non-Temporal Streaming Stores (`VMOVNTDQ` / `MOVNTDQ` + `_mm_sfence()`) to the output batch.
+    /// - `_MM_HINT_T1` L2/L3 cache prefetch lookahead.
     ///
     /// # Microarchitectural Rationale ("L1 is Gold")
-    /// Shadow Workers drain up to 4,096 records (1 MB of memory) in a single burst.
+    /// Shadow Workers drain up to 4,096 records (1 MB of memory) in a single burst on the same core
+    /// as the Frontline serving worker.
     /// Because each log record is read exactly once and then discarded from the ring buffer,
-    /// regular memory loads (`std::ptr::read`) would pull 1 MB of dead ring slots through L1d,
+    /// regular memory loads or stores would pull 1 MB of dead ring slots through L1d and tie up LFBs,
     /// evicting 100% of L1d (32–48 KB) and thrashing L2, which stalls sibling frontline serving threads.
     ///
-    /// By using `_mm256_stream_load_si256` (`VMOVNTDQA`) on AVX2 or `_mm_stream_load_si128` (`MOVNTDQA`) on SSE4.1:
-    /// - Data streams directly from L3/RAM through CPU Line Fill Buffers (LFB) into vector registers,
+    /// By using both `_mm256_stream_load_si256` (`VMOVNTDQA`) and `_mm256_stream_si256` (`VMOVNTDQ`):
+    /// - Read path: Data streams directly from L3/RAM through CPU Line Fill Buffers (LFB) into vector registers,
     ///   completely bypassing L1d cache allocation for the consumed ring slots.
-    /// - Data is stored into the newly allocated output batch slice using regular vector stores,
-    ///   ensuring the batch is placed into cache for active exporter plugins to serialize.
+    /// - Write path: Data writes directly through CPU Write-Combining buffers to L3/RAM without allocating
+    ///   L1d cache lines for the newly allocated batch slice.
+    /// - `_mm_sfence()` guarantees that all streaming stores are flushed and globally visible before
+    ///   the batch `Arc` is enqueued for exporter subscribers.
     pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
         let tail = self.tail.0.load(Ordering::Relaxed);
         let mut head = self.cached_head.0.load(Ordering::Relaxed);
@@ -208,7 +215,7 @@ impl SpscLogRing {
                     let s = src as *const __m256i;
                     let d = dst as *mut __m256i;
 
-                    // Non-Temporal Streaming Loads (VMOVNTDQA): loads 8 x 32-byte chunks directly into registers,
+                    // 1. Non-Temporal Streaming Loads (VMOVNTDQA): loads 8 x 32-byte chunks directly into registers,
                     // bypassing L1d cache allocation for the consumed ring buffer slot ("L1 is gold").
                     let v0 = _mm256_stream_load_si256(s);
                     let v1 = _mm256_stream_load_si256(s.add(1));
@@ -219,22 +226,23 @@ impl SpscLogRing {
                     let v6 = _mm256_stream_load_si256(s.add(6));
                     let v7 = _mm256_stream_load_si256(s.add(7));
 
-                    // Store into exporter destination batch slice (regular store to keep batch in cache for serialization)
-                    _mm256_store_si256(d, v0);
-                    _mm256_store_si256(d.add(1), v1);
-                    _mm256_store_si256(d.add(2), v2);
-                    _mm256_store_si256(d.add(3), v3);
-                    _mm256_store_si256(d.add(4), v4);
-                    _mm256_store_si256(d.add(5), v5);
-                    _mm256_store_si256(d.add(6), v6);
-                    _mm256_store_si256(d.add(7), v7);
+                    // 2. Non-Temporal Streaming Stores (VMOVNTDQ): stores 8 x 32-byte chunks directly through
+                    // Write-Combining buffers to L3/RAM, completely bypassing L1d cache allocation for the output batch slice!
+                    _mm256_stream_si256(d, v0);
+                    _mm256_stream_si256(d.add(1), v1);
+                    _mm256_stream_si256(d.add(2), v2);
+                    _mm256_stream_si256(d.add(3), v3);
+                    _mm256_stream_si256(d.add(4), v4);
+                    _mm256_stream_si256(d.add(5), v5);
+                    _mm256_stream_si256(d.add(6), v6);
+                    _mm256_stream_si256(d.add(7), v7);
                 } else {
-                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_stream_load_si128
+                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_stream_load_si128 and _mm_stream_si128
                     let s = src as *const __m128i;
                     let d = dst as *mut __m128i;
                     for k in 0..16 {
                         let v = _mm_stream_load_si128(s.add(k));
-                        _mm_store_si128(d.add(k), v);
+                        _mm_stream_si128(d.add(k), v);
                     }
                 }
             }
@@ -242,6 +250,14 @@ impl SpscLogRing {
             #[cfg(not(target_arch = "x86_64"))]
             unsafe {
                 std::ptr::copy_nonoverlapping(src, dst, 1);
+            }
+        }
+
+        // Enforce global visibility of Write-Combining non-temporal stores before handing off batch
+        #[cfg(target_arch = "x86_64")]
+        if to_take > 0 {
+            unsafe {
+                core::arch::x86_64::_mm_sfence();
             }
         }
 
