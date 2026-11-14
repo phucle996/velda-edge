@@ -8,71 +8,51 @@
 
 use std::time::Duration;
 
-use velda_observability::{
-    DownstreamProtocol, MetricsSnapshot, MetricsStore, PipeStrategy, StreamCompletion,
-    UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{MetricsSnapshot, MetricsStore, StreamCompletion};
 use velda_plugin::background::statsd_exporter::dialect::{
     DogStatsdTemplate, StandardTemplate, StatsdDialect, format_statsd_snapshot,
 };
 
-/// Helper to populate all 36 pipeline slots in a MetricsStore.
-fn populate_all_36_pipeline_slots(store: &MetricsStore) {
-    for down_idx in 0..DownstreamProtocol::COUNT {
-        let down = DownstreamProtocol::from_discriminant(down_idx as u8).unwrap();
-        for up_idx in 0..UpstreamProtocol::COUNT {
-            let up = UpstreamProtocol::from_discriminant(up_idx as u8).unwrap();
-            for pipe_idx in 0..PipeStrategy::COUNT {
-                let pipe = PipeStrategy::from_discriminant(pipe_idx as u8).unwrap();
-
-                // Start 5 streams for 5 completions + 1 active stream remaining
-                for _ in 0..6 {
-                    store.record_stream_start(down, up, pipe);
-                }
-
-                // Record completions across status categories and durations (each ends 1 stream)
-                store.record_stream_completion(
-                    down,
-                    up,
-                    pipe,
-                    StreamCompletion::new(200, 100, 200, Duration::from_micros(500), None),
-                );
-                store.record_stream_completion(
-                    down,
-                    up,
-                    pipe,
-                    StreamCompletion::new(301, 150, 250, Duration::from_millis(3), None),
-                );
-                store.record_stream_completion(
-                    down,
-                    up,
-                    pipe,
-                    StreamCompletion::new(404, 200, 300, Duration::from_millis(8), None),
-                );
-                store.record_stream_completion(
-                    down,
-                    up,
-                    pipe,
-                    StreamCompletion::new(503, 250, 350, Duration::from_millis(25), None),
-                );
-                store.record_stream_completion(
-                    down,
-                    up,
-                    pipe,
-                    StreamCompletion::new(999, 300, 400, Duration::from_millis(150), None),
-                );
-            }
+/// Helper to populate all 64 pipeline slots in a MetricsStore.
+fn populate_all_pipeline_slots(store: &MetricsStore) {
+    for &pipe in &PipeKind::ALL {
+        // Start 5 streams for 5 completions + 1 active stream remaining
+        for _ in 0..6 {
+            store.record_stream_start(pipe);
         }
+
+        // Record completions across status categories and durations (each ends 1 stream)
+        store.record_stream_completion(
+            pipe,
+            StreamCompletion::new(200, 100, 200, Duration::from_micros(500), None),
+        );
+        store.record_stream_completion(
+            pipe,
+            StreamCompletion::new(301, 150, 250, Duration::from_millis(3), None),
+        );
+        store.record_stream_completion(
+            pipe,
+            StreamCompletion::new(404, 200, 300, Duration::from_millis(8), None),
+        );
+        store.record_stream_completion(
+            pipe,
+            StreamCompletion::new(503, 250, 350, Duration::from_millis(25), None),
+        );
+        store.record_stream_completion(
+            pipe,
+            StreamCompletion::new(999, 300, 400, Duration::from_millis(150), None),
+        );
     }
 }
 
 #[test]
-fn test_chaos_all_36_pipeline_slots_dogstatsd() {
+fn test_chaos_all_64_pipeline_slots_dogstatsd() {
     let store = MetricsStore::new();
-    populate_all_36_pipeline_slots(&store);
+    populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
 
-    assert_eq!(snapshot.pipelines.len(), 36);
+    assert_eq!(snapshot.pipelines.len(), 64);
 
     let mut packet_buf = Vec::new();
     let mut collected = Vec::new();
@@ -89,8 +69,8 @@ fn test_chaos_all_36_pipeline_slots_dogstatsd() {
     );
 
     assert!(packets > 0);
-    // 8 global + 10 pool + 5 evictions + (36 slots * 15 lines) = 563 total lines
-    assert_eq!(metrics, 563);
+    // 8 global + 10 pool + 5 evictions + (64 slots * 15 lines) = 983 total lines
+    assert_eq!(metrics, 983);
 
     let text = String::from_utf8(collected).expect("Output must be valid UTF-8");
 
@@ -100,62 +80,48 @@ fn test_chaos_all_36_pipeline_slots_dogstatsd() {
     assert!(text.contains("velda_chaos.pool.containers.total:0|g\n"));
     assert!(text.contains("velda_chaos.pool.evictions.total:0|c|#reason:idle_timeout\n"));
 
-    // Verify all 36 combinations have their specific tags
-    for down_idx in 0..DownstreamProtocol::COUNT {
-        let d = DownstreamProtocol::from_discriminant(down_idx as u8)
-            .unwrap()
-            .as_str();
-        for up_idx in 0..UpstreamProtocol::COUNT {
-            let u = UpstreamProtocol::from_discriminant(up_idx as u8)
-                .unwrap()
-                .as_str();
-            for pipe_idx in 0..PipeStrategy::COUNT {
-                let p = PipeStrategy::from_discriminant(pipe_idx as u8)
-                    .unwrap()
-                    .as_str();
+    // Verify all 64 combinations have their specific tags
+    for &pipe in &PipeKind::ALL {
+        let d = pipe.downstream().as_str();
+        let u = pipe.upstream().as_str();
+        let p = pipe.strategy_str();
 
-                let expected_tag = format!("#downstream:{d},upstream:{u},pipe:{p}");
-                assert!(
-                    text.contains(&expected_tag),
-                    "Missing expected DogStatsD tag '{expected_tag}'"
-                );
+        let expected_tag = format!("#downstream:{d},upstream:{u},pipe:{p}");
+        assert!(
+            text.contains(&expected_tag),
+            "Missing expected DogStatsD tag '{expected_tag}'"
+        );
 
-                // Verify specific status lines
-                let expected_2xx =
-                    format!("velda_chaos.requests.total:1|c|{expected_tag},status:2xx\n");
-                let expected_3xx =
-                    format!("velda_chaos.requests.total:1|c|{expected_tag},status:3xx\n");
-                let expected_4xx =
-                    format!("velda_chaos.requests.total:1|c|{expected_tag},status:4xx\n");
-                let expected_5xx =
-                    format!("velda_chaos.requests.total:1|c|{expected_tag},status:5xx\n");
-                let expected_other =
-                    format!("velda_chaos.requests.total:1|c|{expected_tag},status:other\n");
+        // Verify specific status lines
+        let expected_2xx = format!("velda_chaos.requests.total:1|c|{expected_tag},status:2xx\n");
+        let expected_3xx = format!("velda_chaos.requests.total:1|c|{expected_tag},status:3xx\n");
+        let expected_4xx = format!("velda_chaos.requests.total:1|c|{expected_tag},status:4xx\n");
+        let expected_5xx = format!("velda_chaos.requests.total:1|c|{expected_tag},status:5xx\n");
+        let expected_other =
+            format!("velda_chaos.requests.total:1|c|{expected_tag},status:other\n");
 
-                assert!(text.contains(&expected_2xx), "Missing: {expected_2xx}");
-                assert!(text.contains(&expected_3xx), "Missing: {expected_3xx}");
-                assert!(text.contains(&expected_4xx), "Missing: {expected_4xx}");
-                assert!(text.contains(&expected_5xx), "Missing: {expected_5xx}");
-                assert!(text.contains(&expected_other), "Missing: {expected_other}");
+        assert!(text.contains(&expected_2xx), "Missing: {expected_2xx}");
+        assert!(text.contains(&expected_3xx), "Missing: {expected_3xx}");
+        assert!(text.contains(&expected_4xx), "Missing: {expected_4xx}");
+        assert!(text.contains(&expected_5xx), "Missing: {expected_5xx}");
+        assert!(text.contains(&expected_other), "Missing: {expected_other}");
 
-                // Active streams gauge
-                let expected_streams = format!("velda_chaos.streams.active:1|g|{expected_tag}\n");
-                assert!(
-                    text.contains(&expected_streams),
-                    "Missing: {expected_streams}"
-                );
-            }
-        }
+        // Active streams gauge
+        let expected_streams = format!("velda_chaos.streams.active:1|g|{expected_tag}\n");
+        assert!(
+            text.contains(&expected_streams),
+            "Missing: {expected_streams}"
+        );
     }
 }
 
 #[test]
-fn test_chaos_all_36_pipeline_slots_standard() {
+fn test_chaos_all_64_pipeline_slots_standard() {
     let store = MetricsStore::new();
-    populate_all_36_pipeline_slots(&store);
+    populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
 
-    assert_eq!(snapshot.pipelines.len(), 36);
+    assert_eq!(snapshot.pipelines.len(), 64);
 
     let mut packet_buf = Vec::new();
     let mut collected = Vec::new();
@@ -172,7 +138,7 @@ fn test_chaos_all_36_pipeline_slots_standard() {
     );
 
     assert!(packets > 0);
-    assert_eq!(metrics, 563);
+    assert_eq!(metrics, 983);
 
     let text = String::from_utf8(collected).expect("Output must be valid UTF-8");
 
@@ -186,41 +152,31 @@ fn test_chaos_all_36_pipeline_slots_standard() {
     assert!(text.contains("velda_chaos.connections.total:0|c\n"));
     assert!(text.contains("velda_chaos.pool.evictions.idle_timeout:0|c\n"));
 
-    // Verify all 36 combinations have their specific dot notation paths
-    for down_idx in 0..DownstreamProtocol::COUNT {
-        let d = DownstreamProtocol::from_discriminant(down_idx as u8)
-            .unwrap()
-            .as_str();
-        for up_idx in 0..UpstreamProtocol::COUNT {
-            let u = UpstreamProtocol::from_discriminant(up_idx as u8)
-                .unwrap()
-                .as_str();
-            for pipe_idx in 0..PipeStrategy::COUNT {
-                let p = PipeStrategy::from_discriminant(pipe_idx as u8)
-                    .unwrap()
-                    .as_str();
+    // Verify all 64 combinations have their specific dot notation paths
+    for &pipe in &PipeKind::ALL {
+        let d = pipe.downstream().as_str();
+        let u = pipe.upstream().as_str();
+        let p = pipe.strategy_str();
 
-                let expected_2xx = format!("velda_chaos.requests.{d}.{u}.{p}.2xx:1|c\n");
-                let expected_5xx = format!("velda_chaos.requests.{d}.{u}.{p}.5xx:1|c\n");
-                let expected_streams = format!("velda_chaos.streams.active.{d}.{u}.{p}:1|g\n");
-                let expected_rx = format!("velda_chaos.bytes.rx.{d}.{u}.{p}:1000|c\n");
+        let expected_2xx = format!("velda_chaos.requests.{d}.{u}.{p}.2xx:1|c\n");
+        let expected_5xx = format!("velda_chaos.requests.{d}.{u}.{p}.5xx:1|c\n");
+        let expected_streams = format!("velda_chaos.streams.active.{d}.{u}.{p}:1|g\n");
+        let expected_rx = format!("velda_chaos.bytes.rx.{d}.{u}.{p}:1000|c\n");
 
-                assert!(text.contains(&expected_2xx), "Missing: {expected_2xx}");
-                assert!(text.contains(&expected_5xx), "Missing: {expected_5xx}");
-                assert!(
-                    text.contains(&expected_streams),
-                    "Missing: {expected_streams}"
-                );
-                assert!(text.contains(&expected_rx), "Missing: {expected_rx}");
-            }
-        }
+        assert!(text.contains(&expected_2xx), "Missing: {expected_2xx}");
+        assert!(text.contains(&expected_5xx), "Missing: {expected_5xx}");
+        assert!(
+            text.contains(&expected_streams),
+            "Missing: {expected_streams}"
+        );
+        assert!(text.contains(&expected_rx), "Missing: {expected_rx}");
     }
 }
 
 #[test]
 fn test_chaos_mtu_boundaries_no_split_no_loss() {
     let store = MetricsStore::new();
-    populate_all_36_pipeline_slots(&store);
+    populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
 
     let mtu_sizes = [256, 512, 1024, 1432, 2048, 8192];
@@ -281,7 +237,7 @@ fn test_chaos_mtu_boundaries_no_split_no_loss() {
 
             assert_eq!(emitted_packets, packets_received);
             assert_eq!(emitted_metrics, all_lines.len());
-            assert_eq!(emitted_metrics, 563);
+            assert_eq!(emitted_metrics, 983);
 
             // Invariant 4: 0 byte / 0 line loss across all MTUs
             if let Some(ref base) = baseline_lines {
@@ -341,9 +297,7 @@ fn test_chaos_extreme_boundary_values() {
     snapshot
         .pipelines
         .push(velda_observability::PipelineSnapshot {
-            downstream: DownstreamProtocol::H1,
-            upstream: UpstreamProtocol::H1,
-            pipe: PipeStrategy::Buffered,
+            pipe: PipeKind::BufferedH1H1,
             requests_2xx: u64::MAX,
             requests_3xx: 0,
             requests_4xx: 1,
@@ -387,11 +341,10 @@ fn test_chaos_extreme_boundary_values() {
     assert!(dog_str.contains("boundary.tls.handshakes.total:1|c\n"));
     assert!(dog_str.contains("boundary.pool.connections.leased:-42|g\n"));
     assert!(dog_str.contains("boundary.pool.multiplexed_active_streams:-1|g\n"));
-    assert!(dog_str.contains("boundary.requests.total:18446744073709551615|c|#downstream:h1,upstream:h1,pipe:buffered,status:2xx\n"));
-    assert!(
-        dog_str
-            .contains("boundary.streams.active:-999|g|#downstream:h1,upstream:h1,pipe:buffered\n")
-    );
+    assert!(dog_str.contains("boundary.requests.total:18446744073709551615|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"));
+    assert!(dog_str.contains(
+        "boundary.streams.active:-999|g|#downstream:http/1.1,upstream:http/1.1,pipe:buffered\n"
+    ));
 
     // 2. Standard StatsD check
     let mut std_collected = Vec::new();
@@ -407,14 +360,17 @@ fn test_chaos_extreme_boundary_values() {
     let std_str = String::from_utf8(std_collected).unwrap();
 
     assert!(std_str.contains("boundary.connections.active:-100|g\n"));
-    assert!(std_str.contains("boundary.requests.h1.h1.buffered.2xx:18446744073709551615|c\n"));
-    assert!(std_str.contains("boundary.streams.active.h1.h1.buffered:-999|g\n"));
+    assert!(
+        std_str
+            .contains("boundary.requests.http/1.1.http/1.1.buffered.2xx:18446744073709551615|c\n")
+    );
+    assert!(std_str.contains("boundary.streams.active.http/1.1.http/1.1.buffered:-999|g\n"));
 }
 
 #[test]
 fn test_chaos_stress_10000_records_zero_leak() {
     let store = MetricsStore::new();
-    populate_all_36_pipeline_slots(&store);
+    populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
 
     let dogstatsd = DogStatsdTemplate::new("stress");
@@ -432,18 +388,18 @@ fn test_chaos_stress_10000_records_zero_leak() {
                 packet_count += 1;
             });
             assert_eq!(pkts, packet_count);
-            assert_eq!(metrics, 563);
+            assert_eq!(metrics, 983);
             metric_count += metrics;
         } else {
             let (pkts, metrics) = standard.format(&snapshot, &mut packet_buf, 1432, |_pkt| {
                 packet_count += 1;
             });
             assert_eq!(pkts, packet_count);
-            assert_eq!(metrics, 563);
+            assert_eq!(metrics, 983);
             metric_count += metrics;
         }
 
-        assert_eq!(metric_count, 563);
+        assert_eq!(metric_count, 983);
         // Ensure packet buffer capacity did not balloon
         assert!(
             packet_buf.capacity() <= 4096,

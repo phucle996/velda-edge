@@ -11,10 +11,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
-use velda_observability::{
-    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
-    UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{EvictionReason, MetricsStore, StreamCompletion};
 
 // ============================================================================
 // Stage 1: HTTP/2 Rapid Reset Flood Attack Simulation
@@ -37,20 +35,14 @@ fn bench_rapid_reset_flood() {
 
     for _ in 0..iters {
         // Stream begins
-        store.record_stream_start(
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
-        );
+        store.record_stream_start(PipeKind::ServerStreamH2H1);
 
         // Immediate cancellation / RST_STREAM received
         store.global().h2_rst_stream();
 
         // Stream completed with 499 (Client Closed Request) and 0 bytes transferred
         store.record_stream_completion(
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
+            PipeKind::ServerStreamH2H1,
             StreamCompletion::new(499, 0, 0, Duration::from_micros(50), None),
         );
     }
@@ -58,13 +50,7 @@ fn bench_rapid_reset_flood() {
     let elapsed = start.elapsed();
     let ns_op = elapsed.as_nanos() as f64 / iters as f64;
     let snap = store.snapshot();
-    let pipe = snap
-        .find_pipeline(
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
-        )
-        .unwrap();
+    let pipe = snap.find_pipeline(PipeKind::ServerStreamH2H1).unwrap();
 
     assert_eq!(snap.global.h2_rst_stream_total, iters);
     assert_eq!(pipe.active_streams, 0);
@@ -103,7 +89,7 @@ fn bench_erratic_status_and_pipeline_hopping() {
     let start = Instant::now();
 
     for _ in 0..iters {
-        let (down, up, pipe) = rng.next_pipeline_coords();
+        let pipe = rng.next_pipe_kind();
         let status = (rng.next_usize(500) + 100) as u16; // Random 100..599
         let bytes_rx = rng.next_usize(8192) as u64;
         let bytes_tx = rng.next_usize(131072) as u64;
@@ -114,10 +100,8 @@ fn bench_erratic_status_and_pipeline_hopping() {
             None
         };
 
-        store.record_stream_start(down, up, pipe);
+        store.record_stream_start(pipe);
         store.record_stream_completion(
-            down,
-            up,
             pipe,
             StreamCompletion::new(status, bytes_rx, bytes_tx, dur, ttfb),
         );

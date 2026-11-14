@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_duration, format_throughput};
+use velda_core::lut::PipeKind;
 use velda_observability::{
-    DownstreamProtocol, EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, PipeStrategy,
-    StreamCompletion, Telemetry, UpstreamProtocol,
+    EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, StreamCompletion, Telemetry,
 };
 
 #[global_allocator]
@@ -99,43 +99,21 @@ fn bench_direct_slot_completion() {
 
     // Warm-up
     for _ in 0..10_000 {
-        store.record_stream_completion(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-            completion,
-        );
+        store.record_stream_completion(PipeKind::BufferedH1H1, completion);
     }
 
     let pipelines = [
-        (
-            "H1 -> H1 Buffered",
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        ),
-        (
-            "H2 -> H1 ServerStream",
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
-        ),
-        (
-            "H3 -> H3 Duplex",
-            DownstreamProtocol::H3,
-            UpstreamProtocol::H3,
-            PipeStrategy::Duplex,
-        ),
+        ("H1 -> H1 Buffered", PipeKind::BufferedH1H1),
+        ("H2 -> H1 ServerStream", PipeKind::ServerStreamH2H1),
+        ("H3 -> H3 Duplex", PipeKind::DuplexH3H3),
     ];
 
-    for (name, down, up, pipe) in pipelines {
+    for (name, pipe) in pipelines {
         ALLOCATOR.reset();
         let start = Instant::now();
 
         for _ in 0..iters {
             store.record_stream_completion(
-                std::hint::black_box(down),
-                std::hint::black_box(up),
                 std::hint::black_box(pipe),
                 std::hint::black_box(completion),
             );
@@ -182,12 +160,7 @@ fn bench_live_telemetry_lifecycle() {
     let start = Instant::now();
 
     for _ in 0..iters {
-        let mut tel = LiveTelemetry::new(
-            Arc::clone(&store),
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
-        );
+        let mut tel = LiveTelemetry::new(Arc::clone(&store), PipeKind::ServerStreamH2H1);
         tel.on_start();
         tel.on_bytes_rx(std::hint::black_box(256));
         tel.on_ttfb();
@@ -302,9 +275,9 @@ fn bench_snapshot_generation_latency() {
     // Populate some data
     let mut rng = FastRng::new(42);
     for _ in 0..10_000 {
-        let (d, u, p) = rng.next_pipeline_coords();
+        let pipe = rng.next_pipe_kind();
         let comp = rng.next_completion();
-        store.record_stream_completion(d, u, p, comp);
+        store.record_stream_completion(pipe, comp);
     }
     store.pool().record_hit();
     store.pool().record_hit();

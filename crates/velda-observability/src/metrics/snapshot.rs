@@ -11,18 +11,15 @@
 
 use std::time::Instant;
 
-use super::types::{DownstreamProtocol, PipeStrategy, UpstreamProtocol};
+use velda_core::lut::{PipeKind, WireProtocol};
+
 use super::vector::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineSnapshot {
-    /// Downstream ingress protocol.
-    pub downstream: DownstreamProtocol,
-    /// Upstream egress protocol.
-    pub upstream: UpstreamProtocol,
-    /// Payload streaming strategy.
-    pub pipe: PipeStrategy,
+    /// Canonical pipeline execution variant.
+    pub pipe: PipeKind,
 
     /// Total 2xx success requests.
     pub requests_2xx: u64,
@@ -62,6 +59,24 @@ pub struct PipelineSnapshot {
 }
 
 impl PipelineSnapshot {
+    /// Downstream ingress wire protocol.
+    #[inline(always)]
+    pub fn downstream(&self) -> WireProtocol {
+        self.pipe.downstream_protocol()
+    }
+
+    /// Upstream egress wire protocol.
+    #[inline(always)]
+    pub fn upstream(&self) -> WireProtocol {
+        self.pipe.upstream_protocol()
+    }
+
+    /// Canonical static string for the streaming pipe strategy.
+    #[inline(always)]
+    pub fn strategy_str(&self) -> &'static str {
+        self.pipe.strategy_str()
+    }
+
     /// Converts pipeline metric counters into a 20-counter array.
     #[inline(always)]
     pub fn to_counters(&self) -> [u64; PIPELINE_COUNTERS_LEN] {
@@ -316,27 +331,16 @@ impl MetricsSnapshot {
         self.pipelines.iter().map(|p| p.active_streams).sum()
     }
 
-    /// Finds a specific pipeline snapshot by its coordinates.
-    pub fn find_pipeline(
-        &self,
-        downstream: DownstreamProtocol,
-        upstream: UpstreamProtocol,
-        pipe: PipeStrategy,
-    ) -> Option<&PipelineSnapshot> {
-        self.pipelines
-            .iter()
-            .find(|p| p.downstream == downstream && p.upstream == upstream && p.pipe == pipe)
+    /// Finds a specific pipeline snapshot by its canonical pipe variant.
+    pub fn find_pipeline(&self, pipe: PipeKind) -> Option<&PipelineSnapshot> {
+        self.pipelines.iter().find(|p| p.pipe == pipe)
     }
 
-    /// Creates a zero-initialized snapshot covering all 36 pipeline coordinate slots.
+    /// Creates a zero-initialized snapshot covering all 64 pipeline coordinate slots.
     pub fn zero() -> Self {
         let mut pipelines = Vec::with_capacity(super::store::TOTAL_PIPELINE_SLOTS);
-        for slot_idx in 0..super::store::TOTAL_PIPELINE_SLOTS {
-            let (downstream, upstream, pipe) =
-                super::store::MetricsStore::decode_slot_index(slot_idx);
+        for &pipe in &PipeKind::ALL {
             pipelines.push(PipelineSnapshot {
-                downstream,
-                upstream,
                 pipe,
                 requests_2xx: 0,
                 requests_3xx: 0,
@@ -411,15 +415,9 @@ impl MetricsSnapshot {
             .iter()
             .enumerate()
             .map(|(i, curr)| {
-                let p = prev.pipelines.get(i).filter(|p| {
-                    p.downstream == curr.downstream
-                        && p.upstream == curr.upstream
-                        && p.pipe == curr.pipe
-                });
+                let p = prev.pipelines.get(i).filter(|p| p.pipe == curr.pipe);
                 match p {
                     Some(prev_p) => PipelineSnapshot {
-                        downstream: curr.downstream,
-                        upstream: curr.upstream,
                         pipe: curr.pipe,
                         requests_2xx: curr.requests_2xx.saturating_sub(prev_p.requests_2xx),
                         requests_3xx: curr.requests_3xx.saturating_sub(prev_p.requests_3xx),
@@ -581,15 +579,9 @@ mod tests {
     fn test_snapshot_delta_since_preserves_gauges_and_subtracts_counters() {
         let store = MetricsStore::new();
         store.global().connection_opened();
-        store.record_stream_start(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             crate::metrics::StreamCompletion::new(200, 100, 250, Duration::from_millis(2), None),
         );
 
@@ -597,13 +589,7 @@ mod tests {
         let d1 = snap1.delta_since(&MetricsSnapshot::zero());
         assert_eq!(d1.global.connections_total, 1);
         assert_eq!(d1.global.connections_active, 1);
-        let p1 = d1
-            .find_pipeline(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            )
-            .unwrap();
+        let p1 = d1.find_pipeline(PipeKind::BufferedH1H1).unwrap();
         assert_eq!(p1.requests_2xx, 1);
         assert_eq!(p1.bytes_rx, 100);
         assert_eq!(p1.bytes_tx, 250);
@@ -613,40 +599,22 @@ mod tests {
         let d2 = snap2.delta_since(&snap1);
         assert_eq!(d2.global.connections_total, 0);
         assert_eq!(d2.global.connections_active, 1);
-        let p2 = d2
-            .find_pipeline(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            )
-            .unwrap();
+        let p2 = d2.find_pipeline(PipeKind::BufferedH1H1).unwrap();
         assert_eq!(p2.requests_2xx, 0);
         assert_eq!(p2.bytes_rx, 0);
         assert_eq!(p2.bytes_tx, 0);
 
         // Second request + connection closed
         store.global().connection_closed();
-        store.record_stream_start(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH1H1,
             crate::metrics::StreamCompletion::new(404, 50, 75, Duration::from_millis(3), None),
         );
         let snap3 = store.snapshot();
         let d3 = snap3.delta_since(&snap2);
         assert_eq!(d3.global.connections_active, 0);
-        let p3 = d3
-            .find_pipeline(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            )
-            .unwrap();
+        let p3 = d3.find_pipeline(PipeKind::BufferedH1H1).unwrap();
         assert_eq!(p3.requests_2xx, 0);
         assert_eq!(p3.requests_4xx, 1);
         assert_eq!(p3.bytes_rx, 50);

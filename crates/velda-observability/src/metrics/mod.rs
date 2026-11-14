@@ -21,9 +21,7 @@ pub use store::{
     init_global_metrics, set_current_worker_lane,
 };
 pub use telemetry::{LiveTelemetry, NoopTelemetry, Telemetry};
-pub use types::{
-    AlpnProtocol, DownstreamProtocol, PipeStrategy, StatusClass, StreamCompletion, UpstreamProtocol,
-};
+pub use types::{AlpnProtocol, PipeKind, StatusClass, StreamCompletion, WireProtocol};
 pub use vector::{
     AGGREGATE_COUNTERS, AccumulateCountersFn, PIPELINE_COUNTERS_LEN, PipelineMetricsTotals,
     add_counters, add_counters_64, add_counters_128, add_counters_256, resolve_counters_fn,

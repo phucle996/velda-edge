@@ -24,9 +24,8 @@
 //!  4. packet_buffer.extend_from_slice(tail);
 //! ```
 
-use velda_observability::{
-    DownstreamProtocol, MetricsSnapshot, PipeStrategy, PipelineSnapshot, UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{MetricsSnapshot, PipelineSnapshot};
 
 use super::StatsdBatchWriter;
 
@@ -51,16 +50,11 @@ pub struct StandardSlotSkeleton {
 }
 
 impl StandardSlotSkeleton {
-    pub fn new(
-        prefix: &str,
-        down: DownstreamProtocol,
-        up: UpstreamProtocol,
-        pipe: PipeStrategy,
-    ) -> Self {
+    pub fn new(prefix: &str, pipe: PipeKind) -> Self {
         let pfx = prefix.trim();
-        let d = down.as_str();
-        let u = up.as_str();
-        let p = pipe.as_str();
+        let d = pipe.downstream_protocol().as_str();
+        let u = pipe.upstream_protocol().as_str();
+        let p = pipe.strategy_str();
 
         Self {
             req_2xx_head: format!("{pfx}.requests.{d}.{u}.{p}.2xx:")
@@ -145,7 +139,7 @@ pub struct StandardTemplate {
     pub eviction_capacity_head: Box<[u8]>,
 
     // 36 Pipeline Slots Skeletons
-    pub slots: Box<[StandardSlotSkeleton; 36]>,
+    pub slots: Box<[StandardSlotSkeleton; 64]>,
 }
 
 impl StandardTemplate {
@@ -153,21 +147,14 @@ impl StandardTemplate {
     pub fn new(prefix: &str) -> Self {
         let pfx = prefix.trim();
 
-        let mut slots_vec = Vec::with_capacity(36);
-        for down_idx in 0..DownstreamProtocol::COUNT {
-            let down = DownstreamProtocol::from_discriminant(down_idx as u8).unwrap();
-            for up_idx in 0..UpstreamProtocol::COUNT {
-                let up = UpstreamProtocol::from_discriminant(up_idx as u8).unwrap();
-                for pipe_idx in 0..PipeStrategy::COUNT {
-                    let pipe = PipeStrategy::from_discriminant(pipe_idx as u8).unwrap();
-                    slots_vec.push(StandardSlotSkeleton::new(pfx, down, up, pipe));
-                }
-            }
+        let mut slots_vec = Vec::with_capacity(PipeKind::COUNT);
+        for &pipe in &PipeKind::ALL {
+            slots_vec.push(StandardSlotSkeleton::new(pfx, pipe));
         }
-        let slots: Box<[StandardSlotSkeleton; 36]> = slots_vec
+        let slots: Box<[StandardSlotSkeleton; 64]> = slots_vec
             .into_boxed_slice()
             .try_into()
-            .unwrap_or_else(|_| panic!("Expected exactly 36 pipeline slot skeletons"));
+            .unwrap_or_else(|_| panic!("Expected exactly 64 pipeline slot skeletons"));
 
         Self {
             conn_total_head: format!("{pfx}.connections.total:")
@@ -386,7 +373,7 @@ impl StandardTemplate {
         p: &PipelineSnapshot,
         writer: &mut StatsdBatchWriter<'_, F>,
     ) {
-        let slot_idx = (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
+        let slot_idx = p.pipe as usize;
         if let Some(slot) = self.slots.get(slot_idx) {
             writer.append_metric_u64(&slot.req_2xx_head, p.requests_2xx, b"|c\n");
             writer.append_metric_u64(&slot.req_3xx_head, p.requests_3xx, b"|c\n");

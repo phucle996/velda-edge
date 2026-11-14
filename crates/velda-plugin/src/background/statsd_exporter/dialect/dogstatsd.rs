@@ -24,9 +24,8 @@
 //!  4. packet_buffer.extend_from_slice(tail);
 //! ```
 
-use velda_observability::{
-    DownstreamProtocol, MetricsSnapshot, PipeStrategy, PipelineSnapshot, UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{MetricsSnapshot, PipelineSnapshot};
 
 use super::StatsdBatchWriter;
 
@@ -51,10 +50,10 @@ pub struct DogStatsdSlotSkeleton {
 }
 
 impl DogStatsdSlotSkeleton {
-    pub fn new(down: DownstreamProtocol, up: UpstreamProtocol, pipe: PipeStrategy) -> Self {
-        let d = down.as_str();
-        let u = up.as_str();
-        let p = pipe.as_str();
+    pub fn new(pipe: PipeKind) -> Self {
+        let d = pipe.downstream_protocol().as_str();
+        let u = pipe.upstream_protocol().as_str();
+        let p = pipe.strategy_str();
 
         Self {
             req_2xx_tail: format!("|c|#downstream:{d},upstream:{u},pipe:{p},status:2xx\n")
@@ -146,8 +145,8 @@ pub struct DogStatsdTemplate {
     pub bytes_tx_head: Box<[u8]>,
     pub duration_head: Box<[u8]>,
 
-    // 36 Pipeline Slots Skeletons
-    pub slots: Box<[DogStatsdSlotSkeleton; 36]>,
+    // 64 Pipeline Slots Skeletons
+    pub slots: Box<[DogStatsdSlotSkeleton; 64]>,
 }
 
 impl DogStatsdTemplate {
@@ -155,22 +154,15 @@ impl DogStatsdTemplate {
     pub fn new(prefix: &str) -> Self {
         let pfx = prefix.trim();
 
-        // Build 36 slot skeletons (3 down * 3 up * 4 pipe)
-        let mut slots_vec = Vec::with_capacity(36);
-        for down_idx in 0..DownstreamProtocol::COUNT {
-            let down = DownstreamProtocol::from_discriminant(down_idx as u8).unwrap();
-            for up_idx in 0..UpstreamProtocol::COUNT {
-                let up = UpstreamProtocol::from_discriminant(up_idx as u8).unwrap();
-                for pipe_idx in 0..PipeStrategy::COUNT {
-                    let pipe = PipeStrategy::from_discriminant(pipe_idx as u8).unwrap();
-                    slots_vec.push(DogStatsdSlotSkeleton::new(down, up, pipe));
-                }
-            }
+        // Build 64 slot skeletons matching PipeKind::COUNT
+        let mut slots_vec = Vec::with_capacity(PipeKind::COUNT);
+        for &pipe in &PipeKind::ALL {
+            slots_vec.push(DogStatsdSlotSkeleton::new(pipe));
         }
-        let slots: Box<[DogStatsdSlotSkeleton; 36]> = slots_vec
+        let slots: Box<[DogStatsdSlotSkeleton; 64]> = slots_vec
             .into_boxed_slice()
             .try_into()
-            .unwrap_or_else(|_| panic!("Expected exactly 36 pipeline slot skeletons"));
+            .unwrap_or_else(|_| panic!("Expected exactly 64 pipeline slot skeletons"));
 
         Self {
             conn_total_head: format!("{pfx}.connections.total:")
@@ -396,7 +388,7 @@ impl DogStatsdTemplate {
         p: &PipelineSnapshot,
         writer: &mut StatsdBatchWriter<'_, F>,
     ) {
-        let slot_idx = (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
+        let slot_idx = p.pipe as usize;
         if let Some(slot) = self.slots.get(slot_idx) {
             writer.append_metric_u64(&self.requests_head, p.requests_2xx, &slot.req_2xx_tail);
             writer.append_metric_u64(&self.requests_head, p.requests_3xx, &slot.req_3xx_tail);

@@ -11,15 +11,14 @@
 use std::sync::Arc;
 
 use prost::Message;
-use velda_observability::{
-    DownstreamProtocol, MetricsSnapshot, MetricsStore, PipeStrategy, UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{MetricsSnapshot, MetricsStore};
 use velda_plugin::background::otlp_metrics_exporter::json::OtlpJsonTemplate;
 use velda_plugin::background::otlp_metrics_exporter::proto::{
     ExportMetricsServiceRequest, OtlpProtoTemplate, number_data_point,
 };
 
-/// Helper: constructs a synthetic snapshot where all 36 pipelines have uniform values.
+/// Helper: constructs a synthetic snapshot where all 64 pipelines have uniform values.
 fn make_uniform_snapshot(
     req_2xx: u64,
     req_3xx: u64,
@@ -31,8 +30,8 @@ fn make_uniform_snapshot(
     tx: u64,
 ) -> MetricsSnapshot {
     let mut snapshot = MetricsStore::new().snapshot();
-    let mut pipelines = Vec::with_capacity(36);
-    for slot_idx in 0..36 {
+    let mut pipelines = Vec::with_capacity(PipeKind::COUNT);
+    for slot_idx in 0..PipeKind::COUNT {
         let mut p = snapshot.pipelines[slot_idx];
         p.requests_2xx = req_2xx;
         p.requests_3xx = req_3xx;
@@ -77,7 +76,7 @@ fn test_otlp_metrics_proto_roundtrip_decode() {
     if let Some(velda_plugin::background::otlp_metrics_exporter::proto::metric::Data::Sum(sum)) =
         &m0.data
     {
-        assert_eq!(sum.data_points.len(), 180);
+        assert_eq!(sum.data_points.len(), 320);
         assert_eq!(
             sum.data_points[0].value,
             Some(number_data_point::Value::AsInt(100))
@@ -108,7 +107,7 @@ fn test_otlp_metrics_proto_roundtrip_decode() {
     if let Some(velda_plugin::background::otlp_metrics_exporter::proto::metric::Data::Gauge(g)) =
         &m1.data
     {
-        assert_eq!(g.data_points.len(), 36);
+        assert_eq!(g.data_points.len(), 64);
         assert_eq!(
             g.data_points[0].value,
             Some(number_data_point::Value::AsInt(42))
@@ -123,7 +122,7 @@ fn test_otlp_metrics_proto_roundtrip_decode() {
     if let Some(velda_plugin::background::otlp_metrics_exporter::proto::metric::Data::Sum(sum)) =
         &m2.data
     {
-        assert_eq!(sum.data_points.len(), 36);
+        assert_eq!(sum.data_points.len(), 64);
         assert_eq!(
             sum.data_points[0].value,
             Some(number_data_point::Value::AsInt(1024))
@@ -138,7 +137,7 @@ fn test_otlp_metrics_proto_roundtrip_decode() {
     if let Some(velda_plugin::background::otlp_metrics_exporter::proto::metric::Data::Sum(sum)) =
         &m3.data
     {
-        assert_eq!(sum.data_points.len(), 36);
+        assert_eq!(sum.data_points.len(), 64);
         assert_eq!(
             sum.data_points[0].value,
             Some(number_data_point::Value::AsInt(2048))
@@ -177,26 +176,26 @@ fn test_otlp_metrics_json_serde_roundtrip() {
     // Metric 0
     assert_eq!(metrics[0]["name"], "velda.requests.total");
     let dps0 = metrics[0]["sum"]["dataPoints"].as_array().unwrap();
-    assert_eq!(dps0.len(), 180);
+    assert_eq!(dps0.len(), 320);
     assert_eq!(dps0[0]["asInt"], "999");
     assert_eq!(dps0[1]["asInt"], "888");
 
     // Metric 1: active streams negative
     assert_eq!(metrics[1]["name"], "velda.active_streams");
     let dps1 = metrics[1]["gauge"]["dataPoints"].as_array().unwrap();
-    assert_eq!(dps1.len(), 36);
+    assert_eq!(dps1.len(), 64);
     assert_eq!(dps1[0]["asInt"], "-12");
 
     // Metric 2: bytes rx
     assert_eq!(metrics[2]["name"], "velda.bytes_received_total");
     let dps2 = metrics[2]["sum"]["dataPoints"].as_array().unwrap();
-    assert_eq!(dps2.len(), 36);
+    assert_eq!(dps2.len(), 64);
     assert_eq!(dps2[0]["asInt"], "100000");
 
     // Metric 3: bytes tx
     assert_eq!(metrics[3]["name"], "velda.bytes_transmitted_total");
     let dps3 = metrics[3]["sum"]["dataPoints"].as_array().unwrap();
-    assert_eq!(dps3.len(), 36);
+    assert_eq!(dps3.len(), 64);
     assert_eq!(dps3[0]["asInt"], "200000");
 }
 
@@ -290,12 +289,7 @@ fn test_otlp_metrics_stress_1000_cycles_memory_stability() {
 
     for cycle in 0..1000 {
         // Mutate metrics activity
-        let slot = store.slot_on_core(
-            cycle % 4,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(cycle % 4, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(&velda_observability::StreamCompletion::new(
             200,

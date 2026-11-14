@@ -13,10 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
-use velda_observability::{
-    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
-    UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{EvictionReason, MetricsStore, StreamCompletion};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -42,12 +40,7 @@ fn bench_sustained_request_serving_zero_leak() {
 
     // Warm-up
     for _ in 0..10_000 {
-        store.record_stream_completion(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-            completion,
-        );
+        store.record_stream_completion(PipeKind::BufferedH1H1, completion);
     }
 
     ALLOCATOR.reset();
@@ -55,12 +48,7 @@ fn bench_sustained_request_serving_zero_leak() {
     let start = Instant::now();
 
     for _ in 0..iters {
-        store.record_stream_completion(
-            DownstreamProtocol::H2,
-            UpstreamProtocol::H1,
-            PipeStrategy::ServerStream,
-            completion,
-        );
+        store.record_stream_completion(PipeKind::ServerStreamH2H1, completion);
     }
 
     let elapsed = start.elapsed();
@@ -188,9 +176,7 @@ fn bench_snapshot_generation_zero_retention() {
 
     // Populate initial state
     store.record_stream_completion(
-        DownstreamProtocol::H1,
-        UpstreamProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         StreamCompletion::new(200, 64, 512, Duration::from_millis(1), None),
     );
 
@@ -272,9 +258,9 @@ fn bench_multi_threaded_concurrent_zero_leak() {
             let pool = store_clone.pool();
 
             for _ in 0..ops_per_thread {
-                let (d, u, p) = rng.next_pipeline_coords();
+                let pipe = rng.next_pipe_kind();
                 let comp = rng.next_completion();
-                store_clone.record_stream_completion(d, u, p, comp);
+                store_clone.record_stream_completion(pipe, comp);
 
                 pool.record_hit();
                 pool.record_release();

@@ -329,6 +329,12 @@ impl PipeKind {
         }
     }
 
+    /// Returns the downstream wire protocol variant (alias for `downstream_protocol`).
+    #[inline(always)]
+    pub const fn downstream(self) -> WireProtocol {
+        self.downstream_protocol()
+    }
+
     /// Returns the upstream wire protocol variant.
     #[inline(always)]
     pub const fn upstream_protocol(self) -> WireProtocol {
@@ -360,6 +366,12 @@ impl PipeKind {
         }
     }
 
+    /// Returns the upstream wire protocol variant (alias for `upstream_protocol`).
+    #[inline(always)]
+    pub const fn upstream(self) -> WireProtocol {
+        self.upstream_protocol()
+    }
+
     /// Returns the downstream protocol discriminant as raw `u8` (0: H1, 1: H2, 2: H3, 3: GrpcTcp, 4: GrpcUdp, 5: RawTcp, 6: RawUdp).
     #[inline(always)]
     pub const fn downstream_protocol_u8(self) -> u8 {
@@ -380,6 +392,28 @@ impl PipeKind {
             v % 4
         } else {
             0 // Raw L4 maps to Buffered/Direct
+        }
+    }
+
+    /// Returns the canonical static string for the streaming pipe strategy.
+    #[inline(always)]
+    pub const fn strategy_str(self) -> &'static str {
+        match self.pipe_strategy_u8() {
+            0 => "buffered",
+            1 => "server_stream",
+            2 => "client_stream",
+            _ => "duplex",
+        }
+    }
+
+    /// Returns the canonical [`StreamingMode`] corresponding to this pipeline's strategy.
+    #[inline(always)]
+    pub const fn streaming_mode(self) -> crate::streaming::StreamingMode {
+        match self.pipe_strategy_u8() {
+            0 => crate::streaming::StreamingMode::DISABLED,
+            1 => crate::streaming::StreamingMode::SERVER,
+            2 => crate::streaming::StreamingMode::CLIENT,
+            _ => crate::streaming::StreamingMode::DUPLEX,
         }
     }
 
@@ -494,5 +528,25 @@ mod tests {
         assert_eq!(PipeKind::BufferedH2H3.upstream_protocol(), WireProtocol::H3);
         assert_eq!(PipeKind::TcpTcp.downstream_protocol(), WireProtocol::RawTcp);
         assert_eq!(PipeKind::TcpTcp.upstream_protocol(), WireProtocol::RawTcp);
+        assert_eq!(PipeKind::BufferedH1H1.strategy_str(), "buffered");
+        assert_eq!(PipeKind::ServerStreamH1H1.strategy_str(), "server_stream");
+        assert_eq!(PipeKind::ClientStreamH1H1.strategy_str(), "client_stream");
+        assert_eq!(PipeKind::DuplexH1H1.strategy_str(), "duplex");
+        assert_eq!(
+            PipeKind::BufferedH1H1.streaming_mode(),
+            crate::streaming::StreamingMode::DISABLED
+        );
+        assert_eq!(
+            PipeKind::ServerStreamH1H1.streaming_mode(),
+            crate::streaming::StreamingMode::SERVER
+        );
+        assert_eq!(
+            PipeKind::ClientStreamH1H1.streaming_mode(),
+            crate::streaming::StreamingMode::CLIENT
+        );
+        assert_eq!(
+            PipeKind::DuplexH1H1.streaming_mode(),
+            crate::streaming::StreamingMode::DUPLEX
+        );
     }
 }

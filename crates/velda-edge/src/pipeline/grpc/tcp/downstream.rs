@@ -7,12 +7,12 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::GrpcStatus;
-use velda_core::{Action, L7Request, UpstreamId};
+use velda_core::{Action, GrpcStatus, L7Request, PipeKind, UpstreamId};
 use velda_grpc::GrpcConfig;
 use velda_grpc::tcp::GrpcPipeStrategy;
 use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
 use velda_grpc::udp::GrpcUdpPipeStrategy;
+use velda_observability::{StreamCompletion, global_log_store, global_metrics};
 use velda_router::GrpcRouteRequest;
 use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
@@ -175,13 +175,11 @@ async fn dispatch_grpc_tcp_request_stream(
             GrpcStatus::ResourceExhausted,
             Some("too many request headers"),
         );
-        velda_observability::global_metrics().record_early_completion(
-            velda_observability::DownstreamProtocol::H2,
-            velda_observability::UpstreamProtocol::H2,
-            velda_observability::PipeStrategy::Buffered,
-            velda_observability::StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        global_metrics().record_early_completion(
+            PipeKind::BufferedGrpcTcpTcp,
+            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
         );
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
             timestamp_sec: request_id.timestamp_secs() as u32,
             duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -195,7 +193,7 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            pipe: PipeKind::BufferedGrpcTcpTcp,
             completion: velda_core::CompletionReason::Rejected,
             method: velda_core::HttpMethod::Post,
             grpc_status: velda_core::GrpcStatus::ResourceExhausted,
@@ -226,13 +224,11 @@ async fn dispatch_grpc_tcp_request_stream(
             GrpcStatus::Unimplemented,
             Some("no route matched for empty path"),
         );
-        velda_observability::global_metrics().record_early_completion(
-            velda_observability::DownstreamProtocol::H2,
-            velda_observability::UpstreamProtocol::H2,
-            velda_observability::PipeStrategy::Buffered,
-            velda_observability::StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        global_metrics().record_early_completion(
+            PipeKind::BufferedGrpcTcpTcp,
+            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
         );
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
             timestamp_sec: request_id.timestamp_secs() as u32,
             duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -246,7 +242,7 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            pipe: PipeKind::BufferedGrpcTcpTcp,
             completion: velda_core::CompletionReason::Rejected,
             method: velda_core::HttpMethod::Post,
             grpc_status: velda_core::GrpcStatus::Unimplemented,
@@ -264,13 +260,11 @@ async fn dispatch_grpc_tcp_request_stream(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
         );
-        velda_observability::global_metrics().record_early_completion(
-            velda_observability::DownstreamProtocol::H2,
-            velda_observability::UpstreamProtocol::H2,
-            velda_observability::PipeStrategy::Buffered,
-            velda_observability::StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        global_metrics().record_early_completion(
+            PipeKind::BufferedGrpcTcpTcp,
+            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
         );
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
             timestamp_sec: request_id.timestamp_secs() as u32,
             duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -284,7 +278,7 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: 0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            pipe: PipeKind::BufferedGrpcTcpTcp,
             completion: velda_core::CompletionReason::Rejected,
             method: velda_core::HttpMethod::Post,
             grpc_status: velda_core::GrpcStatus::Unimplemented,
@@ -352,44 +346,34 @@ async fn dispatch_grpc_tcp_request_stream(
                         if let Ok(r) = builder.body(()) {
                             let _ = server_stream.respond.send_response(r, true);
                         }
-                        velda_observability::global_metrics().record_early_completion(
-                            velda_observability::DownstreamProtocol::H2,
-                            velda_observability::UpstreamProtocol::H2,
-                            velda_observability::PipeStrategy::Buffered,
-                            velda_observability::StreamCompletion::new(
-                                200,
-                                0,
-                                0,
-                                req_start.elapsed(),
-                                None,
-                            ),
+                        global_metrics().record_early_completion(
+                            PipeKind::BufferedGrpcTcpTcp,
+                            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
                         );
-                        velda_observability::global_log_store().emit(
-                            &velda_observability::AccessLogRecord {
-                                request_id: request_id.entropy(),
-                                timestamp_sec: request_id.timestamp_secs() as u32,
-                                duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
-                                    as u64,
-                                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
-                                bytes_rx: 0,
-                                bytes_tx: 0,
-                                upstream_ip: 0,
-                                peer_port: meta.peer.port(),
-                                upstream_port: 0,
-                                status_code: 200,
-                                route_id: route.id.0 as u16,
-                                ua_major_version,
-                                rpc_msgs_or_flags: 1,
-                                pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_core::CompletionReason::Rejected,
-                                method: velda_core::HttpMethod::Post,
-                                grpc_status: log_grpc_status,
-                                ua_family,
-                                ua_os,
-                                url_len: log_url_len,
-                                url_bytes: log_url_bytes,
-                            },
-                        );
+                        global_log_store().emit(&velda_observability::AccessLogRecord {
+                            request_id: request_id.entropy(),
+                            timestamp_sec: request_id.timestamp_secs() as u32,
+                            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
+                                as u64,
+                            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                            bytes_rx: 0,
+                            bytes_tx: 0,
+                            upstream_ip: 0,
+                            peer_port: meta.peer.port(),
+                            upstream_port: 0,
+                            status_code: 200,
+                            route_id: route.id.0 as u16,
+                            ua_major_version,
+                            rpc_msgs_or_flags: 1,
+                            pipe: PipeKind::BufferedGrpcTcpTcp,
+                            completion: velda_core::CompletionReason::Rejected,
+                            method: velda_core::HttpMethod::Post,
+                            grpc_status: log_grpc_status,
+                            ua_family,
+                            ua_os,
+                            url_len: log_url_len,
+                            url_bytes: log_url_bytes,
+                        });
                         return;
                     }
                     Action::Delay { .. } => unreachable!(),
@@ -436,44 +420,34 @@ async fn dispatch_grpc_tcp_request_stream(
                         if let Ok(r) = builder.body(()) {
                             let _ = server_stream.respond.send_response(r, true);
                         }
-                        velda_observability::global_metrics().record_early_completion(
-                            velda_observability::DownstreamProtocol::H2,
-                            velda_observability::UpstreamProtocol::H2,
-                            velda_observability::PipeStrategy::Buffered,
-                            velda_observability::StreamCompletion::new(
-                                200,
-                                0,
-                                0,
-                                req_start.elapsed(),
-                                None,
-                            ),
+                        global_metrics().record_early_completion(
+                            PipeKind::BufferedGrpcTcpTcp,
+                            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
                         );
-                        velda_observability::global_log_store().emit(
-                            &velda_observability::AccessLogRecord {
-                                request_id: request_id.entropy(),
-                                timestamp_sec: request_id.timestamp_secs() as u32,
-                                duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
-                                    as u64,
-                                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
-                                bytes_rx: 0,
-                                bytes_tx: 0,
-                                upstream_ip: 0,
-                                peer_port: meta.peer.port(),
-                                upstream_port: 0,
-                                status_code: 200,
-                                route_id: route.id.0 as u16,
-                                ua_major_version,
-                                rpc_msgs_or_flags: 1,
-                                pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_core::CompletionReason::Rejected,
-                                method: velda_core::HttpMethod::Post,
-                                grpc_status: log_grpc_status,
-                                ua_family,
-                                ua_os,
-                                url_len: log_url_len,
-                                url_bytes: log_url_bytes,
-                            },
-                        );
+                        global_log_store().emit(&velda_observability::AccessLogRecord {
+                            request_id: request_id.entropy(),
+                            timestamp_sec: request_id.timestamp_secs() as u32,
+                            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
+                                as u64,
+                            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                            bytes_rx: 0,
+                            bytes_tx: 0,
+                            upstream_ip: 0,
+                            peer_port: meta.peer.port(),
+                            upstream_port: 0,
+                            status_code: 200,
+                            route_id: route.id.0 as u16,
+                            ua_major_version,
+                            rpc_msgs_or_flags: 1,
+                            pipe: PipeKind::BufferedGrpcTcpTcp,
+                            completion: velda_core::CompletionReason::Rejected,
+                            method: velda_core::HttpMethod::Post,
+                            grpc_status: log_grpc_status,
+                            ua_family,
+                            ua_os,
+                            url_len: log_url_len,
+                            url_bytes: log_url_bytes,
+                        });
                         return;
                     }
                     Action::Delay { .. } => unreachable!(),
@@ -514,13 +488,11 @@ async fn dispatch_grpc_tcp_request_stream(
         let _ = server_stream
             .respond
             .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
-        velda_observability::global_metrics().record_early_completion(
-            velda_observability::DownstreamProtocol::H2,
-            velda_observability::UpstreamProtocol::H2,
-            velda_observability::PipeStrategy::Buffered,
-            velda_observability::StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        global_metrics().record_early_completion(
+            PipeKind::BufferedGrpcTcpTcp,
+            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
         );
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
             timestamp_sec: request_id.timestamp_secs() as u32,
             duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -534,7 +506,7 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: route.id.0 as u16,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            pipe: PipeKind::BufferedGrpcTcpTcp,
             completion: velda_core::CompletionReason::UpstreamError,
             method: velda_core::HttpMethod::Post,
             grpc_status: velda_core::GrpcStatus::Unavailable,
@@ -558,13 +530,11 @@ async fn dispatch_grpc_tcp_request_stream(
         let _ = server_stream
             .respond
             .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
-        velda_observability::global_metrics().record_early_completion(
-            velda_observability::DownstreamProtocol::H2,
-            velda_observability::UpstreamProtocol::H2,
-            velda_observability::PipeStrategy::Buffered,
-            velda_observability::StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+        global_metrics().record_early_completion(
+            PipeKind::BufferedGrpcTcpTcp,
+            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
         );
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+        global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
             timestamp_sec: request_id.timestamp_secs() as u32,
             duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -578,7 +548,7 @@ async fn dispatch_grpc_tcp_request_stream(
             route_id: route.id.0 as u16,
             ua_major_version,
             rpc_msgs_or_flags: 1,
-            pipe: velda_core::PipeKind::BufferedGrpcTcpTcp,
+            pipe: PipeKind::BufferedGrpcTcpTcp,
             completion: velda_core::CompletionReason::Rejected,
             method: velda_core::HttpMethod::Post,
             grpc_status: velda_core::GrpcStatus::ResourceExhausted,
@@ -590,87 +560,108 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     }
 
-    let pipe_strat = match upstream_target.as_ref() {
-        GrpcUpstream::Tcp(u) => match u.strategy {
-            GrpcPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered,
-            GrpcPipeStrategy::ServerStream => velda_observability::PipeStrategy::ServerStream,
-            GrpcPipeStrategy::ClientStream => velda_observability::PipeStrategy::ClientStream,
-            GrpcPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex,
-        },
-        GrpcUpstream::Udp(u) => match u.strategy {
-            GrpcUdpPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered,
-            GrpcUdpPipeStrategy::ServerStream => velda_observability::PipeStrategy::ServerStream,
-            GrpcUdpPipeStrategy::ClientStream => velda_observability::PipeStrategy::ClientStream,
-            GrpcUdpPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex,
-        },
-        GrpcUpstream::Rdma(u) => match u.strategy {
-            GrpcPipeStrategy::Buffered => velda_observability::PipeStrategy::Buffered,
-            GrpcPipeStrategy::ServerStream => velda_observability::PipeStrategy::ServerStream,
-            GrpcPipeStrategy::ClientStream => velda_observability::PipeStrategy::ClientStream,
-            GrpcPipeStrategy::Duplex => velda_observability::PipeStrategy::Duplex,
-        },
-    };
-
-    velda_observability::global_metrics().record_stream_start(
-        velda_observability::DownstreamProtocol::H2,
-        velda_observability::UpstreamProtocol::H2,
-        pipe_strat,
-    );
-
     let (outcome, pipe_kind) = match upstream_target.as_ref() {
         GrpcUpstream::Tcp(upstream) => match upstream.strategy {
-            GrpcPipeStrategy::Buffered => (
-                pipe::buffered_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::BufferedGrpcTcpTcp,
-            ),
-            GrpcPipeStrategy::ServerStream => (
-                pipe::server_stream_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ServerStreamGrpcTcpTcp,
-            ),
-            GrpcPipeStrategy::ClientStream => (
-                pipe::client_stream_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ClientStreamGrpcTcpTcp,
-            ),
-            GrpcPipeStrategy::Duplex => (
-                pipe::duplex_tcp_tcp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::DuplexGrpcTcpTcp,
-            ),
+            GrpcPipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedGrpcTcpTcp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::buffered_tcp_tcp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::ServerStream => {
+                const PIPE: PipeKind = PipeKind::ServerStreamGrpcTcpTcp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_tcp_tcp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamGrpcTcpTcp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::client_stream_tcp_tcp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::Duplex => {
+                const PIPE: PipeKind = PipeKind::DuplexGrpcTcpTcp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_tcp_tcp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
         },
         GrpcUpstream::Udp(upstream) => match upstream.strategy {
-            GrpcUdpPipeStrategy::Buffered => (
-                pipe::buffered_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::BufferedGrpcTcpUdp,
-            ),
-            GrpcUdpPipeStrategy::ServerStream => (
-                pipe::server_stream_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ServerStreamGrpcTcpUdp,
-            ),
-            GrpcUdpPipeStrategy::ClientStream => (
-                pipe::client_stream_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ClientStreamGrpcTcpUdp,
-            ),
-            GrpcUdpPipeStrategy::Duplex => (
-                pipe::duplex_tcp_udp::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::DuplexGrpcTcpUdp,
-            ),
+            GrpcUdpPipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedGrpcTcpUdp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::buffered_tcp_udp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcUdpPipeStrategy::ServerStream => {
+                const PIPE: PipeKind = PipeKind::ServerStreamGrpcTcpUdp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_tcp_udp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcUdpPipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamGrpcTcpUdp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::client_stream_tcp_udp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcUdpPipeStrategy::Duplex => {
+                const PIPE: PipeKind = PipeKind::DuplexGrpcTcpUdp;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_tcp_udp::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
         },
         GrpcUpstream::Rdma(upstream) => match upstream.strategy {
-            GrpcPipeStrategy::Buffered => (
-                pipe::buffered_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::BufferedGrpcTcpRdma,
-            ),
-            GrpcPipeStrategy::ServerStream => (
-                pipe::server_stream_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ServerStreamGrpcTcpRdma,
-            ),
-            GrpcPipeStrategy::ClientStream => (
-                pipe::client_stream_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::ClientStreamGrpcTcpRdma,
-            ),
-            GrpcPipeStrategy::Duplex => (
-                pipe::duplex_tcp_rdma::serve(server_stream, upstream, config).await,
-                velda_core::PipeKind::DuplexGrpcTcpRdma,
-            ),
+            GrpcPipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedGrpcTcpRdma;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::buffered_tcp_rdma::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::ServerStream => {
+                const PIPE: PipeKind = PipeKind::ServerStreamGrpcTcpRdma;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_tcp_rdma::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamGrpcTcpRdma;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::client_stream_tcp_rdma::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
+            GrpcPipeStrategy::Duplex => {
+                const PIPE: PipeKind = PipeKind::DuplexGrpcTcpRdma;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_tcp_rdma::serve(server_stream, upstream, config).await,
+                    PIPE,
+                )
+            }
         },
     };
 
@@ -683,11 +674,9 @@ async fn dispatch_grpc_tcp_request_stream(
         None => (0, 0),
     };
 
-    velda_observability::global_metrics().record_stream_completion(
-        velda_observability::DownstreamProtocol::H2,
-        velda_observability::UpstreamProtocol::H2,
-        pipe_strat,
-        velda_observability::StreamCompletion::new(
+    global_metrics().record_stream_completion(
+        pipe_kind,
+        StreamCompletion::new(
             outcome.status_code,
             outcome.bytes_rx,
             outcome.bytes_tx,
@@ -696,7 +685,7 @@ async fn dispatch_grpc_tcp_request_stream(
         ),
     );
 
-    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
+    global_log_store().emit(&velda_observability::AccessLogRecord {
         request_id: request_id.entropy(),
         timestamp_sec: request_id.timestamp_secs() as u32,
         duration_ns: duration.as_nanos().min(u64::MAX as u128) as u64,

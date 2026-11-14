@@ -32,7 +32,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use velda_observability::{MetricsSnapshot, MetricsStore};
+use velda_core::lut::PipeKind;
+use velda_observability::MetricsSnapshot;
 
 use super::super::lut::{fast_format_ts_19digits_simd, fast_write_i64, fast_write_u64};
 
@@ -70,21 +71,23 @@ impl OtlpJsonTemplate {
         root_header.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
         root_header.extend_from_slice(b"\"},\"metrics\":[{\"name\":\"velda.requests.total\",\"description\":\"Total number of HTTP requests processed across pipeline dimensions\",\"unit\":\"1\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[");
 
-        // 1. Pre-bake 180 requests tails (36 slots * 5 status classes)
-        let mut req_tails = Vec::with_capacity(180);
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+        // 1. Pre-bake 320 requests tails (64 slots * 5 status classes)
+        let mut req_tails = Vec::with_capacity(PipeKind::COUNT * 5);
+        for &pipe in &PipeKind::ALL {
+            let down = pipe.downstream().as_str();
+            let up = pipe.upstream().as_str();
+            let strat = pipe.strategy_str();
             let classes = ["2xx", "3xx", "4xx", "5xx", "other"];
             for class in classes {
                 let mut tail = Vec::with_capacity(256);
                 tail.extend_from_slice(
                     b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
                 );
-                tail.extend_from_slice(down.as_str().as_bytes());
+                tail.extend_from_slice(down.as_bytes());
                 tail.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
-                tail.extend_from_slice(up.as_str().as_bytes());
+                tail.extend_from_slice(up.as_bytes());
                 tail.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
-                tail.extend_from_slice(pipe.as_str().as_bytes());
+                tail.extend_from_slice(strat.as_bytes());
                 tail.extend_from_slice(
                     b"\"}},{\"key\":\"status_class\",\"value\":{\"stringValue\":\"",
                 );
@@ -94,37 +97,41 @@ impl OtlpJsonTemplate {
             }
         }
 
-        // 2. Pre-bake 36 active streams tails
-        let mut active_tails = Vec::with_capacity(36);
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+        // 2. Pre-bake 64 active streams tails
+        let mut active_tails = Vec::with_capacity(PipeKind::COUNT);
+        for &pipe in &PipeKind::ALL {
+            let down = pipe.downstream().as_str();
+            let up = pipe.upstream().as_str();
+            let strat = pipe.strategy_str();
             let mut tail = Vec::with_capacity(200);
             tail.extend_from_slice(
                 b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
             );
-            tail.extend_from_slice(down.as_str().as_bytes());
+            tail.extend_from_slice(down.as_bytes());
             tail.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
-            tail.extend_from_slice(up.as_str().as_bytes());
+            tail.extend_from_slice(up.as_bytes());
             tail.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
-            tail.extend_from_slice(pipe.as_str().as_bytes());
+            tail.extend_from_slice(strat.as_bytes());
             tail.extend_from_slice(b"\"}}]}");
             active_tails.push(tail);
         }
 
-        // 3. Pre-bake 36 bytes received & transmitted tails
-        let mut rx_tails = Vec::with_capacity(36);
-        let mut tx_tails = Vec::with_capacity(36);
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+        // 3. Pre-bake 64 bytes received & transmitted tails
+        let mut rx_tails = Vec::with_capacity(PipeKind::COUNT);
+        let mut tx_tails = Vec::with_capacity(PipeKind::COUNT);
+        for &pipe in &PipeKind::ALL {
+            let down = pipe.downstream().as_str();
+            let up = pipe.upstream().as_str();
+            let strat = pipe.strategy_str();
             let mut tail = Vec::with_capacity(200);
             tail.extend_from_slice(
                 b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":{\"stringValue\":\"",
             );
-            tail.extend_from_slice(down.as_str().as_bytes());
+            tail.extend_from_slice(down.as_bytes());
             tail.extend_from_slice(b"\"}},{\"key\":\"upstream\",\"value\":{\"stringValue\":\"");
-            tail.extend_from_slice(up.as_str().as_bytes());
+            tail.extend_from_slice(up.as_bytes());
             tail.extend_from_slice(b"\"}},{\"key\":\"pipe\",\"value\":{\"stringValue\":\"");
-            tail.extend_from_slice(pipe.as_str().as_bytes());
+            tail.extend_from_slice(strat.as_bytes());
             tail.extend_from_slice(b"\"}}]}");
             rx_tails.push(tail.clone());
             tx_tails.push(tail);

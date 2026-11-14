@@ -12,10 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-use velda_observability::{
-    DownstreamProtocol, MetricsStore, PipeStrategy, PipelineSnapshot, TOTAL_PIPELINE_SLOTS,
-    UpstreamProtocol,
-};
+use velda_observability::{MetricsStore, PipelineSnapshot, TOTAL_PIPELINE_SLOTS};
 use velda_plugin::background::prometheus_exporter::lut::DIGIT_PAIRS;
 use velda_plugin::background::prometheus_exporter::server::BufferPool;
 use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
@@ -54,10 +51,8 @@ fn test_chaos_all_36_pipeline_slots_boundary_values() {
         let mut pipelines = Vec::with_capacity(TOTAL_PIPELINE_SLOTS);
 
         for slot_idx in 0..TOTAL_PIPELINE_SLOTS {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+            let pipe = MetricsStore::decode_slot_index(slot_idx).unwrap();
             pipelines.push(PipelineSnapshot {
-                downstream: down,
-                upstream: up,
                 pipe,
                 requests_2xx: req,
                 requests_3xx: req,
@@ -95,39 +90,22 @@ fn test_chaos_all_36_pipeline_slots_boundary_values() {
 
         assert_eq!(buf_vec, buf_str.as_bytes());
 
-        // Verify all 36 slot coordinates are present in the output
-        for d in &[
-            DownstreamProtocol::H1,
-            DownstreamProtocol::H2,
-            DownstreamProtocol::H3,
-        ] {
-            for u in &[
-                UpstreamProtocol::H1,
-                UpstreamProtocol::H2,
-                UpstreamProtocol::H3,
-            ] {
-                for p in &[
-                    PipeStrategy::Buffered,
-                    PipeStrategy::ServerStream,
-                    PipeStrategy::ClientStream,
-                    PipeStrategy::Duplex,
-                ] {
-                    let needle = format!(
-                        "downstream=\"{}\",upstream=\"{}\",pipe=\"{}\"",
-                        d.as_str(),
-                        u.as_str(),
-                        p.as_str()
-                    );
-                    assert!(buf_str.contains(&needle), "Missing pipeline slot: {needle}");
-                }
-            }
+        // Verify all 64 slot coordinates are present in the output
+        for &pipe in &velda_core::lut::PipeKind::ALL {
+            let needle = format!(
+                "downstream=\"{}\",upstream=\"{}\",pipe=\"{}\"",
+                pipe.downstream_protocol().as_str(),
+                pipe.upstream_protocol().as_str(),
+                pipe.strategy_str()
+            );
+            assert!(buf_str.contains(&needle), "Missing pipeline slot: {needle}");
         }
 
         // Verify boundary numbers rendered accurately
         let req_str = req.to_string();
         let active_str = active.to_string();
         assert!(buf_str.contains(&format!("status_class=\"2xx\"}} {req_str}\n")));
-        assert!(buf_str.contains(&format!("velda_active_streams{{downstream=\"h1\",upstream=\"h1\",pipe=\"buffered\"}} {active_str}\n")));
+        assert!(buf_str.contains(&format!("velda_active_streams{{downstream=\"http/1.1\",upstream=\"http/1.1\",pipe=\"buffered\"}} {active_str}\n")));
     }
 }
 
@@ -241,10 +219,10 @@ fn test_openmetrics_text_syntax_compliance() {
         help_count, type_count,
         "Every HELP must have an exact matching TYPE"
     );
-    // 36 slots * 23 lines = 828 pipeline lines + 8 global + 22 pool = 858 metric lines
+    // 64 slots * 23 lines = 1472 pipeline lines + 8 global + 22 pool = 1502 metric lines
     assert_eq!(
-        metric_count, 858,
-        "OpenMetrics document must contain exactly 858 metric lines"
+        metric_count, 1502,
+        "OpenMetrics document must contain exactly 1502 metric lines"
     );
 }
 
@@ -391,8 +369,8 @@ fn test_chaos_continuous_stress_1000_cycles_memory_stability() {
     // Verify buffer pool capacity has remained strictly bounded (zero heap inflation/leak across 1,000 cycles)
     let sample_buf = buffer_pool.acquire();
     assert!(
-        sample_buf.capacity() <= 128 * 1024,
-        "Buffer capacity must remain strictly bounded under 128KB across 1,000 cycles (actual: {})",
+        sample_buf.capacity() <= 256 * 1024,
+        "Buffer capacity must remain strictly bounded under 256KB across 1,000 cycles (actual: {})",
         sample_buf.capacity()
     );
 }

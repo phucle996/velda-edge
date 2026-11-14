@@ -61,9 +61,9 @@ fn bench_concurrent_reader_writer_chaos() {
         writer_handles.push(thread::spawn(move || {
             let mut rng = FastRng::new((tid as u64 + 1) * 7919);
             for _ in 0..writes_per_thread {
-                let (d, u, p) = rng.next_pipeline_coords();
+                let pipe = rng.next_pipe_kind();
                 let comp = rng.next_completion();
-                store_clone.record_stream_completion(d, u, p, comp);
+                store_clone.record_stream_completion(pipe, comp);
             }
         }));
     }
@@ -220,11 +220,11 @@ fn bench_all_36_pipelines_permutation_flurry() {
             let mut rng = FastRng::new((tid as u64 + 1) * 104729);
 
             for _ in 0..ops_per_thread {
-                let (d, u, p) = rng.next_pipeline_coords();
+                let pipe = rng.next_pipe_kind();
                 let comp = rng.next_completion();
 
-                store_clone.record_stream_start(d, u, p);
-                store_clone.record_stream_completion(d, u, p, comp);
+                store_clone.record_stream_start(pipe);
+                store_clone.record_stream_completion(pipe, comp);
             }
         }));
     }

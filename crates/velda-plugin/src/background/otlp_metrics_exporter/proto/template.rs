@@ -28,7 +28,8 @@
 //! ```
 
 use prost::Message;
-use velda_observability::{MetricsSnapshot, MetricsStore};
+use velda_core::lut::PipeKind;
+use velda_observability::MetricsSnapshot;
 
 use super::model::{
     ExportMetricsServiceRequest, Gauge, InstrumentationScope, KeyValue, Metric, NumberDataPoint,
@@ -77,14 +78,13 @@ pub struct OtlpProtoTemplate {
 impl OtlpProtoTemplate {
     /// Creates a new template pre-populated with metric definitions and static dimension attributes.
     pub fn new(service_name: &str) -> Self {
-        // Build Metric 0: velda.requests.total (180 data points)
-        let mut request_datapoints = Vec::with_capacity(36 * 5);
+        // Build Metric 0: velda.requests.total (320 data points)
+        let mut request_datapoints = Vec::with_capacity(PipeKind::COUNT * 5);
         let mut req_marker_idx = 0;
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
-            let downstream_str = down.as_str();
-            let upstream_str = up.as_str();
-            let pipe_str = pipe.as_str();
+        for &pipe in &PipeKind::ALL {
+            let downstream_str = pipe.downstream().as_str();
+            let upstream_str = pipe.upstream().as_str();
+            let pipe_str = pipe.strategy_str();
 
             let classes = ["2xx", "3xx", "4xx", "5xx", "other"];
             for class in classes {
@@ -118,15 +118,14 @@ impl OtlpProtoTemplate {
             })),
         };
 
-        // Build Metric 1: velda.active_streams (36 data points)
-        let mut active_datapoints = Vec::with_capacity(36);
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+        // Build Metric 1: velda.active_streams (64 data points)
+        let mut active_datapoints = Vec::with_capacity(PipeKind::COUNT);
+        for (slot_idx, &pipe) in PipeKind::ALL.iter().enumerate() {
             active_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", down.as_str()),
-                    KeyValue::new_string("upstream", up.as_str()),
-                    KeyValue::new_string("pipe", pipe.as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
                 time_unix_nano: MAGIC_TIMESTAMP,
@@ -146,16 +145,15 @@ impl OtlpProtoTemplate {
             })),
         };
 
-        // Build Metric 2: velda.bytes_received_total & Metric 3: velda.bytes_transmitted_total (36 each)
-        let mut rx_datapoints = Vec::with_capacity(36);
-        let mut tx_datapoints = Vec::with_capacity(36);
-        for slot_idx in 0..36 {
-            let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
+        // Build Metric 2: velda.bytes_received_total & Metric 3: velda.bytes_transmitted_total (64 each)
+        let mut rx_datapoints = Vec::with_capacity(PipeKind::COUNT);
+        let mut tx_datapoints = Vec::with_capacity(PipeKind::COUNT);
+        for (slot_idx, &pipe) in PipeKind::ALL.iter().enumerate() {
             rx_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", down.as_str()),
-                    KeyValue::new_string("upstream", up.as_str()),
-                    KeyValue::new_string("pipe", pipe.as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
                 time_unix_nano: MAGIC_TIMESTAMP,
@@ -164,9 +162,9 @@ impl OtlpProtoTemplate {
             });
             tx_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", down.as_str()),
-                    KeyValue::new_string("upstream", up.as_str()),
-                    KeyValue::new_string("pipe", pipe.as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
                 time_unix_nano: MAGIC_TIMESTAMP,
@@ -240,13 +238,13 @@ impl OtlpProtoTemplate {
         }
         assert_eq!(
             timestamp_offsets.len(),
-            288,
-            "Must discover exactly 288 timestamp offsets in pre-rendered wire skeleton"
+            512,
+            "Must discover exactly 512 timestamp offsets in pre-rendered wire skeleton"
         );
 
-        // 2. Discover 180 requests value offsets (Tag 6, Wire Type 1: 0x31)
-        let mut requests_offsets = Vec::with_capacity(180);
-        for idx in 0..180 {
+        // 2. Discover 320 requests value offsets (Tag 6, Wire Type 1: 0x31)
+        let mut requests_offsets = Vec::with_capacity(PipeKind::COUNT * 5);
+        for idx in 0..(PipeKind::COUNT * 5) {
             let marker_bytes = make_request_marker(idx).to_le_bytes();
             let mut found = None;
             let mut j = 0;
@@ -260,9 +258,9 @@ impl OtlpProtoTemplate {
             requests_offsets.push(found.expect("request marker offset must exist"));
         }
 
-        // 3. Discover 36 active streams value offsets
-        let mut active_offsets = Vec::with_capacity(36);
-        for idx in 0..36 {
+        // 3. Discover 64 active streams value offsets
+        let mut active_offsets = Vec::with_capacity(PipeKind::COUNT);
+        for idx in 0..PipeKind::COUNT {
             let marker_bytes = make_active_marker(idx).to_le_bytes();
             let mut found = None;
             let mut j = 0;
@@ -276,9 +274,9 @@ impl OtlpProtoTemplate {
             active_offsets.push(found.expect("active marker offset must exist"));
         }
 
-        // 4. Discover 36 rx value offsets
-        let mut rx_offsets = Vec::with_capacity(36);
-        for idx in 0..36 {
+        // 4. Discover 64 rx value offsets
+        let mut rx_offsets = Vec::with_capacity(PipeKind::COUNT);
+        for idx in 0..PipeKind::COUNT {
             let marker_bytes = make_rx_marker(idx).to_le_bytes();
             let mut found = None;
             let mut j = 0;
@@ -292,9 +290,9 @@ impl OtlpProtoTemplate {
             rx_offsets.push(found.expect("rx marker offset must exist"));
         }
 
-        // 5. Discover 36 tx value offsets
-        let mut tx_offsets = Vec::with_capacity(36);
-        for idx in 0..36 {
+        // 5. Discover 64 tx value offsets
+        let mut tx_offsets = Vec::with_capacity(PipeKind::COUNT);
+        for idx in 0..PipeKind::COUNT {
             let marker_bytes = make_tx_marker(idx).to_le_bytes();
             let mut found = None;
             let mut j = 0;
@@ -470,7 +468,7 @@ mod tests {
         if let Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(sum)) =
             &off_metrics[0].data
         {
-            assert_eq!(sum.data_points.len(), 180);
+            assert_eq!(sum.data_points.len(), 320);
             assert_eq!(sum.data_points[0].attributes.len(), 4);
             assert_eq!(sum.data_points[0].attributes[0].key, "downstream");
             assert_eq!(sum.data_points[0].attributes[3].key, "status_class");
@@ -480,7 +478,7 @@ mod tests {
         if let Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(rx_sum)) =
             &off_metrics[2].data
         {
-            assert_eq!(rx_sum.data_points.len(), 36);
+            assert_eq!(rx_sum.data_points.len(), 64);
             assert_eq!(rx_sum.data_points[0].attributes.len(), 3);
             assert_eq!(rx_sum.data_points[0].attributes[2].key, "pipe");
         } else {

@@ -29,7 +29,7 @@
 //! ```
 
 use std::sync::LazyLock;
-use velda_observability::{MetricsSnapshot, MetricsStore, TOTAL_PIPELINE_SLOTS};
+use velda_observability::{MetricsSnapshot, TOTAL_PIPELINE_SLOTS};
 
 use super::lut::{fast_write_i64, fast_write_u64};
 use crate::error::PluginError;
@@ -204,11 +204,10 @@ pub struct PipelineSlotPrefixes {
 }
 
 impl PipelineSlotPrefixes {
-    fn new(slot_idx: usize) -> Self {
-        let (down, up, pipe) = MetricsStore::decode_slot_index(slot_idx);
-        let d = down.as_str();
-        let u = up.as_str();
-        let p = pipe.as_str();
+    fn new(pipe: velda_core::PipeKind) -> Self {
+        let d = pipe.downstream_protocol().as_str();
+        let u = pipe.upstream_protocol().as_str();
+        let p = pipe.strategy_str();
 
         let req_prefix = |status: &str| -> Box<[u8]> {
             format!("velda_requests_total{{downstream=\"{d}\",upstream=\"{u}\",pipe=\"{p}\",status_class=\"{status}\"}} ")
@@ -301,13 +300,13 @@ impl PrometheusTemplate {
     /// Constructs and pre-bakes all label prefix skeletons.
     pub fn new() -> Self {
         let mut slots_vec = Vec::with_capacity(TOTAL_PIPELINE_SLOTS);
-        for i in 0..TOTAL_PIPELINE_SLOTS {
-            slots_vec.push(PipelineSlotPrefixes::new(i));
+        for &pipe in &velda_core::lut::PipeKind::ALL {
+            slots_vec.push(PipelineSlotPrefixes::new(pipe));
         }
         let boxed_slice = slots_vec.into_boxed_slice();
         let slots = match boxed_slice.try_into() {
             Ok(arr) => arr,
-            Err(_) => unreachable!("TOTAL_PIPELINE_SLOTS is exactly 36"),
+            Err(_) => unreachable!("TOTAL_PIPELINE_SLOTS is exactly 64"),
         };
         Self { slots }
     }
@@ -335,9 +334,7 @@ impl PrometheusTemplate {
         // 1. Pipeline Requests Total (Counter by status_class)
         buf.extend_from_slice(HELP_TYPE_REQUESTS_TOTAL);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
 
             buf.extend_from_slice(&slot.requests_2xx);
             fast_write_u64(buf, p.requests_2xx);
@@ -363,9 +360,7 @@ impl PrometheusTemplate {
         // 2. Active Streams (Gauge)
         buf.extend_from_slice(HELP_TYPE_ACTIVE_STREAMS);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
 
             buf.extend_from_slice(&slot.active_streams);
             fast_write_i64(buf, p.active_streams);
@@ -375,9 +370,7 @@ impl PrometheusTemplate {
         // 3. Payload Bytes Received (Counter)
         buf.extend_from_slice(HELP_TYPE_BYTES_RX);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
 
             buf.extend_from_slice(&slot.bytes_rx);
             fast_write_u64(buf, p.bytes_rx);
@@ -387,9 +380,7 @@ impl PrometheusTemplate {
         // 4. Payload Bytes Transmitted (Counter)
         buf.extend_from_slice(HELP_TYPE_BYTES_TX);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
 
             buf.extend_from_slice(&slot.bytes_tx);
             fast_write_u64(buf, p.bytes_tx);
@@ -399,9 +390,7 @@ impl PrometheusTemplate {
         // 5. Request Duration Histogram (Seconds)
         buf.extend_from_slice(HELP_TYPE_DURATION);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
             let total_count = p.duration_le_1000ms.saturating_add(p.duration_gt_1000ms);
 
             buf.extend_from_slice(&slot.duration_buckets[0]);
@@ -440,9 +429,7 @@ impl PrometheusTemplate {
         // 6. Request TTFB Histogram (Seconds)
         buf.extend_from_slice(HELP_TYPE_TTFB);
         for p in &snapshot.pipelines {
-            let slot_idx =
-                (p.downstream as usize) * 12 + (p.upstream as usize) * 4 + (p.pipe as usize);
-            let slot = &self.slots[slot_idx];
+            let slot = &self.slots[p.pipe as usize];
             let total_ttfb = p.ttfb_le_250ms.saturating_add(p.ttfb_gt_250ms);
 
             buf.extend_from_slice(&slot.ttfb_buckets[0]);

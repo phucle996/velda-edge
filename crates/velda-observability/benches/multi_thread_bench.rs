@@ -12,10 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{FastRng, format_throughput};
-use velda_observability::{
-    DownstreamProtocol, EvictionReason, MetricsStore, PipeStrategy, StreamCompletion,
-    TOTAL_PIPELINE_SLOTS, UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{EvictionReason, MetricsStore, StreamCompletion, TOTAL_PIPELINE_SLOTS};
 
 const OPS_PER_THREAD: u64 = 1_000_000;
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8, 16, 32];
@@ -43,7 +41,7 @@ fn bench_disjoint_slots_scaling() {
 
         for tid in 0..num_threads {
             let store_clone = Arc::clone(&store);
-            let (down, up, pipe) = MetricsStore::decode_slot_index(tid % TOTAL_PIPELINE_SLOTS);
+            let pipe = MetricsStore::decode_slot_index(tid % TOTAL_PIPELINE_SLOTS).unwrap();
 
             handles.push(thread::spawn(move || {
                 let comp = StreamCompletion::new(
@@ -55,7 +53,7 @@ fn bench_disjoint_slots_scaling() {
                 );
 
                 for _ in 0..OPS_PER_THREAD {
-                    store_clone.record_stream_completion(down, up, pipe, comp);
+                    store_clone.record_stream_completion(pipe, comp);
                 }
             }));
         }
@@ -118,12 +116,7 @@ fn bench_contended_single_slot() {
                 );
 
                 for _ in 0..OPS_PER_THREAD {
-                    store_clone.record_stream_completion(
-                        DownstreamProtocol::H1,
-                        UpstreamProtocol::H1,
-                        PipeStrategy::Buffered,
-                        comp,
-                    );
+                    store_clone.record_stream_completion(PipeKind::BufferedH1H1, comp);
                 }
             }));
         }

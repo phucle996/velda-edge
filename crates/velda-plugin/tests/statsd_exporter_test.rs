@@ -6,9 +6,8 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
-use velda_observability::{
-    DownstreamProtocol, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProtocol,
-};
+use velda_core::PipeKind;
+use velda_observability::{MetricsStore, StreamCompletion};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
 use velda_plugin::background::statsd_exporter::lut::{fast_write_i64, fast_write_u64};
@@ -55,15 +54,9 @@ fn test_dogstatsd_formatting_and_tags() {
     let store = MetricsStore::new();
 
     // Record sample completions
-    store.record_stream_start(
-        DownstreamProtocol::H1,
-        UpstreamProtocol::H1,
-        PipeStrategy::Buffered,
-    );
+    store.record_stream_start(PipeKind::BufferedH1H1);
     store.record_stream_completion(
-        DownstreamProtocol::H1,
-        UpstreamProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         StreamCompletion::new(200, 1024, 2048, Duration::from_millis(15), None),
     );
 
@@ -93,30 +86,30 @@ fn test_dogstatsd_formatting_and_tags() {
 
     // Check dogstatsd tags
     assert!(combined.contains(
-        "velda.requests.total:1|c|#downstream:h1,upstream:h1,pipe:buffered,status:2xx\n"
+        "velda.requests.total:1|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"
     ));
-    assert!(combined.contains("velda.bytes.rx:1024|c|#downstream:h1,upstream:h1,pipe:buffered\n"));
-    assert!(combined.contains("velda.bytes.tx:2048|c|#downstream:h1,upstream:h1,pipe:buffered\n"));
     assert!(
         combined.contains(
-            "velda.duration_ms.bucket:1|c|#downstream:h1,upstream:h1,pipe:buffered,le:50\n"
+            "velda.bytes.rx:1024|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered\n"
         )
     );
+    assert!(
+        combined.contains(
+            "velda.bytes.tx:2048|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered\n"
+        )
+    );
+    assert!(combined.contains(
+        "velda.duration_ms.bucket:1|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,le:50\n"
+    ));
 }
 
 #[test]
 fn test_standard_statsd_formatting_dot_notation() {
     let store = MetricsStore::new();
 
-    store.record_stream_start(
-        DownstreamProtocol::H2,
-        UpstreamProtocol::H2,
-        PipeStrategy::ServerStream,
-    );
+    store.record_stream_start(PipeKind::ServerStreamH2H2);
     store.record_stream_completion(
-        DownstreamProtocol::H2,
-        UpstreamProtocol::H2,
-        PipeStrategy::ServerStream,
+        PipeKind::ServerStreamH2H2,
         StreamCompletion::new(503, 500, 1500, Duration::from_millis(2), None),
     );
 
@@ -140,10 +133,10 @@ fn test_standard_statsd_formatting_dot_notation() {
 
     let combined = collected_packets.join("");
     // Check dot notation without tags
-    assert!(combined.contains("velda.requests.h2.h2.server_stream.5xx:1|c\n"));
-    assert!(combined.contains("velda.bytes.rx.h2.h2.server_stream:500|c\n"));
-    assert!(combined.contains("velda.bytes.tx.h2.h2.server_stream:1500|c\n"));
-    assert!(combined.contains("velda.duration_ms.h2.h2.server_stream.5:1|c\n"));
+    assert!(combined.contains("velda.requests.http/2.http/2.server_stream.5xx:1|c\n"));
+    assert!(combined.contains("velda.bytes.rx.http/2.http/2.server_stream:500|c\n"));
+    assert!(combined.contains("velda.bytes.tx.http/2.http/2.server_stream:1500|c\n"));
+    assert!(combined.contains("velda.duration_ms.http/2.http/2.server_stream.5:1|c\n"));
 }
 
 #[test]
@@ -191,15 +184,9 @@ async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
 
     // 2. Setup MetricsStore with sample data
     let store = Arc::new(MetricsStore::new());
-    store.record_stream_start(
-        DownstreamProtocol::H1,
-        UpstreamProtocol::H1,
-        PipeStrategy::Buffered,
-    );
+    store.record_stream_start(PipeKind::BufferedH1H1);
     store.record_stream_completion(
-        DownstreamProtocol::H1,
-        UpstreamProtocol::H1,
-        PipeStrategy::Buffered,
+        PipeKind::BufferedH1H1,
         StreamCompletion::new(200, 4096, 8192, Duration::from_millis(5), None),
     );
 

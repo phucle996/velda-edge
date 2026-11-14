@@ -134,9 +134,8 @@ async fn test_ab_comparative_traffic_coexistence() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::watch;
-    use velda_observability::{
-        DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol,
-    };
+    use velda_core::lut::PipeKind;
+    use velda_observability::StreamCompletion;
     use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
     use velda_sync::{
         AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
@@ -159,12 +158,7 @@ async fn test_ab_comparative_traffic_coexistence() {
     for i in 0..WORKER_REQUESTS {
         let core_id = (i & 1) as usize;
         store_b.global().connection_opened();
-        let slot = store_b.slot_on_core(
-            core_id,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store_b.slot_on_core(core_id, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
         slot.stream_ended();
@@ -262,12 +256,7 @@ async fn test_ab_comparative_traffic_coexistence() {
     for i in 0..WORKER_REQUESTS {
         let core_id = (i & 1) as usize;
         store_a.global().connection_opened();
-        let slot = store_a.slot_on_core(
-            core_id,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store_a.slot_on_core(core_id, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
         slot.stream_ended();

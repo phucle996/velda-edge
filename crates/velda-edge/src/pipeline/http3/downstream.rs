@@ -7,14 +7,12 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use http::header::HeaderValue;
-use velda_core::{Action, L7Request};
+use velda_core::{Action, L7Request, PipeKind};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
 use velda_http3::server::connection::OutgoingDatagram;
-use velda_observability::{
-    DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol, global_metrics,
-};
+use velda_observability::{StreamCompletion, global_metrics};
 use velda_router::Http3RouteRequest;
 use velda_sock::{Datagram, UdpSocket};
 
@@ -231,9 +229,7 @@ pub async fn handle_http3_udp(
                     ))
                     .await;
                 global_metrics().record_early_completion(
-                    DownstreamProtocol::H3,
-                    UpstreamProtocol::H3,
-                    PipeStrategy::Buffered,
+                    PipeKind::BufferedH3H1,
                     StreamCompletion::new(
                         StatusCode::TOO_EARLY.as_u16(),
                         req.body.len() as u64,
@@ -284,9 +280,7 @@ pub async fn handle_http3_udp(
                     ))
                     .await;
                 global_metrics().record_early_completion(
-                    DownstreamProtocol::H3,
-                    UpstreamProtocol::H3,
-                    PipeStrategy::Buffered,
+                    PipeKind::BufferedH3H1,
                     StreamCompletion::new(
                         StatusCode::BAD_REQUEST.as_u16(),
                         req.body.len() as u64,
@@ -383,9 +377,7 @@ async fn process_http3_request(
             .await;
         let elapsed = req_start.elapsed();
         global_metrics().record_early_completion(
-            DownstreamProtocol::H3,
-            UpstreamProtocol::H3,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::NOT_FOUND.as_u16(),
                 req.body.len() as u64,
@@ -461,9 +453,7 @@ async fn process_http3_request(
                     let _ = responder.send_response(resp).await;
                     let elapsed = req_start.elapsed();
                     global_metrics().record_early_completion(
-                        DownstreamProtocol::H3,
-                        UpstreamProtocol::H3,
-                        PipeStrategy::Buffered,
+                        PipeKind::BufferedH3H1,
                         StreamCompletion::new(
                             status,
                             req.body.len() as u64,
@@ -538,9 +528,7 @@ async fn process_http3_request(
                     let _ = responder.send_response(resp).await;
                     let elapsed = req_start.elapsed();
                     global_metrics().record_early_completion(
-                        DownstreamProtocol::H3,
-                        UpstreamProtocol::H3,
-                        PipeStrategy::Buffered,
+                        PipeKind::BufferedH3H1,
                         StreamCompletion::new(
                             status,
                             req.body.len() as u64,
@@ -599,9 +587,7 @@ async fn process_http3_request(
             let _ = responder.send_response(resp).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H3,
-                UpstreamProtocol::H3,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH3H1,
                 StreamCompletion::new(status, req.body.len() as u64, bytes_tx, elapsed, None),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
@@ -658,9 +644,7 @@ async fn process_http3_request(
             .await;
         let elapsed = req_start.elapsed();
         global_metrics().record_early_completion(
-            DownstreamProtocol::H3,
-            UpstreamProtocol::H3,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 req.body.len() as u64,
@@ -712,9 +696,7 @@ async fn process_http3_request(
             .await;
         let elapsed = req_start.elapsed();
         global_metrics().record_early_completion(
-            DownstreamProtocol::H3,
-            UpstreamProtocol::H3,
-            PipeStrategy::Buffered,
+            PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::TOO_MANY_REQUESTS.as_u16(),
                 req.body.len() as u64,
@@ -771,81 +753,12 @@ async fn process_http3_request(
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     });
 
-    let (upstream_protocol, pipe_strat, pipe_kind) = match upstream_target.as_ref() {
-        HttpUpstream::Http3(u) => match u.strategy.effective(has_upload_body, is_sse) {
-            Http3PipeStrategy::Buffered => (
-                UpstreamProtocol::H3,
-                PipeStrategy::Buffered,
-                velda_core::PipeKind::BufferedH3H3,
-            ),
-            Http3PipeStrategy::ServerStream => (
-                UpstreamProtocol::H3,
-                PipeStrategy::ServerStream,
-                velda_core::PipeKind::ServerStreamH3H3,
-            ),
-            Http3PipeStrategy::ClientStream => (
-                UpstreamProtocol::H3,
-                PipeStrategy::ClientStream,
-                velda_core::PipeKind::ClientStreamH3H3,
-            ),
-            Http3PipeStrategy::Duplex => (
-                UpstreamProtocol::H3,
-                PipeStrategy::Duplex,
-                velda_core::PipeKind::DuplexH3H3,
-            ),
-        },
-        HttpUpstream::Http2(u) => match u.strategy.effective(has_upload_body, is_sse) {
-            Http2PipeStrategy::Buffered => (
-                UpstreamProtocol::H2,
-                PipeStrategy::Buffered,
-                velda_core::PipeKind::BufferedH3H2,
-            ),
-            Http2PipeStrategy::ServerStream => (
-                UpstreamProtocol::H2,
-                PipeStrategy::ServerStream,
-                velda_core::PipeKind::ServerStreamH3H2,
-            ),
-            Http2PipeStrategy::ClientStream => (
-                UpstreamProtocol::H2,
-                PipeStrategy::ClientStream,
-                velda_core::PipeKind::ClientStreamH3H2,
-            ),
-            Http2PipeStrategy::Duplex => (
-                UpstreamProtocol::H2,
-                PipeStrategy::Duplex,
-                velda_core::PipeKind::DuplexH3H2,
-            ),
-        },
-        HttpUpstream::Http1(u) => match u.strategy.effective(has_upload_body, is_sse) {
-            Http1PipeStrategy::Buffered => (
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-                velda_core::PipeKind::BufferedH3H1,
-            ),
-            Http1PipeStrategy::ServerStream => (
-                UpstreamProtocol::H1,
-                PipeStrategy::ServerStream,
-                velda_core::PipeKind::ServerStreamH3H1,
-            ),
-            Http1PipeStrategy::ClientStream => (
-                UpstreamProtocol::H1,
-                PipeStrategy::ClientStream,
-                velda_core::PipeKind::ClientStreamH3H1,
-            ),
-            Http1PipeStrategy::Duplex => (
-                UpstreamProtocol::H1,
-                PipeStrategy::Duplex,
-                velda_core::PipeKind::DuplexH3H1,
-            ),
-        },
-    };
-
-    global_metrics().record_stream_start(DownstreamProtocol::H3, upstream_protocol, pipe_strat);
-
-    let outcome: PipeOutcome = match upstream_target.as_ref() {
+    let (outcome, pipe_kind): (PipeOutcome, PipeKind) = match upstream_target.as_ref() {
         HttpUpstream::Http3(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http3PipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedH3H3;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -854,18 +767,28 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http3PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h3::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::ServerStreamH3H3;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_h3_h3::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
             Http3PipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamH3H3;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -874,21 +797,31 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http3PipeStrategy::Duplex => {
-                pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::DuplexH3H3;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_h3_h3::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
         },
         HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http2PipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedH3H2;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -897,18 +830,28 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http2PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h2::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::ServerStreamH3H2;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_h3_h2::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
             Http2PipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamH3H2;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -917,21 +860,31 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http2PipeStrategy::Duplex => {
-                pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::DuplexH3H2;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_h3_h2::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
         },
         HttpUpstream::Http1(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)
         {
             Http1PipeStrategy::Buffered => {
+                const PIPE: PipeKind = PipeKind::BufferedH3H1;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -940,18 +893,28 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http1PipeStrategy::ServerStream => {
-                pipe::server_stream_h3_h1::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::ServerStreamH3H1;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::server_stream_h3_h1::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
             Http1PipeStrategy::ClientStream => {
+                const PIPE: PipeKind = PipeKind::ClientStreamH3H1;
+                global_metrics().record_stream_start(PIPE);
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
@@ -960,25 +923,31 @@ async fn process_http3_request(
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
-                PipeOutcome::http(
-                    status,
-                    req.body.len() as u64,
-                    bytes_tx,
-                    upstream_addr,
-                    completion,
+                (
+                    PipeOutcome::http(
+                        status,
+                        req.body.len() as u64,
+                        bytes_tx,
+                        upstream_addr,
+                        completion,
+                    ),
+                    PIPE,
                 )
             }
             Http1PipeStrategy::Duplex => {
-                pipe::duplex_h3_h1::serve(&req, responder, upstream, plan).await
+                const PIPE: PipeKind = PipeKind::DuplexH3H1;
+                global_metrics().record_stream_start(PIPE);
+                (
+                    pipe::duplex_h3_h1::serve(&req, responder, upstream, plan).await,
+                    PIPE,
+                )
             }
         },
     };
 
     let elapsed = req_start.elapsed();
     global_metrics().record_stream_completion(
-        DownstreamProtocol::H3,
-        upstream_protocol,
-        pipe_strat,
+        pipe_kind,
         StreamCompletion::new(
             outcome.status_code,
             outcome.bytes_rx,

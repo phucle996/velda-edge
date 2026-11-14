@@ -16,7 +16,7 @@ use std::sync::Arc;
 use velda_core::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
-use velda_observability::{AccessLogRecord, PipeStrategy, encode_ip_u128};
+use velda_observability::{AccessLogRecord, encode_ip_u128};
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 use velda_plugin::background::std_log_shipper::sink::StdLogSink;
@@ -385,10 +385,10 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
     ];
 
     let all_strategies = [
-        PipeStrategy::Buffered,
-        PipeStrategy::ServerStream,
-        PipeStrategy::ClientStream,
-        PipeStrategy::Duplex,
+        0u8, // Buffered
+        1,   // ServerStream
+        2,   // ClientStream
+        3,   // Duplex
     ];
 
     let all_completions = [
@@ -422,7 +422,7 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
                 status,
                 (counter % 100) as u16,
                 (counter % 50) as u16,
-                PipeKind::from_protocols(proto as u8, proto as u8, strat as u8),
+                PipeKind::from_protocols(proto as u8, proto as u8, strat),
                 comp,
                 method,
                 grpc_st,

@@ -227,9 +227,7 @@ impl BackgroundPlugin for StatsdExporterPlugin {
 mod tests {
     use super::*;
     use tokio::net::UdpSocket;
-    use velda_observability::{
-        DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol,
-    };
+    use velda_observability::StreamCompletion;
 
     #[tokio::test]
     async fn test_statsd_exporter_emits_deltas_without_idle_counter_inflation() {
@@ -237,15 +235,9 @@ mod tests {
         let rx_addr = rx_sock.local_addr().unwrap();
 
         let store = Arc::new(MetricsStore::new());
-        store.record_stream_start(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        store.record_stream_start(velda_core::PipeKind::BufferedH1H1);
         store.record_stream_completion(
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
+            velda_core::PipeKind::BufferedH1H1,
             StreamCompletion::new(200, 128, 256, Duration::from_millis(2), None),
         );
 
@@ -275,7 +267,7 @@ mod tests {
             tick1.push_str(&String::from_utf8_lossy(&buf[..extra]));
         }
         assert!(
-            tick1.contains("velda_delta.requests.total:1|c|#downstream:h1,upstream:h1,pipe:buffered,status:2xx\n"),
+            tick1.contains("velda_delta.requests.total:1|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"),
             "Tick 1 must emit delta 1, got: {tick1}"
         );
 
@@ -291,7 +283,7 @@ mod tests {
             tick2.push_str(&String::from_utf8_lossy(&buf[..extra]));
         }
         assert!(
-            tick2.contains("velda_delta.requests.total:0|c|#downstream:h1,upstream:h1,pipe:buffered,status:2xx\n"),
+            tick2.contains("velda_delta.requests.total:0|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"),
             "Tick 2 at idle must emit delta 0 (not 1), got: {tick2}"
         );
 

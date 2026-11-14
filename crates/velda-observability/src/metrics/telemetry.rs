@@ -10,8 +10,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use velda_core::lut::PipeKind;
+
 use super::store::MetricsStore;
-use super::types::{DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol};
+use super::types::StreamCompletion;
 
 /// Generic telemetry interface for stream and request processing pipelines.
 pub trait Telemetry: Send + Sync + 'static {
@@ -65,9 +67,7 @@ impl Telemetry for NoopTelemetry {
 /// Thread-safe and lock-free.
 pub struct LiveTelemetry {
     store: Arc<MetricsStore>,
-    downstream: DownstreamProtocol,
-    upstream: UpstreamProtocol,
-    pipe: PipeStrategy,
+    pipe: PipeKind,
     start_time: Option<Instant>,
     ttfb: Option<Duration>,
     bytes_rx: u64,
@@ -77,17 +77,10 @@ pub struct LiveTelemetry {
 impl LiveTelemetry {
     /// Creates a new active telemetry context bound to a target pipeline slot.
     #[inline(always)]
-    pub fn new(
-        store: Arc<MetricsStore>,
-        downstream: DownstreamProtocol,
-        upstream: UpstreamProtocol,
-        pipe: PipeStrategy,
-    ) -> Self {
-        store.record_stream_start(downstream, upstream, pipe);
+    pub fn new(store: Arc<MetricsStore>, pipe: PipeKind) -> Self {
+        store.record_stream_start(pipe);
         Self {
             store,
-            downstream,
-            upstream,
             pipe,
             start_time: None,
             ttfb: None,
@@ -130,7 +123,6 @@ impl Telemetry for LiveTelemetry {
         let completion =
             StreamCompletion::new(status, self.bytes_rx, self.bytes_tx, duration, self.ttfb);
 
-        self.store
-            .record_stream_completion(self.downstream, self.upstream, self.pipe, completion);
+        self.store.record_stream_completion(self.pipe, completion);
     }
 }

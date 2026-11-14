@@ -22,12 +22,10 @@ use super::pipe;
 use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
-use velda_core::{Action, L7Request, UpstreamId};
+use velda_core::{Action, L7Request, PipeKind, UpstreamId};
 use velda_http2::Http2PipeStrategy;
 use velda_http3::Http3PipeStrategy;
-use velda_observability::{
-    DownstreamProtocol, PipeStrategy, StreamCompletion, UpstreamProtocol, global_metrics,
-};
+use velda_observability::{StreamCompletion, global_metrics};
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///
@@ -153,9 +151,7 @@ pub async fn run_http1_loop<IO>(
                 let _ = conn.send_early_error(StatusCode::REQUEST_TIMEOUT).await;
                 let timeout_dur = std::time::Duration::from_millis(config.header_read_timeout_ms);
                 global_metrics().record_early_completion(
-                    DownstreamProtocol::H1,
-                    UpstreamProtocol::H1,
-                    PipeStrategy::Buffered,
+                    PipeKind::BufferedH1H1,
                     StreamCompletion::new(
                         StatusCode::REQUEST_TIMEOUT.as_u16(),
                         0,
@@ -206,9 +202,7 @@ pub async fn run_http1_loop<IO>(
                 conn.mark_close();
                 let _ = conn.send_early_error(status).await;
                 global_metrics().record_early_completion(
-                    DownstreamProtocol::H1,
-                    UpstreamProtocol::H1,
-                    PipeStrategy::Buffered,
+                    PipeKind::BufferedH1H1,
                     StreamCompletion::new(
                         status.as_u16(),
                         0,
@@ -290,9 +284,7 @@ pub async fn run_http1_loop<IO>(
             let _ = conn.send_early_error(StatusCode::FORBIDDEN).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::FORBIDDEN.as_u16(),
                     0,
@@ -339,9 +331,7 @@ pub async fn run_http1_loop<IO>(
             let _ = conn.send_early_error(StatusCode::BAD_REQUEST).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::BAD_REQUEST.as_u16(),
                     0,
@@ -414,9 +404,7 @@ pub async fn run_http1_loop<IO>(
             let _ = conn.send_early_error(StatusCode::NOT_FOUND).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::NOT_FOUND.as_u16(),
                     0,
@@ -514,9 +502,7 @@ pub async fn run_http1_loop<IO>(
                             let _ = conn.send_response(&server_resp).await;
                             let elapsed = req_start.elapsed();
                             global_metrics().record_early_completion(
-                                DownstreamProtocol::H1,
-                                UpstreamProtocol::H1,
-                                PipeStrategy::Buffered,
+                                PipeKind::BufferedH1H1,
                                 StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
                             );
                             velda_observability::global_log_store().emit(
@@ -602,9 +588,7 @@ pub async fn run_http1_loop<IO>(
                             let _ = conn.send_response(&server_resp).await;
                             let elapsed = req_start.elapsed();
                             global_metrics().record_early_completion(
-                                DownstreamProtocol::H1,
-                                UpstreamProtocol::H1,
-                                PipeStrategy::Buffered,
+                                PipeKind::BufferedH1H1,
                                 StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
                             );
                             velda_observability::global_log_store().emit(
@@ -670,9 +654,7 @@ pub async fn run_http1_loop<IO>(
                     let _ = conn.send_response(&server_resp).await;
                     let elapsed = req_start.elapsed();
                     global_metrics().record_early_completion(
-                        DownstreamProtocol::H1,
-                        UpstreamProtocol::H1,
-                        PipeStrategy::Buffered,
+                        PipeKind::BufferedH1H1,
                         StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
                     );
                     velda_observability::global_log_store().emit(
@@ -737,9 +719,7 @@ pub async fn run_http1_loop<IO>(
             let _ = conn.send_early_error(StatusCode::SERVICE_UNAVAILABLE).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                     0,
@@ -788,9 +768,7 @@ pub async fn run_http1_loop<IO>(
             let _ = conn.send_early_error(StatusCode::TOO_MANY_REQUESTS).await;
             let elapsed = req_start.elapsed();
             global_metrics().record_early_completion(
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
+                PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::TOO_MANY_REQUESTS.as_u16(),
                     0,
@@ -836,165 +814,148 @@ pub async fn run_http1_loop<IO>(
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
         });
 
-        let (upstream_protocol, pipe_strat, pipe_kind) = match upstream_target.as_ref() {
-            HttpUpstream::Http1(upstream) => {
-                match upstream.strategy.effective(is_chunked, is_sse) {
-                    Http1PipeStrategy::Buffered => (
-                        UpstreamProtocol::H1,
-                        PipeStrategy::Buffered,
-                        velda_core::PipeKind::BufferedH1H1,
-                    ),
-                    Http1PipeStrategy::ServerStream => (
-                        UpstreamProtocol::H1,
-                        PipeStrategy::ServerStream,
-                        velda_core::PipeKind::ServerStreamH1H1,
-                    ),
-                    Http1PipeStrategy::ClientStream => (
-                        UpstreamProtocol::H1,
-                        PipeStrategy::ClientStream,
-                        velda_core::PipeKind::ClientStreamH1H1,
-                    ),
-                    Http1PipeStrategy::Duplex => (
-                        UpstreamProtocol::H1,
-                        PipeStrategy::Duplex,
-                        velda_core::PipeKind::DuplexH1H1,
-                    ),
-                }
-            }
-            HttpUpstream::Http2(upstream) => {
-                match upstream.strategy.effective(is_chunked, is_sse) {
-                    Http2PipeStrategy::Buffered => (
-                        UpstreamProtocol::H2,
-                        PipeStrategy::Buffered,
-                        velda_core::PipeKind::BufferedH1H2,
-                    ),
-                    Http2PipeStrategy::ServerStream => (
-                        UpstreamProtocol::H2,
-                        PipeStrategy::ServerStream,
-                        velda_core::PipeKind::ServerStreamH1H2,
-                    ),
-                    Http2PipeStrategy::ClientStream => (
-                        UpstreamProtocol::H2,
-                        PipeStrategy::ClientStream,
-                        velda_core::PipeKind::ClientStreamH1H2,
-                    ),
-                    Http2PipeStrategy::Duplex => (
-                        UpstreamProtocol::H2,
-                        PipeStrategy::Duplex,
-                        velda_core::PipeKind::DuplexH1H2,
-                    ),
-                }
-            }
-            HttpUpstream::Http3(upstream) => {
-                match upstream.strategy.effective(is_chunked, is_sse) {
-                    Http3PipeStrategy::Buffered => (
-                        UpstreamProtocol::H3,
-                        PipeStrategy::Buffered,
-                        velda_core::PipeKind::BufferedH1H3,
-                    ),
-                    Http3PipeStrategy::ServerStream => (
-                        UpstreamProtocol::H3,
-                        PipeStrategy::ServerStream,
-                        velda_core::PipeKind::ServerStreamH1H3,
-                    ),
-                    Http3PipeStrategy::ClientStream => (
-                        UpstreamProtocol::H3,
-                        PipeStrategy::ClientStream,
-                        velda_core::PipeKind::ClientStreamH1H3,
-                    ),
-                    Http3PipeStrategy::Duplex => (
-                        UpstreamProtocol::H3,
-                        PipeStrategy::Duplex,
-                        velda_core::PipeKind::DuplexH1H3,
-                    ),
-                }
-            }
-        };
-
-        global_metrics().record_stream_start(DownstreamProtocol::H1, upstream_protocol, pipe_strat);
-
-        let pipe_result = match upstream_target.as_ref() {
+        let (pipe_result, pipe_kind) = match upstream_target.as_ref() {
             HttpUpstream::Http1(upstream) => {
                 match upstream.strategy.effective(is_chunked, is_sse) {
                     Http1PipeStrategy::Buffered => {
-                        pipe::buffered_h1_h1::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::BufferedH1H1;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::buffered_h1_h1::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http1PipeStrategy::ServerStream => {
-                        pipe::server_stream_h1_h1::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ServerStreamH1H1;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::server_stream_h1_h1::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http1PipeStrategy::ClientStream => {
-                        pipe::client_stream_h1_h1::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ClientStreamH1H1;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::client_stream_h1_h1::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http1PipeStrategy::Duplex => {
-                        pipe::duplex_h1_h1::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::DuplexH1H1;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::duplex_h1_h1::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                 }
             }
             HttpUpstream::Http2(upstream) => {
                 match upstream.strategy.effective(is_chunked, is_sse) {
                     Http2PipeStrategy::Buffered => {
-                        pipe::buffered_h1_h2::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::BufferedH1H2;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::buffered_h1_h2::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http2PipeStrategy::ServerStream => {
-                        pipe::server_stream_h1_h2::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ServerStreamH1H2;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::server_stream_h1_h2::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http2PipeStrategy::ClientStream => {
-                        pipe::client_stream_h1_h2::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ClientStreamH1H2;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::client_stream_h1_h2::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http2PipeStrategy::Duplex => {
-                        pipe::duplex_h1_h2::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::DuplexH1H2;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::duplex_h1_h2::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                 }
             }
             HttpUpstream::Http3(upstream) => {
                 match upstream.strategy.effective(is_chunked, is_sse) {
                     Http3PipeStrategy::Buffered => {
-                        pipe::buffered_h1_h3::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::BufferedH1H3;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::buffered_h1_h3::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http3PipeStrategy::ServerStream => {
-                        pipe::server_stream_h1_h3::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ServerStreamH1H3;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::server_stream_h1_h3::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http3PipeStrategy::ClientStream => {
-                        pipe::client_stream_h1_h3::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::ClientStreamH1H3;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::client_stream_h1_h3::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                     Http3PipeStrategy::Duplex => {
-                        pipe::duplex_h1_h3::serve(
-                            &mut conn, req_head, framing, upstream, &meta, plan,
+                        const PIPE: PipeKind = PipeKind::DuplexH1H3;
+                        global_metrics().record_stream_start(PIPE);
+                        (
+                            pipe::duplex_h1_h3::serve(
+                                &mut conn, req_head, framing, upstream, &meta, plan,
+                            )
+                            .await,
+                            PIPE,
                         )
-                        .await
                     }
                 }
             }
@@ -1034,9 +995,7 @@ pub async fn run_http1_loop<IO>(
 
         let elapsed = req_start.elapsed();
         global_metrics().record_stream_completion(
-            DownstreamProtocol::H1,
-            upstream_protocol,
-            pipe_strat,
+            pipe_kind,
             StreamCompletion::new(
                 final_status,
                 conn.last_bytes_rx,

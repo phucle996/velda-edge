@@ -10,9 +10,8 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
-use velda_observability::{
-    DownstreamProtocol, MetricsStore, PipeStrategy, StreamCompletion, UpstreamProtocol,
-};
+use velda_core::lut::PipeKind;
+use velda_observability::{MetricsStore, StreamCompletion};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
 use velda_plugin::background::statsd_exporter::lut::{fast_write_i64, fast_write_u64};
@@ -153,12 +152,7 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
     // Warm up
     for i in 0..10_000u64 {
         let core_id = (i & 1) as usize;
-        let slot = store.slot_on_core(
-            core_id,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(core_id, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(&completion);
         slot.stream_ended();
@@ -169,12 +163,7 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
     let start_tsc_b = unsafe { core::arch::x86_64::_rdtsc() };
     for i in 0..WORKER_REQUESTS {
         let core_id = (i & 1) as usize;
-        let slot = store.slot_on_core(
-            core_id,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(core_id, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
         slot.stream_ended();
@@ -207,12 +196,7 @@ async fn test_ab_statsd_exporter_hot_path_impact() {
     let start_tsc_a = unsafe { core::arch::x86_64::_rdtsc() };
     for i in 0..WORKER_REQUESTS {
         let core_id = (i & 1) as usize;
-        let slot = store.slot_on_core(
-            core_id,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(core_id, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
         slot.stream_ended();
@@ -342,12 +326,7 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
 
     // Warm up frontline worker caches before testing
     for _ in 0..20_000 {
-        let slot = store.slot_on_core(
-            0,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(0, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
         slot.stream_ended();
@@ -362,12 +341,7 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
         let start = Instant::now();
         let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
         for _ in 0..WORKER_REQUESTS {
-            let slot = store_b.slot_on_core(
-                0,
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            );
+            let slot = store_b.slot_on_core(0, PipeKind::BufferedH1H1);
             slot.stream_started();
             slot.record_completion(std::hint::black_box(&comp_b));
             slot.stream_ended();
@@ -417,12 +391,7 @@ async fn test_chaos_scenario_1_udp_blackhole_and_backpressure() {
         let start = Instant::now();
         let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
         for _ in 0..WORKER_REQUESTS {
-            let slot = store_a.slot_on_core(
-                0,
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            );
+            let slot = store_a.slot_on_core(0, PipeKind::BufferedH1H1);
             slot.stream_started();
             slot.record_completion(std::hint::black_box(&comp_a));
             slot.stream_ended();
@@ -493,12 +462,7 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
 
     // Warm up
     for i in 0..10_000u64 {
-        let slot = store.slot_on_core(
-            (i % 12) as usize,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core((i % 12) as usize, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(&completion);
         slot.stream_ended();
@@ -508,12 +472,7 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
     const SAMPLE_COUNT: usize = 20_000;
     let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
     for _ in 0..SAMPLE_COUNT {
-        let slot = store.slot_on_core(
-            0,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(0, PipeKind::BufferedH1H1);
         let t0 = unsafe { core::arch::x86_64::_rdtsc() };
         slot.stream_started();
         slot.record_completion(std::hint::black_box(&completion));
@@ -536,12 +495,7 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
             pin_thread(core_id);
             let mut samples = Vec::with_capacity(SAMPLE_COUNT);
             for i in 0..ops_per_thread_4 {
-                let slot = store_c.slot_on_core(
-                    core_id,
-                    DownstreamProtocol::H1,
-                    UpstreamProtocol::H1,
-                    PipeStrategy::Buffered,
-                );
+                let slot = store_c.slot_on_core(core_id, PipeKind::BufferedH1H1);
                 if i < SAMPLE_COUNT {
                     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                     slot.stream_started();
@@ -577,12 +531,7 @@ fn test_chaos_scenario_2_l7_burst_flooding() {
             pin_thread(core_id);
             let mut samples = Vec::with_capacity(SAMPLE_COUNT);
             for i in 0..ops_per_thread_8 {
-                let slot = store_c.slot_on_core(
-                    core_id,
-                    DownstreamProtocol::H1,
-                    UpstreamProtocol::H1,
-                    PipeStrategy::Buffered,
-                );
+                let slot = store_c.slot_on_core(core_id, PipeKind::BufferedH1H1);
                 if i < SAMPLE_COUNT {
                     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                     slot.stream_started();
@@ -680,12 +629,7 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
         let (nvcsw_0, nivcsw_0) = get_thread_rusage();
         let mut samples = Vec::with_capacity(TEST_OPS);
         for _ in 0..TEST_OPS {
-            let slot = store_3a.slot_on_core(
-                0,
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            );
+            let slot = store_3a.slot_on_core(0, PipeKind::BufferedH1H1);
             let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             slot.stream_started();
             slot.record_completion(std::hint::black_box(&comp_3a));
@@ -708,12 +652,7 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
         let (nvcsw_0, nivcsw_0) = get_thread_rusage();
         let mut samples = Vec::with_capacity(TEST_OPS);
         for _ in 0..TEST_OPS {
-            let slot = store_3b.slot_on_core(
-                2,
-                DownstreamProtocol::H1,
-                UpstreamProtocol::H1,
-                PipeStrategy::Buffered,
-            );
+            let slot = store_3b.slot_on_core(2, PipeKind::BufferedH1H1);
             let t0 = unsafe { core::arch::x86_64::_rdtsc() };
             slot.stream_started();
             slot.record_completion(std::hint::black_box(&comp_3b));
@@ -736,12 +675,7 @@ fn test_chaos_scenario_3_noisy_neighbor_cache_eviction() {
     const CLFLUSH_SAMPLES: usize = 10_000;
     let mut clflush_samples = Vec::with_capacity(CLFLUSH_SAMPLES);
     for _ in 0..CLFLUSH_SAMPLES {
-        let slot = store.slot_on_core(
-            0,
-            DownstreamProtocol::H1,
-            UpstreamProtocol::H1,
-            PipeStrategy::Buffered,
-        );
+        let slot = store.slot_on_core(0, PipeKind::BufferedH1H1);
         // Force flush slot cacheline to DRAM
         let slot_addr = slot as *const _ as *const u8;
         unsafe {
