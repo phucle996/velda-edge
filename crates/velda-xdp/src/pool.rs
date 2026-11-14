@@ -59,7 +59,7 @@ const BITS_PER_ATOMIC_WORD: usize = 64;
 #[derive(Debug)]
 enum UmemBacking {
     MmapHuge { len: usize },
-    MmapTransparent { len: usize },
+    MmapStandard { len: usize },
     Heap(Layout),
 }
 
@@ -84,7 +84,7 @@ impl Drop for XdpSlabArenaInner {
     fn drop(&mut self) {
         if !self.base_ptr.is_null() {
             match self.backing {
-                UmemBacking::MmapHuge { len } | UmemBacking::MmapTransparent { len } => {
+                UmemBacking::MmapHuge { len } | UmemBacking::MmapStandard { len } => {
                     #[cfg(target_os = "linux")]
                     unsafe {
                         libc::munmap(self.base_ptr as *mut libc::c_void, len);
@@ -305,25 +305,23 @@ impl XdpSlabArena {
                 allocated_ptr = ptr as *mut u8;
                 allocated_backing = Some(UmemBacking::MmapHuge { len: huge_bytes });
             } else {
-                // 2. Fallback: Attempt Transparent HugePages (2MB-aligned mmap + MADV_HUGEPAGE)
-                let thp_flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+                // 2. Fallback: Contiguous Virtual Memory via single 2MB-aligned mmap
+                // Allocates a single contiguous VMA without intrusive khugepaged/madvise compaction loops.
+                let std_flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
                 let ptr = unsafe {
                     libc::mmap(
                         std::ptr::null_mut(),
                         huge_bytes,
                         libc::PROT_READ | libc::PROT_WRITE,
-                        thp_flags,
+                        std_flags,
                         -1,
                         0,
                     )
                 };
 
                 if ptr != libc::MAP_FAILED && !ptr.is_null() {
-                    unsafe {
-                        libc::madvise(ptr, huge_bytes, libc::MADV_HUGEPAGE);
-                    }
                     allocated_ptr = ptr as *mut u8;
-                    allocated_backing = Some(UmemBacking::MmapTransparent { len: huge_bytes });
+                    allocated_backing = Some(UmemBacking::MmapStandard { len: huge_bytes });
                 }
             }
         }
@@ -380,18 +378,15 @@ impl XdpSlabArena {
     pub fn backing_kind(&self) -> ArenaBackingKind {
         match self.inner.backing {
             UmemBacking::MmapHuge { .. } => ArenaBackingKind::HugePages,
-            UmemBacking::MmapTransparent { .. } => ArenaBackingKind::TransparentHugePages,
+            UmemBacking::MmapStandard { .. } => ArenaBackingKind::ContiguousMmap,
             UmemBacking::Heap(_) => ArenaBackingKind::Heap,
         }
     }
 
-    /// Returns whether this UMEM arena is backed by 2MB HugePages (explicit or transparent).
+    /// Returns whether this UMEM arena is backed by 2MB HugePages via MAP_HUGETLB.
     #[inline(always)]
     pub fn is_huge_pages(&self) -> bool {
-        matches!(
-            self.inner.backing,
-            UmemBacking::MmapHuge { .. } | UmemBacking::MmapTransparent { .. }
-        )
+        matches!(self.inner.backing, UmemBacking::MmapHuge { .. })
     }
 
     /// Leases an available frame from the arena using lock-free bitmask allocation.
@@ -847,9 +842,7 @@ mod tests {
         let backing = arena.backing_kind();
         assert!(matches!(
             backing,
-            ArenaBackingKind::HugePages
-                | ArenaBackingKind::TransparentHugePages
-                | ArenaBackingKind::Heap
+            ArenaBackingKind::HugePages | ArenaBackingKind::ContiguousMmap | ArenaBackingKind::Heap
         ));
     }
 }

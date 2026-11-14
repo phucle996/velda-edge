@@ -21,11 +21,13 @@ To guarantee that request processing never halts on memory mapping or physical R
 Baseline slabs in [`PayloadSlabPool`](src/buffer/slab.rs) are carved out of **2MB HugePage chunks**:
 1. **Explicit 2MB HugePages (`mmap` + `MAP_HUGETLB`)**:
    - Requests physically contiguous 2MB blocks directly from the Linux Buddy Allocator (Order-9 allocation).
+   - Sourced from the pre-reserved hugetlb pool with zero kernel compaction overhead or OS pressure.
    - Guarantees 100% physical RAM continuity without external fragmentation across hours/days of execution.
    - Condenses 512 separate 4KB page translations into a **single 2MB DTLB entry**, eliminating TLB miss stalls.
-2. **Transparent HugePages (`mmap` + `MADV_HUGEPAGE`)**:
+2. **Contiguous Virtual Memory Mapping (`mmap` standard pages)**:
    - Fallback when dedicated `hugetlbfs` pool is unconfigured.
-   - Hints kernel `khugepaged` to coalesce underlying physical frames into contiguous 2MB huge pages.
+   - Allocates a single contiguous 2MB-aligned VMA without forcing intrusive `madvise(MADV_HUGEPAGE)` compaction loops onto the OS.
+   - When RAM is unconstrained (especially post-restart), the Linux Buddy Allocator naturally places physical page frames adjacent to each other.
 3. **Standard 4KB Page-Aligned Allocation (`alloc_zeroed`)**:
    - Graceful fallback for unprivileged containers or non-Linux development environments.
 
