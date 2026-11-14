@@ -1,25 +1,27 @@
 //! Pre-Allocated 64-Byte Aligned SPSC Ring Buffer (`velda_observability::logs::ring`).
 //!
 //! # Hardware Mechanism & L1 Cache Protection ("L1 is Gold")
-//! 1. **Pre-Allocated 64-Byte Stride Buffer**:
+//! 1. **Pre-Allocated 256-Byte Stride Buffer (4 CPU Cache Lines)**:
 //!    `Box<[UnsafeCell<AccessLogRecord>]>` is allocated once at worker initialization. Because
-//!    [`AccessLogRecord`] is `#[repr(C, align(64))]` with size 64, the slice base address and every
-//!    slot offset are strictly 64-byte aligned.
+//!    [`AccessLogRecord`] is `#[repr(C, align(64))]` with size 256, the slice base address and every
+//!    slot offset are strictly 64-byte aligned (each record spans exactly 4 cache lines).
 //! 2. **Non-Temporal Streaming Store on Push (`_mm256_stream_si256` + `_mm_sfence()`)**:
-//!    `velda-worker-{id}` writes the 64-byte record through CPU Write-Combining buffers directly
+//!    `velda-worker-{id}` writes the 256-byte record through CPU Write-Combining buffers directly
 //!    to L3/RAM without allocating a cache line in L1d, protecting hot routing and socket state.
 //!    `_mm_sfence()` enforces global visibility of the Write-Combining buffer before the
 //!    `Ordering::Release` store on `head`.
-//! 3. **L2/L3-Only Prefetch on Drain (`_mm_prefetch(..., _MM_HINT_T1)`)**:
-//!    `velda-shadow-{id}` prefetches upcoming ring slots into L2/L3 only so background log draining
-//!    never evicts L1d cache lines of its sibling Frontline thread.
+//! 3. **Non-Temporal Streaming Load on Drain (`_mm256_stream_load_si256` / `VMOVNTDQA`)**:
+//!    `velda-shadow-{id}` drains ring slots directly using Non-Temporal Streaming Loads (`VMOVNTDQA`),
+//!    bypassing L1d cache allocation for dead ring buffer slots so background log draining
+//!    never evicts hot routing tables, connection pools, or metadata of its sibling Frontline thread.
+//!    Upcoming slots are prefetched ahead into L2/L3 via `_MM_HINT_T1` to eliminate DRAM wait latency.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::record::AccessLogRecord;
 
-/// Default per-core SPSC ring capacity (4096 records × 64B = 256 KB per core).
+/// Default per-core SPSC ring capacity (4096 records × 256B = 1 MB per core).
 pub const DEFAULT_CORE_RING_CAPACITY: usize = 4096;
 
 #[repr(align(64))]
@@ -140,8 +142,20 @@ impl SpscLogRing {
         count
     }
 
-    /// Drains up to `max_records` from the ring using `_MM_HINT_T1` (L2/L3 cache prefetch only)
-    /// so background draining on Shadow Worker never evicts hot L1d lines of the sibling thread.
+    /// Drains up to `max_records` from the ring using Non-Temporal Streaming Loads (`VMOVNTDQA` / `MOVNTDQA`)
+    /// and `_MM_HINT_T1` (L2/L3 cache prefetch lookahead).
+    ///
+    /// # Microarchitectural Rationale ("L1 is Gold")
+    /// Shadow Workers drain up to 4,096 records (1 MB of memory) in a single burst.
+    /// Because each log record is read exactly once and then discarded from the ring buffer,
+    /// regular memory loads (`std::ptr::read`) would pull 1 MB of dead ring slots through L1d,
+    /// evicting 100% of L1d (32–48 KB) and thrashing L2, which stalls sibling frontline serving threads.
+    ///
+    /// By using `_mm256_stream_load_si256` (`VMOVNTDQA`) on AVX2 or `_mm_stream_load_si128` (`MOVNTDQA`) on SSE4.1:
+    /// - Data streams directly from L3/RAM through CPU Line Fill Buffers (LFB) into vector registers,
+    ///   completely bypassing L1d cache allocation for the consumed ring slots.
+    /// - Data is stored into the newly allocated output batch slice using regular vector stores,
+    ///   ensuring the batch is placed into cache for active exporter plugins to serialize.
     pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
         let tail = self.tail.0.load(Ordering::Relaxed);
         let mut head = self.cached_head.0.load(Ordering::Relaxed);
@@ -158,9 +172,14 @@ impl SpscLogRing {
 
         let to_take = avail.min(max_records);
         let mut out = Vec::with_capacity(to_take);
+        let spare = out.spare_capacity_mut();
 
-        for i in 0..to_take {
+        #[cfg(target_arch = "x86_64")]
+        let has_avx2 = std::is_x86_feature_detected!("avx2");
+
+        for (i, slot_uninit) in spare[..to_take].iter_mut().enumerate() {
             let idx = tail.wrapping_add(i) & self.mask;
+
             #[cfg(target_arch = "x86_64")]
             if i + 4 < to_take {
                 let prefetch_idx = tail.wrapping_add(i + 4) & self.mask;
@@ -173,10 +192,62 @@ impl SpscLogRing {
                     _mm_prefetch(slot.add(192), _MM_HINT_T1);
                 }
             }
+
+            let src = unsafe { self.buffer.get_unchecked(idx).get() };
+            let dst = slot_uninit.as_mut_ptr();
+
+            // Both src (slot in Box<[UnsafeCell<AccessLogRecord>]>) and dst (element in Vec<AccessLogRecord>)
+            // are strictly 64-byte aligned due to #[repr(C, align(64))].
+            debug_assert!((src as usize) & 63 == 0);
+            debug_assert!((dst as usize) & 63 == 0);
+
+            #[cfg(target_arch = "x86_64")]
             unsafe {
-                let ptr = self.buffer.get_unchecked(idx).get();
-                out.push(std::ptr::read(ptr));
+                use core::arch::x86_64::*;
+                if has_avx2 {
+                    let s = src as *const __m256i;
+                    let d = dst as *mut __m256i;
+
+                    // Non-Temporal Streaming Loads (VMOVNTDQA): loads 8 x 32-byte chunks directly into registers,
+                    // bypassing L1d cache allocation for the consumed ring buffer slot ("L1 is gold").
+                    let v0 = _mm256_stream_load_si256(s);
+                    let v1 = _mm256_stream_load_si256(s.add(1));
+                    let v2 = _mm256_stream_load_si256(s.add(2));
+                    let v3 = _mm256_stream_load_si256(s.add(3));
+                    let v4 = _mm256_stream_load_si256(s.add(4));
+                    let v5 = _mm256_stream_load_si256(s.add(5));
+                    let v6 = _mm256_stream_load_si256(s.add(6));
+                    let v7 = _mm256_stream_load_si256(s.add(7));
+
+                    // Store into exporter destination batch slice (regular store to keep batch in cache for serialization)
+                    _mm256_store_si256(d, v0);
+                    _mm256_store_si256(d.add(1), v1);
+                    _mm256_store_si256(d.add(2), v2);
+                    _mm256_store_si256(d.add(3), v3);
+                    _mm256_store_si256(d.add(4), v4);
+                    _mm256_store_si256(d.add(5), v5);
+                    _mm256_store_si256(d.add(6), v6);
+                    _mm256_store_si256(d.add(7), v7);
+                } else {
+                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_stream_load_si128
+                    let s = src as *const __m128i;
+                    let d = dst as *mut __m128i;
+                    for k in 0..16 {
+                        let v = _mm_stream_load_si128(s.add(k));
+                        _mm_store_si128(d.add(k), v);
+                    }
+                }
             }
+
+            #[cfg(not(target_arch = "x86_64"))]
+            unsafe {
+                std::ptr::copy_nonoverlapping(src, dst, 1);
+            }
+        }
+
+        // SAFETY: All `to_take` elements in `out` were initialized above via direct SIMD/pointer copy.
+        unsafe {
+            out.set_len(to_take);
         }
 
         self.tail
