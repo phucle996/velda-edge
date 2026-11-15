@@ -12,3 +12,5 @@ pub use algorithm::{KeyState, RateLimitAlgorithm, ShardedState};
 pub use key::{KeyStrategy, extract_client_ip, hash_key};
 pub use plugin::{FallbackBehavior, RateLimitBackend, RateLimitConfig, RateLimitPlugin};
 pub use redis::{RedisConfig, RedisConnectionPool, TlsSource};
+
+pub mod validation;

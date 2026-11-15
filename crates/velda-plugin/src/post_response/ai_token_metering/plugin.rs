@@ -15,10 +15,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::config::PluginConfig;
 use http::HeaderValue;
 use http::header::HeaderName;
 use velda_core::{HeaderWorkspace, L7Response};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::AiTokenMeteringConfig;
 use super::scanner::{scan_model, scan_token_usage};

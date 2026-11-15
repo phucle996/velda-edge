@@ -24,8 +24,8 @@ use tokio::sync::{Semaphore, watch};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use super::validation::PrometheusExporterConfig;
 use velda_observability::MetricsStore;
-use velda_sync::PrometheusExporterConfig;
 use velda_tls::ServerTlsConfig;
 
 use super::lut::fast_write_u64_slice;
@@ -255,14 +255,13 @@ impl PrometheusExporter {
         })
     }
 
-    /// Deserializes and constructs an instance directly from a [`velda_sync::post_sync::plugin::PluginConfig`].
-    pub fn from_config(
-        config: &velda_sync::post_sync::plugin::PluginConfig,
-    ) -> Result<Self, PluginError> {
+    /// Deserializes and constructs an instance directly from a [`crate::config::PluginConfig`].
+    pub fn from_config(config: &crate::config::PluginConfig) -> Result<Self, PluginError> {
         let exporter_cfg =
-            velda_sync::validate_prometheus_exporter_config(&config.id, &config.config).map_err(
-                |e| PluginError::Config(format!("Invalid Prometheus exporter config: {e}")),
-            )?;
+            super::validation::validate_prometheus_exporter_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!("Invalid Prometheus exporter config: {e}"))
+                })?;
         Self::new(exporter_cfg, velda_observability::global_metrics())
     }
 

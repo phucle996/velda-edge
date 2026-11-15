@@ -17,10 +17,10 @@
 //! - **Inflation Safeguard**: If compressed payload size is larger than original, the original
 //!   uncompressed body is preserved to prevent bandwidth degradation.
 
+use crate::config::PluginConfig;
 use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, VARY};
 use http::{HeaderValue, StatusCode};
 use velda_core::{Body, L7Response};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::ResponseCompressionConfig;
 use super::dictionary::ZstdDictionaryConfig;
@@ -48,13 +48,14 @@ impl ResponseCompressionPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_response_compression_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid response_compression configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+        let cfg =
+            super::validation::validate_response_compression_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid response_compression configuration for '{}': {e}",
+                        config.id
+                    ))
+                })?;
 
         let mut algorithms = Vec::with_capacity(cfg.algorithms.len());
         for item in &cfg.algorithms {

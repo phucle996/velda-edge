@@ -2391,6 +2391,7 @@ dependencies = [
  "aho-corasick",
  "arc-swap",
  "base64 0.22.1",
+ "bincode",
  "bitflags",
  "brotli",
  "bytes",
@@ -2419,7 +2420,6 @@ dependencies = [
  "velda-grpc",
  "velda-observability",
  "velda-router",
- "velda-sync",
  "velda-tls",
  "x509-parser",
  "zstd",
@@ -2490,6 +2490,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "velda-core",
+ "velda-plugin",
  "x509-parser",
 ]
 

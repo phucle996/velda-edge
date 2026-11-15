@@ -69,7 +69,7 @@ pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Requ
 /// Adding a new pre-route plugin requires adding exactly 1 match arm here, delegating
 /// config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
-    config: &velda_sync::post_sync::plugin::PluginConfig,
+    config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
     match config.id.as_str() {
         "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_pre_route_ip_filter_execution() {
-        let config = velda_sync::post_sync::plugin::PluginConfig {
+        let config = crate::config::PluginConfig {
             id: "ip_filter".into(),
             phase: "pre_route".into(),
             config: serde_json::json!({

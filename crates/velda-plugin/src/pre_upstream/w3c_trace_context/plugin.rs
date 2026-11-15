@@ -13,10 +13,10 @@
 //! # Performance
 //! - In-memory execution in ~5-10 ns with zero disk I/O, zero network calls, and zero heap allocation.
 
+use crate::config::PluginConfig;
 use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use velda_core::{Action, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::traceparent::TraceParentCodec;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};

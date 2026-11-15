@@ -1,9 +1,39 @@
 //! Cryptographic JWT Verification and Flexible Claim Extraction.
 //!
+//! ```text
+//!                          JWT VERIFICATION PIPELINE
+//!
+//!   Inbound JWT String: [ header_b64 ] . [ payload_b64 ] . [ signature_b64 ]
+//!                                |                 |                 |
+//!     +--------------------------+                 |                 |
+//!     | Zero-alloc base64 decode                   |                 |
+//!     v                                            v                 |
+//!   JoseHeader                                Claims Ingest          |
+//!   - alg: "HS256" / "RS256"...                    |                 |
+//!   - kid: Option<&str>                            |                 |
+//!             |                                    |                 |
+//!             v                                    |                 |
+//!   +-------------------------+                    |                 |
+//!   | JwksKeyTable Lookup     |                    |                 |
+//!   | [kid_index: 8x u64]     |                    |                 |
+//!   | (Single L1D Cache Line) |                    |                 |
+//!   +-------------------------+                    |                 |
+//!             |                                    |                 |
+//!             +-----> Target Slot Key              |                 |
+//!                             |                    |                 |
+//!                             v                    v                 v
+//!                   +----------------------------------------------------+
+//!                   | Cryptographic Verification (HMAC / RSA / ECDSA)    |
+//!                   +----------------------------------------------------+
+//!                                          |
+//!                                          v
+//!                             ValidatedClaims (Headers Injection)
+//! ```
+//!
 //! # Verification Invariants & High-Performance Design
 //! - **Zero-Allocation Hot Path**: Decodes JOSE header, signature, and standard-sized payloads
 //!   into stack-allocated slices (`decode_slice`), avoiding heap allocations on cryptographic verification.
-//! - **Fail-Fast Signature Length Guard**: Validates signature length in 1ns against the pre-computed
+//! - **Fail-Fast Signature Length Guard**: Validates signature length immediately against the pre-computed
 //!   key geometry before initiating expensive asymmetric modular exponentiation (RSA) or point math (ECDSA).
 //! - **Universal Key Parsing (SPKI & PKCS#1/SEC 1)**: Accepts standard OpenSSL / PEM public keys
 //!   (X.509 `SubjectPublicKeyInfo`), extracting underlying raw key structures at boot time.
@@ -21,6 +51,7 @@ use ring::hmac;
 use ring::signature::{self, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 
+use super::table::JwksKeyTable;
 use crate::error::PluginError;
 
 /// Cryptographic algorithms supported for JWT signature verification.
@@ -293,6 +324,7 @@ pub fn parse_pem_to_der(pem_str: &str) -> Result<Vec<u8>, PluginError> {
 // ============================================================================
 
 /// Pre-parsed cryptographic verification key with pre-computed geometry.
+#[derive(Clone)]
 pub enum VerifierKey {
     Hmac {
         key: hmac::Key,
@@ -425,7 +457,7 @@ impl VerifierKey {
         signing_input: &[u8],
         signature_bytes: &[u8],
     ) -> Result<(), &'static str> {
-        // Fast 1ns signature length check
+        // Fast fail-fast signature length check against pre-computed key geometry
         if signature_bytes.len() != self.expected_sig_len() {
             return Err("Signature length mismatch");
         }
@@ -545,7 +577,7 @@ pub struct VerifiedToken {
 /// Configuration policies and cryptographic keys for JWT verification.
 pub struct JwtValidationPolicy<'a> {
     pub expected_alg: JwtAlgorithm,
-    pub key: &'a VerifierKey,
+    pub key_table: &'a JwksKeyTable,
     pub validate_exp: bool,
     pub clock_skew_secs: u64,
     pub expected_issuer: Option<&'a str>,
@@ -558,6 +590,8 @@ pub struct JwtValidationPolicy<'a> {
 #[derive(Deserialize)]
 struct JoseHeader<'a> {
     alg: &'a str,
+    #[serde(default)]
+    kid: Option<&'a str>,
 }
 
 /// Performs full validation of a compact JWT string against cryptographic key and business policies.
@@ -593,12 +627,29 @@ pub fn verify_jwt(
         return Err("Algorithm mismatch");
     }
 
+    // 2b. Match key from the contiguous 8-slot table (1 Cache Line integer match)
+    let slot = if let Some(kid_str) = header_json.kid {
+        policy
+            .key_table
+            .find_by_raw_kid(kid_str)
+            .ok_or("Unknown key ID (kid)")?
+    } else {
+        policy
+            .key_table
+            .default_key()
+            .ok_or("No matching default key in key table")?
+    };
+
+    if slot.alg != policy.expected_alg {
+        return Err("Algorithm mismatch for selected key");
+    }
+
+    let verifier_key = slot.key.as_ref().ok_or("Key slot is uninitialized")?;
+
     // 3. Cryptographic signature check into stack buffer (zero allocation)
     let mut sig_stack_buf = [0u8; 512];
     let signature_bytes = decode_base64url_to_slice(signature_b64, &mut sig_stack_buf)?;
-    policy
-        .key
-        .verify(policy.expected_alg, signing_input, signature_bytes)?;
+    verifier_key.verify(policy.expected_alg, signing_input, signature_bytes)?;
 
     // 4. Decode and parse JSON payload into stack buffer (zero allocation for standard tokens < 2KB)
     let mut payload_stack_buf = [0u8; 2048];
@@ -718,9 +769,10 @@ mod tests {
         ];
 
         let assert_claims = vec![("roles".to_string(), "admin".to_string())];
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS256,
-            key: &key,
+            key_table: &key_table,
             validate_exp: true,
             clock_skew_secs: 60,
             expected_issuer: Some("https://auth.internal"),
@@ -746,6 +798,7 @@ mod tests {
         let payload = r#"{"sub": "user_1", "exp": 2000000000}"#;
         let token = create_test_hs256_jwt(secret, payload);
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
 
         // Tamper with signature to have invalid length (4 valid base64 chars = 3 bytes, whereas HS256 requires 32 bytes)
         let parts: Vec<&str> = token.split('.').collect();
@@ -753,7 +806,7 @@ mod tests {
 
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS256,
-            key: &key,
+            key_table: &key_table,
             validate_exp: false,
             clock_skew_secs: 0,
             expected_issuer: None,
@@ -772,10 +825,11 @@ mod tests {
         let payload = r#"{"sub": "user_1", "exp": 1000}"#;
         let token = create_test_hs256_jwt(secret, payload);
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
 
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS256,
-            key: &key,
+            key_table: &key_table,
             validate_exp: true,
             clock_skew_secs: 0,
             expected_issuer: None,
@@ -794,11 +848,12 @@ mod tests {
         let payload = r#"{"sub": "user_1", "role": "viewer", "exp": 2000000000}"#;
         let token = create_test_hs256_jwt(secret, payload);
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
 
         let assert_claims = vec![("role".to_string(), "admin".to_string())];
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS256,
-            key: &key,
+            key_table: &key_table,
             validate_exp: false,
             clock_skew_secs: 0,
             expected_issuer: None,
@@ -817,10 +872,11 @@ mod tests {
         let payload = r#"{"sub": "user_1", "exp": 2000000000}"#;
         let token = create_test_hs256_jwt(secret, payload);
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
 
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS384, // expected HS384, but token is HS256
-            key: &key,
+            key_table: &key_table,
             validate_exp: false,
             clock_skew_secs: 0,
             expected_issuer: None,
@@ -837,11 +893,12 @@ mod tests {
     fn test_excessive_dots_rejected() {
         let secret = "test-secret";
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
         let malformed_token = "header.payload.signature.extra";
 
         let policy = JwtValidationPolicy {
             expected_alg: JwtAlgorithm::HS256,
-            key: &key,
+            key_table: &key_table,
             validate_exp: false,
             clock_skew_secs: 0,
             expected_issuer: None,
@@ -852,5 +909,81 @@ mod tests {
 
         let res = verify_jwt(malformed_token, &policy, 1000);
         assert_eq!(res.err(), Some("Malformed JWT: unexpected additional dots"));
+    }
+
+    #[test]
+    fn test_kid_integer_match_and_multi_key_rotation() {
+        use super::super::table::JwksKeySlot;
+
+        let secret1 = "secret-key-1";
+        let secret2 = "secret-key-2";
+
+        // Build token with kid: "key-1"
+        let header1 = r#"{"alg":"HS256","typ":"JWT","kid":"key-1"}"#;
+        let payload = r#"{"sub":"user_rotation","exp":2000000000}"#;
+        let h1_b64 = BASE64_URL_SAFE_NO_PAD.encode(header1.as_bytes());
+        let p_b64 = BASE64_URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let input1 = format!("{h1_b64}.{p_b64}");
+        let hmac_key1 = hmac::Key::new(hmac::HMAC_SHA256, secret1.as_bytes());
+        let sig1 = hmac::sign(&hmac_key1, input1.as_bytes());
+        let token1 = format!("{input1}.{}", BASE64_URL_SAFE_NO_PAD.encode(sig1.as_ref()));
+
+        // Build token with kid: "key-2"
+        let header2 = r#"{"alg":"HS256","typ":"JWT","kid":"key-2"}"#;
+        let h2_b64 = BASE64_URL_SAFE_NO_PAD.encode(header2.as_bytes());
+        let input2 = format!("{h2_b64}.{p_b64}");
+        let hmac_key2 = hmac::Key::new(hmac::HMAC_SHA256, secret2.as_bytes());
+        let sig2 = hmac::sign(&hmac_key2, input2.as_bytes());
+        let token2 = format!("{input2}.{}", BASE64_URL_SAFE_NO_PAD.encode(sig2.as_ref()));
+
+        // Build token with kid: "unknown-kid"
+        let header_unk = r#"{"alg":"HS256","typ":"JWT","kid":"unknown-kid"}"#;
+        let h_unk_b64 = BASE64_URL_SAFE_NO_PAD.encode(header_unk.as_bytes());
+        let input_unk = format!("{h_unk_b64}.{p_b64}");
+        let sig_unk = hmac::sign(&hmac_key1, input_unk.as_bytes());
+        let token_unk = format!(
+            "{input_unk}.{}",
+            BASE64_URL_SAFE_NO_PAD.encode(sig_unk.as_ref())
+        );
+
+        // Setup 8-slot table holding both keys
+        let mut table = JwksKeyTable::empty();
+        let k1 = VerifierKey::new(JwtAlgorithm::HS256, Some(secret1), None).unwrap();
+        let k2 = VerifierKey::new(JwtAlgorithm::HS256, Some(secret2), None).unwrap();
+
+        let s1 = JwksKeySlot::new(101, "key-1", JwtAlgorithm::HS256, k1);
+        let s2 = JwksKeySlot::new(102, "key-2", JwtAlgorithm::HS256, k2);
+
+        let mut hashes = [0u64; 8];
+        hashes[0] = s1.raw_kid_hash;
+        hashes[1] = s2.raw_kid_hash;
+        table.slots[0] = s1;
+        table.slots[1] = s2;
+        table.set_kid_index_batch(&hashes);
+
+        table.active_count = 2;
+
+        let policy = JwtValidationPolicy {
+            expected_alg: JwtAlgorithm::HS256,
+            key_table: &table,
+            validate_exp: true,
+            clock_skew_secs: 0,
+            expected_issuer: None,
+            expected_audience: None,
+            claims_to_headers: &[],
+            assert_claims: &[],
+        };
+
+        // Token 1 matches key-1 slot
+        let res1 = verify_jwt(&token1, &policy, 1000);
+        assert!(res1.is_ok());
+
+        // Token 2 matches key-2 slot
+        let res2 = verify_jwt(&token2, &policy, 1000);
+        assert!(res2.is_ok());
+
+        // Token with unknown kid fails fail-fast
+        let res_unk = verify_jwt(&token_unk, &policy, 1000);
+        assert_eq!(res_unk.err(), Some("Unknown key ID (kid)"));
     }
 }

@@ -6,3 +6,6 @@ pub mod scanner;
 
 pub use dictionary::ThreatVector;
 pub use plugin::{WafLitePlugin, WafMode, WafScope};
+
+pub mod validation;
+pub use validation::*;

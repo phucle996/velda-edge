@@ -24,13 +24,13 @@
 //! - **Strict Origin Isolation**: Disallowed origins receive zero CORS headers (no wildcards fallback).
 //! - **Zero-Allocation Hot Path**: Atomic ref-count clone on `HeaderValue` without heap re-allocations.
 
+use crate::config::PluginConfig;
 use http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
     ACCESS_CONTROL_MAX_AGE, ORIGIN, VARY,
 };
 use http::header::{HeaderName, HeaderValue};
 use velda_core::L7Response;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -268,8 +268,8 @@ impl CorsResponsePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_cors_response_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_cors_response_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid cors configuration for '{}': {e}",
                     config.id

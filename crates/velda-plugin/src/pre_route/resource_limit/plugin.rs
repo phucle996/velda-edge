@@ -4,9 +4,9 @@
 //! and upstream connection leasing by enforcing strict thresholds on URI length,
 //! header counts, and cumulative header bytes.
 
+use crate::config::PluginConfig;
 use http::header::HeaderName;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -54,14 +54,13 @@ impl ResourceLimitPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_resource_limit_config(&config.id, &config.config).map_err(
-            |e| {
+        let cfg = super::validation::validate_resource_limit_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid resource_limit configuration for '{}': {e}",
                     config.id
                 ))
-            },
-        )?;
+            })?;
 
         Ok(Self::new(
             &config.id,

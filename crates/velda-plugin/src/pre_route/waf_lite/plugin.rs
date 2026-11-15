@@ -7,9 +7,9 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::dictionary::ThreatVector;
 use super::scanner::WafMatcher;
@@ -85,7 +85,7 @@ impl WafLitePlugin {
         for p in custom_blocked_patterns {
             let lower = p.trim().to_ascii_lowercase();
             if !lower.is_empty()
-                && !velda_sync::is_builtin_attack_pattern(&lower)
+                && !super::validation::is_builtin_attack_pattern(&lower)
                 && seen_pats.insert(lower.clone())
             {
                 deduped_patterns.push(lower);
@@ -97,7 +97,7 @@ impl WafLitePlugin {
         for ua in custom_blocked_user_agents {
             let lower = ua.trim().to_ascii_lowercase();
             if !lower.is_empty()
-                && !velda_sync::is_builtin_user_agent(&lower)
+                && !super::validation::is_builtin_user_agent(&lower)
                 && seen_uas.insert(lower.clone())
             {
                 deduped_uas.push(lower);
@@ -136,13 +136,14 @@ impl WafLitePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_waf_lite_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_waf_lite_config(&config.id, &config.config).map_err(
+            |e| {
                 PluginError::Config(format!(
                     "Invalid waf_lite configuration for '{}': {e}",
                     config.id
                 ))
-            })?;
+            },
+        )?;
 
         let mode = match cfg.mode.as_str() {
             "block" => WafMode::Block,

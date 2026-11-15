@@ -8,9 +8,9 @@
 //! - **Zero Automatic Overwrites**: Does not inject or override headers without explicit configuration.
 //! - **In-Place Mutation**: Modifies [`L7Response`] headers directly on the worker hot path.
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{HeaderWorkspace, L7Response};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::{
     OP_DYNAMIC_ADD, OP_DYNAMIC_ANY, OP_DYNAMIC_SET, OP_DYNAMIC_SET_IF_MISSING, OP_REMOVE,

@@ -9,7 +9,7 @@
 //! - [`json`]: Pre-baked static JSON envelope, schema URL byte constant, and persistent HTTP/1.1 Keep-Alive client.
 //! - [`proto`]: Direct Protobuf wire format serializer, SIMD timestamp stamping, and persistent HTTP/2 gRPC client.
 //! - [`config`]: Explicit configuration definition.
-//! - [`plugin`]: Background lifecycle coordinated on `velda-shadow-0` (`SCHED_IDLE`).
+//! - [`plugin`]: Background lifecycle coordinated on `velda-shadow-{i}` (`SCHED_IDLE`, Core $i$).
 
 pub mod config;
 pub mod json;
@@ -19,3 +19,6 @@ pub mod proto;
 
 pub use config::OtlpLogShipperConfig;
 pub use plugin::OtlpLogShipperPlugin;
+
+pub mod validation;
+pub use validation::*;

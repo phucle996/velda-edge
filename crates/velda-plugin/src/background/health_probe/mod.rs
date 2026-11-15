@@ -6,3 +6,5 @@ pub mod state;
 
 pub use plugin::{HealthProbeConfig, HealthProbePlugin};
 pub use state::HealthState;
+
+pub mod validation;

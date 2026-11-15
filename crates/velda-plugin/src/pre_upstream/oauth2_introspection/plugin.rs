@@ -10,10 +10,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use super::validation::Oauth2IntrospectionConfig;
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::Oauth2IntrospectionConfig;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::{CacheLookup, CachedClaims, IntrospectionCache, STALE_REFRESH_THRESHOLD_SECS};
 use super::client::{IdpKeepAliveClient, IntrospectionResponse};
@@ -122,8 +122,9 @@ impl Oauth2IntrospectionPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_oauth2_introspection_config(&config.id, &config.config)
-            .map_err(|e| PluginError::Config(e.to_string()))?;
+        let cfg =
+            super::validation::validate_oauth2_introspection_config(&config.id, &config.config)
+                .map_err(|e| PluginError::Config(e.to_string()))?;
         Self::new(&config.id, cfg)
     }
 

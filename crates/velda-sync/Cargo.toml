@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+velda-plugin = { path = "../velda-plugin" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"

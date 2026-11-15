@@ -7,10 +7,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::StatusCode;
 use http::header::HeaderValue;
 use velda_core::L7Response;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 
@@ -119,13 +119,13 @@ impl HttpCacheStorePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_http_cache_store_config(&config.id, &config.config)
+        let cfg = super::validation::validate_http_cache_store_config(&config.id, &config.config)
             .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid http_cache_store configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+            PluginError::Config(format!(
+                "Invalid http_cache_store configuration for '{}': {e}",
+                config.id
+            ))
+        })?;
 
         let mut cacheable_status = Vec::with_capacity(cfg.cacheable_status.len());
         for code in cfg.cacheable_status {

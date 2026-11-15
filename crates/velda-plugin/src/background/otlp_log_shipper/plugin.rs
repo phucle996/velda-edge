@@ -4,16 +4,16 @@
 //! ┌────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                        VELDA EDGE DATA PLANE ARCHITECTURE                              │
 //! │                                                                                        │
-//! │   FRONTLINE TRAFFIC WORKERS (Core 0..N, SCHED_OTHER)                                  │
+//! │   FRONTLINE TRAFFIC WORKERS (Cores 0..N-1, SCHED_OTHER)                                │
 //! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
 //! │   │ Client Ingress -> Route Matching -> Upstream Proxying -> Client Response       │   │
 //! │   │                                                                                │   │
 //! │   │ [Hot-Path Telemetry Hook]                                                      │   │
-//! │   │ 64-byte AccessLogRecord ──► Core-Local SPSC Ring (< 70 CPU clock cycles)       │   │
+//! │   │ 64-byte AccessLogRecord ──► Core-Local SPSC Ring (Zero-lock push)             │   │
 //! │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
 //! │                                           │ Atomic In-Memory Hand-off                  │
 //! │                                           ▼                                            │
-//! │   SHADOW LOGISTICS WORKER (velda-shadow-0, SCHED_IDLE)                                 │
+//! │   SHADOW LOGISTICS WORKER (velda-shadow-{i}, SCHED_IDLE, Assigned Core i)              │
 //! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
 //! │   │ LogStore::flush_all_lanes() ──► Batched Arc<[AccessLogRecord]> Slices          │   │
 //! │   │                                                                                │   │
@@ -32,10 +32,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::HeaderMap;
 use tokio::sync::watch;
 use velda_observability::{LogStore, global_log_store};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 pub use super::config::OtlpLogShipperConfig;
 use super::json::{OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json};
@@ -91,8 +91,9 @@ impl OtlpLogShipperPlugin {
 
     /// Instantiates and validates this plugin from declarative [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let validated = velda_sync::validate_otlp_log_shipper_config(&config.id, &config.config)
-            .map_err(|e| PluginError::Config(e.to_string()))?;
+        let validated =
+            super::validation::validate_otlp_log_shipper_config(&config.id, &config.config)
+                .map_err(|e| PluginError::Config(e.to_string()))?;
 
         Self::with_store(&config.id, validated, global_log_store())
     }
@@ -111,6 +112,11 @@ impl OtlpLogShipperPlugin {
 impl BackgroundPlugin for OtlpLogShipperPlugin {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        70
     }
 
     fn run(

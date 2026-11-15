@@ -8,3 +8,6 @@ pub mod transport;
 
 pub use config::StatsdExporterConfig;
 pub use plugin::StatsdExporterPlugin;
+
+pub mod validation;
+pub use validation::*;

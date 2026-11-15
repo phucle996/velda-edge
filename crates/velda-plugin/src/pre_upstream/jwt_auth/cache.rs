@@ -2,7 +2,7 @@
 //!
 //! # Architecture & Threat Mitigation
 //! - **Positive Cache**: Stores pre-verified tokens along with pre-built [`HeaderValue`] instances.
-//!   On cache hit, claims injection takes ~20ns without re-verifying cryptography or re-parsing JSON.
+//!   On cache hit, injects pre-parsed claims immediately without re-verifying cryptography or re-parsing JSON.
 //! - **Negative Cache**: Caches invalid or malformed tokens for a bounded TTL (e.g. 10s).
 //!   Protects against Crypto-Exhaustion Denial-of-Service attacks by failing fast before running
 //!   expensive asymmetric crypto algorithms (RSA/ECDSA).
@@ -244,5 +244,30 @@ mod tests {
 
         // At least entry 3 must be present
         assert!(cache.get_valid(3, now + 10).is_some());
+    }
+
+    #[test]
+    fn test_shard_cacheline_alignment_and_stride() {
+        assert_eq!(std::mem::align_of::<CacheShard>(), 64);
+        assert_eq!(std::mem::align_of::<Mutex<CacheShard>>(), 64);
+        let size = std::mem::size_of::<Mutex<CacheShard>>();
+        assert_eq!(
+            size % 64,
+            0,
+            "Mutex<CacheShard> size must be multiple of 64"
+        );
+
+        let cache = JwtCache::new(64, 100, 300, 10);
+        let base_ptr = cache.shards.as_ptr() as usize;
+        assert_eq!(base_ptr % 64, 0, "Base pointer must be 64-byte aligned");
+
+        for i in 0..cache.shards.len() {
+            let shard_ptr = (&cache.shards[i] as *const Mutex<CacheShard>) as usize;
+            assert_eq!(shard_ptr % 64, 0, "Shard {i} must be 64-byte aligned");
+            if i > 0 {
+                let prev_ptr = (&cache.shards[i - 1] as *const Mutex<CacheShard>) as usize;
+                assert_eq!(shard_ptr - prev_ptr, size);
+            }
+        }
     }
 }

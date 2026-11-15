@@ -15,6 +15,7 @@
 //!   tags Bit-1 bypass headers (`Retry-After`, `x-metering-exhausted`).
 //! - `ExhaustedAction::Passthrough`: Permits request and records debt (negative micro-credit balance).
 
+use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, StatusCode};
@@ -22,7 +23,6 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use velda_core::{Action, L7Request, L7Response, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::algorithm::{ExhaustedAction, MeteringDecision, ShardedMeteringState, TierConfig};
 use super::key::resolve_account_and_tier;

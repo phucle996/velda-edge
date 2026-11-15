@@ -11,13 +11,13 @@
 //! ║                    (crates/velda-plugin: statsd_exporter::plugin)                                 ║
 //! ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 //!
-//!  [FRONTLINE WORKERS]                       [SHADOW WORKER: velda-shadow-0 (SCHED_IDLE)]
-//!   velda-worker-0/1                          interval_secs periodic ticker
+//!  [FRONTLINE WORKERS (Cores 0..N-1)]         [SHADOW WORKER: velda-shadow-{i} (SCHED_IDLE)]
+//!   velda-worker-0..n (Cores 0..N-1)          interval_secs periodic ticker (Core i)
 //!         │                                                │
 //!         ▼ (Atomic writes)                                ▼
 //!   ┌───────────┐   Lock-Free Atomic Extraction    ┌───────────────────────────────┐
 //!   │ 36 Slots  │ ───────────────────────────────► │   MetricsStore::snapshot()    │
-//!   │ Counters  │     (< 100ns vector reduce)      │   (36 Pipelines, 563 DPs)     │
+//!   │ Counters  │     (Relaxed atomic reduce)  │   (36 Pipelines, 563 DPs)     │
 //!   └───────────┘                                  └───────────────┬───────────────┘
 //!                                                                  │
 //!                                       ┌──────────────────────────┴──────────────────────────┐
@@ -28,7 +28,7 @@
 //!                            │ dialect/dogstatsd.rs  │                             │  dialect/standard.rs  │
 //!                            │ Pre-baked Tag Suffix  │                             │ Pre-baked Dot Paths   │
 //!                            │ Direct-to-Packet Pass │                             │ Direct-to-Packet Pass │
-//!                            │ (14,356 CPU cycles)   │                             │ (10,022 CPU cycles)   │
+//!                            │ (LUT-accelerated)     │                             │ (Zero-tag formatting) │
 //!                            └──────────┬────────────┘                             └──────────┬────────────┘
 //!                                       │                                                     │
 //!                                       └──────────────────────────┬──────────────────────────┘
@@ -97,10 +97,8 @@ impl StatsdExporterPlugin {
     }
 
     /// Instantiates and validates exporter plugin from declarative configuration.
-    pub fn from_config(
-        config: &velda_sync::post_sync::plugin::PluginConfig,
-    ) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_statsd_exporter_config(&config.id, &config.config)
+    pub fn from_config(config: &crate::config::PluginConfig) -> Result<Self, PluginError> {
+        let cfg = super::validation::validate_statsd_exporter_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid statsd_exporter config: {e}")))?;
 
         Self::new(
@@ -213,6 +211,11 @@ impl StatsdExporterPlugin {
 impl BackgroundPlugin for StatsdExporterPlugin {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        20
     }
 
     fn run(

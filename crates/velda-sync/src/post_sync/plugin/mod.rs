@@ -19,34 +19,47 @@ use sha2::{Digest, Sha256};
 
 use crate::SyncError;
 
-pub mod pre_route;
-pub use pre_route::*;
+// Re-export core plugin definitions and validation dispatcher from velda-plugin
+pub use velda_plugin::{
+    PluginConfig, canonical_phase_for_id, canonical_protocol_family_for_id, validate_plugin_config,
+    validate_plugin_dependencies,
+};
 
-pub mod pre_upstream;
-pub use pre_upstream::*;
-
-pub mod post_response;
-pub use post_response::*;
-
-pub mod health_probe;
-pub use health_probe::*;
-
-pub mod prometheus_exporter;
-pub use prometheus_exporter::*;
-
-pub mod otlp_metrics_exporter;
-pub use otlp_metrics_exporter::*;
-
-pub mod statsd_exporter;
-pub use statsd_exporter::*;
-pub mod acme_cert_rotator;
-pub use acme_cert_rotator::*;
-pub mod loki_log_shipper;
-pub use loki_log_shipper::*;
-pub mod std_log_shipper;
-pub use std_log_shipper::*;
-pub mod otlp_log_shipper;
-pub use otlp_log_shipper::*;
+// Re-export all plugin configuration types from velda-plugin for seamless backward compatibility
+pub use velda_plugin::background::acme_cert_rotator::validation::*;
+pub use velda_plugin::background::health_probe::validation::*;
+pub use velda_plugin::background::jwks_rotator::validation::*;
+pub use velda_plugin::background::loki_log_shipper::validation::*;
+pub use velda_plugin::background::otlp_log_shipper::validation::*;
+pub use velda_plugin::background::otlp_metrics_exporter::validation::*;
+pub use velda_plugin::background::prometheus_exporter::validation::*;
+pub use velda_plugin::background::statsd_exporter::validation::*;
+pub use velda_plugin::background::std_log_shipper::validation::*;
+pub use velda_plugin::post_response::cors::validation::*;
+pub use velda_plugin::post_response::http_cache_store::validation::*;
+pub use velda_plugin::post_response::opentelemetry_tracer::validation::*;
+pub use velda_plugin::post_response::response_compression::validation::*;
+pub use velda_plugin::post_response::response_header_mutation::validation::*;
+pub use velda_plugin::post_response::security_headers::validation::*;
+pub use velda_plugin::pre_route::cors_preflight::validation::*;
+pub use velda_plugin::pre_route::ip_filter::validation::*;
+pub use velda_plugin::pre_route::resource_limit::validation::*;
+pub use velda_plugin::pre_route::waf_lite::validation::*;
+pub use velda_plugin::pre_upstream::api_key_auth::validation::*;
+pub use velda_plugin::pre_upstream::canary::validation::*;
+pub use velda_plugin::pre_upstream::csrf::validation::*;
+pub use velda_plugin::pre_upstream::grpc_fault_injection::validation::*;
+pub use velda_plugin::pre_upstream::header_mutation::validation::*;
+pub use velda_plugin::pre_upstream::hmac_auth::validation::*;
+pub use velda_plugin::pre_upstream::http_cache_lookup::validation::*;
+pub use velda_plugin::pre_upstream::http_fault_injection::validation::*;
+pub use velda_plugin::pre_upstream::jwt_auth::validation::*;
+pub use velda_plugin::pre_upstream::oauth2_introspection::validation::*;
+pub use velda_plugin::pre_upstream::rate_limit::validation::*;
+pub use velda_plugin::pre_upstream::request_mirror::validation::*;
+pub use velda_plugin::pre_upstream::request_termination::validation::*;
+pub use velda_plugin::pre_upstream::url_rewrite::validation::*;
+pub use velda_plugin::pre_upstream::w3c_trace_context::validation::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
@@ -75,118 +88,15 @@ pub struct DomainHeader {
 pub const DOMAIN_HEADER_SIZE: usize = std::mem::size_of::<DomainHeader>();
 
 // ============================================================================
-// Phase 1: Entity & Schema Definitions
+// Phase 2: Ingest & Parse (JSON -> Typed Struct)
 // ============================================================================
 
+/// Plugins configuration file schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginsFile {
     pub schema_version: u32,
     pub plugins: Vec<PluginConfig>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginConfig {
-    pub id: String,
-    #[serde(default)]
-    pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
-    #[serde(with = "json_value_bincode")]
-    pub config: serde_json::Value,
-}
-
-/// Returns the canonical execution phase for a known plugin identifier.
-pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
-    match id {
-        "api_key_auth" => Some("pre_upstream"),
-        "jwt_auth" => Some("pre_upstream"),
-        "hmac_auth" => Some("pre_upstream"),
-        "oauth2_introspection" => Some("pre_upstream"),
-        "ip_filter" => Some("pre_route"),
-        "cors_preflight" => Some("pre_route"),
-        "resource_limit" => Some("pre_route"),
-        "waf_lite" => Some("pre_route"),
-        "rate_limit" => Some("pre_upstream"),
-        "header_mutation" => Some("pre_upstream"),
-        "canary" => Some("pre_upstream"),
-        "request_mirror" => Some("pre_upstream"),
-        "url_rewrite" => Some("pre_upstream"),
-        "http_cache_lookup" => Some("pre_upstream"),
-        "http_fault_injection" => Some("pre_upstream"),
-        "grpc_fault_injection" => Some("pre_upstream"),
-        "request_termination" => Some("pre_upstream"),
-        "w3c_trace_context" => Some("pre_upstream"),
-        "csrf" => Some("pre_upstream"),
-        "csrf_protection" => Some("pre_upstream"),
-        "consumer_quota" => Some("pre_upstream"),
-        "api_metering" => Some("pre_upstream"),
-        "security_headers" => Some("post_response"),
-        "cors" => Some("post_response"),
-        "http_cache_store" => Some("post_response"),
-        "response_header_mutation" => Some("post_response"),
-        "response_compression" => Some("post_response"),
-        "opentelemetry_tracer" => Some("post_response"),
-        "ai_token_metering" => Some("post_response"),
-        "prometheus_exporter" => Some("background"),
-        "health_probe" => Some("background"),
-        "otlp_metrics_exporter" => Some("background"),
-        "statsd_exporter" => Some("background"),
-        "acme_cert_rotator" => Some("background"),
-        "loki_log_shipper" => Some("background"),
-        "std_log_shipper" => Some("background"),
-        "otlp_log_shipper" => Some("background"),
-        _ => None,
-    }
-}
-
-/// Returns the restricted protocol family for a known plugin identifier, if any.
-/// Plugins returning `Some("grpc")` are strictly forbidden on HTTP/Raw routes.
-/// Plugins returning `Some("http")` are strictly forbidden on gRPC/Raw routes.
-pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
-    match id {
-        "grpc_fault_injection" => Some("grpc"),
-        "http_fault_injection" => Some("http"),
-        "cors_preflight" => Some("http"),
-        "cors" => Some("http"),
-        "http_cache_lookup" => Some("http"),
-        "http_cache_store" => Some("http"),
-        "response_header_mutation" => Some("http"),
-        "response_compression" => Some("http"),
-        "request_termination" => Some("http"),
-        "ai_token_metering" => Some("http"),
-        _ => None,
-    }
-}
-
-mod json_value_bincode {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S>(value: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if serializer.is_human_readable() {
-            value.serialize(serializer)
-        } else {
-            let json_str = value.to_string();
-            serializer.serialize_str(&json_str)
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        if deserializer.is_human_readable() {
-            serde_json::Value::deserialize(deserializer)
-        } else {
-            let s = String::deserialize(deserializer)?;
-            serde_json::from_str(&s).map_err(serde::de::Error::custom)
-        }
-    }
-}
-
-// ============================================================================
-// Phase 2: Ingest & Parse (JSON -> Typed Struct)
-// ============================================================================
 
 /// Parses raw JSON into plugin configurations.
 pub fn parse_plugins(payload: &[u8]) -> Result<Vec<PluginConfig>, SyncError> {
@@ -230,7 +140,7 @@ fn trim_in_place(s: &mut String) {
 pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(plugins.len());
 
-    for plugin in plugins {
+    for plugin in &mut *plugins {
         trim_in_place(&mut plugin.id);
         trim_in_place(&mut plugin.phase);
         plugin.phase.make_ascii_lowercase();
@@ -244,7 +154,7 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
         }
 
         // Fail fast: duplicate plugin ID
-        if !seen_ids.insert(plugin.id.as_str()) {
+        if !seen_ids.insert(plugin.id.clone()) {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
                 reason: format!("Duplicate plugin ID '{}'", plugin.id),
@@ -273,345 +183,17 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
             });
         }
 
-        // Modular semantic validation dispatched per plugin ID
-        match plugin.id.as_str() {
-            "ip_filter" => {
-                if plugin.phase != "pre_route" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
-                    });
-                }
-                let normalized = pre_route::validate_ip_filter_config(&plugin.id, &plugin.config)?;
-                plugin.config =
-                    serde_json::to_value(normalized).map_err(|e| SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' failed to serialize normalized config: {e}",
-                            plugin.id
-                        ),
-                    })?;
-            }
-            "cors_preflight" => {
-                if plugin.phase != "pre_route" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
-                    });
-                }
-                pre_route::validate_cors_preflight_config(&plugin.id, &plugin.config)?;
-            }
-            "resource_limit" => {
-                if plugin.phase != "pre_route" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
-                    });
-                }
-                pre_route::validate_resource_limit_config(&plugin.id, &plugin.config)?;
-            }
-            "waf_lite" => {
-                if plugin.phase != "pre_route" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_route'", plugin.id),
-                    });
-                }
-                let normalized = pre_route::validate_waf_lite_config(&plugin.id, &plugin.config)?;
-                plugin.config =
-                    serde_json::to_value(normalized).map_err(|e| SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' failed to serialize normalized config: {e}",
-                            plugin.id
-                        ),
-                    })?;
-            }
-            "api_key_auth" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_api_key_auth_config(&plugin.id, &plugin.config)?;
-            }
-            "jwt_auth" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_jwt_auth_config(&plugin.id, &plugin.config)?;
-            }
-            "rate_limit" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_rate_limit_config(&plugin.id, &plugin.config)?;
-            }
-            "canary" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_canary_config(&plugin.id, &plugin.config)?;
-            }
-            "request_mirror" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_request_mirror_config(&plugin.id, &plugin.config)?;
-            }
-            "url_rewrite" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_url_rewrite_config(&plugin.id, &plugin.config)?;
-            }
-            "grpc_fault_injection" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_grpc_fault_injection_config(&plugin.id, &plugin.config)?;
-            }
-            "http_fault_injection" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_http_fault_injection_config(&plugin.id, &plugin.config)?;
-            }
-            "request_termination" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_request_termination_config(&plugin.id, &plugin.config)?;
-            }
-            "header_mutation" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_header_mutation_config(&plugin.id, &plugin.config)?;
-            }
-            "hmac_auth" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_hmac_auth_config(&plugin.id, &plugin.config)?;
-            }
-            "oauth2_introspection" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_oauth2_introspection_config(&plugin.id, &plugin.config)?;
-            }
-            "prometheus_exporter" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-
-                prometheus_exporter::validate_prometheus_exporter_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            }
-            "http_cache_lookup" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_http_cache_lookup_config(&plugin.id, &plugin.config)?;
-            }
-            "http_cache_store" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_http_cache_store_config(&plugin.id, &plugin.config)?;
-            }
-            "security_headers" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_security_headers_config(&plugin.id, &plugin.config)?;
-            }
-            "cors" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_cors_response_config(&plugin.id, &plugin.config)?;
-            }
-            "response_header_mutation" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_response_header_mutation_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            }
-            "response_compression" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_response_compression_config(&plugin.id, &plugin.config)?;
-            }
-            "health_probe" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                health_probe::validate_health_probe_config(&plugin.id, &plugin.config)?;
-            }
-            "otlp_metrics_exporter" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                otlp_metrics_exporter::validate_otlp_metrics_exporter_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            }
-            "statsd_exporter" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                statsd_exporter::validate_statsd_exporter_config(&plugin.id, &plugin.config)?;
-            }
-            "acme_cert_rotator" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                acme_cert_rotator::validate_acme_cert_rotator_config(&plugin.id, &plugin.config)?;
-            }
-            "loki_log_shipper" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                loki_log_shipper::validate_loki_log_shipper_config(&plugin.id, &plugin.config)?;
-            }
-            "std_log_shipper" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                std_log_shipper::validate_std_log_shipper_config(&plugin.id, &plugin.config)?;
-            }
-            "otlp_log_shipper" => {
-                if plugin.phase != "background" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'background'", plugin.id),
-                    });
-                }
-                otlp_log_shipper::validate_otlp_log_shipper_config(&plugin.id, &plugin.config)?;
-            }
-            "opentelemetry_tracer" => {
-                if plugin.phase != "post_response" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!(
-                            "Plugin '{}' must specify phase 'post_response'",
-                            plugin.id
-                        ),
-                    });
-                }
-                post_response::validate_opentelemetry_tracer_config(&plugin.id, &plugin.config)?;
-            }
-            "w3c_trace_context" => {
-                if plugin.phase != "pre_upstream" {
-                    return Err(SyncError::Validation {
-                        domain: "plugins".into(),
-                        reason: format!("Plugin '{}' must specify phase 'pre_upstream'", plugin.id),
-                    });
-                }
-                pre_upstream::validate_w3c_trace_context_config(&plugin.id, &plugin.config)?;
-            }
-            _ => {
-                // Future plugins will dispatch to their respective validation modules
-            }
-        }
+        // Dispatch semantic validation to velda-plugin
+        velda_plugin::validate_plugin_config(plugin).map_err(|e| SyncError::Validation {
+            domain: "plugins".into(),
+            reason: e.to_string(),
+        })?;
     }
+
+    velda_plugin::validate_plugin_dependencies(plugins).map_err(|e| SyncError::Validation {
+        domain: "plugins".into(),
+        reason: e.to_string(),
+    })?;
 
     Ok(())
 }

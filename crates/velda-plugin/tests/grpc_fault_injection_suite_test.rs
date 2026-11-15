@@ -14,12 +14,12 @@ use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use rustc_hash::FxHashMap;
 use serde_json::json;
 use velda_core::{Action, Body, L7Request, ProtocolFamily, StreamingMode};
+use velda_plugin::PluginConfig;
 use velda_plugin::factory::{LoadedPlugin, build_route_plugin_plan};
 use velda_plugin::pre_upstream::{
     GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin, PreUpstreamPlugin,
     run_pre_upstream_plugins,
 };
-use velda_sync::PluginConfig;
 
 fn build_grpc_request(path: &str) -> L7Request {
     let mut headers = HeaderMap::new();

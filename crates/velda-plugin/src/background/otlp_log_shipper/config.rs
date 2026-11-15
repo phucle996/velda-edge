@@ -4,4 +4,4 @@
 //! All configuration fields must be explicitly supplied in `plugins.json`. No implicit fallbacks,
 //! hidden defaults, or magic values. Validation occurs strictly at config sync time.
 
-pub use velda_sync::post_sync::plugin::otlp_log_shipper::OtlpLogShipperConfig;
+pub use super::validation::OtlpLogShipperConfig;

@@ -18,3 +18,6 @@ pub use abort::HttpAbortConfig;
 pub use condition::{HeaderMatchRule, HttpFaultCondition, IpRangeMatcher};
 pub use delay::HttpDelayConfig;
 pub use plugin::HttpFaultInjectionPlugin;
+
+pub mod validation;
+pub use validation::*;

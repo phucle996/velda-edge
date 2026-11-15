@@ -6,10 +6,10 @@
 
 use std::str::FromStr;
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use rustc_hash::FxHashMap;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::ApiKeyCache;
 use super::source::{ApiKeyEntry, KeySource, MatchedSource, extract_token_ref};
@@ -86,8 +86,8 @@ impl ApiKeyAuthPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_api_key_auth_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_api_key_auth_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid api_key_auth configuration for '{}': {e}",
                     config.id
@@ -97,7 +97,7 @@ impl ApiKeyAuthPlugin {
         let mut sources = Vec::with_capacity(cfg.sources.len());
         for src in &cfg.sources {
             match src {
-                velda_sync::ApiKeySourceConfig::Header { name, prefix } => {
+                super::validation::ApiKeySourceConfig::Header { name, prefix } => {
                     let hname = HeaderName::from_str(name).map_err(|e| {
                         PluginError::Config(format!(
                             "Invalid header name '{name}' for plugin '{}': {e}",
@@ -109,7 +109,7 @@ impl ApiKeyAuthPlugin {
                         prefix: prefix.clone().unwrap_or_default(),
                     });
                 }
-                velda_sync::ApiKeySourceConfig::Query { param } => {
+                super::validation::ApiKeySourceConfig::Query { param } => {
                     sources.push(KeySource::Query {
                         param: param.clone(),
                     });

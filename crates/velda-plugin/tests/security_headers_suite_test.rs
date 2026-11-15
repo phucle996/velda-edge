@@ -12,13 +12,13 @@
 use http::StatusCode;
 use serde_json::json;
 use velda_core::{HeaderWorkspace, L7Response};
+use velda_plugin::PluginConfig;
 use velda_plugin::post_response::PostResponsePlugin;
 use velda_plugin::post_response::security_headers::{
     CompiledHeader, FLAG_COEP, FLAG_COOP, FLAG_CORP, FLAG_CROSS_DOMAIN, FLAG_CSP,
     FLAG_FRAME_OPTIONS, FLAG_HSTS, FLAG_NOSNIFF, FLAG_PERMISSIONS_POLICY, FLAG_REFERRER_POLICY,
     FLAG_XSS_PROTECTION, HstsConfig, SecurityHeadersConfig, SecurityHeadersPlugin,
 };
-use velda_sync::post_sync::plugin::PluginConfig;
 
 #[test]
 fn test_suite_default_owasp_hardening() {

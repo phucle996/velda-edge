@@ -18,7 +18,7 @@ use velda_plugin::background::prometheus_exporter::server::BufferPool;
 use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
 use velda_plugin::background::prometheus_exporter::template::PrometheusTemplate;
 use velda_plugin::background::prometheus_exporter::template::format_snapshot;
-use velda_sync::{
+use velda_plugin::background::prometheus_exporter::validation::{
     AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
     TlsExporterConfig,
 };

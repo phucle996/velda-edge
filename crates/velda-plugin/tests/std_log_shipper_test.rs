@@ -7,11 +7,11 @@ use std::time::Duration;
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 use velda_observability::{AccessLogRecord, LogStore};
+use velda_plugin::PluginConfig;
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 use velda_plugin::background::std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 #[test]
 fn test_std_log_shipper_formatting_all_protocols() {

@@ -12,11 +12,11 @@
 //!   specified HTTP status code, eliminating arbitrary body schema bloat at the Edge.
 //! - **Protocol Compatibility**: Strictly restricted to HTTP protocol families (`ALL_HTTP`). Forbidden on gRPC/Raw.
 
+use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
 use velda_core::{Action, Body, L7Request, L7Response};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -162,13 +162,14 @@ impl RequestTerminationPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_request_termination_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid request_termination configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+        let cfg =
+            super::validation::validate_request_termination_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid request_termination configuration for '{}': {e}",
+                        config.id
+                    ))
+                })?;
 
         let mut headers = Vec::with_capacity(cfg.headers.len() + 1);
         for (k, v) in &cfg.headers {

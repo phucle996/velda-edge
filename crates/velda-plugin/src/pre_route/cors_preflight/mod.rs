@@ -8,3 +8,6 @@ pub mod plugin;
 
 pub use origin::OriginPattern;
 pub use plugin::CorsPreflightPlugin;
+
+pub mod validation;
+pub use validation::*;

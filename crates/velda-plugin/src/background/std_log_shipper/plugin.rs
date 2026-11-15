@@ -4,7 +4,7 @@
 //! ┌────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                          SHADOW WORKER COORDINATOR ARCHITECTURE                        │
 //! │                                                                                        │
-//! │   Traffic Workers (Cores 0..N, SCHED_OTHER)                                            │
+//! │   Traffic Workers (Cores 0..N-1, SCHED_OTHER)                                          │
 //! │        │                                                                               │
 //! │        ▼ AccessLogRecord (64B)                                                         │
 //! │   [LogStore SPSC Ring Buffers]                                                         │
@@ -28,9 +28,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+pub use crate::config::PluginConfig;
 use tokio::sync::watch;
 use velda_observability::{LogStore, global_log_store};
-pub use velda_sync::post_sync::plugin::PluginConfig;
 
 pub use super::config::{StdLogShipperConfig, TargetStream};
 pub use super::format::format_std_log_payload;
@@ -64,8 +64,9 @@ impl StdLogShipperPlugin {
     }
 
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let validated = velda_sync::validate_std_log_shipper_config(&config.id, &config.config)
-            .map_err(|e| PluginError::Config(e.to_string()))?;
+        let validated =
+            super::validation::validate_std_log_shipper_config(&config.id, &config.config)
+                .map_err(|e| PluginError::Config(e.to_string()))?;
 
         Self::with_store(&config.id, validated, global_log_store())
     }
@@ -74,6 +75,11 @@ impl StdLogShipperPlugin {
 impl BackgroundPlugin for StdLogShipperPlugin {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        15
     }
 
     fn run(

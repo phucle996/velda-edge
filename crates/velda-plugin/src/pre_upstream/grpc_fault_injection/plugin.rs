@@ -20,11 +20,11 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode, Version};
 use velda_core::{Action, Body, GrpcStatus, HeaderWorkspace, L7Request, L7Response};
 use velda_grpc::GrpcWire;
-use velda_sync::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -216,13 +216,14 @@ impl GrpcFaultInjectionPlugin {
 
     /// Instantiates a new [`GrpcFaultInjectionPlugin`] from compiled [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_grpc_fault_injection_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid grpc_fault_injection configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+        let cfg =
+            super::validation::validate_grpc_fault_injection_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid grpc_fault_injection configuration for '{}': {e}",
+                        config.id
+                    ))
+                })?;
 
         let delay_cfg = if cfg.delay.enabled && cfg.delay.percentage > 0 {
             Some(

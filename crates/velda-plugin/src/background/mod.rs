@@ -18,6 +18,7 @@ use crate::error::PluginError;
 
 pub mod acme_cert_rotator;
 pub mod health_probe;
+pub mod jwks_rotator;
 pub mod loki_log_shipper;
 pub mod otlp_log_shipper;
 pub mod otlp_metrics_exporter;
@@ -27,6 +28,7 @@ pub mod std_log_shipper;
 
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
+pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};
 pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
 pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
@@ -62,6 +64,28 @@ pub trait BackgroundPlugin: Send + Sync {
     fn direction(&self) -> Direction {
         Direction::Background
     }
+
+    /// If this background plugin acts as a companion rotator to `jwt_auth`, returns the target `jwt_auth` plugin ID.
+    #[inline(always)]
+    fn target_jwt_auth_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Workload weight (1..100) representing compute intensity, memory footprint,
+    /// and cadence for static multi-core shadow logistics bin-packing.
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        50
+    }
+
+    /// Attaches the shared pre-allocated [`crate::pre_upstream::jwt_auth::table::SharedJwksStore`] from the target `jwt_auth` plugin.
+    #[inline(always)]
+    fn attach_shared_jwks_store(
+        &self,
+        _store: Arc<crate::pre_upstream::jwt_auth::table::SharedJwksStore>,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 
 /// Spawns all declared background plugins onto isolated Tokio tasks.
@@ -96,7 +120,7 @@ pub fn spawn_background_plugins(
 /// # Open-Closed Principle (OCP)
 /// Background services are instantiated on dedicated supervisory threads.
 pub fn instantiate(
-    config: &velda_sync::post_sync::plugin::PluginConfig,
+    config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn BackgroundPlugin>, PluginError> {
     match config.id.as_str() {
         "health_probe" => {
@@ -118,6 +142,10 @@ pub fn instantiate(
         }
         "acme_cert_rotator" => {
             let rotator = AcmeCertRotatorPlugin::from_config(config)?;
+            Ok(Arc::new(rotator))
+        }
+        "jwks_rotator" => {
+            let rotator = JwksRotatorPlugin::from_config(config)?;
             Ok(Arc::new(rotator))
         }
         "loki_log_shipper" => {

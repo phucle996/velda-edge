@@ -12,4 +12,6 @@ pub mod scope;
 pub use cache::IntrospectionCache;
 pub use client::IdpKeepAliveClient;
 pub use plugin::Oauth2IntrospectionPlugin;
-pub use velda_sync::{ClaimToHeaderConfig, Oauth2IntrospectionConfig};
+
+pub mod validation;
+pub use validation::*;

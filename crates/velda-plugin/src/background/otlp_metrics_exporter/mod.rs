@@ -8,3 +8,6 @@ pub mod proto;
 
 pub use config::OtlpMetricsExporterConfig;
 pub use plugin::OtlpMetricsExporterPlugin;
+
+pub mod validation;
+pub use validation::*;

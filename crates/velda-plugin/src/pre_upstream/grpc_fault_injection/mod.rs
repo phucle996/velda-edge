@@ -6,3 +6,6 @@
 pub mod plugin;
 
 pub use plugin::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
+
+pub mod validation;
+pub use validation::*;

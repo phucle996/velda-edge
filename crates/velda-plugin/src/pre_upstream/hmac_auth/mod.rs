@@ -11,4 +11,6 @@ pub mod nonce;
 pub mod plugin;
 
 pub use plugin::HmacAuthPlugin;
-pub use velda_sync::{HmacAuthConfig, HmacCredentialConfig};
+
+pub mod validation;
+pub use validation::*;

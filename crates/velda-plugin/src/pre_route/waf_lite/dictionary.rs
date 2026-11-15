@@ -223,17 +223,17 @@ mod tests {
 
     #[test]
     fn test_dictionary_parity_with_velda_sync_and_zero_redundancy() {
-        // 1. Verify exact 1:1 parity with velda_sync::BUILTIN_ATTACK_PATTERNS
+        // 1. Verify exact 1:1 parity with super::super::validation::BUILTIN_ATTACK_PATTERNS
         let dict_pats: Vec<&str> = BUILTIN_ATTACK_SIGNATURES.iter().map(|&(p, _)| p).collect();
         assert_eq!(
             dict_pats.as_slice(),
-            velda_sync::BUILTIN_ATTACK_PATTERNS,
-            "dictionary::BUILTIN_ATTACK_SIGNATURES must match velda_sync::BUILTIN_ATTACK_PATTERNS"
+            super::super::validation::BUILTIN_ATTACK_PATTERNS,
+            "dictionary::BUILTIN_ATTACK_SIGNATURES must match validation::BUILTIN_ATTACK_PATTERNS"
         );
         assert_eq!(
             BUILTIN_MALICIOUS_USER_AGENTS,
-            velda_sync::BUILTIN_MALICIOUS_USER_AGENTS,
-            "dictionary::BUILTIN_MALICIOUS_USER_AGENTS must match velda_sync::BUILTIN_MALICIOUS_USER_AGENTS"
+            super::super::validation::BUILTIN_MALICIOUS_USER_AGENTS,
+            "dictionary::BUILTIN_MALICIOUS_USER_AGENTS must match validation::BUILTIN_MALICIOUS_USER_AGENTS"
         );
 
         // 2. Verify every pattern is non-empty, lowercase ASCII, and no pattern is a substring of another

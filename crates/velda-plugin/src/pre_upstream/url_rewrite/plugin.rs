@@ -16,10 +16,10 @@
 //! 5. **Hot-Path Zero-Allocation Bypass**:
 //!    - If neither path nor query string was modified, no `Uri` or `PathAndQuery` allocations occur.
 
+use crate::config::PluginConfig;
 use http::Uri;
 use serde::{Deserialize, Serialize};
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::sanitizer::{is_already_normalized, normalize_and_sanitize_path};
 use super::strategy::{CompiledPathStrategy, PathRewriteStrategy, QueryStrategy};
@@ -74,7 +74,7 @@ impl UrlRewritePlugin {
 
     /// Instantiates plugin from compiled configuration.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_url_rewrite_config(&config.id, &config.config)
+        let cfg = super::validation::validate_url_rewrite_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid url_rewrite config: {e}")))?;
 
         let path_strat = match cfg.path_rewrite_mode.as_str() {

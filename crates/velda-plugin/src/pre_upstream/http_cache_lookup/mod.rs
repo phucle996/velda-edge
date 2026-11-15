@@ -3,3 +3,5 @@
 pub mod plugin;
 
 pub use plugin::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
+
+pub mod validation;

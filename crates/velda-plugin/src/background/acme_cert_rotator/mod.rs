@@ -14,4 +14,6 @@ pub mod route_guard;
 pub mod storage;
 
 pub use plugin::AcmeCertRotatorPlugin;
-pub use velda_sync::AcmeCertRotatorConfig;
+
+pub mod validation;
+pub use validation::*;

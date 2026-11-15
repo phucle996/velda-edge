@@ -11,12 +11,12 @@
 //! 4. **Spoof-Resistant Backend Marker**: Injects an informational header when routed to canary,
 //!    and strictly purges any client-supplied marker on the baseline path to prevent telemetry/flag spoofing.
 
+use crate::config::PluginConfig;
 use http::header::{COOKIE, HeaderName, HeaderValue};
 use std::cell::Cell;
 use std::hash::Hasher;
 use std::sync::Arc;
 use velda_core::{Action, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -289,12 +289,13 @@ impl CanaryPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_canary_config(&config.id, &config.config).map_err(|e| {
-            PluginError::Config(format!(
-                "Invalid canary configuration for '{}': {e}",
-                config.id
-            ))
-        })?;
+        let cfg =
+            super::validation::validate_canary_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid canary configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
         let mut rules = Vec::with_capacity(cfg.rules.len());
         for r in &cfg.rules {

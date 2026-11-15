@@ -10,9 +10,9 @@
 //! - **Header Sanitization**: When dynamic overrides are allowed, `x-fault-delay-ms` and `x-fault-abort-code`
 //!   are purged from request headers to prevent internal chaos tokens from leaking to upstream.
 
+use crate::config::PluginConfig;
 use http::header::HeaderName;
 use velda_core::{Action, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -49,13 +49,14 @@ impl HttpFaultInjectionPlugin {
 
     /// Instantiates a new [`HttpFaultInjectionPlugin`] from compiled [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_http_fault_injection_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid http_fault_injection configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+        let cfg =
+            super::validation::validate_http_fault_injection_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid http_fault_injection configuration for '{}': {e}",
+                        config.id
+                    ))
+                })?;
 
         // 1. Build Scope & Condition Matchers
         let ip_matcher = if !cfg.scope.client_ips.is_empty() {

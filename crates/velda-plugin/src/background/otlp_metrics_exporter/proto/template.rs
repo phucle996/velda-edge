@@ -16,7 +16,7 @@
 //!               ├── Discovers 288 timestamp offsets (fixed64, tag 3, wire type 1: 0x19)
 //!               └── Discovers 288 counter offsets   (sfixed64, tag 6, wire type 1: 0x31)
 //!
-//!  [Runtime: update_and_encode() — 1,624 CPU Cycles (~662 ns, 0 Allocations)]
+//!  [Runtime: update_and_encode() — Zero-Allocation In-Place Byte Stamping]
 //!  1. buf.clear(); buf.extend_from_slice(&self.base_wire);
 //!  2. now_bytes = now_nanos.to_le_bytes();
 //!     for &offset in &self.timestamp_offsets {

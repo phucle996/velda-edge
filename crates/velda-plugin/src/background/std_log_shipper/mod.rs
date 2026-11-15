@@ -12,3 +12,6 @@ pub mod sink;
 
 pub use config::StdLogShipperConfig;
 pub use plugin::StdLogShipperPlugin;
+
+pub mod validation;
+pub use validation::*;

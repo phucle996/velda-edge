@@ -79,7 +79,7 @@ pub fn run_post_response_plugins(
 /// Adding a new post-response plugin requires adding exactly 1 match arm here, delegating
 /// config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
-    config: &velda_sync::post_sync::plugin::PluginConfig,
+    config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PostResponsePlugin>, crate::error::PluginError> {
     match config.id.as_str() {
         "security_headers" => Ok(Arc::new(SecurityHeadersPlugin::from_config(config)?)),

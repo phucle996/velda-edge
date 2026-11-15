@@ -5,3 +5,5 @@ pub mod traceparent;
 
 pub use plugin::{W3cTraceContextConfig, W3cTraceContextPlugin};
 pub use traceparent::{ParsedTraceParent, TraceParentCodec};
+
+pub mod validation;

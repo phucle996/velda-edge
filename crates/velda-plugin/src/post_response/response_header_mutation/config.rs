@@ -2,8 +2,8 @@
 //!
 //! Provides single-instruction ALU bitmasks (`op_mask: u8`) and typed rule containers.
 
+use crate::config::PluginConfig;
 use http::header::HeaderName;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::var::ResponseHeaderValueSpec;
 use crate::error::PluginError;
@@ -46,13 +46,14 @@ pub struct ResponseHeaderMutationConfig {
 impl ResponseHeaderMutationConfig {
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_plugin_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_response_header_mutation_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid response_header_mutation configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+        let cfg =
+            super::validation::validate_response_header_mutation_config(&config.id, &config.config)
+                .map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid response_header_mutation configuration for '{}': {e}",
+                        config.id
+                    ))
+                })?;
 
         let mut remove = Vec::with_capacity(cfg.remove_headers.len());
         for h in &cfg.remove_headers {

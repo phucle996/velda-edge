@@ -10,3 +10,5 @@ pub use strategy::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken,
     extract_static_prefix, parse_replacement_template,
 };
+
+pub mod validation;

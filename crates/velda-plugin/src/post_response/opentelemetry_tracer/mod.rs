@@ -22,3 +22,5 @@ pub use sampling::SamplingTable;
 pub use span::{
     OtlpSpanItem, PackedOtlpSpan, decode_hex, format_otlp_spans_json, format_packed_spans_json,
 };
+
+pub mod validation;

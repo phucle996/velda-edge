@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 use velda_observability::MetricsStore;
 use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
-use velda_sync::{
+use velda_plugin::background::prometheus_exporter::validation::{
     AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
     TlsExporterConfig,
 };

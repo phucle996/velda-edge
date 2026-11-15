@@ -6,7 +6,12 @@
 pub mod cache;
 pub mod crypto;
 pub mod plugin;
+pub mod table;
 
 pub use cache::{InvalidTokenEntry, JwtCache, ValidTokenEntry};
 pub use crypto::{JwtAlgorithm, VerifiedToken, VerifierKey, resolve_claim_path, verify_jwt};
 pub use plugin::{JwtAuthPlugin, TokenSource};
+pub use table::{JwksKeySlot, JwksKeyTable, MAX_JWKS_SLOTS, SharedJwksStore, hash_kid};
+
+pub mod validation;
+pub use validation::*;

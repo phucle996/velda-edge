@@ -4,7 +4,7 @@
 //! All configuration blocks (`scrape`, `tls`, `cors`, `auth`) are strictly mandatory.
 //! Disabled features must be explicitly declared (`mode: "none"` or `enabled: false`).
 
-pub use velda_sync::{
+pub use super::validation::{
     AuthExporterConfig, CorsExporterConfig, PrometheusExporterConfig, ScrapeExporterConfig,
     TlsExporterConfig,
 };

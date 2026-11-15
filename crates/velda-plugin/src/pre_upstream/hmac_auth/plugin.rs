@@ -9,12 +9,12 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use super::validation::HmacAuthConfig;
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
 use rustc_hash::FxHashMap;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::HmacAuthConfig;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::canonical::{
     CanonicalRequest, SignedHeadersSpec, compute_sha256, constant_time_eq, format_base64_to_buf,
@@ -165,7 +165,7 @@ impl HmacAuthPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_hmac_auth_config(&config.id, &config.config)
+        let cfg = super::validation::validate_hmac_auth_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(e.to_string()))?;
         Self::new(&config.id, cfg)
     }
@@ -398,10 +398,10 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::validation::HmacCredentialConfig;
     use super::*;
     use http::{HeaderMap, Method, Uri, Version};
     use velda_core::Body;
-    use velda_sync::HmacCredentialConfig;
 
     fn to_hex(bytes: &[u8]) -> String {
         const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";

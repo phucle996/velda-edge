@@ -94,6 +94,14 @@ pub trait PreUpstreamPlugin: Send + Sync {
     fn direction(&self) -> Direction {
         Direction::Request
     }
+
+    /// Returns the shared JWKS key store if this plugin manages in-memory verification keys (e.g. `jwt_auth`).
+    #[inline(always)]
+    fn shared_jwks_store(
+        &self,
+    ) -> Option<Arc<crate::pre_upstream::jwt_auth::table::SharedJwksStore>> {
+        None
+    }
 }
 
 /// Executes a linear chain of pre-upstream plugins.
@@ -134,7 +142,7 @@ pub fn run_pre_upstream_plugins(
 /// Adding a new pre-upstream plugin requires adding exactly 1 match arm here, delegating
 /// config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
-    config: &velda_sync::post_sync::plugin::PluginConfig,
+    config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
     match config.id.as_str() {
         "api_key_auth" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),

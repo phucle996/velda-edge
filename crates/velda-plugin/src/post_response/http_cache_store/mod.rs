@@ -3,3 +3,5 @@
 pub mod plugin;
 
 pub use plugin::{HttpCacheStoreConfig, HttpCacheStorePlugin};
+
+pub mod validation;

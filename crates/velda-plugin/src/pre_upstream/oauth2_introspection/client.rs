@@ -9,10 +9,10 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::validation::Oauth2IntrospectionConfig;
 use base64::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
-use velda_sync::Oauth2IntrospectionConfig;
 
 use crate::error::PluginError;
 

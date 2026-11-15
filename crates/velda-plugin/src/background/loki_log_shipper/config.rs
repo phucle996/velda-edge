@@ -4,4 +4,4 @@
 //! All configuration fields must be explicitly supplied in `plugins.json`. No implicit fallbacks,
 //! hidden defaults, or magic values. Validation occurs strictly at config sync time.
 
-pub use velda_sync::post_sync::plugin::loki_log_shipper::LokiLogShipperConfig;
+pub use super::validation::LokiLogShipperConfig;

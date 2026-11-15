@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-pub use velda_sync::StdLogShipperConfig;
+pub use super::validation::StdLogShipperConfig;
 
 /// Output destination target for standard log records.
 #[derive(Debug, Clone, PartialEq, Eq)]

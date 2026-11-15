@@ -8,10 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::Method;
 use http::header::HeaderValue;
 use velda_core::{Action, CachedResponseDirective, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::http_cache::constants::{X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 
@@ -105,7 +105,7 @@ impl HttpCacheLookupPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_http_cache_lookup_config(&config.id, &config.config)
+        let cfg = super::validation::validate_http_cache_lookup_config(&config.id, &config.config)
             .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid http_cache_lookup configuration for '{}': {e}",

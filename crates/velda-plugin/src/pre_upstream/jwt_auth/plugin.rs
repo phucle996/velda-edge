@@ -1,22 +1,63 @@
 //! JWT Authentication Pre-Upstream Plugin (`phase: "pre_upstream"`).
 //!
+//! ```text
+//!                          JWT AUTH PRE-UPSTREAM WORKFLOW
+//!
+//!                      Inbound Request (L7Request)
+//!                                  |
+//!                                  v
+//!                     +--------------------------+
+//!                     | Extract Token            |
+//!                     | (Header / Cookie / Query)|
+//!                     +--------------------------+
+//!                       |                      |
+//!                   (Missing)               (Found)
+//!                       |                      |
+//!                       v                      v
+//!                401 Unauthorized    Compute Token SipHash
+//!                                              |
+//!                     +------------------------+
+//!                     |
+//!                     +---> [Negative Cache Hit?] ---> 401 Unauthorized
+//!                     |
+//!                     +---> [Positive Cache Hit?] ---> Inject Claims & Continue
+//!                     |
+//!                     v (Cache Miss)
+//!          +--------------------------------------+
+//!          | Load SharedJwksStore (ArcSwap guard) |
+//!          +--------------------------------------+
+//!                     |
+//!                     v
+//!          +--------------------------------------+
+//!          | Cryptographic Verify via Key Table   |
+//!          +--------------------------------------+
+//!            |                                  |
+//!         (Valid)                            (Invalid)
+//!            |                                  |
+//!            v                                  v
+//!    Populate Positive Cache            Populate Negative Cache
+//!    Inject Claims & Continue           401 Unauthorized
+//! ```
+//!
 //! # Execution Invariants
 //! - **Route-Scoped Authentication**: Public routes omit this plugin, while protected routes attach it.
 //! - **Fail-Fast Defense**: Rejects invalid, missing, or expired tokens with `401 Unauthorized` before
 //!   leasing backend connections or streaming request bodies.
-//! - **Dual Caching**: Hits positive cache in ~20ns; caches invalid tokens in negative cache to defeat
+//! - **Dual Caching**: Reuses validated claims on positive cache hit without re-verification; caches invalid tokens in negative cache to defeat
 //!   cryptographic exhaustion attacks.
 //! - **Flexible Payloads & Claims Mapping**: Injects extracted claims into downstream request headers for
 //!   consumption by subsequent plugins (e.g., user-scoped `rate_limit`) and backend upstreams.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::cache::JwtCache;
 use super::crypto::{JwtAlgorithm, JwtValidationPolicy, VerifierKey, verify_jwt};
+use super::table::{JwksKeyTable, SharedJwksStore};
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
@@ -36,7 +77,7 @@ pub enum TokenSource {
 pub struct JwtAuthPlugin {
     pub id: String,
     pub algorithm: JwtAlgorithm,
-    pub key: VerifierKey,
+    pub key_store: Arc<SharedJwksStore>,
     pub token_sources: Vec<TokenSource>,
     pub validate_exp: bool,
     pub clock_skew_secs: u64,
@@ -50,13 +91,14 @@ pub struct JwtAuthPlugin {
 impl JwtAuthPlugin {
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_jwt_auth_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_jwt_auth_config(&config.id, &config.config).map_err(
+            |e| {
                 PluginError::Config(format!(
                     "Invalid jwt_auth configuration for '{}': {e}",
                     config.id
                 ))
-            })?;
+            },
+        )?;
 
         let algorithm = JwtAlgorithm::from_str(&cfg.algorithm)?;
         let key = VerifierKey::new(
@@ -64,11 +106,13 @@ impl JwtAuthPlugin {
             cfg.secret_key.as_deref(),
             cfg.public_key_pem.as_deref(),
         )?;
+        let key_table = JwksKeyTable::with_static_key(key, algorithm);
+        let key_store = Arc::new(SharedJwksStore::new(key_table));
 
         let mut token_sources = Vec::with_capacity(cfg.token_sources.len());
         for src in &cfg.token_sources {
             match src {
-                velda_sync::JwtTokenSourceConfig::Header { name, prefix } => {
+                super::validation::JwtTokenSourceConfig::Header { name, prefix } => {
                     let hname = HeaderName::from_str(name).map_err(|e| {
                         PluginError::Config(format!(
                             "Invalid header name '{name}' for plugin '{}': {e}",
@@ -80,10 +124,10 @@ impl JwtAuthPlugin {
                         prefix: prefix.clone().unwrap_or_default(),
                     });
                 }
-                velda_sync::JwtTokenSourceConfig::Cookie { name } => {
+                super::validation::JwtTokenSourceConfig::Cookie { name } => {
                     token_sources.push(TokenSource::Cookie { name: name.clone() });
                 }
-                velda_sync::JwtTokenSourceConfig::Query { param } => {
+                super::validation::JwtTokenSourceConfig::Query { param } => {
                     token_sources.push(TokenSource::Query {
                         param: param.clone(),
                     });
@@ -107,12 +151,17 @@ impl JwtAuthPlugin {
             assert_claims.push((claim_path.clone(), val_str.clone()));
         }
 
-        let cache = JwtCache::new(64, 2048, cfg.cache_ttl_secs, 10);
+        let negative_ttl = if cfg.cache_ttl_secs == 0 {
+            0
+        } else {
+            10.min(cfg.cache_ttl_secs)
+        };
+        let cache = JwtCache::new(64, 2048, cfg.cache_ttl_secs, negative_ttl);
 
         Ok(Self {
             id: config.id.clone(),
             algorithm,
-            key,
+            key_store,
             token_sources,
             validate_exp: cfg.validate_exp,
             clock_skew_secs: cfg.clock_skew_secs,
@@ -122,6 +171,18 @@ impl JwtAuthPlugin {
             assert_claims,
             cache,
         })
+    }
+
+    /// Returns the shared JWKS key store for this plugin instance.
+    #[inline(always)]
+    pub fn key_store(&self) -> &Arc<SharedJwksStore> {
+        &self.key_store
+    }
+
+    /// Replaces the key store with an externally shared store (e.g. wired by jwks_rotator).
+    pub fn with_shared_key_store(mut self, store: Arc<SharedJwksStore>) -> Self {
+        self.key_store = store;
+        self
     }
 
     /// Extracts the raw token string from the request using configured token sources.
@@ -207,7 +268,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         };
 
         let token_hash = JwtCache::hash_token(token_str);
-        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
+        // Use authoritative pre-sampled ingress timestamp (zero redundant clock syscalls on hot path)
         let now = req.ingress_time_sec;
 
         // 1. Negative Cache check: fail-fast on known bad tokens
@@ -219,7 +280,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
             return Action::Reject(RejectReason::Unauthorized);
         }
 
-        // 2. Positive Cache check: ultra-fast (~20ns) zero-allocation claims injection
+        // 2. Positive Cache check: zero-allocation claims injection on cache hit
         if let Some(cached_headers) = self.cache.get_valid(token_hash, now) {
             for (name, val) in cached_headers {
                 req.headers.insert(name, val);
@@ -228,9 +289,10 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         }
 
         // 3. Cache Miss: verify signature and business policies
+        let table_guard = self.key_store.load();
         let policy = JwtValidationPolicy {
             expected_alg: self.algorithm,
-            key: &self.key,
+            key_table: &table_guard,
             validate_exp: self.validate_exp,
             clock_skew_secs: self.clock_skew_secs,
             expected_issuer: self.issuer.as_deref(),
@@ -280,6 +342,11 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
     #[inline(always)]
     fn direction(&self) -> Direction {
         Direction::Request
+    }
+
+    #[inline(always)]
+    fn shared_jwks_store(&self) -> Option<Arc<SharedJwksStore>> {
+        Some(Arc::clone(&self.key_store))
     }
 }
 

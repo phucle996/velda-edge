@@ -7,9 +7,9 @@
 //! - Evaluates and interpolates dynamic runtime variables (`$client_ip`, `$request_id`, etc.).
 //! - Appends values to existing headers (e.g. multi-value `X-Forwarded-For`).
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, HeaderWorkspace, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -281,14 +281,13 @@ impl HeaderMutationPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_header_mutation_config(&config.id, &config.config).map_err(
-            |e| {
+        let cfg = super::validation::validate_header_mutation_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid header_mutation configuration for '{}': {e}",
                     config.id
                 ))
-            },
-        )?;
+            })?;
 
         let mut remove = Vec::with_capacity(cfg.remove_headers.len());
         for s in &cfg.remove_headers {

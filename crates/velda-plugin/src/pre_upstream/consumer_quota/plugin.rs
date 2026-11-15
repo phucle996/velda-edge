@@ -12,12 +12,12 @@
 //! When exhausted, rejects with `Action::Reject(RejectReason::TooManyRequests)` and tags Bit-1
 //! bypass response headers (`Retry-After`, `x-quota-remaining: 0`, `x-quota-window`).
 
+use crate::config::PluginConfig;
 use http::header::RETRY_AFTER;
 use http::{HeaderName, HeaderValue};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::algorithm::{QuotaAlgorithm, QuotaDecision, QuotaWindowConfig, ShardedQuotaState};
 use super::key::resolve_quota_key;

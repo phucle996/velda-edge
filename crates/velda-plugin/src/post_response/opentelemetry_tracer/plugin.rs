@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::HeaderMap;
 use velda_core::L7Response;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::OpentelemetryTracerConfig;
 use super::drainer::ShadowOtlpTracerDrainer;

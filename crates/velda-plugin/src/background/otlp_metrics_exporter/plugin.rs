@@ -12,13 +12,13 @@
 //! ║                  (crates/velda-plugin: otlp_metrics_exporter::plugin)                             ║
 //! ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 //!
-//!  [FRONTLINE WORKERS]                       [SHADOW WORKER: velda-shadow-0 (SCHED_IDLE)]
-//!   velda-worker-0/1                          interval_secs periodic ticker
+//!  [FRONTLINE WORKERS (Cores 0..N-1)]         [SHADOW WORKER: velda-shadow-{i} (SCHED_IDLE)]
+//!   velda-worker-0..n (Cores 0..N-1)          interval_secs periodic ticker (Core i)
 //!         │                                                │
 //!         ▼ (Atomic writes)                                ▼
 //!   ┌───────────┐   Lock-Free Atomic Extraction    ┌───────────────────────────────┐
 //!   │ 36 Slots  │ ───────────────────────────────► │   MetricsStore::snapshot()    │
-//!   │ Counters  │     (< 100ns vector reduce)      │   (36 Pipelines, 288 DPs)     │
+//!   │ Counters  │     (Relaxed atomic reduce)  │   (36 Pipelines, 288 DPs)     │
 //!   └───────────┘                                  └───────────────┬───────────────┘
 //!                                                                  │
 //!                                                  ┌───────────────┴───────────────┐
@@ -28,8 +28,8 @@
 //!                                       ┌─────────────────────┐         ┌─────────────────────┐
 //!                                       │  proto/template.rs  │         │   json/template.rs  │
 //!                                       │ Pre-Baked Wire      │         │ Pre-Baked Chunk     │
-//!                                       │ Skeleton (100% Safe)│         │ Interleaving (JSON) │
-//!                                       │ (1,624 CPU cycles)  │         │ (8,986 CPU cycles)  │
+//!                                       │ Skeleton (Zero-Alloc│         │ Interleaving (JSON) │
+//!                                       │ direct protobuf)    │         │ (LUT-accelerated)   │
 //!                                       └──────────┬──────────┘         └──────────┬──────────┘
 //!                                                  │                               │
 //!                                                  ▼                               ▼
@@ -57,10 +57,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use http::HeaderMap;
 use tokio::sync::watch;
 use velda_observability::{MetricsStore, global_metrics};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::OtlpMetricsExporterConfig;
 use super::json::{OtlpJsonTemplate, OtlpMetricsClient};
@@ -136,6 +136,11 @@ impl OtlpMetricsExporterPlugin {
 impl BackgroundPlugin for OtlpMetricsExporterPlugin {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        40
     }
 
     fn run(

@@ -12,7 +12,7 @@
 //!                                                               │ (100% Zero-mpsc channel)
 //!                                                               ▼
 //!                                               ┌────────────────────────────────┐
-//!                                               │  velda-shadow-0 (SCHED_IDLE)   │
+//!                                               │  velda-shadow-{i} (SCHED_IDLE) │
 //!                                               │  bg_tasks: JoinSet<()>         │
 //!                                               └───────────────┬────────────────┘
 //!                                                               │
@@ -64,12 +64,13 @@
 //!
 //! - **ADR-1: Zero-Spawn & Sequential Inline Execution**:
 //!   Eliminates arbitrary `tokio::spawn` task allocation overhead per probe. Because evaluating
-//!   static memory paths takes $< 15\ \mu\text{s}$, a single idle-scheduled thread effortlessly
-//!   serves over 50,000 probes/second with 0 heap allocation and 0 context switching.
+//!   static memory paths involves no dynamic formatting or heap allocation, sequential inline
+//!   execution operates with zero heap allocations on the serving path and avoids green-thread
+//!   task queue overhead.
 //!
 //! - **ADR-2: Bootstrap Zero-MPSC Direct Handoff**:
 //!   Background plugins are compiled into `RuntimeSnapshot` at bootstrap and mounted directly
-//!   into `velda-shadow-0` (`bg_tasks`). Frontline Traffic Workers never dispatch tasks or
+//!   into `velda-shadow-{i}` (`bg_tasks`). Frontline Traffic Workers never dispatch tasks or
 //!   exchange messages over `mpsc` channels with background daemons.
 //!
 //! - **ADR-3: Port Isolation Invariant**:
@@ -94,18 +95,18 @@
 //!
 //! - **ADR-7: Contiguous L1D Cache-Resident Wire Responses**:
 //!   All response payloads are packed into a single 64-byte aligned 195-byte contiguous memory
-//!   block (`WIRE_RESPONSES`), fitting within 4 contiguous cache lines ($\approx 0.5\%$ of 32KB L1D).
-//!   Provides zero-pointer-indirection $< 1\text{ns}$ socket streaming without DRAM bus traffic.
+//!   block (`WIRE_RESPONSES`), fitting within 4 contiguous cache lines ($\approx 0.59\%$ of 32KB L1D).
+//!   Provides zero-pointer-indirection socket streaming directly from L1D cache without DRAM bus traffic.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::PluginConfig;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::response::{HealthProbeTokens, eval_probe_request, evaluate_path};
 use super::state::HealthState;
@@ -191,8 +192,8 @@ impl HealthProbePlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_health_probe_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_health_probe_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid health_probe configuration for '{}': {e}",
                     config.id
@@ -260,6 +261,11 @@ impl BackgroundPlugin for HealthProbePlugin {
     #[inline(always)]
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        1
     }
 
     fn run(

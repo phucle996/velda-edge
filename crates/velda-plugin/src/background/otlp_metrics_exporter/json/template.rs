@@ -18,8 +18,8 @@
 //!  ├── active_tails[36]:   b"\",\"attributes\":[{\"key\":\"downstream\",\"value\":...}}]}"
 //!  └── metric_separators & root_footer
 //!
-//!  [Runtime: format_into() — 8,986 CPU Cycles (~3.66 µs, 0 Allocations)]
-//!  1. fast_format_ts_19digits_simd(ts)   ──► 28 CPU cycles (SSE2 SIMD)
+//!  [Runtime: format_into() — Zero Allocations via Pre-baked Skeletons]
+//!  1. fast_format_ts_19digits_simd(ts)   ──► 128-bit SSE2 SIMD itoa formatting
 //!  2. buf.extend_from_slice(&self.root_header);
 //!  3. for each DataPoint:
 //!       ├── buf.extend_from_slice(b"{\"timeUnixNano\":\"");

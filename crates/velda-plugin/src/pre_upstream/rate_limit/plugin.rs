@@ -139,11 +139,9 @@ impl RateLimitPlugin {
     ///
     /// # Strict Sentinel standard
     /// Unused or omitted parameters MUST be set to `"none"`.
-    pub fn from_config(
-        config: &velda_sync::post_sync::plugin::PluginConfig,
-    ) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_rate_limit_config(&config.id, &config.config).map_err(|e| {
+    pub fn from_config(config: &crate::config::PluginConfig) -> Result<Self, PluginError> {
+        let cfg = super::validation::validate_rate_limit_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid rate_limit configuration for '{}': {e}",
                     config.id
@@ -583,7 +581,7 @@ mod tests {
             "redis_timeout_ms": "none"
         });
 
-        let sync_cfg = velda_sync::post_sync::plugin::PluginConfig {
+        let sync_cfg = crate::config::PluginConfig {
             id: "full-config-test".into(),
             phase: "pre_upstream".into(),
             config: json_cfg,

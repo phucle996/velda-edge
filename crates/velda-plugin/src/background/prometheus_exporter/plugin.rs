@@ -10,13 +10,13 @@
 //! ║                  (crates/velda-plugin: prometheus_exporter::plugin)                              ║
 //! ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 //!
-//!  [FRONTLINE WORKERS]                       [SHADOW WORKER: velda-shadow-0 (SCHED_IDLE)]
-//!   velda-worker-0/1                          Management Port (:9090)
+//!  [FRONTLINE WORKERS (Cores 0..N-1)]         [SHADOW WORKER: velda-shadow-{i} (SCHED_IDLE)]
+//!   velda-worker-0..n                         Management Port (:9090, Core i)
 //!         │                                                │
 //!         ▼ (Atomic writes)                                ▼
 //!   ┌───────────┐   Lock-Free Atomic Extraction    ┌───────────────────────────────┐
 //!   │ 36 Slots  │ ───────────────────────────────► │   MetricsStore::snapshot()    │
-//!   │ Counters  │     (< 100ns vector reduce)      │   (36 Pipelines, 858 DPs)     │
+//!   │ Counters  │     (Lock-Free Atomics)          │   (36 Pipelines, 858 DPs)     │
 //!   └───────────┘                                  └───────────────┬───────────────┘
 //!                                                                  │
 //!                                                                  ▼
@@ -24,7 +24,7 @@
 //!                                                       │     template.rs     │
 //!                                                       │ Pre-baked Skeletons │
 //!                                                       │ SIMD Itoa (LUT)     │
-//!                                                       │ (15,445 CPU cycles) │
+//!                                                       │ (Division-Free Itoa)│
 //!                                                       └──────────┬──────────┘
 //!                                                                  │
 //!                                                                  ▼ Reused PooledBuffer
@@ -57,6 +57,11 @@ impl BackgroundPlugin for PrometheusExporter {
     #[inline(always)]
     fn id(&self) -> &str {
         "prometheus_exporter"
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        30
     }
 
     fn run(

@@ -17,9 +17,9 @@
 //! - **Prefetcher & Branch Predictor Harmony**: Flat contiguous array with sequential loop iteration
 //!   enables 100% accurate CPU stream prefetching and zero branch mispredictions.
 
+use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use velda_core::L7Response;
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::config::{CompiledHeader, HstsConfig, MAX_SECURITY_HEADERS, SecurityHeadersConfig};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -63,13 +63,13 @@ impl SecurityHeadersPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_security_headers_config(&config.id, &config.config)
+        let cfg = super::validation::validate_security_headers_config(&config.id, &config.config)
             .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid security_headers configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+            PluginError::Config(format!(
+                "Invalid security_headers configuration for '{}': {e}",
+                config.id
+            ))
+        })?;
 
         let frame_options = if cfg.frame_options.trim().eq_ignore_ascii_case("none") {
             None

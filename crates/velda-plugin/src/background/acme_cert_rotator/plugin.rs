@@ -85,10 +85,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use super::validation::AcmeCertRotatorConfig;
 use tokio::sync::watch;
 use velda_core::coarse_time::coarse_now_sec;
 use velda_router::Router;
-use velda_sync::AcmeCertRotatorConfig;
 
 use super::challenge::ChallengeStore;
 use super::client::AcmeClient;
@@ -145,10 +145,8 @@ impl AcmeCertRotatorPlugin {
     }
 
     /// Instantiates and validates the plugin from declarative configuration.
-    pub fn from_config(
-        config: &velda_sync::post_sync::plugin::PluginConfig,
-    ) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_acme_cert_rotator_config(&config.id, &config.config)
+    pub fn from_config(config: &crate::config::PluginConfig) -> Result<Self, PluginError> {
+        let cfg = super::validation::validate_acme_cert_rotator_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid acme_cert_rotator config: {e}")))?;
 
         Self::new(config.id.clone(), cfg, None, None, TlsHotSwapper::new(None))
@@ -479,6 +477,11 @@ impl AcmeCertRotatorPlugin {
 impl BackgroundPlugin for AcmeCertRotatorPlugin {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn weight(&self) -> u32 {
+        10
     }
 
     fn run(

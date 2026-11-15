@@ -16,6 +16,7 @@
 //!   strictly prohibited; the exact requesting origin is reflected.
 //! - **Flat Workflow**: Entire execution is linear top-to-bottom without helper indirection (Rule 2.2).
 
+use crate::config::PluginConfig;
 use http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS,
@@ -23,7 +24,6 @@ use http::header::{
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use velda_core::{Action, L7Request, L7Response, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -136,14 +136,13 @@ impl CorsPreflightPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_cors_preflight_config(&config.id, &config.config).map_err(
-            |e| {
+        let cfg = super::validation::validate_cors_preflight_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid cors_preflight configuration for '{}': {e}",
                     config.id
                 ))
-            },
-        )?;
+            })?;
 
         let allowed_origins = cfg
             .allowed_origins

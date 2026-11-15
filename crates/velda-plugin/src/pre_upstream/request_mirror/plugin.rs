@@ -17,12 +17,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Uri};
 use tokio::sync::mpsc;
 use velda_core::{Action, L7Request};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -137,14 +137,13 @@ impl RequestMirrorPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_request_mirror_config(&config.id, &config.config).map_err(
-            |e| {
+        let cfg = super::validation::validate_request_mirror_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid request_mirror configuration for '{}': {e}",
                     config.id
                 ))
-            },
-        )?;
+            })?;
 
         let sample_percent = (cfg.sample_percent.round() as u32).min(100);
 

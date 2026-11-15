@@ -10,3 +10,6 @@ pub mod template;
 
 pub use config::PrometheusExporterConfig;
 pub use plugin::PrometheusExporterPlugin;
+
+pub mod validation;
+pub use validation::*;

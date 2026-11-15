@@ -237,7 +237,7 @@ impl LogRecord {
         self.severity_text.clear();
         self.severity_text.push_str(severity_txt);
 
-        // Body is constant "HTTP access log" (0 CPU cycles spent on dynamic body string formatting)
+        // Body is constant "HTTP access log" (Constant string eliminates dynamic body formatting)
         if let Some(AnyValue {
             value: Some(any_value::Value::StringValue(ref mut s)),
         }) = self.body

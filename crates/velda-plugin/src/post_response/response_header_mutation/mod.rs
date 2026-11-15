@@ -17,3 +17,5 @@ pub use config::{
 pub use plugin::ResponseHeaderMutationPlugin;
 pub use simd::{compute_header_fingerprint, fingerprint_matches_simd, validate_header_value_simd};
 pub use var::{ResponseDynamicVar, ResponseHeaderValueSpec};
+
+pub mod validation;

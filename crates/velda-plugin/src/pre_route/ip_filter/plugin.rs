@@ -7,8 +7,8 @@
 //! Full schema specification, allowed values, and configuration examples:
 //! See [`README.md`](./README.md).
 
+use crate::config::PluginConfig;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::network::{
     ClientIpSource, IpExtractionError, IpNetwork, ParsedIp, compact_and_sort_v4,
@@ -128,8 +128,8 @@ impl IpFilterPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            velda_sync::validate_ip_filter_config(&config.id, &config.config).map_err(|e| {
+        let cfg = super::validation::validate_ip_filter_config(&config.id, &config.config)
+            .map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid ip_filter configuration for '{}': {e}",
                     config.id

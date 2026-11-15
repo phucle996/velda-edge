@@ -23,11 +23,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::PluginConfig;
 use http::header::{COOKIE, HOST, ORIGIN, REFERER};
 use http::{HeaderName, Method};
 use ring::hmac;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use super::token::{self, constant_time_eq};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -35,7 +35,7 @@ use crate::error::PluginError;
 use crate::pre_route::OriginPattern;
 use crate::pre_upstream::PreUpstreamPlugin;
 
-pub use velda_sync::post_sync::plugin::pre_upstream::csrf::CsrfConfig;
+pub use super::validation::CsrfConfig;
 
 /// Compact bitmask for O(1) single-instruction HTTP method validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,12 +188,13 @@ impl CsrfPlugin {
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = velda_sync::validate_csrf_config(&config.id, &config.config).map_err(|e| {
-            PluginError::Config(format!(
-                "Invalid csrf configuration for '{}': {e}",
-                config.id
-            ))
-        })?;
+        let cfg =
+            super::validation::validate_csrf_config(&config.id, &config.config).map_err(|e| {
+                PluginError::Config(format!(
+                    "Invalid csrf configuration for '{}': {e}",
+                    config.id
+                ))
+            })?;
 
         Self::new(&config.id, cfg)
     }

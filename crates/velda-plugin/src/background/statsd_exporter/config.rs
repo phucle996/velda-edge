@@ -4,4 +4,4 @@
 //! All configuration fields must be explicitly supplied in `plugins.json`. No implicit fallbacks,
 //! hidden defaults, or magic values. Validation occurs strictly at config sync time.
 
-pub use velda_sync::StatsdExporterConfig;
+pub use super::validation::StatsdExporterConfig;
