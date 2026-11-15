@@ -19,11 +19,11 @@
 //!  ├── Latency Prefixes:   b"velda_request_duration_seconds_bucket{downstream=\"...\",...,le=\"0.001\"} "
 //!  └── Global & Pool Prefixes
 //!
-//!  [Runtime: format_snapshot_into() — 15,445 CPU Cycles (~6.3 µs, 0 Allocations)]
+//!  [Runtime: format_snapshot_into() — Division-Free Scratch Buffer Assembly (0 Allocations)]
 //!  1. buf.extend_from_slice(HELP_TYPE_REQUESTS_TOTAL);
 //!  2. for each Metric Line (858 lines total):
 //!       ├── buf.extend_from_slice(prebaked_prefix); ──► 1 single slice copy of full name + labels
-//!       ├── fast_write_u64(buf, counter_value);     ──► SIMD Itoa (3-7 cycles, 0 division)
+//!       ├── fast_write_u64(buf, counter_value);     ──► Division-free Itoa via reciprocal multiply
 //!       └── buf.push(b'\n');
 //!  3. Direct transmission via PooledBuffer (Zero-Allocation)
 //! ```

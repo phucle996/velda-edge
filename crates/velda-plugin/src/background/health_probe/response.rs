@@ -250,8 +250,8 @@ pub type ProbeEvalFn = fn(
 /// High-performance 64-bit register SWAR evaluator.
 ///
 /// Uses a single 64-bit general-purpose register to inspect 8 bytes of the request path
-/// simultaneously in 1 CPU cycle. Computes response index branchlessly via ALU arithmetic:
-/// `index = 2 - probe_match - probe_ok`.
+/// simultaneously using scalar bitwise operations. Computes response index branchlessly
+/// via ALU arithmetic: `index = 2 - probe_match - probe_ok`.
 #[inline(always)]
 pub fn eval_swar_64(
     req_buf: &[u8],

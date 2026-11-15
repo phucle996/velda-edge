@@ -1,8 +1,8 @@
 //! Lock-Free Atomic Health & Readiness State Entity.
 //!
 //! Tracks Data Plane lifecycle states (`is_live`, `is_ready`, `is_draining`) using
-//! cacheline-isolated atomic flags (`AtomicBool`), guaranteeing $\mathcal{O}(1)$ nanosecond
-//! query times with zero mutex contention across worker and shadow threads.
+//! lock-free atomic flags (`AtomicBool`), enabling $\mathcal{O}(1)$ query times
+//! with zero mutex contention across worker and shadow threads.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

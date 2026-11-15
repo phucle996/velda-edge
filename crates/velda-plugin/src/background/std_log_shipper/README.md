@@ -1,107 +1,124 @@
 # Standard Stream Log Shipper Plugin (`std_log_shipper`)
 
-The `std_log_shipper` plugin is a high-throughput, zero-allocation background logging exporter for the **Velda Edge Data Plane**. It subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches across all application protocols (HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP) and writes formatted JSON, text, or Common Log Format (CLF) streams directly to `stdout`, `stderr`, or persistent filesystem targets without imposing locks, memory allocations, or formatting overhead on frontline request-serving worker threads.
+High-throughput, zero-allocation background logging exporter for Velda Edge. Subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches across all application protocols (HTTP/1.1, HTTP/2, HTTP/3, gRPC, Raw L4 TCP/UDP) and writes formatted JSON, text, or Common Log Format (CLF) streams directly to `stdout`, `stderr`, or persistent filesystem targets strictly from isolated Shadow Logistics Workers.
 
 ---
 
-## 1. Overview & Service Specification
+## 1. Documentation Index
 
-| Property | Value |
-| :--- | :--- |
-| **Plugin Identifier** | `std_log_shipper` |
-| **Canonical Execution Phase** | `background` (Dedicated Shadow Logistics Worker) |
-| **Execution Runtime** | Pinned to `velda-shadow-0` under Linux `SCHED_IDLE` scheduling priority |
-| **Capability Declaration** | `PluginCapability::default()` (Non-request-serving background logistics service) |
-| **Supported Protocols** | Ingests and formats records across HTTP/1.1, HTTP/2, HTTP/3, gRPC, Raw TCP, and Raw UDP |
-| **Hot-Path Request Overhead** | **0 nanoseconds serving cost**; zero lock contention, zero string allocations, zero I/O on traffic cores |
-| **Output Target Streams** | Standard Output (`stdout`), Standard Error (`stderr`), or persistent filesystem path (`File`) with open descriptor reuse |
-| **Serialization Formats** | Structured JSON (`"json"`), Human-Readable Text (`"text"`), or Common Log Format (`"clf"`) |
+| Document | Purpose | Primary Audience |
+| :--- | :--- | :--- |
+| **[README.md](README.md)** | Subsystem overview, configuration contract, production profiles, quickstart verification | All Engineers, Operators |
+| **[RUNBOOK.md](RUNBOOK.md)** | SRE On-Call Incident Triage Matrix (P0–P3), Mermaid decision flowchart, CLI diagnostic toolkit, emergency playbooks | On-Call SREs, Systems Engineers |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep micro-architectural specification, memory geometry, SSSE3 SIMD PSHUFB hex stamping, disassembly proof, physical boundaries | Systems Architects, Performance Engineers |
+| **[BENCHMARK.md](BENCHMARK.md)** | First-principles 5-tier zero-bloat benchmark specification adhering to `/velda-benchmark` with 6-scenario comparative matrix | Performance Engineers, SRE Leads |
+
+---
+
+## 2. Overview & Core Invariants
+
+The `std_log_shipper` plugin (`phase: "background"`) operates as an autonomous background companion service designed to format and persist access logs without competing with frontline traffic workers:
+
+* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute string formatting, serialization, or file I/O syscalls.
+* **Lock-Free SPSC Ring Drain**: Frontline traffic workers push 64-byte scalar `AccessLogRecord` structs into core-local Single-Producer Single-Consumer (SPSC) ring buffers without mutexes or lock contention.
+* **Zero-Allocation Formatting Arena**: `format_std_log_payload` pre-reserves buffer capacity upfront based on batch size and writes formatted bytes directly using static slices, a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), and 128-bit SSSE3 SIMD vector instructions for request ID hex stamping.
+* **Persistent File Descriptor Reuse**: The target file or stream descriptor is opened once at plugin instantiation and held persistently across all periodic flush cycles, completely eliminating per-cycle `open()` and `close()` syscall overhead.
+* **Multi-Format Serialization**: Supports structured NDJSON (`"json"`), human-readable text (`"text"`), or NCSA Common Log Format (`"clf"`).
+* **Fail-Safe SPSC Bounded Queue**: If disk writes stall or fail, the bounded SPSC ring drops records at the buffer threshold to prevent memory exhaustion and preserve client request serving throughput.
 
 ```text
-╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                          VELDA EDGE — STD LOG SHIPPER ARCHITECTURE                                   ║
-║              (crates/velda-plugin/src/background/std_log_shipper: StdLogShipperPlugin)              ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                          VELDA EDGE — STD LOG SHIPPER PIPELINE                                   ║
+║                    (crates/velda-plugin: std_log_shipper::plugin)                                ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 
- [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
- (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, 100ms Ticker)
+ [FRONTLINE TRAFFIC WORKERS (Cores 0..N-1)]     [SHADOW LOGISTICS WORKER (Core i)]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Assigned Core i)
   velda-worker-0 (Core 0)                        
   velda-worker-1 (Core 1)                        
-        │                                                    │ (Every 100ms)
+  ...                                            
+  velda-worker-n (Core N-1)                      
+        │                                                    │ (Periodic Ticker)
         ▼                                                    ▼
-  ┌───────────┐  Zero-Lock SPSC Ring Drain  ┌──────────────────────────────────┐
-  │ AccessLog │ ──────────────────────────► │  Drain Batches (max 1000 recs)   │
-  │  Record   │    (< 2ns per record)       └────────────────┬─────────────────┘
-  └───────────┘                                              │
-                                              ┌──────────────┴──────────────┐
-                                              │ Upfront Buffer Pre-reserve  │
-                                              │ (O(1) scratch vector resize)│
-                                              └──────────────┬──────────────┘
-                                                             │
-                                   ┌─────────────────────────┴─────────────────────────┐
-                                   │                                                   │
-                            [format: "json"]                                    [format: "text"]
-                                   ▼                                                   ▼
-                        ┌─────────────────────┐                             ┌─────────────────────┐
-                        │   format/json.rs    │                             │   format/text.rs    │
-                        │ Structured NDJSON   │                             │ Extended Text / CLF │
-                        │ SIMD Itoa + PSHUFB  │                             │ SIMD Itoa + PSHUFB  │
-                        │ (235 CPU cycles)    │                             │ (225 CPU cycles)    │
-                        └──────────┬──────────┘                             └──────────┬──────────┘
-                                   │                                                   │
-                                   └─────────────────────────┬─────────────────────────┘
-                                                             │
-                                                             ▼
-                                                    ┌─────────────────┐
-                                                    │   sink/mod.rs   │
-                                                    │   StdLogSink    │
-                                                    │ Persistent FD   │
-                                                    │ write_all()     │
-                                                    └────────┬────────┘
-                                                             │
-                                    ┌────────────────────────┼────────────────────────┐
-                                    ▼                        ▼                        ▼
-                                [stdout]                  [stderr]                 [File]
-                               (Console)                 (Console)             (/var/log/...)
+  ┌───────────┐  Zero-Lock SPSC Ring Drain   ┌──────────────────────────────────┐
+  │ AccessLog │ ───────────────────────────► │  Drain Batches (max_batch_size)  │
+  │  Record   │    (O(1) Ring Dequeue)       └────────────────┬─────────────────┘
+  └───────────┘                                               │
+                                                ┌─────────────┴─────────────┐
+                                                │ Upfront Buffer Capacity   │
+                                                │ (O(1) Scratch Allocation) │
+                                                └─────────────┬─────────────┘
+                                                              │
+                                   ┌──────────────────────────┴──────────────────────────┐
+                                   │                                                     │
+                            [format: "json"]                                      [format: "text"]
+                                   ▼                                                     ▼
+                        ┌─────────────────────┐                               ┌─────────────────────┐
+                        │   format/json.rs    │                               │   format/text.rs    │
+                        │ Structured NDJSON   │                               │ Extended Text / CLF │
+                        │ SIMD Itoa + PSHUFB  │                               │ SIMD Itoa + PSHUFB  │
+                        │ (LUT-accelerated)   │                               │ (LUT-accelerated)   │
+                        └──────────┬──────────┘                               └──────────┬──────────┘
+                                   │                                                     │
+                                   └──────────────────────────┬──────────────────────────┘
+                                                              │
+                                                              ▼
+                                                     ┌─────────────────┐
+                                                     │   sink/mod.rs   │
+                                                     │   StdLogSink    │
+                                                     │ Persistent FD   │
+                                                     │ write_all()     │
+                                                     └────────┬────────┘
+                                                              │
+                                    ┌─────────────────────────┼─────────────────────────┐
+                                    ▼                         ▼                         ▼
+                                [stdout]                   [stderr]                  [File]
+                               (Console)                  (Console)              (/var/log/...)
 ```
 
 ---
 
-## 2. Technical Documentation Index
+## 3. Shadow Workload Weight & Core Affinity
 
-| Document | Purpose & Scope |
-| :--- | :--- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | In-depth architectural design, Hourglass Model integration, lock-free SPSC ring consumption, division-free 2-digit ASCII Lookup Table (LUT) integer serialization, SSSE3 SIMD byte stamping, persistent `StdLogSink`, and `SCHED_IDLE` lifecycle |
-| [MACHINE_CODE_ANALYSIS.md](MACHINE_CODE_ANALYSIS.md) | Assembly inspection, SSSE3 PSHUFB SIMD vector instructions, memory alignment, hardware CPU cycle counts via `RDTSC` (315 cycles/rec JSON, 286 cycles/rec Text), and zero-allocation proofs |
-| [BENCHMARK.md](BENCHMARK.md) | Standardized 4-tier benchmark specification form (Macro Serving, System Resources, Kernel Network & Syscalls, Hardware Performance Monitoring Counters) across five operational scenarios |
-| [RUNBOOK.md](RUNBOOK.md) | Site Reliability Engineering (SRE) operational guide, severity triage matrix, Mermaid incident response decision tree, diagnostic command toolkit, and disk backpressure mitigation |
-| [TEST.md](TEST.md) | Automated unit, integration, and machine code test catalog, test execution reproduction instructions, and boundary assertion invariants |
+Under the Velda Edge Workload Distribution Model, background logistics plugins are assigned a workload weight from 1 to 100 based on CPU intensity, memory footprint, cadence/wakeup rate, and failure blast radius:
+
+| Physical Dimension | Metric Profile | Impact Analysis |
+| :--- | :--- | :--- |
+| **Assigned Workload Weight** | **15** | **Low Background Workload** |
+| **CPU Intensity** | Low | SPSC ring batch drain, SIMD hex stamping (`PSHUFB`), 2-digit LUT byte conversion, and single persistent VFS write syscall. Zero network protocol or TLS encryption overhead. |
+| **Memory Footprint** | ~64 KB | Reusable formatting scratch vector (`out_buf`) + SPSC ring subscriber buffers. Zero ongoing heap churn. |
+| **Cadence / Wakeup Rate** | Moderate (50ms – 1000ms) | Operates on sub-second flush intervals (default: 100ms) to ensure low log latency. |
+| **Failure Blast Radius** | P3 (Low Impact) | Access log loss only. If the target disk is full or read-only, write errors are logged while client request serving continues without delay. |
+
+### Complementary Static Sharding Recommendation
+* **Target Affinity**: Core 1, 2, or 3.
+* **Anti-Colocation Rule**: Avoid co-locating on Core 0 when Core 0 is strictly dedicated to latency-critical `health_probe` (Weight: 1) and master traffic intake.
+* **Ideal Pairing**: Pair with sleep-bound rotators (`jwks_rotator`, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
 
 ---
 
-## 3. Strict 100% Explicit Configuration Invariant
+## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration field must be explicitly declared in `plugins.json`. Velda Edge strictly rejects implicit fallbacks, magic defaults, or omitted properties. If any property is omitted or malformed, configuration validation fails fast at synchronization time.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "std_log_shipper"`.
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Production Value | Description |
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `target` | string | **Yes** | `"stdout"`, `"stderr"`, or valid absolute file path | `"/var/log/velda/access.log"` or `"stdout"` | Output destination stream for formatted access log records. |
-| `format` | string | **Yes** | `"json"`, `"text"`, or `"clf"` (case-insensitive) | `"json"` (Production SIEM)<br>`"text"` (Local Debug) | Serialization format applied to all drained batches. |
-| `flush_interval_ms` | integer (u64) | **Yes** | `50 ..= 60000` (milliseconds) | `100` (100 milliseconds) | Periodic timer interval for waking up shadow worker to drain SPSC rings and flush buffered bytes. |
-| `max_batch_size` | integer (usize) | **Yes** | `1 ..= 10000` (records) | `1000` | Maximum number of log records drained and processed in a single sequential flush cycle. |
+| `target` | String | **Yes** | `"stdout"`, `"stderr"`, or valid absolute file path | `"/var/log/velda/access.log"` or `"stdout"` | Output destination stream for formatted access log records. |
+| `format` | String | **Yes** | `"json"`, `"text"`, or `"clf"` (case-insensitive) | `"json"` | Serialization format: structured NDJSON (`"json"`), human-readable text (`"text"`), or Common Log Format (`"clf"`). |
+| `flush_interval_ms` | Integer (u64) | **Yes** | `50 ..= 60000` | `100` | Periodic timer interval for waking up shadow worker to drain SPSC rings and flush buffered bytes. |
+| `max_batch_size` | Integer (usize) | **Yes** | `1 ..= 10000` | `1000` | Maximum number of log records drained and processed in a single sequential flush cycle. |
 
 ---
 
-## 4. Production Configuration Profiles
+## 5. Production Configuration Profiles
 
 ### Profile 1: High-Throughput Production Profile (Structured JSON via File Stream)
-*Recommended for production edge nodes shipping logs to vector, fluentbit, or datadog agents via filesystem rotation.*
+*Recommended for production edge nodes shipping logs to Vector, Fluent Bit, or Datadog agents via filesystem rotation.*
 
 ```json
 {
   "id": "std_log_shipper",
-  "phase": "background",
   "config": {
     "target": "/var/log/velda/access.log",
     "format": "json",
@@ -111,13 +128,12 @@ The `std_log_shipper` plugin is a high-throughput, zero-allocation background lo
 }
 ```
 
-### Profile 2: Containerized Cloud-Native Profile (Standard Output JSON)
-*Recommended for Kubernetes container runtimes aggregating logs via container stdout.*
+### Profile 2: Containerized Cloud Native Profile (JSON via Standard Output)
+*Recommended for Kubernetes, Docker, and serverless environments where stdout is captured by container runtimes.*
 
 ```json
 {
   "id": "std_log_shipper",
-  "phase": "background",
   "config": {
     "target": "stdout",
     "format": "json",
@@ -127,30 +143,58 @@ The `std_log_shipper` plugin is a high-throughput, zero-allocation background lo
 }
 ```
 
-### Profile 3: Development & Debug Profile (Human-Readable Text)
-*Recommended for developer workstations and local sandbox validation.*
+### Profile 3: Legacy Syslog / Web Server Text Profile (Common Log Format)
+*Recommended for traditional web server analytics tools requiring standard NCSA Common Log Format.*
 
 ```json
 {
   "id": "std_log_shipper",
-  "phase": "background",
   "config": {
-    "target": "stdout",
-    "format": "text",
-    "flush_interval_ms": 50,
-    "max_batch_size": 100
+    "target": "/var/log/velda/access_clf.log",
+    "format": "clf",
+    "flush_interval_ms": 250,
+    "max_batch_size": 2000
   }
 }
 ```
 
 ---
 
-## 5. Architectural Invariants
+## 6. Verification & Quickstart
 
-1. **Protocol-Agnostic Unified Processing**: A single background instance formats all protocols identically, completely eliminating duplicated plugins per protocol.
-2. **Zero Hot-Path Work**: Traffic worker threads strictly record an atomic 64-byte integer struct and push it into a core-local Single-Producer Single-Consumer (SPSC) ring buffer in less than 70 CPU clock cycles.
-3. **Division-Free ASCII Lookup Table (LUT)**: All integer-to-ASCII conversions use a pre-computed 200-byte lookup table (`DIGIT_PAIRS`), completely eliminating costly `DIV` and `IDIV` CPU instructions.
-4. **128-Bit Request ID SSSE3 SIMD Hex Stamping**: Full 128-bit Request IDs are formatted into exact 32 lowercase hex characters using vector shuffle instructions (`_mm_shuffle_epi8` / PSHUFB) without heap allocations.
-5. **Zero-Alloc RFC 5952 IPv6 Formatting**: Native IPv6 addresses are zero-compressed on a fixed 40-byte stack buffer, eliminating runtime `v6.to_string()` heap string churn.
-6. **Persistent Sink Handle**: File descriptors are opened once at plugin instantiation time and held open across all 100ms flush cycles, eliminating per-cycle `open()` and `close()` syscall overhead.
-7. **Reference-Counted Memory Reclamation**: Log record batches are stored in `Arc<[AccessLogRecord]>`. As soon as all active exporters finish processing a batch, memory is reclaimed without locking.
+### Step 1: Prepare Log Directory (If Logging to File)
+```bash
+sudo mkdir -p /var/log/velda
+sudo chown -R $(whoami) /var/log/velda
+```
+
+### Step 2: Declare in `plugins.json`
+Include the plugin block in `plugins.json`:
+
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "std_log_shipper",
+      "config": {
+        "target": "stdout",
+        "format": "json",
+        "flush_interval_ms": 100,
+        "max_batch_size": 1000
+      }
+    }
+  ]
+}
+```
+
+### Step 3: Run Velda Edge Gateway
+```bash
+rtk cargo run -p velda-edge
+```
+
+### Step 4: Verify Formatted Access Logs
+Generate test requests and verify formatted NDJSON access logs appear on `stdout`:
+```json
+{"req_id":"673708a2000000010000000000000001","ts":1731659938,"dur_us":1450,"status":200,"method":"GET","path":"/api/v1/ping","client_ip":"127.0.0.1","downstream":"h1","upstream":"h1","pipe":"buffered","bytes_rx":128,"bytes_tx":256}
+```

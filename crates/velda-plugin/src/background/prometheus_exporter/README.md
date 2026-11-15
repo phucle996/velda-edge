@@ -1,166 +1,136 @@
 # Prometheus Metrics Exporter Plugin (`prometheus_exporter`)
 
-Production-grade background service exposing zero-allocation OpenMetrics / Prometheus scrape endpoints on an isolated management port.
-
----
-
-## 1. Overview & Service Specification
-
-| Property | Value |
-| :--- | :--- |
-| **Plugin ID** | `prometheus_exporter` |
-| **Canonical Phase** | `background` |
-| **Execution Runtime** | Isolated shadow thread with cooperative scheduling |
-| **Management Socket** | `0.0.0.0:9090` (Management Port) |
-| **Hot-Path Overhead** | **Zero**. Runs completely out-of-band; zero overhead on traffic workers |
-| **Format** | Prometheus Text-based format 0.0.4 / OpenMetrics standard |
-| **Security** | Supports Optional TLS/mTLS, Bearer Token / HTTP Basic Authentication, and CORS |
-
 ```text
-╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                        VELDA EDGE — PROMETHEUS EXPORTER ARCHITECTURE                                 ║
-║          (crates/velda-plugin/src/background/prometheus_exporter: PrometheusExporterPlugin)         ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
-
- [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
- (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, Management Port)
-  velda-worker-0 (Core 0)                        
-  velda-worker-1 (Core 1)                        
-        │                                                    │
-        ▼                                                    ▼
-  ┌───────────┐  Lock-Free Atomic Extraction ┌──────────────────────────────────┐
-  │ Pipeline  │ ───────────────────────────► │      MetricsStore::snapshot()    │
-  │ Counters  │    (Ordering::Relaxed)       │   (36 Pipelines, 850 Data Points)│
-  └───────────┘                              └────────────────┬─────────────────┘
-                                                              │
-                                                              ▼
-                                                   ┌─────────────────────┐
-                                                   │     template.rs     │
-                                                   │ Pre-baked Skeletons │
-                                                   │ SIMD Itoa (LUT)     │
-                                                   │ (850 Metric Lines)  │
-                                                   └──────────┬──────────┘
-                                                              │
-                                                              ▼ Reused Scratch Buffer
-                                                   ┌─────────────────────┐
-                                                   │      server.rs      │
-                                                   │ acquire_shadow_tcp  │
-                                                   │ mTLS + Auth + CORS  │
-                                                   │ Concurrency Limiter │
-                                                   └──────────┬──────────┘
-                                                              │
-                                                              ▼ HTTP/HTTPS GET /metrics
-                                                   ┌─────────────────────────────────────┐
-                                                   │         Prometheus Server           │
-                                                   └─────────────────────────────────────┘
++-----------------------------------------------------------------------------------+
+|                        Prometheus Exporter Architecture                           |
+|                                                                                   |
+|  [External Scraper] (Prometheus Server / VictoriaMetrics / Grafana Agent)         |
+|         │                                                                         |
+|         │ HTTP/HTTPS GET /metrics (Port 9090 Management Port)                     |
+|         ▼                                                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ Management Socket (Strictly Disjoint from Ingress Traffic Listeners)        │  |
+|  └──────────────────────────────────────┬──────────────────────────────────────┘  |
+|                                         │ Direct Socket Handoff (Zero-mpsc)       |
+|                                         ▼                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ velda-shadow-{i} (SCHED_IDLE, Assigned Core i Companion Worker)            │  |
+|  │  - Concurrency Limiter (Semaphore bounds concurrent scrapers)               │  |
+|  │  - Hard Timeout Guard (timeout_ms clamps slow scrapers)                     │  |
+|  │  - Optional Transport Security (TLS / mTLS + Bearer / Basic Auth + CORS)    │  |
+|  │  - Reusable Scratch Buffer Pool (BufferPool eliminates heap churn)          │  |
+|  │  - Pre-baked Label Skeletons (template.rs pre-allocates 858 metric lines)   │  |
+|  │  - Division-Free Integer Formatting (lut.rs reciprocal multiplication Itoa) │  |
+|  └──────────────────────────────────────┬──────────────────────────────────────┘  |
+|                                         │ Lock-Free Point-in-Time Atomic Snapshot |
+|                                         ▼                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ velda_observability::MetricsStore                                           │  |
+|  │  - 36 Pipeline Slots x Counters / Gauges / Latency Histograms              │  |
+|  │  - Frontline Traffic Workers record metrics via lock-free fetch_add         │  |
+|  └─────────────────────────────────────────────────────────────────────────────┘  |
++-----------------------------------------------------------------------------------+
 ```
 
----
-
-## 2. Technical Documentation Index
-
-| Document | Purpose & Scope |
-| :--- | :--- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Deep-dive architectural specification, Port Isolation Invariant, Socket Handoff from `velda-core`, Lock-Free snapshot extraction, and 200-byte LUT OpenMetrics serialization engine |
-| [MACHINE_CODE_ANALYSIS.md](MACHINE_CODE_ANALYSIS.md) | Ground-truth machine code analysis, reciprocal division-free arithmetic (`fast_write_u64`), AVX2 vector reduction (`_mm256_add_epi64`), L1D cache residency, and zero-contention invariant |
-| [BENCHMARK.md](BENCHMARK.md) | Standardized 4-tier benchmark specification form (Macro, System, Kernel Syscalls, HPC/CPU Hardware Counters) across 5 scenarios and comparative matrix vs OpenResty, Envoy, and Kong |
-| [RUNBOOK.md](RUNBOOK.md) | Emergency incident runbook for SRE/DevOps, P0–P3 triage matrix, Mermaid incident decision flowchart, field diagnostic CLI toolkit, and emergency remediation |
-| [TEST.md](TEST.md) | Automated unit & integration test catalog, OpenMetrics compliance assertions, and reproduction commands |
+The **`prometheus_exporter`** plugin is Velda Edge's dedicated telemetry export daemon (`phase: "background"`). It serves OpenMetrics and Prometheus text-format scrape endpoints (`GET /metrics`) on an isolated management port (e.g. `0.0.0.0:9090`), decoupled from the Data Plane request serving path.
 
 ---
 
-## 3. 100% Explicit Configuration Invariant
+## 1. What This Plugin Does
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration block and parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Fields for disabled features must be explicitly declared as `"none"`, `false`, `[]`, or `null`.
-
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `listen` | String | **Yes** | Valid `IP:PORT` socket address (must not collide with ingress listeners) | `"0.0.0.0:9090"` | Dedicated management IP:Port socket to bind and expose metrics. |
-| `path` | String | **Yes** | Must start with `/` | `"/metrics"` | HTTP URI path where scraper fetches metrics. |
-| `protocol` | String | **Yes** | `"http"` or `"https"` | `"http"` | Transport protocol for the management exporter server. |
-| `scrape.timeout_ms` | Integer (u64) | **Yes** | `100 ..= 60000` ms | `5000` | Exporter scraping request timeout threshold in milliseconds. |
-| `scrape.max_concurrency` | Integer (usize) | **Yes** | `1 ..= 1024` | `16` | Maximum concurrent scraper connections allowed simultaneously. |
-| `scrape.max_buffer_size_kb` | Integer (usize) | **Yes** | `16 ..= 16384` KB | `256` | Maximum scratch buffer capacity allocated for OpenMetrics serialization. |
-| `tls.mode` | String | **Yes** | `"none"`, `"tls"`, or `"mtls"` | `"none"` | TLS operating mode. If `"none"`, certificate paths must be `null`. |
-| `tls.cert_file` | String / null | **Yes** | Non-empty string when mode is `"tls"`/`"mtls"`, otherwise `null` | `null` | Path to server TLS certificate file in PEM format. |
-| `tls.key_file` | String / null | **Yes** | Non-empty string when mode is `"tls"`/`"mtls"`, otherwise `null` | `null` | Path to server private key file in PEM format. |
-| `tls.client_ca_file` | String / null | **Yes** | Non-empty string when mode is `"mtls"`, otherwise `null` | `null` | Path to client CA certificate bundle for mTLS verification. |
-| `cors.enabled` | Boolean | **Yes** | `true` or `false` | `false` | Whether Cross-Origin Resource Sharing is enabled for Web UIs (e.g. Grafana). |
-| `cors.allow_origins` | Array of strings | **Yes** | Allowed origin patterns (or `[]` if disabled) | `[]` | Permitted origins for CORS requests. |
-| `cors.allow_methods` | Array of strings | **Yes** | Permitted HTTP methods (or `[]` if disabled) | `[]` | Allowed HTTP methods (e.g. `["GET", "OPTIONS"]`). |
-| `cors.allow_headers` | Array of strings | **Yes** | Permitted HTTP headers (or `[]` if disabled) | `[]` | Allowed request headers (e.g. `["Authorization"]`). |
-| `auth.mode` | String | **Yes** | `"none"`, `"bearer"`, or `"basic"` | `"none"` | Exporter authentication mode. |
-| `auth.token` | String / null | **Yes** | Non-empty string if mode is `"bearer"`, otherwise `null` | `null` | Secret bearer token required for scraper access. |
-| `auth.username` | String / null | **Yes** | Non-empty string if mode is `"basic"`, otherwise `null` | `null` | HTTP Basic Auth username for scraper access. |
-| `auth.password` | String / null | **Yes** | Non-empty string if mode is `"basic"`, otherwise `null` | `null` | HTTP Basic Auth password for scraper access. |
+1. **Standardized OpenMetrics / Prometheus Telemetry**:
+   - Exposes comprehensive L4/L7 gateway telemetry: request counters, active stream gauges, byte throughput, error distribution, connection counts, and histogram latency buckets across all 36 pipeline slot combinations.
+2. **Dedicated Management Port Isolation**:
+   - Binds strictly to a dedicated management port (`listen`, default `0.0.0.0:9090`), strictly disjoint from customer traffic ports (e.g. 80, 443). Traffic surges or L7 DDoS attacks on ingress listeners cannot saturate or block telemetry scrapers.
+3. **Zero Heap Allocation Scrape Processing (Buffer Pooling)**:
+   - Reuses pre-allocated scratch buffers (`BufferPool`) across scrape cycles. Buffers are checked out via RAII (`PooledBuffer`), populated with metrics, written to the socket, and cleared back to the pool, eliminating heap churn during steady-state scraping.
+4. **Pre-baked Label Skeletons & Division-Free Itoa**:
+   - Pre-bakes exact metric name, label combinations, and `# HELP` / `# TYPE` strings into static byte slices (`template.rs`).
+   - Converts integer metrics to ASCII using division-free reciprocal multiplication and a 200-byte 2-digit lookup table (`lut.rs`), eliminating costly hardware integer division (`DIV`) instructions.
+5. **Lock-Free Point-in-Time Atomics**:
+   - Frontline Traffic Workers update metrics via `fetch_add(Ordering::Relaxed)`. Telemetry extraction executes point-in-time atomic loads without acquiring locks or suspending worker threads.
+6. **Configurable Enterprise Security**:
+   - Supports optional TLS / mutual TLS (mTLS with client CA validation), Bearer Token authentication, HTTP Basic authentication, and CORS headers for direct browser scraping (e.g. Grafana dashboards).
 
 ---
 
-## 4. Management Port Isolation Invariant
+## 2. Where It Sits in Velda Edge
 
-> [!CAUTION]
-> **Management Port Isolation Invariant**: The Prometheus exporter socket (`listen`) runs as a shadow background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
-> 
-> The configuration compiler validates that the set of management ports and traffic listener ports are strictly disjoint:
-> $$\text{ListenerPorts} \cap \text{ManagementPorts} = \emptyset$$
+- **Subsystem**: `crates/velda-plugin/src/background/prometheus_exporter/`
+- **Execution Phase**: `phase: "background"`
+- **Runtime Placement**: Operates entirely on the Shadow Logistics Worker (`velda-shadow-{i}`) running under `SCHED_IDLE` on its assigned core $i$.
+- **Data Plane Touchpoints**:
+  - Frontline Traffic Workers (`velda-worker-{0..N-1}`) **never** format metrics, never serialize strings, and never execute scrape socket I/O.
+  - Sockets are reserved through `velda-core::socket::GlobalSocketManager` using `SocketRole::Shadow` to guarantee anti-collision invariants against ingress traffic listeners.
 
 ---
 
-## 5. Configuration Manifest Example (`plugins.json`)
+## 3. Requirements & Prerequisites
+
+1. **Disjoint Port Allocation**: The configured `listen` address (e.g. `0.0.0.0:9090`) must not collide with any ingress traffic listeners.
+2. **Explicit Declarative Contract**: Every configuration block (`scrape`, `tls`, `cors`, `auth`) must be explicitly declared in `plugins.json`. Disabled features must be explicitly declared as `"none"`, `false`, `[]`, or `null`.
+3. **Scraper Network Access**: Ensure firewalls or Kubernetes NetworkPolicies permit incoming TCP traffic to port 9090 strictly from authorized Prometheus scrapers.
+
+---
+
+## 4. Quick Start Configuration
+
+Declare the plugin in your `plugins.json`:
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "prometheus_exporter",
-      "config": {
-        "listen": "0.0.0.0:9090",
-        "path": "/metrics",
-        "protocol": "http",
-        "scrape": {
-          "timeout_ms": 5000,
-          "max_concurrency": 16,
-          "max_buffer_size_kb": 256
-        },
-        "tls": {
-          "mode": "none",
-          "cert_file": null,
-          "key_file": null,
-          "client_ca_file": null
-        },
-        "cors": {
-          "enabled": false,
-          "allow_origins": [],
-          "allow_methods": [],
-          "allow_headers": []
-        },
-        "auth": {
-          "mode": "none",
-          "token": null,
-          "username": null,
-          "password": null
-        }
-      }
+  "id": "prometheus_exporter",
+  "type": "prometheus_exporter",
+  "enabled": true,
+  "config": {
+    "listen": "0.0.0.0:9090",
+    "path": "/metrics",
+    "protocol": "http",
+    "scrape": {
+      "timeout_ms": 5000,
+      "max_concurrency": 16,
+      "max_buffer_size_kb": 256
+    },
+    "tls": {
+      "mode": "none",
+      "cert_file": null,
+      "key_file": null,
+      "client_ca_file": null
+    },
+    "cors": {
+      "enabled": false,
+      "allow_origins": [],
+      "allow_methods": [],
+      "allow_headers": []
+    },
+    "auth": {
+      "mode": "none",
+      "token": null,
+      "username": null,
+      "password": null
     }
-  ]
+  }
 }
 ```
 
-> [!NOTE]
-> Background plugins are not attached to individual HTTP/gRPC routes. They run as standalone shadow daemons managed by the runtime lifecycle engine.
-
----
-
-## 6. Prometheus Scrape Configuration (`prometheus.yml`)
+### Prometheus Scraper Configuration (`prometheus.yml`)
 
 ```yaml
 scrape_configs:
   - job_name: 'velda_edge'
-    scrape_interval: 5s
-    scrape_timeout: 4s
+    scrape_interval: 10s
+    scrape_timeout: 5s
     static_configs:
       - targets: ['127.0.0.1:9090']
     metrics_path: /metrics
 ```
+
+---
+
+## 5. Documentation Directory
+
+For deeper technical and operational information, refer to the accompanying specifications:
+
+- **[RUNBOOK.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/prometheus_exporter/RUNBOOK.md)**: Field-by-field parameter explanations, tuned operational presets (Kubernetes Cluster, High-Security mTLS, High-Throughput Edge), emergency incident triage matrix (P0–P3), CLI diagnostic toolkit, and troubleshooting playbooks.
+- **[ARCHITECTURE.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/prometheus_exporter/ARCHITECTURE.md)**: Deep micro-architectural specification, memory geometry (200-byte LUT, pre-baked skeletons), reciprocal division-free assembly proof (`fast_write_u64`), lock-free atomic extraction, and physical hardware boundaries without dogmatic commitments.
+- **[BENCHMARK.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/prometheus_exporter/BENCHMARK.md)**: Standardized zero-bloat 5-tier benchmark specification across 6 operational scenarios (`KB 01` to `KB 06`), comparing against Envoy Proxy, Nginx, and Kong Gateway.

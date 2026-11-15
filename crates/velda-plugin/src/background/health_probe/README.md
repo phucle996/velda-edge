@@ -1,87 +1,98 @@
 # Health & Readiness Probe Plugin (`health_probe`)
 
-Background service exposing ultra-lightweight cloud-native health and readiness endpoints (`/livez`, `/readyz`) on an isolated management port for Kubernetes Kubelet, Docker Swarm, and external load balancers.
+```text
++-----------------------------------------------------------------------------------+
+|                        Health & Readiness Probe Architecture                      |
+|                                                                                   |
+|  [Cluster Orchestrator] (Kubernetes Kubelet / AWS ALB / GCP LB / Consul)          |
+|         │                                                                         |
+|         │ HTTP/1.1 Probes (GET /livez, GET /readyz)                               |
+|         ▼                                                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ Management Port 9091 (Strictly Disjoint from Traffic Listeners 80/443)     │  |
+|  └──────────────────────────────────────┬──────────────────────────────────────┘  |
+|                                         │ Direct Socket Handoff (Zero-mpsc)       |
+|                                         ▼                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ velda-shadow-{i} (SCHED_IDLE, Assigned Core i Companion Worker)            │  |
+|  │  - Sequential Inline Accept Loop (Zero tokio::spawn, Zero Heap Allocations)  │  |
+|  │  - Bounded Execution Timeout (Anti-Slowloris timeout_ms guard)              │  |
+|  │  - Stack Buffer (512B) + Register SWAR Path Matching (eval_swar_64/32x2)    │  |
+|  │  - Branchless ALU Index Selection: index = 2 - probe_match - probe_ok       │  |
+|  │  - Contiguous L1D Cache Wire Responses (195B, #[repr(C, align(64))])        │  |
+|  └──────────────────────────────────────┬──────────────────────────────────────┘  |
+|                                         │ Atomic State Query (Acquire / Release)  |
+|                                         ▼                                         |
+|  ┌─────────────────────────────────────────────────────────────────────────────┐  |
+|  │ HealthState (AtomicBool Flags: is_live, is_ready, is_draining)              │  |
+|  │  - SIGTERM received -> is_draining=true -> /readyz immediately returns 503  │  |
+|  │  - Orchestrator prunes pod endpoints before active connections drain        │  |
+|  └─────────────────────────────────────────────────────────────────────────────┘  |
++-----------------------------------------------------------------------------------+
+```
+
+The **`health_probe`** plugin is Velda Edge's dedicated container health and readiness daemon (`phase: "background"`). It runs an out-of-band, zero-allocation HTTP management server on a dedicated port (e.g., `0.0.0.0:9091`) to serve orchestrator liveness and readiness checks (`/livez`, `/readyz`) completely isolated from the Data Plane request serving path.
 
 ---
 
-## 1. Overview & Service Specification
+## 1. What This Plugin Does
 
-| Property | Value |
-| :--- | :--- |
-| **Plugin ID** | `health_probe` |
-| **Canonical Phase** | `background` |
-| **Execution Runtime** | Isolated shadow thread with `SCHED_IDLE` / `nice(19)` cooperative scheduling |
-| **Management Socket** | `0.0.0.0:9091` (Management Port) |
-| **Hot-Path Overhead** | **Zero**. Runs completely out-of-band; zero overhead on traffic workers |
-| **Response Payload** | **Zero-Byte Body (`Content-Length: 0`)**. Static byte constants in `.rodata`; zero heap allocation |
-| **Memory Access** | Lock-free atomic states (`AtomicBool`); 1–2 nanoseconds read overhead |
-
----
-
-## 2. Technical Documentation Index
-
-| Document | Purpose & Scope |
-| :--- | :--- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Deep-dive architectural specification, Port Isolation Invariant, Bootstrap Zero-mpsc handoff, Shadow Worker ownership, and Graceful Draining state machine |
-| [BENCHMARK.md](BENCHMARK.md) | Standardized performance benchmark specification, topology, microsecond latency tables, and reproduction commands |
-| [TEST.md](TEST.md) | Automated unit & integration test catalog, assertions, and Kubernetes pod lifecycle simulation |
-| [RUNBOOK.md](RUNBOOK.md) | SRE operational runbook, On-call P0–P3 triage matrix, decision flowchart, and emergency remediation |
+1. **Orchestrator Lifecycle Integration**:
+   - Exposes `/livez` to verify event-loop responsiveness and process vitality (failing probes trigger pod restarts).
+   - Exposes `/readyz` to signal readiness for client traffic (failing or draining probes cause orchestrators to prune the instance from routing pools).
+2. **Dedicated Management Port Isolation**:
+   - Operates on an isolated port (`listen`), strictly disjoint from customer traffic ports (e.g., ports 80, 443, 8080). Even under extreme traffic spikes or L7 DDoS saturation on traffic ports, orchestrator probes receive immediate responses without false-positive container evictions.
+3. **Sequential Inline Execution (Zero `tokio::spawn`)**:
+   - Eliminates per-probe task allocation and green-thread queue overhead. A single idle-scheduled worker processes incoming probe connections sequentially using a 512-byte stack buffer and static wire responses, eliminating heap allocations and task scheduling contention on the serving path.
+4. **Adaptive Register SWAR & Branchless ALU Evaluation**:
+   - Inspects the request path using SIMD Within A Register (SWAR) across 64-bit (`u64`) or dual 32-bit (`u32x2`) registers.
+   - Computes target response indices through branchless arithmetic (`index = 2 - probe_match - probe_ok`), avoiding branch misprediction penalties.
+5. **Contiguous L1D Cache-Resident Wire Responses**:
+   - Packs all pre-compiled HTTP/1.1 response frames (`200 OK`, `503 Service Unavailable`, `404 Not Found`) into a single 64-byte aligned 195-byte contiguous block (`WIRE_RESPONSES`), eliminating dynamic string formatting and memory allocation during socket streaming.
+6. **Graceful Draining Coordination**:
+   - Upon receiving a shutdown signal (SIGTERM/SIGINT), atomically sets `is_draining = true`. The `/readyz` endpoint immediately responds with `503 Service Unavailable`, prompting the cluster orchestrator to prune the instance from upstream endpoints *before* active TCP/H2/QUIC streams begin terminating.
 
 ---
 
-## 3. 100% Explicit Configuration Invariant
+## 2. Where It Sits in Velda Edge
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
-
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `listen` | String | **Yes** | Valid `IP:PORT` socket address (must not collide with ingress listeners) | `"0.0.0.0:9091"` | Dedicated management IP:Port socket to bind and serve health checks. |
-| `liveness_path` | String | **Yes** | Must start with `/` | `"/livez"` | HTTP URL path for Kubernetes Liveness probes. Returns `200 OK` when healthy, `503` when failed. |
-| `readiness_path` | String | **Yes** | Must start with `/` | `"/readyz"` | HTTP URL path for Kubernetes Readiness probes. Returns `200 OK` when ready, `503` when draining. |
-| `check_interval_ms` | Integer (u64) | **Yes** | `100 ..= 60000` ms | `1000` | Background health state evaluation interval in milliseconds. |
-| `timeout_ms` | Integer (u64) | **Yes** | `100 ..= 30000` ms | `500` | Health check probe evaluation timeout in milliseconds. |
+- **Subsystem**: `crates/velda-plugin/src/background/health_probe/`
+- **Execution Phase**: `phase: "background"`
+- **Runtime Placement**: Operates entirely on the Shadow Logistics Worker (`velda-shadow-{i}`) running under `SCHED_IDLE` on its assigned core $i$ (recommended: Core 0).
+- **Data Plane Touchpoints**:
+  - Frontline Traffic Workers (`velda-worker-{0..N-1}`) **never** interact with the probe listener, never route health checks, and never send messages over `mpsc` channels to this plugin.
+  - Sockets are pre-reserved through `velda-core::socket::GlobalSocketManager` using `SocketRole::Shadow` to guarantee anti-collision invariants against ingress listeners.
 
 ---
 
-## 4. Management Port Isolation Invariant
+## 3. Requirements & Prerequisites
 
-> [!CAUTION]
-> **Management Port Isolation Invariant**: The health probe socket (`listen`) runs as a shadow background service and **MUST NEVER** collide with any Data Plane traffic listener ports (e.g., ports `80`, `443`, `8080`, `8443`, `50051`).
-> 
-> The configuration compiler validates that the set of management ports and traffic listener ports are strictly disjoint:
-> $$\text{ListenerPorts} \cap \text{ManagementPorts} = \emptyset$$
-
-Running health checks on an isolated management port prevents cascading outages: even under extreme traffic load or DDoS saturation on traffic ports, orchestrator health probes are answered immediately in microseconds without timeout or false-positive container restarts.
+1. **Disjoint Port Allocation**: The configured `listen` address (e.g., `0.0.0.0:9091`) must not overlap with any public or internal traffic listeners declared in `velda-ingress`.
+2. **Explicit Configuration Contract**: Every configuration parameter must be intentionally declared in `plugins.json`. No implicit or silent fallback values exist.
+3. **Container Network Exposure**: When deploying inside containerized environments (Kubernetes, Docker, ECS), the probe port (e.g., 9091) must be exposed in the container definition (`containerPort: 9091`) and mapped to the container network namespace.
 
 ---
 
-## 5. Configuration Manifest Example (`plugins.json`)
+## 4. Quick Start Configuration
+
+Declare the plugin in your `plugins.json`:
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "health_probe",
-      "config": {
-        "listen": "0.0.0.0:9091",
-        "liveness_path": "/livez",
-        "readiness_path": "/readyz",
-        "check_interval_ms": 1000,
-        "timeout_ms": 500
-      }
-    }
-  ]
+  "id": "health_probe",
+  "type": "health_probe",
+  "enabled": true,
+  "config": {
+    "listen": "0.0.0.0:9091",
+    "liveness_path": "/livez",
+    "readiness_path": "/readyz",
+    "check_interval_ms": 1000,
+    "timeout_ms": 500
+  }
 }
 ```
 
-> [!NOTE]
-> Background plugins are not attached to individual HTTP/gRPC routes. They run as standalone shadow daemons managed by the runtime lifecycle engine.
-
----
-
-## 6. Kubernetes Pod Specification Example
+### Kubernetes Pod Definition Example
 
 ```yaml
 apiVersion: v1
@@ -105,10 +116,24 @@ spec:
         port: 9091
       initialDelaySeconds: 2
       periodSeconds: 5
+      timeoutSeconds: 1
+      failureThreshold: 3
     readinessProbe:
       httpGet:
         path: /readyz
         port: 9091
       initialDelaySeconds: 1
       periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 2
 ```
+
+---
+
+## 5. Documentation Directory
+
+For deeper technical and operational information, refer to the accompanying specifications:
+
+- **[RUNBOOK.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/health_probe/RUNBOOK.md)**: Field-by-field parameter explanations, tuned operational presets (Kubernetes Production, Bare-Metal WAN Edge, Graceful Draining), emergency incident triage matrix (P0–P3), CLI diagnostic toolkit, and troubleshooting playbooks.
+- **[ARCHITECTURE.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/health_probe/ARCHITECTURE.md)**: Deep micro-architectural specification, memory geometry (195B L1D contiguous layout), SWAR assembly extraction (`eval_swar_64`), branchless ALU mechanics, and physical hardware boundaries without dogmatic commitments.
+- **[BENCHMARK.md](file:///home/phucle/.gemini/antigravity/worktrees/velda-edge/setup_kvm_collectors_isolation/crates/velda-plugin/src/background/health_probe/BENCHMARK.md)**: Standardized zero-bloat 5-tier benchmark specification across 6 operational scenarios (`KB 01` to `KB 06`), comparing against Envoy Proxy, Nginx, and Kong Gateway.

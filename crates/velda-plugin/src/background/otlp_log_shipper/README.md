@@ -1,104 +1,142 @@
 # OpenTelemetry Log Shipper Plugin (`otlp_log_shipper`)
 
-The `otlp_log_shipper` plugin is a high-performance background telemetry service for the **Velda Edge Data Plane**. It subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches across all application protocols and exports standardized OpenTelemetry `ResourceLogs` payloads directly to OpenTelemetry Collectors via **OTLP/HTTP** (JSON over persistent HTTP/1.1 Keep-Alive) or **OTLP/gRPC** (binary Protocol Buffers over HTTP/2).
+High-performance, zero-allocation background telemetry exporter for Velda Edge. Subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches across all application protocols (HTTP/1.1, HTTP/2, HTTP/3, gRPC, Raw L4 TCP/UDP) and exports standardized OpenTelemetry `ResourceLogs` directly to OpenTelemetry Collectors via **OTLP/gRPC** (binary Protocol Buffers over persistent HTTP/2) or **OTLP/HTTP** (JSON over persistent HTTP/1.1 Keep-Alive) strictly from isolated Shadow Logistics Workers.
 
 ---
 
-## 1. Overview & Service Specification
+## 1. Documentation Index
 
-| Property | Value |
-| :--- | :--- |
-| **Plugin Identifier** | `otlp_log_shipper` |
-| **Canonical Execution Phase** | `background` (Dedicated Shadow Logistics Worker) |
-| **Execution Runtime** | Pinned to `velda-shadow-0` under Linux `SCHED_IDLE` scheduling priority |
-| **Capability Declaration** | `PluginCapability::default()` (Non-request-serving background logistics service) |
-| **Supported Ingress Protocols** | Ingests access log records across HTTP/1.1, HTTP/2, HTTP/3, gRPC, and Raw L4 TCP/UDP |
-| **Hot-Path Request Overhead** | **0 nanoseconds serving cost**; zero lock contention, zero string allocations, zero I/O on traffic cores |
-| **Export Transports** | OTLP/HTTP (JSON over HTTP/1.1, default port 4318) or OTLP/gRPC (Protobuf over HTTP/2, default port 4317) |
-| **OpenTelemetry Compliance** | Conforms to OpenTelemetry Log Data Model (`opentelemetry.proto.logs.v1`) |
+| Document | Purpose | Primary Audience |
+| :--- | :--- | :--- |
+| **[README.md](README.md)** | Subsystem overview, configuration contract, production profiles, quickstart verification | All Engineers, Operators |
+| **[RUNBOOK.md](RUNBOOK.md)** | SRE On-Call Incident Triage Matrix (P0–P3), Mermaid decision flowchart, CLI diagnostic toolkit, emergency playbooks | On-Call SREs, Systems Engineers |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep micro-architectural specification, memory geometry, Protobuf wire skeletons, SSSE3 SIMD PSHUFB hex stamping, physical boundaries | Systems Architects, Performance Engineers |
+| **[BENCHMARK.md](BENCHMARK.md)** | First-principles 5-tier zero-bloat benchmark specification adhering to `/velda-benchmark` with 6-scenario comparative matrix | Performance Engineers, SRE Leads |
+
+---
+
+## 2. Overview & Core Invariants
+
+The `otlp_log_shipper` plugin (`phase: "background"`) operates as an autonomous background companion service designed to format and export structured access logs without competing with frontline traffic workers:
+
+* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O.
+* **Lock-Free SPSC Ring Drain**: Frontline traffic workers push 64-byte scalar `AccessLogRecord` structs into core-local Single-Producer Single-Consumer (SPSC) ring buffers without mutexes or lock contention.
+* **Pre-Baked Wire Skeletons (Protobuf)**: In gRPC mode, static Resource, Scope, and log record header framing bytes are pre-computed into static byte skeletons. Record attributes and timestamps are stamped directly into memory via raw pointer arithmetic, eliminating Prost runtime AST heap allocations.
+* **Pre-Baked Chunk Interleaving & SIMD Itoa (JSON)**: In HTTP mode, static JSON fragments, a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), and SSSE3 `PSHUFB` vector instructions convert 128-bit trace and request IDs into 32 hex characters in parallel without scalar branching.
+* **Persistent Transport Reuse**: Maintains persistent HTTP/2 connections for gRPC (Port 4317) or Keep-Alive HTTP/1.1 connections for JSON (Port 4318), avoiding per-flush TCP and TLS handshake overhead.
+* **Fail-Open Autonomy**: If the downstream OpenTelemetry Collector hangs, crashes, or rejects payloads, the shipper logs warnings and backs off without blocking or stalling downstream client request serving.
 
 ```text
-╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                          VELDA EDGE — OTLP LOG SHIPPER ARCHITECTURE                                  ║
-║              (crates/velda-plugin/src/background/otlp_log_shipper: OtlpLogShipperPlugin)             ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                          VELDA EDGE — OTLP LOG SHIPPER PIPELINE                                  ║
+║                    (crates/velda-plugin: otlp_log_shipper::plugin)                               ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 
- [FRONTLINE TRAFFIC WORKERS]                     [SHADOW LOGISTICS WORKER: velda-shadow-0]
- (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Core 0, 100ms Ticker)
+ [FRONTLINE TRAFFIC WORKERS (Cores 0..N-1)]     [SHADOW LOGISTICS WORKER (Core i)]
+ (Serving Hot Path, Priority 1)                 (Linux SCHED_IDLE, Assigned Core i)
   velda-worker-0 (Core 0)                        
   velda-worker-1 (Core 1)                        
-        │                                                    │ (Every 100ms)
+  ...                                            
+  velda-worker-n (Core N-1)                      
+        │                                                    │ (Periodic Ticker)
         ▼                                                    ▼
-  ┌───────────┐  Zero-Lock SPSC Ring Drain  ┌──────────────────────────────────┐
-  │ AccessLog │ ──────────────────────────► │  Drain Batches (max 1000 recs)   │
-  │  Record   │    (< 2ns per record)       └────────────────┬─────────────────┘
-  └───────────┘                                              │
-                                              ┌──────────────┴──────────────┐
-                                              │                             │
-                                        [mode: "grpc"]                [mode: "http"]
-                                              ▼                             ▼
-                                   ┌─────────────────────┐       ┌─────────────────────┐
-                                   │  proto/template.rs  │       │   json/template.rs  │
-                                   │ Wire Skeletons (PB) │       │ Pre-Baked Envelope  │
-                                   │ Raw Pointer Stamp   │       │ SIMD Itoa + PSHUFB  │
-                                   │ (96-111 CPU cycles) │       │ (203-311 cycles)    │
-                                   └──────────┬──────────┘       └──────────┬──────────┘
-                                              │                             │
-                                              ▼                             ▼
-                                   ┌─────────────────────┐       ┌─────────────────────┐
-                                   │   proto/client.rs   │       │    json/client.rs   │
-                                   │ Persistent HTTP/2   │       │ Persistent HTTP/1.1 │
-                                   │ 5-byte Framing      │       │ Keep-Alive (TCP/TLS)│
-                                   └──────────┬──────────┘       └──────────┬──────────┘
-                                              │                             │
-                                              ▼                             ▼
-                                  gRPC Port 4317 (Protobuf)      HTTP Port 4318 (JSON)
-                                  ┌────────────────────────────────────────────────────┐
-                                  │             OpenTelemetry Collector                │
-                                  └────────────────────────────────────────────────────┘
+  ┌───────────┐  Zero-Lock SPSC Ring Drain   ┌──────────────────────────────────┐
+  │ AccessLog │ ───────────────────────────► │  Drain Batches (max_batch_size)  │
+  │  Record   │    (O(1) Ring Dequeue)       └────────────────┬─────────────────┘
+  └───────────┘                                               │
+                                                ┌─────────────┴─────────────┐
+                                                │                           │
+                                          [mode: "grpc"]              [mode: "http"]
+                                                ▼                           ▼
+                                     ┌─────────────────────┐     ┌─────────────────────┐
+                                     │  proto/template.rs  │     │   json/template.rs  │
+                                     │ Wire Skeletons (PB) │     │ Pre-Baked Envelope  │
+                                     │ Raw Pointer Stamp   │     │ SIMD Itoa + PSHUFB  │
+                                     │ (Zero AST Churn)    │     │ (LUT-accelerated)   │
+                                     └──────────┬──────────┘     └──────────┬──────────┘
+                                                │                           │
+                                                ▼                           ▼
+                                     ┌─────────────────────┐     ┌─────────────────────┐
+                                     │   proto/client.rs   │     │    json/client.rs   │
+                                     │ Persistent HTTP/2   │     │ Persistent HTTP/1.1 │
+                                     │ 5-byte Framing      │     │ Keep-Alive (TCP/TLS)│
+                                     └──────────┬──────────┘     └──────────┬──────────┘
+                                                │                           │
+                                                ▼                           ▼
+                                    gRPC Port 4317 (Protobuf)    HTTP Port 4318 (JSON)
+                                    ┌──────────────────────────────────────────────────┐
+                                    │             OpenTelemetry Collector              │
+                                    └──────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Technical Documentation Index
+## 3. Shadow Workload Weight & Core Affinity
 
-| Document | Purpose & Scope |
-| :--- | :--- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Architectural specification, pre-baked static JSON envelope (`OtlpJsonEnvelope`), persistent connection reuse, Protobuf encoder, and `SCHED_IDLE` lifecycle |
-| [MACHINE_CODE_ANALYSIS.md](MACHINE_CODE_ANALYSIS.md) | Assembly inspection, memory alignment, hardware CPU cycle counts via `RDTSC`, division-free LUT serialization, and A/B co-existence verification |
-| [BENCHMARK.md](BENCHMARK.md) | Standardized 4-tier benchmark specification form (Macro Serving, System Resources, Kernel Network & Syscalls, Hardware PMU Counters) across five operational scenarios |
-| [RUNBOOK.md](RUNBOOK.md) | Site Reliability Engineering (SRE) operational playbook, severity classification matrix, incident decision flowchart, diagnostic tooling, and collector blackhole remediation |
-| [TEST.md](TEST.md) | Automated unit, integration, and machine code test catalog, schema validation, transparent reconnection tests, and reproduction commands |
+Under the Velda Edge Workload Distribution Model, background logistics plugins are assigned a workload weight from 1 to 100 based on CPU intensity, memory footprint, cadence/wakeup rate, and failure blast radius:
+
+| Physical Dimension | Metric Profile | Impact Analysis |
+| :--- | :--- | :--- |
+| **Assigned Workload Weight** | **70** | **High Background Workload** |
+| **CPU Intensity** | High | SPSC ring batch drain, per-record Protobuf serialization, SSSE3 SIMD hex stamping (`PSHUFB`), HTTP/2 binary framing or JSON text interleaving, and TLS encryption. Under heavy traffic (e.g. 50K RPS), this produces sustained CPU activity on the shadow core. |
+| **Memory Footprint** | ~512 KB – 2 MB | Pre-allocated Protobuf wire arena, JSON scratch formatting vectors, and HTTP/2 transport connection state. Zero ongoing heap churn. |
+| **Cadence / Wakeup Rate** | High (50ms – 1000ms) | Sub-second flush interval (default: 100ms) generates frequent scheduler activity to maintain low log delivery latency. |
+| **Failure Blast Radius** | P3 (Low Impact) | Access log loss only. Collector downtime, connection timeouts, or rejected payloads do not impact frontline client request serving. |
+
+### Complementary Static Sharding Recommendation
+* **Target Affinity**: Core 2 or 3.
+* **Strict Anti-Colocation Rule**: NEVER co-locate on Core 0 with latency-critical `health_probe` (Weight: 1) or master traffic intake. NEVER co-locate on the same core as `loki_log_shipper` (Weight: 80) — both are heavy log shippers that will exhaust core L1/L2 cache capacity and TLS cryptographic hardware units.
+* **Ideal Pairing**: Pair with sleep-bound rotators (`jwks_rotator`, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
 
 ---
 
-## 3. Strict 100% Explicit Configuration Invariant
+## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration field must be explicitly declared in `plugins.json`. Velda Edge strictly rejects implicit fallbacks, magic defaults, or omitted properties. If any property is omitted or malformed, configuration validation fails fast at synchronization time.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "otlp_log_shipper"`.
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Production Value | Description |
+| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `protocol` | string | **Yes** | `"http"` or `"grpc"` | `"http"` (High Concurrency)<br>`"grpc"` (Low Wire Overhead) | Transport protocol for shipping logs to OpenTelemetry Collector. |
-| `endpoint` | string | **Yes** | Valid URI starting with `http://`, `https://`, `grpc://`, or `grpcs://` | `"http://otel-collector:4318/v1/logs"` | Ingestion endpoint URL of the target OpenTelemetry Collector. |
-| `service_name` | string | **Yes** | Non-empty string (`^[a-zA-Z0-9_\-\.]+$`) | `"velda-edge-prod"` | Logical service identifier reported in OpenTelemetry Resource attributes (`service.name`). |
-| `flush_interval_ms` | integer (u64) | **Yes** | `100 ..= 60000` (milliseconds) | `100` (100 milliseconds) | Periodic timer interval for waking up shadow worker to drain SPSC rings and ship buffered records. |
-| `max_batch_size` | integer (usize) | **Yes** | `1 ..= 10000` (records) | `1000` | Maximum number of log records grouped into a single exported payload. |
-| `connect_timeout_ms`| integer (u64) | **Yes** | `100 ..= 60000` (milliseconds) | `1000` (1 second) | TCP and TLS connection establishment timeout before aborting and retrying. |
-| `request_timeout_ms`| integer (u64) | **Yes** | `100 ..= 60000` (milliseconds) | `1000` (1 second) | Maximum round-trip time allowed for an HTTP/gRPC export request to complete. |
-| `headers` | object | **Yes** | Key-value map of string pairs (use `{}` if empty) | `{}` or Auth headers | Custom HTTP or gRPC headers sent with every export request (for example, authorization tokens, tenant IDs). |
+| `protocol` | String | **Yes** | `"http"` or `"grpc"` | `"grpc"` | Transport protocol: `"grpc"` streams Protobuf over HTTP/2 (port 4317); `"http"` streams JSON over HTTP/1.1 (port 4318). |
+| `endpoint` | String | **Yes** | Valid URI (`http://`, `https://`, `grpc://`, `grpcs://`) | `"grpc://127.0.0.1:4317"` | Target OpenTelemetry Collector ingestion endpoint. |
+| `service_name` | String | **Yes** | Non-empty ASCII string (`^[a-zA-Z0-9_\-\.]+$`) | `"velda-edge-prod"` | Logical service identifier reported in OpenTelemetry Resource attributes (`service.name`). |
+| `flush_interval_ms` | Integer (u64) | **Yes** | `100 ..= 60000` | `100` | Periodic timer interval for waking up shadow worker to drain SPSC rings and ship buffered records. |
+| `max_batch_size` | Integer (usize) | **Yes** | `1 ..= 10000` | `1000` | Maximum number of log records grouped into a single exported payload. |
+| `connect_timeout_ms`| Integer (u64) | **Yes** | `100 ..= 60000` | `1000` | TCP and TLS connection establishment timeout before aborting and retrying. |
+| `request_timeout_ms`| Integer (u64) | **Yes** | `100 ..= 60000` | `1000` | Maximum round-trip time allowed for an HTTP/gRPC export request to complete. |
+| `headers` | Object | **Yes** | Key-value map of string pairs (`{}` if empty) | `{}` | Custom headers sent with every export request (e.g. Bearer auth, tenant IDs). |
 
 ---
 
-## 4. Production Configuration Profiles
+## 5. Production Configuration Profiles
 
-### Profile 1: OTLP / HTTP Keep-Alive Production Profile (Default Port 4318)
-*Recommended for production clusters with HTTP-based OpenTelemetry log aggregation pipelines.*
+### Profile 1: High-Throughput Production Profile (OTLP / gRPC Protobuf)
+*Recommended for production clusters to minimize wire bandwidth and CPU usage via binary Protobuf framing.*
 
 ```json
 {
   "id": "otlp_log_shipper",
-  "phase": "background",
+  "config": {
+    "protocol": "grpc",
+    "endpoint": "grpc://otel-collector.monitoring.svc.cluster.local:4317",
+    "service_name": "velda-edge-production",
+    "flush_interval_ms": 100,
+    "max_batch_size": 1000,
+    "connect_timeout_ms": 1000,
+    "request_timeout_ms": 1000,
+    "headers": {
+      "authorization": "Bearer sec-tok-98471982734"
+    }
+  }
+}
+```
+
+### Profile 2: Standard REST / JSON Profile (OTLP / HTTP Keep-Alive)
+*Recommended for environments utilizing HTTP/JSON-based OpenTelemetry log aggregation pipelines.*
+
+```json
+{
+  "id": "otlp_log_shipper",
   "config": {
     "protocol": "http",
     "endpoint": "http://otel-collector.monitoring.svc.cluster.local:4318/v1/logs",
@@ -107,37 +145,70 @@ The `otlp_log_shipper` plugin is a high-performance background telemetry service
     "max_batch_size": 1000,
     "connect_timeout_ms": 1000,
     "request_timeout_ms": 1000,
-    "headers": {
-      "X-Environment": "production"
-    }
+    "headers": {}
   }
 }
 ```
 
-### Profile 2: OTLP / gRPC Binary Protobuf Profile (Default Port 4317)
-*Recommended for high-throughput environments prioritizing minimal wire bandwidth via binary Protobuf framing.*
+### Profile 3: Secure Cross-Datacenter WAN Profile (gRPC + TLS)
+*Recommended for cross-datacenter or cloud ingestion endpoints requiring transport security.*
 
 ```json
 {
   "id": "otlp_log_shipper",
-  "phase": "background",
   "config": {
     "protocol": "grpc",
-    "endpoint": "grpc://otel-collector.monitoring.svc.cluster.local:4317",
-    "service_name": "velda-edge-production",
-    "flush_interval_ms": 100,
+    "endpoint": "grpcs://otel.eu-west-1.aws.internal:4317",
+    "service_name": "velda-edge-wan",
+    "flush_interval_ms": 200,
     "max_batch_size": 2000,
-    "connect_timeout_ms": 1000,
-    "request_timeout_ms": 1000,
-    "headers": {}
+    "connect_timeout_ms": 2000,
+    "request_timeout_ms": 2000,
+    "headers": {
+      "x-api-key": "secret-collector-key"
+    }
   }
 }
 ```
 
 ---
 
-## 5. Architectural Invariants
+## 6. Verification & Quickstart
 
-1. **Pre-Baked Static JSON Envelope (`OtlpJsonEnvelope`)**: The complex OpenTelemetry outer JSON envelope containing resource attributes and scope descriptors is serialized once at startup into byte vectors, completely avoiding runtime format string construction.
-2. **Persistent Connection Reuse**: Connections are kept open across export cycles via persistent TCP keep-alive, preventing connection thrashing and repeated handshakes.
-3. **Reference-Counted Memory Reclamation**: Consumes `Arc<[AccessLogRecord]>` batches from `LogStore`. Memory is automatically returned to the global pool once the last active exporter drops its batch reference.
+### Step 1: Start OpenTelemetry Collector
+Ensure an OpenTelemetry Collector instance is running and listening on port 4317 (gRPC) or port 4318 (HTTP).
+
+### Step 2: Declare in `plugins.json`
+Include the plugin block in `plugins.json`:
+
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "otlp_log_shipper",
+      "config": {
+        "protocol": "grpc",
+        "endpoint": "grpc://127.0.0.1:4317",
+        "service_name": "velda-edge-prod",
+        "flush_interval_ms": 100,
+        "max_batch_size": 1000,
+        "connect_timeout_ms": 1000,
+        "request_timeout_ms": 1000,
+        "headers": {}
+      }
+    }
+  ]
+}
+```
+
+### Step 3: Run Velda Edge Gateway
+```bash
+rtk cargo run -p velda-edge
+```
+
+### Step 4: Verify Telemetry Stream
+Generate downstream traffic and verify log batches reach the OpenTelemetry Collector:
+```text
+DEBUG otlp_log_shipper: Flushed OTLP log batch via gRPC successfully records=1000
+```

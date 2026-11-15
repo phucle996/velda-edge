@@ -1,130 +1,159 @@
-# OpenTelemetry Metrics Exporter Plugin (`otlp_metrics_exporter`) — SRE Operational Runbook
+# OpenTelemetry Metrics Exporter — SRE On-Call Runbook & Incident Triage Guide
 
-This document is the emergency incident response guide (**SRE Incident Playbook & On-Call Runbook**) designed for SREs, DevOps engineers, and operators managing Velda Edge Gateway clusters and monitoring the OpenTelemetry metrics export pipeline in production.
-
----
-
-## 1. On-Call Triage Matrix
-
-| Severity | Symptoms & Alerts | Root Cause | Immediate Mitigation | Target SLA |
-| :---: | :--- | :--- | :--- | :---: |
-| **P0** | Edge Gateway cluster experiences latency spikes or process crashes when exporter is enabled | Memory exhaustion (OOM), host kernel panic, or system resource starvation | Activate Emergency Bypass (disable `otlp_metrics_exporter` plugin via Control Plane API) | **< 5 minutes** |
-| **P1** | `VeldaOtelMetricsHighFailureRate` (`failed_count` metric continuously increments) | Downstream OpenTelemetry Collector is crashed, unresponsive, or unreachable on port 4317/4318 | Check OpenTelemetry Collector cluster; Gateway remains 100% Fail-Open without impacting user traffic | **< 15 minutes** |
-| **P2** | `VeldaOtelMetricsRejected` (Collector returns HTTP 4xx or non-zero gRPC status) | Authentication failure (missing or expired Bearer token in `headers`), or invalid `service_name` | Update the `headers` field in the plugin configuration via Control Plane | **< 30 minutes** |
-| **P3** | Metrics dashboard on Grafana/Datadog displays gaps or stale graphs | `interval_secs` is configured too high (e.g., 60s) or collector disk intake is throttling | Adjust `interval_secs` to `10` or `15` seconds via Control Plane API | **< 2 hours** |
+This runbook guides Site Reliability Engineers (SREs) and on-call operators in diagnosing, troubleshooting, and resolving production incidents involving the **OpenTelemetry Metrics Exporter Plugin** (`otlp_metrics_exporter`).
 
 ---
 
-## 2. Incident Decision Flowchart
+## 1. Parameter Reference & Operational Impact
+
+| Field | Production Range | Operational Impact | Recommended Default |
+| :--- | :--- | :--- | :--- |
+| `protocol` | `"grpc"` \| `"http"` | `"grpc"` streams binary Protobuf over HTTP/2, saving CPU and wire bandwidth. `"http"` emits human-readable JSON over HTTP/1.1. | `"grpc"` |
+| `endpoint` | Valid URI | Target OTLP Collector address. If unreachable, exporter enters non-blocking exponential backoff without stalling request traffic. | `"grpc://127.0.0.1:4317"` |
+| `interval_secs` | `1 ..= 3600` | Telemetry push interval in seconds. Lower values increase freshness but generate higher network load. | `10` |
+| `connect_timeout_ms` | `100 ..= 60000` | Connection establishment timeout. Prevents hung TCP/TLS handshakes from blocking the shadow task loop. | `5000` |
+| `request_timeout_ms` | `100 ..= 60000` | Export request timeout before aborting and logging a failure. | `10000` |
+| `service_name` | ASCII string | Logical service name injected into OpenTelemetry Resource attributes (`service.name`). | `"velda-edge-prod"` |
+| `headers` | Key-value pairs | Custom headers sent with every request (e.g. Bearer auth, tenant IDs). | `{}` |
+
+---
+
+## 2. Tuned Production Presets
+
+### Preset A: High-Throughput Kubernetes Production Daemon (gRPC / HTTP/2)
+```json
+{
+  "protocol": "grpc",
+  "endpoint": "grpc://otel-collector.monitoring.svc.cluster.local:4317",
+  "interval_secs": 10,
+  "connect_timeout_ms": 5000,
+  "request_timeout_ms": 10000,
+  "service_name": "velda-edge-prod",
+  "headers": {}
+}
+```
+*Rationale: In-place Protobuf stamping and persistent HTTP/2 stream multiplexing deliver maximum telemetry throughput with zero heap allocations.*
+
+### Preset B: Staging / Local Debugging REST Telemetry (HTTP/1.1 JSON)
+```json
+{
+  "protocol": "http",
+  "endpoint": "http://127.0.0.1:4318/v1/metrics",
+  "interval_secs": 5,
+  "connect_timeout_ms": 5000,
+  "request_timeout_ms": 10000,
+  "service_name": "velda-edge-dev",
+  "headers": {}
+}
+```
+*Rationale: Pre-baked JSON template and 2-digit LUT allow seamless ingestion into JSON-based monitoring proxies without requiring gRPC tooling.*
+
+### Preset C: Secure Cross-Datacenter WAN Telemetry (gRPC + TLS + Token Auth)
+```json
+{
+  "protocol": "grpc",
+  "endpoint": "grpcs://otel.eu-west-1.aws.internal:4317",
+  "interval_secs": 15,
+  "connect_timeout_ms": 5000,
+  "request_timeout_ms": 10000,
+  "service_name": "velda-edge-wan",
+  "headers": {
+    "authorization": "Bearer prod-secret-token-v2"
+  }
+}
+```
+*Rationale: 15-second cadence minimizes WAN traffic and TLS renegotiation while keeping central dashboards fully updated.*
+
+---
+
+## 3. SRE Incident Triage Matrix (P0 – P3)
+
+| Severity | Incident Pattern | Symptoms & Indicators | Immediate Mitigation Action |
+| :---: | :--- | :--- | :--- |
+| **P0** | **Process Panic on Startup / Host Starvation** | Gateway fails boot or memory usage spikes uncontrollably. | Check `endpoint` validity and network connectivity. Activate emergency bypass by removing the plugin from `plugins.json` and pushing hot reload. |
+| **P1** | **Telemetry Blackhole (Metrics Missing)** | `failed_count` continuously increments; collector shows 0 incoming data points. | 1. Check if the OpenTelemetry Collector is alive on port 4317/4318.<br>2. Gateway operates in Fail-Open mode: live traffic is **never** impacted.<br>3. Inspect network firewall rules. |
+| **P2** | **Collector Rejection / Authentication Failure** | Collector returns HTTP 401/403 or non-zero gRPC status (`UNAUTHENTICATED`, `INVALID_ARGUMENT`). | 1. Update `headers` in `plugins.json` with a valid Bearer token.<br>2. Verify OpenTelemetry Collector version (must be $\ge$ v0.80.0).<br>3. Reload configuration. |
+| **P3** | **Dashboard Telemetry Gaps / Staleness** | Metrics graphs on Grafana/Datadog show periodic gaps or delayed points. | 1. Reduce `interval_secs` from 30s/60s to 10s.<br>2. Check Collector queue depth and disk I/O throttling. |
+
+---
+
+## 4. Incident Triage Decision Flowchart
 
 ```mermaid
 flowchart TD
-    Alert["Alert Triggered: VeldaOtelMetricsHighFailureRate\n(failed_count continuously increasing)"] --> CheckCollector{"Is OTel Collector Sink\n(Port 4317 / 4318) Reachable?"}
-    
-    CheckCollector -->|Connection Refused / Timeout| ActionCollector["1. Verify OpenTelemetry Collector process\n2. Confirm Gateway operates in Fail-Open mode\n3. Restart or horizontally scale Collector cluster"]
-    CheckCollector -->|Port Open & Responding| CheckAuth{"What Error Code Does\nCollector Return?"}
-    
-    CheckAuth -->|HTTP 401 / 403 / gRPC Unauthenticated| ActionAuth["Check headers field in plugin config:\nUpdate Bearer Token / API Key via Control Plane"]
-    CheckAuth -->|HTTP 400 / gRPC InvalidArgument| ActionSchema["Verify OTel Collector version:\nEnsure Collector meets minimum version v0.80.0+"]
-    CheckAuth -->|Timeout / Connection Reset| CheckNetwork{"Is Internal Network Experiencing\nPacket Loss or High Jitter?"}
-    
-    CheckNetwork -->|Network Congestion Detected| ActionInterval["Increase interval_secs from 10s to 30s\nto reduce network export frequency"]
-    CheckNetwork -->|Network Normal| CheckShadow["Inspect CPU usage of velda-shadow-0 thread\n(Nominal baseline < 0.1% CPU)"]
+    ALERT["Alert: OTLP Metrics Export Failing (failed_count increasing)"] --> CHK_COLLECTOR{"Is Collector Endpoint\n(Port 4317 / 4318) Reachable?"}
+
+    CHK_COLLECTOR -->|"No / Connection Refused"| ACT_COLLECTOR["1. Verify OpenTelemetry Collector process\n2. Note: Gateway runs Fail-Open (zero traffic impact)\n3. Restart Collector service"]
+    CHK_COLLECTOR -->|"Yes / Port Open"| CHK_STATUS{"What Error or Status\nDoes Collector Return?"}
+
+    CHK_STATUS -->|"HTTP 401/403 or gRPC Unauthenticated"| FIX_AUTH["Update authorization Bearer token in headers\nvia Control Plane reload"]
+    CHK_STATUS -->|"HTTP 400 or gRPC InvalidArgument"| FIX_SCHEMA["Verify Collector version (>= v0.80.0)\nCheck service_name string constraints"]
+    CHK_STATUS -->|"Timeout / Reset"| CHK_NET{"Is Network Experiencing\nLoss or High Jitter?"}
+
+    CHK_NET -->|"Network Congested"| ACT_INTERVAL["Increase interval_secs to reduce export frequency"]
+    CHK_NET -->|"Network Normal"| CHK_THREAD["Inspect CPU of velda-shadow-{i} thread\n(Nominal baseline < 0.8% CPU)"]
 ```
 
 ---
 
-## 3. Field Diagnostic CLI Toolkit
+## 5. Diagnostic CLI Toolkit
 
-When alerted by PagerDuty or Prometheus, SSH directly into the affected Velda Edge node and execute the following diagnostic commands:
-
-### 3.1 Check Success vs Failure Export Counters
+### Command 1: Inspect Export Logs
+Check whether telemetry batches are successfully reaching the collector:
 ```bash
-# Inspect system logs from the velda-edge service
-journalctl -u velda-edge -n 100 --no-pager | grep "otlp_metrics"
-
-# Stream live export logs with JSON filter
 journalctl -u velda-edge -f -o cat | grep -E "Flushed OTLP metrics|Failed to send OTLP"
 ```
-*Assessment*:
-- `Flushed OTLP metrics batch via gRPC successfully` $\to$ Export pipeline is operating nominally.
-- `Failed to send OTLP metrics via gRPC to collector: connection refused` $\to$ Target Collector is down or stopped listening.
 
-### 3.2 Inspect Socket Connection State to OpenTelemetry Collector
+### Command 2: Inspect Socket Connection State to Collector
+Verify that the exporter has established a persistent TCP/TLS connection:
 ```bash
-# Inspect TCP socket status to Collector (port 4317 for gRPC or 4318 for HTTP)
 ss -tinh 'dport = :4317 or dport = :4318'
+```
 
-# Test raw network reachability to Collector
-nc -zv <IP_OTEL_COLLECTOR> 4317
+### Command 3: Test Raw Reachability to Collector
+Verify network port access:
+```bash
+nc -zv 127.0.0.1 4317
+```
 
-# For HTTP JSON mode:
-curl -v -X POST "http://<IP_OTEL_COLLECTOR>:4318/v1/metrics" \
+### Command 4: Check HTTP JSON Collector Endpoint via `curl`
+If using HTTP mode:
+```bash
+curl -v -X POST "http://127.0.0.1:4318/v1/metrics" \
   -H "Content-Type: application/json" \
   -d '{"resourceMetrics":[]}'
 ```
-*Assessment*:
-- `Connection refused` or `Operation timed out` $\to$ Collector is offline or blocked by firewall security group.
-- Socket state displays `ESTAB` with `timer:(keepalive)` $\to$ Persistent TCP connection is healthy.
 
-### 3.3 Verify CPU Separation Between Frontline and Shadow Workers
+### Command 5: Verify Thread CPU Separation Between Workers and Shadow
+Ensure shadow logistics execution does not steal CPU from traffic cores:
 ```bash
-# Monitor per-thread CPU utilization (Worker vs Shadow)
 pidstat -u -t -p $(pgrep velda-edge) 1 5
 ```
-*Assessment*:
-- `velda-worker-{id}` (Frontline Workers): Solely responsible for request traffic. Must show zero jitter from export cycles.
-- `velda-shadow-0` (Shadow Worker): Operates under `SCHED_IDLE`. Nominal CPU consumption must remain $< 0.8\%$.
 
 ---
 
-## 4. Emergency Remediation Procedures
+## 6. Emergency Playbooks
 
-### Scenario 1: OpenTelemetry Collector Outage During Traffic Spikes
-When the backend OpenTelemetry Collector cluster collapses completely under heavy infrastructure load:
-1. **Confirm User Traffic Impact**:
-   - By virtue of **Fail-Open Autonomy**, even if the Collector experiences 100% downtime, frontline worker threads (`velda-worker-*`) continue serving traffic with **0 ns latency impact**.
-   - Do **NOT** restart the Gateway process.
-2. **Throttle Export Frequency (If Internal Network is Congested)**:
-   Submit an updated configuration via the Go Control Plane API to increase `interval_secs`:
+### Playbook A: Throttling Export Frequency During Network Congestion
+If the internal network between the Gateway and the Collector is saturated:
+1. Update `interval_secs` from `10` to `30` or `60` in `plugins.json`.
+2. Push reload notification:
    ```bash
-   curl -X PUT http://<CONTROL_PLANE_IP>:8080/api/v1/plugins/otlp_metrics_exporter \
-     -H "Content-Type: application/json" \
-     -d '{
-       "protocol": "grpc",
-       "endpoint": "grpc://10.0.1.50:4317",
-       "interval_secs": 60,
-       "connect_timeout_ms": 5000,
-       "request_timeout_ms": 10000,
-       "service_name": "velda-edge-prod",
-       "headers": {}
-     }'
+   curl -X POST http://127.0.0.1:8080/api/v1/plugins/reload
    ```
 
-### Scenario 2: Authentication Credentials Expired (HTTP 401 / gRPC Unauthenticated)
-When a rotated API key or Bearer token is rejected by the Collector:
-1. Generate a valid token from your secret management system (HashiCorp Vault / AWS Secrets Manager).
-2. Push the updated token via Control Plane:
-   ```bash
-   curl -X PUT http://<CONTROL_PLANE_IP>:8080/api/v1/plugins/otlp_metrics_exporter \
-     -H "Content-Type: application/json" \
-     -d '{
-       "protocol": "grpc",
-       "endpoint": "grpc://10.0.1.50:4317",
-       "interval_secs": 10,
-       "connect_timeout_ms": 5000,
-       "request_timeout_ms": 10000,
-       "service_name": "velda-edge-prod",
-       "headers": {
-         "authorization": "Bearer <NEW_TOKEN>"
-       }
-     }'
+### Playbook B: Rotating Authentication Tokens (Zero-Downtime Reload)
+When an expired Bearer token triggers authentication errors:
+1. Generate an active token from your secrets manager.
+2. Update the `headers` field in `plugins.json`:
+   ```json
+   "headers": {
+     "authorization": "Bearer <NEW_TOKEN>"
+   }
    ```
-3. Verify that log messages transition back to `Flushed OTLP metrics batch successfully`.
+3. Push reload notification. The shadow worker seamlessly applies the new token on the next tick.
 
-### Scenario 3: Complete Emergency Bypass (Disable Plugin)
-If an unknown memory leak or panic occurs in the background logistics worker:
-```bash
-curl -X DELETE http://<CONTROL_PLANE_IP>:8080/api/v1/plugins/otlp_metrics_exporter
-```
-The Control Plane updates the LKG runtime snapshot in RAM within $< 10\ \mu\text{s}$, cleanly stopping the background exporter task.
+### Playbook C: Dynamically Disabling Exporter (Zero-Downtime Bypass)
+To stop the exporter without interrupting client traffic:
+1. Remove the `otlp_metrics_exporter` block from `plugins.json`.
+2. Push reload notification. The shadow worker cancels the background export task cleanly.

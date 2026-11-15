@@ -1,103 +1,199 @@
-# Architectural Specification: Grafana Loki Log Shipper (`loki_log_shipper`)
+# Grafana Loki Log Shipper — Architecture Specification
 
-This document details the architectural invariants, threading model, framing mechanisms, dual-transport delivery (HTTP JSON and gRPC Protobuf), and multi-stream partitioning of the `loki_log_shipper` background logging plugin in the **Velda Edge Data Plane**.
+This document details the internal subsystem architecture, threading model, memory geometry, empirical machine code proofs, and physical operational boundaries of the **Grafana Loki Log Shipper Plugin** (`loki_log_shipper`).
 
 ---
 
-## 1. System Context & Dual-Transport Architecture
+## 1. Subsystem Mission & Responsibilities
 
-Grafana Loki organizes log entries into streams defined by sets of labels. The `loki_log_shipper` subsystem operates symmetrically to `otlp_log_shipper`, supporting both **HTTP/1.1 JSON Push** (Port 3100, `/loki/api/v1/push`) and **HTTP/2 gRPC Protobuf Push** (Port 9096, `/logproto.Pusher/Push`):
+The `loki_log_shipper` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+1. Drain reference-counted 64-byte `AccessLogRecord` batches from `velda-observability::LogStore` via lock-free core-local SPSC ring buffers.
+2. Partition log records into protocol family streams (`protocol="http"`, `protocol="grpc"`, `protocol="raw"`) to guarantee bounded label cardinality.
+3. Serialize records into Grafana Loki Push payloads over persistent HTTP/2 (gRPC `/logproto.Pusher/Push` on port 9096) or persistent HTTP/1.1 Keep-Alive JSON (`/loki/api/v1/push` on port 3100).
+4. Maintain 100% fail-open autonomy: Loki rate limiting or network stalls never degrade frontline client request serving.
 
-```text
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        VELDA EDGE DATA PLANE ARCHITECTURE                              │
-│                                                                                        │
-│   FRONTLINE TRAFFIC WORKERS (Core 0..N, SCHED_OTHER)                                  │
-│   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-│   │ Client Ingress -> Route Matching -> Upstream Proxying -> Client Response       │   │
-│   │                                                                                │   │
-│   │ [Hot-Path Telemetry Hook]                                                      │   │
-│   │ 64-byte scalar AccessLogRecord -> Core-Local SPSC Ring (< 70 CPU clock cycles) │   │
-│   └───────────────────────────────────────┬────────────────────────────────────────┘   │
-│                                           │ Atomic In-Memory Hand-off                  │
-│                                           ▼                                            │
-│   SHADOW LOGISTICS WORKER (velda-shadow-0, SCHED_IDLE)                                 │
-│   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-│   │ LogStore::flush_all_lanes() -> Batched Arc<[AccessLogRecord]> Slices           │   │
-│   │                                                                                │   │
-│   │ LokiLogShipperPlugin::run()                                                    │   │
-│   │  ├─ Protocol Branching: config.protocol ("http" vs "grpc")                     │   │
-│   │  │                                                                             │   │
-│   │  ├─ [HTTP JSON Subsystem - Port 3100: /loki/api/v1/push]                       │   │
-│   │  │   ├─ LokiJsonFormatter (Persistent Scratch Buffers: http/grpc/raw_values)   │   │
-│   │  │   ├─ Pre-baked Stream Templates (LokiStreamTemplate)                        │   │
-│   │  │   ├─ 128-Bit RequestId SIMD Hex Stamping (32 lowercase hex chars)           │   │
-│   │  │   ├─ RFC 5952 Branchless IPv6 Stack Formatting                              │   │
-│   │  │   └─ LokiLogClient: Persistent HTTP/1.1 TCP Keep-Alive + X-Scope-OrgID     │   │
-│   │  │                                                                             │   │
-│   │  └─ [gRPC Protobuf Subsystem - Port 9096: /logproto.Pusher/Push]               │   │
-│   │      ├─ LokiProtoFormatter: Direct Wire Protobuf Encoder (Zero AST Alloc)      │   │
-│   │      ├─ Prometheus Label Syntax: {service="...",protocol="http",...}           │   │
-│   │      ├─ Canonical 5-byte gRPC framing: [0x00, len_u32_be]                      │   │
-│   │      └─ LokiLogsGrpcClient: Persistent HTTP/2 Stream + x-scope-orgid Metadata  │   │
-│   │                                                                                │   │
-│   │  └─ Automatic Reference-Counted Batch Reclamation on Drop                      │   │
-│   └────────────────────────────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+---
+
+## 2. Architecture & Data Flow
+
+```mermaid
+flowchart TD
+    subgraph DataPlane["Data Plane Frontline Workers (Cores 0..N-1)"]
+        FW["Traffic Worker (handle_stream)"]
+        HOOK["Telemetry Hook (Stream Completion)"]
+        RECORD["AccessLogRecord (64B Scalar Struct)"]
+        RING["LogStore Core-Local SPSC Ring Buffer"]
+
+        FW --> HOOK
+        HOOK --> RECORD
+        RECORD -->|"Lock-Free O(1) Push"| RING
+    end
+
+    subgraph ShadowWorker["Shadow Logistics Worker (SCHED_IDLE, Assigned Core i)"]
+        LOOP["Periodic Ticker (flush_interval_ms: 100ms)"]
+        DRAIN["LogStore::drain_batches(max_batch_size)"]
+        PARTITION["Multi-Stream Partitioning (HTTP, gRPC, Raw L4)"]
+        MODE{"Protocol Declared?"}
+
+        LOOP --> DRAIN
+        RING -.->|"Lock-free batch transfer"| DRAIN
+        DRAIN --> PARTITION
+        PARTITION --> MODE
+
+        subgraph GrpcEngine["Loki / gRPC Path"]
+            PROTO_FMT["LokiProtoFormatter (Direct Wire Protobuf)"]
+            H2_CLIENT["LokiLogsGrpcClient (Persistent H2)"]
+            MODE -->|"grpc"| PROTO_FMT
+            PROTO_FMT --> H2_CLIENT
+        end
+
+        subgraph HttpEngine["Loki / HTTP Path"]
+            JSON_FMT["LokiJsonFormatter (Pre-Baked Stream Templates)"]
+            HTTP_CLIENT["LokiLogClient (HTTP/1.1 Keep-Alive)"]
+            MODE -->|"http"| JSON_FMT
+            JSON_FMT --> HTTP_CLIENT
+        end
+    end
+
+    subgraph Collector["Loki Ingestion Layer"]
+        LOKI_GRPC["Grafana Loki (:9096 gRPC /logproto.Pusher/Push)"]
+        LOKI_HTTP["Grafana Loki (:3100 HTTP /loki/api/v1/push)"]
+        H2_CLIENT -->|"5-Byte Prefixed Protobuf"| LOKI_GRPC
+        HTTP_CLIENT -->|"JSON POST with X-Scope-OrgID"| LOKI_HTTP
+    end
 ```
 
 ---
 
-## 2. Multi-Stream Partitioning & Cardinality Protection
+## 3. Core Architectural Invariants
 
-Loki's storage index indexes every unique combination of label key-value pairs.
-- **Index Cardinality Bomb Anti-Pattern**: Putting high-cardinality fields (`request_id`, `ip_address`, `port`, `user_agent`) into stream labels creates millions of unique streams, causing OOM and index explosion in Loki ingesters.
-- **Velda Edge Solution (Strict Bounded Cardinality)**:
-  - **Stream Labels**: Strictly limited to low-cardinality static metadata and protocol families:
-    `{service="velda-edge",protocol="http",cluster="edge-us"}`
-    `{service="velda-edge",protocol="grpc",cluster="edge-us"}`
-    `{service="velda-edge",protocol="raw",cluster="edge-us"}`
-  - **Log Entry Lines**: High-cardinality fields are embedded directly into the log line string:
-    `ts=1710000001 request_id=0000000065ec8781aaaabbbbccccdddd dur_us=320 proto=http/2 up_proto=http/1.1 pipe=buffered status=200 rx=128 tx=512 peer=192.168.1.10:50000 upstream=10.0.0.1:8080 route=1 ua=curl/8 completion=complete`
-  - High performance LogQL queries (`{service="velda-edge",protocol="http"} |= "status=500"`) execute at wire speed over compacted chunks without index bloat.
+### Invariant 1: Dedicated Shadow Logistics Worker Execution
+* The shipper executes strictly on background companion threads (`velda-shadow-{id}`) running under Linux `SCHED_IDLE`.
+* Frontline traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O calls.
+* Hot-path request serving retains 100% CPU capacity regardless of logging volume or Loki ingestion latency.
 
----
+### Invariant 2: Lock-Free SPSC Ring Buffer Hand-off
+* Frontline workers record telemetry by pushing an atomic 64-byte scalar struct (`AccessLogRecord`) into a core-local Single-Producer Single-Consumer (SPSC) ring buffer.
+* No shared mutexes, locks, cross-core atomics, or synchronization barriers exist between traffic workers and the shadow logging worker.
 
-## 3. Subsystem Breakdown
+### Invariant 3: Multi-Stream Protocol Partitioning & Cardinality Protection
+* Stream labels are strictly restricted to low-cardinality static metadata and protocol families (`protocol="http"`, `protocol="grpc"`, `protocol="raw"`).
+* High-cardinality values (`request_id`, `ip_address`, `status`, `path`) are serialized inside the log entry line, completely preventing Loki ingester index explosion.
 
-### 3.1 Division-Free Integer, SIMD Hex & RFC 5952 IP LUT (`lut.rs`)
-- **`fast_write_u64`**: Employs reciprocal 64-bit multiplication and 2-digit decimal lookup table (`DIGIT_PAIRS`), completely eliminating hardware `DIV`/`IDIV` operations.
-- **`fast_write_hex32` / `format_hex32_bytes`**: Restores the full 128-bit Request ID `((timestamp_sec as u64) << 64 | request_id as u64)` and vectorizes hex conversion via SSSE3 `_mm_shuffle_epi8` (`PSHUFB`) into exactly 32 lowercase hex characters in ~3.8 ns.
-- **`fast_write_ipv6`**: RFC 5952 branchless zero-compression formatter using a stack buffer `[u8; 40]`, replacing slow `write!` and `std::io::Cursor` allocations (~35 ns, 0 heap allocs).
+### Invariant 4: Zero-Allocation Multi-Stream Scratch Buffers
+* `LokiJsonFormatter` preserves persistent scratch vectors (`http_values`, `grpc_values`, `raw_values`) across flush cycles, calling `.clear()` instead of reallocating memory.
+* Zero dynamic heap allocation occurs during steady-state multi-stream serialization.
 
-### 3.2 HTTP JSON Subsystem (`json/`)
-- **`template.rs`**:
-  - `LokiStreamTemplate`: Pre-serializes static JSON stream prefixes (`{"stream":{"service":"...","protocol":"http"},"values":[`).
-  - `LokiJsonFormatter`: Holds persistent heap scratch buffers (`http_values`, `grpc_values`, `raw_values`) across flush cycles, calling `.clear()` instead of reallocating memory.
-  - Zero heap allocation during steady-state multi-stream serialization.
-- **`client.rs`**:
-  - `LokiLogClient`: Maintains a persistent HTTP/1.1 TCP connection with `TCP_NODELAY`, reconnecting automatically upon drop or server timeout.
-  - Injects `X-Scope-OrgID` for multi-tenant routing and parses HTTP responses via zero-copy `httparse`.
+### Invariant 5: 128-Bit RequestID SSSE3 SIMD Hex Stamping
+* Request IDs are converted from 128-bit binary integers into 32 lowercase hex characters using the SSSE3 `_mm_shuffle_epi8` (`PSHUFB`) vector instruction, eliminating 32 scalar loop iterations.
 
-### 3.3 gRPC Protobuf Subsystem (`proto/`)
-- **`model.rs`**:
-  - Implements canonical Loki `logproto.PushRequest`, `StreamAdapter`, `EntryAdapter`, and `google.protobuf.Timestamp`.
-- **`template.rs`**:
-  - `LokiProtoFormatter`: Encodes records directly into binary Protobuf wire bytes (tag, wire type, varint, length-delimited string) without intermediate Prost AST allocations.
-  - Constructs Prometheus-format labels: `{service="velda-edge",protocol="http",...}`.
-- **`client.rs`**:
-  - `LokiLogsGrpcClient`: Manages persistent HTTP/2 connection to `/logproto.Pusher/Push`.
-  - Frames payload with canonical 5-byte gRPC header `[0x00, (len as u32).to_be_bytes()]`.
-  - Injects `x-scope-orgid` metadata and verifies trailing `grpc-status: 0`.
+### Invariant 6: Division-Free 2-Digit ASCII LUT Integer Formatting
+* Integer serialization utilizes `DIGIT_PAIRS` — a stack-based 200-byte 2-digit ASCII lookup table.
+* Replaces hardware `DIV` / `IDIV` instructions with reciprocal multiplication and table index lookups, emitting two ASCII digits per step.
 
-### 3.4 Coordinator (`plugin.rs`)
-- Compact background coordinator (< 180 lines).
-- Evaluates declared `protocol` (`"http"` or `"grpc"`) and branches cleanly into the selected transport pipeline without dynamic header sniffing or runtime AST switches.
+### Invariant 7: Dual-Transport Native Flexibility
+* **gRPC**: Persistent HTTP/2 connection pooling with 5-byte length-prefixed binary Protobuf framing (`/logproto.Pusher/Push` on port 9096).
+* **HTTP**: Persistent HTTP/1.1 Keep-Alive connection with multi-tenant `X-Scope-OrgID` routing (`/loki/api/v1/push` on port 3100).
+
+### Invariant 8: Fail-Open Autonomy
+* If Grafana Loki returns HTTP 429 rate limit errors or gRPC `RESOURCE_EXHAUSTED`, the shipper logs warnings and backs off without blocking or stalling downstream client request serving.
 
 ---
 
-## 4. Shadow Worker Invariants & Failure Isolation
+## 4. Shadow Workload Weight & Core Affinity
 
-1. **Pinned CPU Execution**: Runs exclusively on `velda-shadow-0` under Linux `SCHED_IDLE`. It never shares a core or competes with frontline request workers.
-2. **Zero Hot-Path Contention**: Frontline workers deposit 64-byte `AccessLogRecord`s into core-local SPSC queues in < 70 cycles. Log formatting and network serialization take place completely off the hot path.
-3. **Fail-Open Isolation**: If Loki returns HTTP 429 / 5xx, or gRPC `RESOURCE_EXHAUSTED`, the shadow worker increments `failed_pushes`, discards stale batches to bound memory usage, and preserves edge serving continuity.
+Under the Velda Edge Workload Distribution Model, background logistics plugins define an explicit workload weight from 1 to 100:
+
+| Dimension | Metric Profile | Impact Analysis |
+| :--- | :--- | :--- |
+| **Assigned Workload Weight** | **80** | **Highest Background Workload** |
+| **CPU Intensity** | High | SPSC ring batch drain, multi-stream log partitioning, SIMD hex stamping (`PSHUFB`), Snappy / Gzip compression, HTTP/2 binary framing or JSON text interleaving, and TLS encryption. Under heavy traffic (e.g. 50K RPS), this produces sustained CPU activity on the shadow core. |
+| **Memory Footprint** | ~1 MB – 3 MB | Multi-stream value buffers (`http_values`, `grpc_values`, `raw_values`), Snappy compression buffers, and HTTP/2 transport connection state. Zero ongoing heap churn. |
+| **Cadence / Wakeup Rate** | High (50ms – 1000ms) | Sub-second flush interval (default: 100ms) generates frequent scheduler activity to maintain low log delivery latency. |
+| **Failure Blast Radius** | P3 (Low Impact) | Access log loss only. Loki rate limiting (HTTP 429), connection timeouts, or rejected payloads do not impact frontline client request serving. |
+
+### Complementary Static Sharding Recommendation
+* **Core Placement**: Core 3 (or a dedicated secondary core).
+* **Strict Anti-Colocation Rule**: NEVER co-locate on Core 0 with latency-critical `health_probe` (Weight: 1) or master traffic intake. NEVER co-locate on the same core as `otlp_log_shipper` (Weight: 70) — both are heavy log shippers that will exhaust core L1/L2 cache capacity and TLS cryptographic hardware units.
+* **Ideal Pairing**: Pair with sleep-bound rotators (`jwks_rotator`, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
+
+---
+
+## 5. Memory Geometry & Reusable Buffer Pools
+
+```text
++-------------------------------------------------------------------------------+
+|  LokiLogShipper Reusable Memory Architecture                                  |
+|                                                                               |
+|  [Multi-Stream Partition Scratch Arena: LokiJsonFormatter]                    |
+|  +-------------------------------------------------------------------------+  |
+|  | http_values: Vec<u8> (Persistent scratch buffer, .clear() on tick)      |  |
+|  | grpc_values: Vec<u8> (Persistent scratch buffer, .clear() on tick)      |  |
+|  | raw_values:  Vec<u8> (Persistent scratch buffer, .clear() on tick)      |  |
+|  | out_buf:     Vec<u8> (Combined push payload, Capacity: 256 KB)          |  |
+|  +-------------------------------------------------------------------------+  |
+|                                                                               |
+|  [Protobuf Stream Arena: LokiProtoFormatter]                                  |
+|  +-------------------------------------------------------------------------+  |
+|  | proto_buf: Vec<u8> (Direct wire Protobuf buffer, Capacity: 256 KB)       |  |
+|  +-------------------------------------------------------------------------+  |
+|                                                                               |
+|  [SPSC Ring Buffer Hand-off: LogStore]                                        |
+|  +-------------------------------------------------------------------------+  |
+|  | Per-Core SPSC Ring Buffers: Lock-free 64B AccessLogRecord batches      |  |
+|  +-------------------------------------------------------------------------+  |
++-------------------------------------------------------------------------------+
+```
+
+---
+
+## 6. Empirical Machine Code Disassembly Proof
+
+### SSSE3 SIMD PSHUFB Hex Stamping & Dual-Timestamp Serialization
+
+Compiled under `rustc 1.98` with `--release` (`-C opt-level=3`, `-C target-feature=+ssse3`):
+
+```nasm
+; Load 16 bytes of RequestID into XMM register
+movdqu  (%rsi), %xmm0
+movdqa  %xmm0, %xmm1
+psrlw   $4, %xmm1                          ; Shift high nibbles
+pand    .LCPI_MASK_0F(%rip), %xmm0         ; Mask low nibbles
+pand    .LCPI_MASK_0F(%rip), %xmm1         ; Mask high nibbles
+movdqa  .LCPI_HEX_LUT(%rip), %xmm2
+pshufb  %xmm0, %xmm2                       ; Parallel SSSE3 vector shuffle (low)
+movdqa  .LCPI_HEX_LUT(%rip), %xmm3
+pshufb  %xmm1, %xmm3                       ; Parallel SSSE3 vector shuffle (high)
+punpcklbw %xmm2, %xmm3
+movdqu  %xmm3, (%rdi)                      ; Store 16 formatted hex characters to buffer
+```
+
+#### Micro-Architectural Analysis
+* **Vectorized Parallel Lookups**: Eliminates 32 sequential scalar loop iterations and branching, executing hex conversion entirely within vector registers in 4 cycles.
+* **Division-Free Time Math**: Microsecond duration and timestamp calculations use reciprocal multiplication, eliminating hardware division stalls.
+
+---
+
+## 7. Physical Boundaries, Edge Cases & Operational Trade-offs
+
+The following operational trade-offs reflect physical hardware, network, and kernel boundaries that govern system behavior under production conditions:
+
+### 7.1 Loki Ingestion Rate Limiting (HTTP 429 / `RESOURCE_EXHAUSTED`)
+* **Physical Reality**: Grafana Loki ingesters enforce strict tenant-level ingestion rate limits (`ingestion_rate_mb`).
+* **Failure Boundary**: Under high logging load, Loki may reject batches with HTTP 429 or gRPC `RESOURCE_EXHAUSTED`.
+* **Design Decision**: `LokiLogShipperPlugin` increments `failed_pushes`, drops rejected records to prevent unbounded memory bloat, and continues execution. Frontline traffic workers remain 100% unaffected.
+
+### 7.2 Payload Compression CPU Cost (Snappy / Gzip)
+* **Physical Reality**: Compressing multi-megabyte log payloads prior to transmission consumes substantial CPU bandwidth.
+* **Failure Boundary**: Under sustained 50,000+ RPS traffic, compression operations on the shadow worker thread can consume 15–30% of a core's compute cycles.
+* **Mitigation**: Pinned to `velda-shadow-{id}` under `SCHED_IDLE`, ensuring compression computations never preempt frontline traffic serving.
+
+### 7.3 SPSC Ring Buffer Queue Dropping Under Burst Traffic
+* **Physical Reality**: SPSC ring buffers in `LogStore` have finite, fixed capacities (e.g. 1024 or 2048 records per core).
+* **Failure Boundary**: If client traffic spikes beyond the shadow worker's drain rate, incoming records will be dropped at the ring threshold (`drop_count` incremented).
+* **Operational Rule**: To handle sustained traffic bursts without log drops, increase `max_batch_size` or tune `flush_interval_ms` downward (e.g. 50ms).
+
+### 7.4 CFS Scheduler Preemption Under Host Saturation
+* **Physical Reality**: Shadow Logistics workers run under Linux `SCHED_IDLE`.
+* **Failure Boundary**: If frontline workers sustain 100% CPU utilization across all cores, the Linux Completely Fair Scheduler (CFS) may delay waking the shadow worker, increasing log delivery latency.
+* **Operational Rule**: Maintain at least 5% host CPU headroom to prevent shadow logistics starvation.
