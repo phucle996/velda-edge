@@ -276,15 +276,19 @@ pub fn spawn_shadow_worker(
                 let mut reload_rx = crate::reload::get_reload_receiver();
                 let mut last_revision = shared_runtime.load().revision;
 
-                if worker_id == 0 {
-                    // 1. Register declared background plugins
+                // 1. Register declared background plugins assigned to this specific shadow worker lane
+                let rt_guard = shared_runtime.load();
+                let assigned_plugins = rt_guard.plugins.get_shadow_plugins(worker_id);
+                if !assigned_plugins.is_empty() {
                     register_background_plugins(
                         &mut bg_tasks,
-                        &shared_runtime.load().plugins.background_plugins,
+                        assigned_plugins,
                         shutdown.clone(),
                     );
+                }
 
-                    // 2. Register Resource Overload Monitor
+                // 2. Register Resource Overload Monitor (process-wide singleton on Worker 0)
+                if worker_id == 0 {
                     let overload = shared_runtime.load().overload.clone();
                     let mut overload_shutdown = shutdown.clone();
                     bg_tasks.spawn(async move {
@@ -386,18 +390,37 @@ pub fn spawn_shadow_worker(
                         res = reload_rx.changed() => {
                             if res.is_ok() {
                                 let current_rt = shared_runtime.load();
-                                if worker_id == 0 && current_rt.revision != last_revision {
+                                if current_rt.revision != last_revision {
                                     tracing::info!(
+                                        worker = worker_id,
                                         old_rev = last_revision,
                                         new_rev = current_rt.revision,
-                                        "Runtime revision updated, reloading background plugins on Shadow Worker 0"
+                                        "Runtime revision updated, reloading background plugins on Shadow Worker"
                                     );
                                     bg_tasks.shutdown().await;
-                                    register_background_plugins(
-                                        &mut bg_tasks,
-                                        &current_rt.plugins.background_plugins,
-                                        shutdown.clone(),
-                                    );
+                                    let assigned_plugins = current_rt.plugins.get_shadow_plugins(worker_id);
+                                    if !assigned_plugins.is_empty() {
+                                        register_background_plugins(
+                                            &mut bg_tasks,
+                                            assigned_plugins,
+                                            shutdown.clone(),
+                                        );
+                                    }
+                                    if worker_id == 0 {
+                                        let overload = current_rt.overload.clone();
+                                        let mut overload_shutdown = shutdown.clone();
+                                        bg_tasks.spawn(async move {
+                                            let mut interval = tokio::time::interval(DEFAULT_OVERLOAD_SAMPLE_INTERVAL);
+                                            loop {
+                                                tokio::select! {
+                                                    _ = interval.tick() => {
+                                                        let _ = overload.sample_and_update();
+                                                    }
+                                                    _ = overload_shutdown.changed() => break,
+                                                }
+                                            }
+                                        });
+                                    }
                                     last_revision = current_rt.revision;
                                 }
 

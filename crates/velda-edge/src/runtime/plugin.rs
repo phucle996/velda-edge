@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, RouteId, StreamingMode};
-use velda_plugin::{LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin};
+use velda_plugin::{
+    LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
+    wire_plugin_dependencies,
+};
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
@@ -22,6 +25,9 @@ pub struct PluginTable {
     pub routes: FxHashMap<RouteId, Arc<RoutePluginPlan>>,
     /// Active background plugins running on Shadow Worker.
     pub background_plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>>,
+    /// Pre-computed background plugins partitioned across shadow workers:
+    /// Index = worker_id (0..N-1) -> List of plugins running on that shadow worker.
+    pub shadow_shards: Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>>,
     /// Canonical empty plan singleton used for routes without any declared plugins.
     pub empty_plan: Arc<RoutePluginPlan>,
 }
@@ -31,6 +37,7 @@ impl std::fmt::Debug for PluginTable {
         f.debug_struct("PluginTable")
             .field("routes_count", &self.routes.len())
             .field("background_plugins_count", &self.background_plugins.len())
+            .field("shadow_shards_count", &self.shadow_shards.len())
             .finish()
     }
 }
@@ -41,6 +48,7 @@ impl PluginTable {
         Self {
             routes: FxHashMap::default(),
             background_plugins: Vec::new(),
+            shadow_shards: Vec::new(),
             empty_plan: Arc::new(RoutePluginPlan::default()),
         }
     }
@@ -51,6 +59,20 @@ impl PluginTable {
     #[inline(always)]
     pub fn get_plan(&self, route_id: RouteId) -> &Arc<RoutePluginPlan> {
         self.routes.get(&route_id).unwrap_or(&self.empty_plan)
+    }
+
+    /// Returns the assigned background plugins for the specified shadow worker lane.
+    ///
+    /// If the worker lane index exceeds the partitioned shards, returns an empty slice.
+    #[inline(always)]
+    pub fn get_shadow_plugins(
+        &self,
+        worker_id: usize,
+    ) -> &[Arc<dyn velda_plugin::BackgroundPlugin>] {
+        self.shadow_shards
+            .get(worker_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Returns `true` if the route has at least one active plugin hook.
@@ -78,6 +100,11 @@ pub fn build_plugin_table(
         }
         available_plugins.insert(plugin_cfg.id.clone(), loaded);
     }
+
+    // 1b. Wire inter-plugin dependencies (e.g. jwks_rotator -> jwt_auth SharedJwksStore)
+    wire_plugin_dependencies(&available_plugins).map_err(|e| EdgeError::InvalidConfig {
+        detail: format!("Failed to wire plugin dependencies: {e}"),
+    })?;
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
     let socket_manager = velda_core::socket::global_socket_manager();
@@ -135,11 +162,77 @@ pub fn build_plugin_table(
         }
     }
 
+    let worker_count = velda_core::hardware::global_hardware_topology()
+        .worker_threads
+        .max(1);
+    let shadow_shards = partition_background_plugins(&background_plugins, worker_count);
+
     Ok(PluginTable {
         routes: route_plans,
         background_plugins,
+        shadow_shards,
         empty_plan,
     })
+}
+
+/// Partitions background plugins across `worker_count` shadow worker threads using
+/// a deterministic Greedy LPT (Longest Processing Time First) bin-packing algorithm
+/// with Core 0 protection invariants.
+pub fn partition_background_plugins(
+    plugins: &[Arc<dyn velda_plugin::BackgroundPlugin>],
+    worker_count: usize,
+) -> Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>> {
+    let worker_count = worker_count.max(1);
+    let mut shards: Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>> =
+        (0..worker_count).map(|_| Vec::new()).collect();
+
+    if plugins.is_empty() {
+        return shards;
+    }
+
+    if worker_count == 1 {
+        shards[0] = plugins.to_vec();
+        return shards;
+    }
+
+    // Multi-core partitioning (worker_count >= 2):
+    // 1. Separate plugins with strict Core 0 affinity or sleep-bound characteristics:
+    //    - "health_probe": Hard affinity to Core 0 (Kubernetes liveness/readiness SLA).
+    //    - Sleep-bound key/cert rotators ("jwks_rotator", "acme_cert_rotator"):
+    //      placed on Core 0 because they are dormant 99.9% of the time (weight <= 10).
+    // 2. Heavy exporters and log shippers are sorted descending by weight and assigned
+    //    greedily to the non-0 core with the minimum current accumulated load.
+    let mut core_loads = vec![0u32; worker_count];
+    let mut regular_plugins = Vec::new();
+
+    for plugin in plugins {
+        let id = plugin.id();
+        let w = plugin.weight();
+        let is_core0_affinity = id.starts_with("health_probe")
+            || ((id.starts_with("jwks_rotator") || id.starts_with("acme_cert_rotator")) && w <= 10);
+
+        if is_core0_affinity {
+            shards[0].push(Arc::clone(plugin));
+            core_loads[0] += w;
+        } else {
+            regular_plugins.push((w, Arc::clone(plugin)));
+        }
+    }
+
+    // Sort regular plugins descending by weight (LPT: heaviest first)
+    regular_plugins.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    // Greedily place each regular plugin into the non-0 core with the smallest load.
+    for (weight, plugin) in regular_plugins {
+        let min_core = (1..worker_count)
+            .min_by_key(|&c| core_loads[c])
+            .unwrap_or(0);
+
+        shards[min_core].push(plugin);
+        core_loads[min_core] += weight;
+    }
+
+    shards
 }
 
 #[cfg(test)]
@@ -153,5 +246,121 @@ mod tests {
         assert!(!table.has_plugins(non_existent));
         assert!(table.get_plan(non_existent).is_empty());
         assert!(table.background_plugins.is_empty());
+        assert!(table.get_shadow_plugins(0).is_empty());
+    }
+
+    struct MockBackgroundPlugin {
+        id: String,
+        weight: u32,
+    }
+
+    impl velda_plugin::BackgroundPlugin for MockBackgroundPlugin {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn weight(&self) -> u32 {
+            self.weight
+        }
+
+        fn run(
+            self: Arc<Self>,
+            _shutdown: tokio::sync::watch::Receiver<bool>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), velda_plugin::PluginError>> + Send>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn test_partition_background_plugins_single_core() {
+        let plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>> = vec![
+            Arc::new(MockBackgroundPlugin {
+                id: "health_probe".into(),
+                weight: 1,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "loki_log_shipper".into(),
+                weight: 80,
+            }),
+        ];
+        let shards = partition_background_plugins(&plugins, 1);
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].len(), 2);
+    }
+
+    #[test]
+    fn test_partition_background_plugins_multi_core_protection() {
+        let plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>> = vec![
+            Arc::new(MockBackgroundPlugin {
+                id: "health_probe".into(),
+                weight: 1,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "jwks_rotator".into(),
+                weight: 5,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "acme_cert_rotator".into(),
+                weight: 10,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "std_log_shipper".into(),
+                weight: 15,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "statsd_exporter".into(),
+                weight: 20,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "prometheus_exporter".into(),
+                weight: 30,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "otlp_metrics_exporter".into(),
+                weight: 40,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "otlp_log_shipper".into(),
+                weight: 70,
+            }),
+            Arc::new(MockBackgroundPlugin {
+                id: "loki_log_shipper".into(),
+                weight: 80,
+            }),
+        ];
+
+        // 4 Cores: Core 0 must only host health_probe + rotators; heavy shippers on cores 1..3
+        let shards = partition_background_plugins(&plugins, 4);
+        assert_eq!(shards.len(), 4);
+
+        // Core 0 must have health_probe, jwks_rotator, acme_cert_rotator
+        let core0_ids: Vec<&str> = shards[0].iter().map(|p| p.id()).collect();
+        assert!(core0_ids.contains(&"health_probe"));
+        assert!(core0_ids.contains(&"jwks_rotator"));
+        assert!(core0_ids.contains(&"acme_cert_rotator"));
+        assert!(!core0_ids.contains(&"loki_log_shipper"));
+        assert!(!core0_ids.contains(&"otlp_log_shipper"));
+
+        // loki and otlp_log_shipper must not be on the same core
+        let mut loki_core = None;
+        let mut otlp_log_core = None;
+        for (core, shard) in shards.iter().enumerate() {
+            for p in shard {
+                if p.id() == "loki_log_shipper" {
+                    loki_core = Some(core);
+                }
+                if p.id() == "otlp_log_shipper" {
+                    otlp_log_core = Some(core);
+                }
+            }
+        }
+        assert_ne!(
+            loki_core, otlp_log_core,
+            "Loki and OTLP log shipper must be isolated on different cores"
+        );
+        assert!(loki_core.unwrap() > 0);
+        assert!(otlp_log_core.unwrap() > 0);
     }
 }
