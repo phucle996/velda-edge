@@ -176,8 +176,10 @@ pub fn build_plugin_table(
 }
 
 /// Partitions background plugins across `worker_count` shadow worker threads using
-/// a deterministic Greedy LPT (Longest Processing Time First) bin-packing algorithm
-/// with Core 0 protection invariants.
+/// a deterministic, pure Greedy LPT (Longest Processing Time First) bin-packing algorithm.
+///
+/// Plugins are sorted descending by physical workload `weight` (1..100) and assigned
+/// greedily to the shadow worker core with the minimum current accumulated load.
 pub fn partition_background_plugins(
     plugins: &[Arc<dyn velda_plugin::BackgroundPlugin>],
     worker_count: usize,
@@ -195,36 +197,18 @@ pub fn partition_background_plugins(
         return shards;
     }
 
-    // Multi-core partitioning (worker_count >= 2):
-    // 1. Separate plugins with strict Core 0 affinity or sleep-bound characteristics:
-    //    - "health_probe": Hard affinity to Core 0 (Kubernetes liveness/readiness SLA).
-    //    - Sleep-bound key/cert rotators ("jwks_rotator", "acme_cert_rotator"):
-    //      placed on Core 0 because they are dormant 99.9% of the time (weight <= 10).
-    // 2. Heavy exporters and log shippers are sorted descending by weight and assigned
-    //    greedily to the non-0 core with the minimum current accumulated load.
+    // Sort all plugins descending by weight (LPT: heaviest first)
+    let mut sorted_plugins: Vec<(u32, Arc<dyn velda_plugin::BackgroundPlugin>)> = plugins
+        .iter()
+        .map(|p| (p.weight(), Arc::clone(p)))
+        .collect();
+    sorted_plugins.sort_by_key(|a| std::cmp::Reverse(a.0));
+
     let mut core_loads = vec![0u32; worker_count];
-    let mut regular_plugins = Vec::new();
 
-    for plugin in plugins {
-        let id = plugin.id();
-        let w = plugin.weight();
-        let is_core0_affinity = id.starts_with("health_probe")
-            || ((id.starts_with("jwks_rotator") || id.starts_with("acme_cert_rotator")) && w <= 10);
-
-        if is_core0_affinity {
-            shards[0].push(Arc::clone(plugin));
-            core_loads[0] += w;
-        } else {
-            regular_plugins.push((w, Arc::clone(plugin)));
-        }
-    }
-
-    // Sort regular plugins descending by weight (LPT: heaviest first)
-    regular_plugins.sort_by_key(|a| std::cmp::Reverse(a.0));
-
-    // Greedily place each regular plugin into the non-0 core with the smallest load.
-    for (weight, plugin) in regular_plugins {
-        let min_core = (1..worker_count)
+    // Greedily place each plugin into the core with the smallest current accumulated load.
+    for (weight, plugin) in sorted_plugins {
+        let min_core = (0..worker_count)
             .min_by_key(|&c| core_loads[c])
             .unwrap_or(0);
 
@@ -291,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_partition_background_plugins_multi_core_protection() {
+    fn test_partition_background_plugins_pure_greedy_lpt() {
         let plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>> = vec![
             Arc::new(MockBackgroundPlugin {
                 id: "health_probe".into(),
@@ -331,19 +315,20 @@ mod tests {
             }),
         ];
 
-        // 4 Cores: Core 0 must only host health_probe + rotators; heavy shippers on cores 1..3
+        // 4 Cores: pure greedy LPT bin-packing across all 4 cores with zero hard affinity
         let shards = partition_background_plugins(&plugins, 4);
         assert_eq!(shards.len(), 4);
 
-        // Core 0 must have health_probe, jwks_rotator, acme_cert_rotator
-        let core0_ids: Vec<&str> = shards[0].iter().map(|p| p.id()).collect();
-        assert!(core0_ids.contains(&"health_probe"));
-        assert!(core0_ids.contains(&"jwks_rotator"));
-        assert!(core0_ids.contains(&"acme_cert_rotator"));
-        assert!(!core0_ids.contains(&"loki_log_shipper"));
-        assert!(!core0_ids.contains(&"otlp_log_shipper"));
+        // All 9 plugins must be allocated across the 4 shards
+        let total_allocated: usize = shards.iter().map(|s| s.len()).sum();
+        assert_eq!(total_allocated, 9);
 
-        // loki and otlp_log_shipper must not be on the same core
+        // Every core must receive at least 1 plugin
+        for (i, shard) in shards.iter().enumerate() {
+            assert!(!shard.is_empty(), "Core {i} must have at least one plugin");
+        }
+
+        // Two heaviest shippers (loki: 80, otlp_log: 70) must naturally be separated on different cores
         let mut loki_core = None;
         let mut otlp_log_core = None;
         for (core, shard) in shards.iter().enumerate() {
@@ -358,9 +343,21 @@ mod tests {
         }
         assert_ne!(
             loki_core, otlp_log_core,
-            "Loki and OTLP log shipper must be isolated on different cores"
+            "Loki and OTLP log shipper must naturally be on different cores"
         );
-        assert!(loki_core.unwrap() > 0);
-        assert!(otlp_log_core.unwrap() > 0);
+
+        // Compute total weight per core and verify tight load balance
+        let core_loads: Vec<u32> = shards
+            .iter()
+            .map(|shard| shard.iter().map(|p| p.weight()).sum())
+            .collect();
+
+        let max_load = *core_loads.iter().max().unwrap();
+        let min_load = *core_loads.iter().min().unwrap();
+        // Load variance must be minimal (<= 20) across all 4 cores
+        assert!(
+            max_load - min_load <= 20,
+            "Max load {max_load} and min load {min_load} difference must be <= 20"
+        );
     }
 }
