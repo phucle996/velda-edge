@@ -37,7 +37,6 @@ pub use velda_plugin::background::statsd_exporter::validation::*;
 pub use velda_plugin::background::std_log_shipper::validation::*;
 pub use velda_plugin::post_response::cors::validation::*;
 pub use velda_plugin::post_response::http_cache_store::validation::*;
-pub use velda_plugin::post_response::opentelemetry_tracer::validation::*;
 pub use velda_plugin::post_response::response_compression::validation::*;
 pub use velda_plugin::post_response::response_header_mutation::validation::*;
 pub use velda_plugin::post_response::security_headers::validation::*;
@@ -59,7 +58,6 @@ pub use velda_plugin::pre_upstream::rate_limit::validation::*;
 pub use velda_plugin::pre_upstream::request_mirror::validation::*;
 pub use velda_plugin::pre_upstream::request_termination::validation::*;
 pub use velda_plugin::pre_upstream::url_rewrite::validation::*;
-pub use velda_plugin::pre_upstream::w3c_trace_context::validation::*;
 
 // ============================================================================
 // Binary Protocol Constants & Domain Header
