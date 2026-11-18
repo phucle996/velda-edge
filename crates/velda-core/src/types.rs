@@ -26,9 +26,15 @@ impl RequestId {
         self.0
     }
 
-    /// Returns the high 64 bits (Unix Epoch Timestamp).
+    /// Returns the high 64 bits Unix Epoch timestamp in seconds.
     #[inline(always)]
     pub const fn timestamp_secs(self) -> u64 {
+        ((self.0 >> 64) as u64) / 1_000_000_000
+    }
+
+    /// Returns the high 64 bits Unix Epoch timestamp in nanoseconds.
+    #[inline(always)]
+    pub const fn timestamp_nanos(self) -> u64 {
         (self.0 >> 64) as u64
     }
 
@@ -43,7 +49,7 @@ impl RequestId {
     pub fn to_hex_bytes(self) -> [u8; 32] {
         let mut hex = [0u8; 32];
         let high: &mut [u8; 16] = (&mut hex[0..16]).try_into().unwrap();
-        crate::request_id::format_hex_16(self.timestamp_secs(), high);
+        crate::request_id::format_hex_16(self.timestamp_nanos(), high);
         let low: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
         crate::request_id::format_hex_16(self.entropy(), low);
         hex

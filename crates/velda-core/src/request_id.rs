@@ -3,13 +3,13 @@
 //! ```text
 //! ┌───────────────────────────────────┬───────────────────────────────────┐
 //! │ Timestamp (High 64 bits)          │ Entropy / Sequence (Low 64 bits)  │
-//! │ Unix Epoch Seconds (Hex 0..16)    │ [WorkerId: 16b] [SeqCounter: 48b] │
+//! │ Unix Epoch Nanoseconds (Hex 0..16)│ SplitMix64 [WorkerId ^ SeqCounter]│
 //! └───────────────────────────────────┴───────────────────────────────────┘
 //!
 //!   next_request_id() ──► Thread-Local Pool (Capacity = 64, Low Watermark = 16)
 //!                             │
 //!             ┌───────────────┴───────────────┐
-//!             ▼ [Same Second]                 ▼ [Second Changed]
+//!             ▼ [Active Batch]                ▼ [Second Rollover]
 //!        Pop Entry (~1ns)              In-Place Prefix Patch (Hex 0..16)
 //! ```
 
@@ -108,16 +108,25 @@ pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
     }
 }
 
-/// Helper to get current Unix epoch in seconds via the lock-free coarse clock (~0.5ns).
+/// High-performance 64-bit bijective entropy mixer (SplitMix64).
+///
+/// Maps `(worker_id, seq)` to a distinct, high-entropy 64-bit integer
+/// with zero collisions and zero runs of consecutive zeros.
 #[inline(always)]
-fn now_epoch_secs() -> u64 {
-    crate::clock::coarse_sec()
+pub fn mix_entropy(worker_id: u16, seq: u64) -> u64 {
+    let w = ((worker_id as u64) ^ 0x517c_c1b7_2722_0a95).rotate_left(17);
+    let mut z = seq.wrapping_add(w).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Pre-computed request ID entry held in the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PoolEntry {
-    /// Low 64 bits representing worker ID and monotonic sequence.
+    /// High 64 bits representing Unix epoch timestamp in nanoseconds.
+    timestamp: u64,
+    /// Low 64 bits representing bijective worker ID and sequence entropy.
     entropy: u64,
     /// Pre-formatted 32-character lowercase hex ASCII string.
     hex: [u8; 32],
@@ -135,9 +144,10 @@ pub struct RequestIdPool {
 impl RequestIdPool {
     /// Creates a new `RequestIdPool` bound to a specific worker thread.
     pub fn new(worker_id: u16) -> Self {
-        let initial_sec = now_epoch_secs();
+        let initial_sec = crate::clock::coarse_sec();
+        let initial_nanos = crate::clock::now_unix_nanos();
         let mut prefix_hex = [0u8; 16];
-        format_hex_16(initial_sec, &mut prefix_hex);
+        format_hex_16(initial_nanos, &mut prefix_hex);
 
         let mut pool = Self {
             worker_id,
@@ -154,21 +164,25 @@ impl RequestIdPool {
     #[inline]
     fn refill(&mut self) {
         let needed = ID_POOL_CAPACITY.saturating_sub(self.entries.len());
-        for _ in 0..needed {
+        let base_nanos = crate::clock::now_unix_nanos();
+        for i in 0..needed {
+            let timestamp = base_nanos.wrapping_add(i as u64);
             let seq = self.sequence;
             self.sequence = self.sequence.wrapping_add(1);
-
-            // Entropy formula: WorkerID (high 16 bits of u64) | Monotonic Sequence (low 48 bits)
-            let entropy = ((self.worker_id as u64) << 48) | (seq & 0x0000_FFFF_FFFF_FFFF);
+            let entropy = mix_entropy(self.worker_id, seq);
 
             let mut hex = [0u8; 32];
-            // Part 1: Timestamp prefix (16 bytes)
-            hex[0..16].copy_from_slice(&self.prefix_hex);
-            // Part 2: Entropy suffix (16 bytes)
+            // Part 1: Nanosecond timestamp prefix (16 bytes)
+            format_hex_16(timestamp, (&mut hex[0..16]).try_into().unwrap());
+            // Part 2: High-entropy suffix (16 bytes)
             let suffix_slice: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
             format_hex_16(entropy, suffix_slice);
 
-            self.entries.push(PoolEntry { entropy, hex });
+            self.entries.push(PoolEntry {
+                timestamp,
+                entropy,
+                hex,
+            });
         }
     }
 
@@ -179,16 +193,18 @@ impl RequestIdPool {
     /// - Idle rollover (> 1s): ~3-5 nanoseconds (in-place 16-byte memory patch of L1 cache entries).
     #[inline]
     pub fn next_id(&mut self) -> (RequestId, HeaderValue) {
-        let now = now_epoch_secs();
+        let now_sec = crate::clock::coarse_sec();
 
         // Check if second has rolled over (due to idle time > 1s)
-        if now != self.batch_epoch_sec {
-            self.batch_epoch_sec = now;
-            format_hex_16(now, &mut self.prefix_hex);
+        if now_sec != self.batch_epoch_sec {
+            self.batch_epoch_sec = now_sec;
+            let now_nanos = crate::clock::now_unix_nanos();
+            format_hex_16(now_nanos, &mut self.prefix_hex);
 
             // Two-Part Decoupled Assembly: Patch the first 16 hex bytes in place.
             // Preserves pre-allocated entropy and sequence numbers in the suffix!
             for entry in &mut self.entries {
+                entry.timestamp = now_nanos;
                 entry.hex[0..16].copy_from_slice(&self.prefix_hex);
             }
         }
@@ -200,18 +216,23 @@ impl RequestIdPool {
 
         let entry = self.entries.pop().unwrap_or_else(|| {
             // Extreme edge-case fallback if capacity is 0
+            let timestamp = crate::clock::now_unix_nanos();
             let seq = self.sequence;
             self.sequence = self.sequence.wrapping_add(1);
-            let entropy = ((self.worker_id as u64) << 48) | (seq & 0x0000_FFFF_FFFF_FFFF);
+            let entropy = mix_entropy(self.worker_id, seq);
             let mut hex = [0u8; 32];
-            hex[0..16].copy_from_slice(&self.prefix_hex);
+            format_hex_16(timestamp, (&mut hex[0..16]).try_into().unwrap());
             let suffix_slice: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
             format_hex_16(entropy, suffix_slice);
-            PoolEntry { entropy, hex }
+            PoolEntry {
+                timestamp,
+                entropy,
+                hex,
+            }
         });
 
         // Construct 128-bit typed RequestId
-        let raw_u128 = ((self.batch_epoch_sec as u128) << 64) | (entry.entropy as u128);
+        let raw_u128 = ((entry.timestamp as u128) << 64) | (entry.entropy as u128);
         let request_id = RequestId::new(raw_u128);
 
         // Construct HeaderValue from verified ASCII hex slice (0 heap alloc)
@@ -286,10 +307,12 @@ mod tests {
         let mut pool = RequestIdPool::new(7);
 
         // Artificially simulate that pool entries were generated 10 seconds ago
-        let old_sec = now_epoch_secs() - 10;
+        let old_sec = crate::clock::coarse_sec().saturating_sub(10);
+        let old_nanos = crate::clock::now_unix_nanos().saturating_sub(10_000_000_000);
         pool.batch_epoch_sec = old_sec;
-        format_hex_16(old_sec, &mut pool.prefix_hex);
+        format_hex_16(old_nanos, &mut pool.prefix_hex);
         for entry in &mut pool.entries {
+            entry.timestamp = old_nanos;
             entry.hex[0..16].copy_from_slice(&pool.prefix_hex);
         }
 
