@@ -1,39 +1,45 @@
 //! Layer 7 HTTP/2 routing rules, match requests, and in-memory lookup tables.
 //!
-//! ### Architectural Note: Protocol Isolation Invariant (AGENTS.md §2.1 & §2.7)
-//! This module intentionally maintains its own self-contained definitions for [`Http2Route`],
-//! [`Http2RouteRequest`], and [`Http2Router`] rather than sharing a generic parent struct with
-//! HTTP/1.1 and HTTP/3. Duplicating these structures across protocol boundaries is an intentional
-//! architectural design choice:
-//! 1. "Duplicate first. Abstract second": Preserves flat workflows and avoids accidental cross-protocol
-//!    coupling between RFC 9113 (HTTP/2 binary framing and multiplexed streams) and text streaming/QUIC.
-//! 2. Allows future HTTP/2-specific routing constraints (such as `:authority` pseudo-header evaluation,
-//!    multiplexed priority stream weighting, or H2 push directives) without polluting HTTP/1.1 or HTTP/3.
-//!
-//! ### Hot/Cold Data-Oriented Separation & L1D Cache Line Alignment
-//! - Full route definitions ([`Http2Route`]) contain cold metadata (`listener_id`, `upstream_name`,
-//!   `plugins: Vec<String>`) exceeding 200+ bytes. Storing them directly in lookup tables pollutes L1D cache lines.
-//! - The hot lookup structures ([`exact_routes`], [`prefix_routes`]) store compact, 16-byte-aligned
-//!   [`Http2HotCandidate`] descriptors. During route matching, only compact matching state is fetched
-//!   into L1D cache lines.
-//! - Cold route metadata is accessed exactly ONCE from the listener's `routes: Vec<Http2Route>` arena
-//!   after the winning candidate is identified.
+//! ```text
+//!                           HTTP/2 ROUTE MATCHING
+//!                                     │
+//!                        ┌────────────▼────────────┐
+//!                        │ Ephemeral Route Active? │──[HIT]──► Ephemeral Route
+//!                        └────────────┬────────────┘
+//!                                     │ [NONE]
+//!                        ┌────────────▼────────────┐
+//!                        │ PathPrefixMatcher (16B) │
+//!                        │ 4 Nodes per Cache Line  │
+//!                        └────────────┬────────────┘
+//!                                     │
+//!                     ┌───────────────┴───────────────┐
+//!                     ▼                               ▼
+//!                [PATH ENDS]                   [PATH CONTINUES]
+//!              Exact Leaf First              Longest Prefix Candidate
+//!                     │                               │
+//!                     └───────────────┬───────────────┘
+//!                                     ▼
+//!                         Candidate Method & Host Check
+//!                                     │
+//!                                ┌────┴────┐
+//!                         [HIT]  ▼         ▼  [MISS]
+//!                           Http2Route   None (404)
+//! ```
 
 use rustc_hash::FxHashMap;
-use velda_core::{ListenerId, RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId};
 
 use crate::error::RouterError;
 use crate::host::{CompiledHost, ReverseHostLabels, host_specificity};
 use crate::method::MethodMask;
 use crate::path::PathPrefixMatcher;
 
-/// Concrete compiled HTTP/2 Layer 7 route (12 bytes, `Copy`, zero heap strings).
+/// Concrete compiled HTTP/2 Layer 7 route (8 bytes, `Copy`, zero heap strings).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http2Route {
     pub id: RouteId,
     pub listener_id: ListenerId,
-    pub upstream_id: UpstreamId,
 }
 
 impl Http2Route {
@@ -44,7 +50,6 @@ impl Http2Route {
         id: RouteId,
         listener_id: impl Into<ListenerId>,
         path_prefix: impl Into<String>,
-        upstream_id: UpstreamId,
     ) -> Http2RouteRule {
         Http2RouteRule {
             id,
@@ -53,7 +58,6 @@ impl Http2Route {
             path_prefix: Some(path_prefix.into()),
             exact_path: None,
             method: None,
-            upstream_id,
             method_mask: MethodMask::ANY,
             compiled_host: CompiledHost::Any,
         }
@@ -66,7 +70,6 @@ impl Http2Route {
         id: RouteId,
         listener_id: impl Into<ListenerId>,
         exact_path: impl Into<String>,
-        upstream_id: UpstreamId,
     ) -> Http2RouteRule {
         Http2RouteRule {
             id,
@@ -75,7 +78,6 @@ impl Http2Route {
             path_prefix: None,
             exact_path: Some(exact_path.into()),
             method: None,
-            upstream_id,
             method_mask: MethodMask::ANY,
             compiled_host: CompiledHost::Any,
         }
@@ -85,7 +87,7 @@ impl Http2Route {
 /// Builder specification for an HTTP/2 route rule consumed during router compilation.
 ///
 /// All pattern strings (`host`, `path_prefix`, `exact_path`, `method`) are consumed and
-/// dropped once compiled into [`ListenerHttp2Router`], leaving only 12-byte [`Http2Route`]s in RAM.
+/// dropped once compiled into [`ListenerHttp2Router`], leaving only 8-byte [`Http2Route`]s in RAM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Http2RouteRule {
     pub id: RouteId,
@@ -94,7 +96,6 @@ pub struct Http2RouteRule {
     pub path_prefix: Option<String>,
     pub exact_path: Option<String>,
     pub method: Option<String>,
-    pub upstream_id: UpstreamId,
     pub method_mask: MethodMask,
     pub compiled_host: CompiledHost,
 }
@@ -147,16 +148,14 @@ impl Http2RouteRule {
     }
 }
 
-/// Compact, 16-byte-aligned hot candidate descriptor for L1D cache line residency.
-///
-/// Contains ONLY the fields required during the hot matching loop, indexing into the
-/// listener's 12-byte `routes: Vec<Http2Route>` table once a winner is identified.
+/// Compact candidate descriptor indexing into `routes: Vec<Http2Route>`.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Http2HotCandidate {
     pub compiled_host: CompiledHost,
     pub route_idx: u32,
     pub method_mask: MethodMask,
+    pub is_prefix: bool,
 }
 
 impl Http2HotCandidate {
@@ -179,50 +178,12 @@ impl Http2HotCandidate {
     }
 }
 
-/// Compact candidate descriptor for listeners with small route tables (<= 3 routes).
-///
-/// Eliminates FxHashMap hashing and flat Slash-Block table traversals, resolving routes
-/// via linear register-unrolled evaluation in GPRs (%rax, %rcx, %rdx).
+/// Ephemeral exact route registered dynamically (e.g. for ACME challenges).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Http2SmallCandidate {
+pub struct EphemeralHttp2Route {
+    pub path: String,
     pub route: Http2Route,
-    pub exact_path: Option<String>,
-    pub path_prefix: Option<String>,
-    pub compiled_host: CompiledHost,
     pub method_mask: MethodMask,
-}
-
-impl Http2SmallCandidate {
-    /// Evaluates small candidate matching against an incoming request view.
-    #[inline(always)]
-    pub fn matches_req(&self, req: &Http2RouteRequest<'_>) -> bool {
-        if !self.method_mask.matches(req.method_mask) {
-            return false;
-        }
-        if self.compiled_host != CompiledHost::Any {
-            let host_matches = if req.parsed_host.count > 0 || req.parsed_host.is_ip_or_unbracketed
-            {
-                self.compiled_host.matches(&req.parsed_host)
-            } else if let Some(h) = req.host {
-                self.compiled_host.matches(&ReverseHostLabels::parse(h))
-            } else {
-                false
-            };
-            if !host_matches {
-                return false;
-            }
-        }
-        if let Some(ref exact) = self.exact_path {
-            if req.path != exact.as_str() {
-                return false;
-            }
-        } else if let Some(ref prefix) = self.path_prefix
-            && !req.path.starts_with(prefix.as_str())
-        {
-            return false;
-        }
-        true
-    }
 }
 
 /// Zero-allocation view of an incoming HTTP/2 request for route matching.
@@ -265,201 +226,151 @@ impl<'a> Http2RouteRequest<'a> {
     }
 }
 
-/// Function pointer signature for HTTP/2 route lookup strategies.
-pub type Http2RouteFn =
-    for<'a> fn(&'a ListenerHttp2Router, &Http2RouteRequest<'_>) -> Option<&'a Http2Route>;
-
 /// Route table for a single HTTP/2 listener with Hot/Cold Data-Oriented Separation.
 ///
 /// Aligned to 64 bytes to sit on an exact L1D cache line boundary, preventing split-line
 /// header loads and false sharing between worker threads.
 #[repr(C, align(64))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ListenerHttp2Router {
     routes: Vec<Http2Route>,
-    exact_routes: FxHashMap<String, Vec<Http2HotCandidate>>,
     matcher: PathPrefixMatcher,
-    prefix_routes: Vec<Vec<Http2HotCandidate>>,
-    small_candidates: Vec<Http2SmallCandidate>,
-    route_fn: Http2RouteFn,
-}
-
-impl Default for ListenerHttp2Router {
-    fn default() -> Self {
-        Self {
-            routes: Vec::new(),
-            exact_routes: FxHashMap::default(),
-            matcher: PathPrefixMatcher::default(),
-            prefix_routes: Vec::new(),
-            small_candidates: Vec::new(),
-            route_fn: route_small,
-        }
-    }
+    pattern_routes: Vec<Vec<Http2HotCandidate>>,
+    ephemeral_routes: Vec<EphemeralHttp2Route>,
 }
 
 impl ListenerHttp2Router {
     /// Builds a new compiled HTTP/2 router for a single listener.
     ///
-    /// Automatically selects between Workload-Adaptive strategies:
-    /// - `rules.len() <= 3`: Scalar register unrolled matching ([`route_small`]), eliminating hashing and Slash-Block overhead.
-    /// - `rules.len() > 3`: SIMD/Slash-Block prefix matcher + FxHashMap exact matcher ([`route_table`]).
+    /// Consolidates exact and prefix matching into a single contiguous integer-block
+    /// arena ([`PathPrefixMatcher`]), eliminating heap pointer dereferencing and scalar
+    /// branch divergence.
     pub fn new(rules: Vec<Http2RouteRule>) -> Result<Self, RouterError> {
-        if rules.len() <= 3 {
-            let mut sorted_rules = rules;
-            sorted_rules.sort_by(|a, b| {
-                let a_is_exact = a.exact_path.is_some();
-                let b_is_exact = b.exact_path.is_some();
-                if a_is_exact != b_is_exact {
-                    return b_is_exact.cmp(&a_is_exact);
-                }
-                let a_prefix_len = a.path_prefix.as_ref().map_or(0, |p| p.len());
-                let b_prefix_len = b.path_prefix.as_ref().map_or(0, |p| p.len());
-                if a_prefix_len != b_prefix_len {
-                    return b_prefix_len.cmp(&a_prefix_len);
-                }
-                let a_host_spec = host_specificity(a.host.as_deref());
-                let b_host_spec = host_specificity(b.host.as_deref());
-                b_host_spec.cmp(&a_host_spec)
-            });
-
-            let small_candidates = sorted_rules
-                .into_iter()
-                .map(|r| Http2SmallCandidate {
-                    route: Http2Route {
-                        id: r.id,
-                        listener_id: r.listener_id,
-                        upstream_id: r.upstream_id,
-                    },
-                    exact_path: r.exact_path,
-                    path_prefix: r.path_prefix,
-                    compiled_host: r.compiled_host,
-                    method_mask: r.method_mask,
-                })
-                .collect();
-
-            return Ok(Self {
-                routes: Vec::new(),
-                exact_routes: FxHashMap::default(),
-                matcher: PathPrefixMatcher::default(),
-                prefix_routes: Vec::new(),
-                small_candidates,
-                route_fn: route_small,
-            });
-        }
-
-        let mut exact_map: FxHashMap<String, Vec<Http2HotCandidate>> = FxHashMap::default();
-        let mut prefix_map: FxHashMap<String, Vec<Http2HotCandidate>> = FxHashMap::default();
         let mut routes = Vec::with_capacity(rules.len());
+        let mut pattern_map: FxHashMap<String, Vec<Http2HotCandidate>> = FxHashMap::default();
 
         for (idx, r) in rules.iter().enumerate() {
             routes.push(Http2Route {
                 id: r.id,
                 listener_id: r.listener_id,
-                upstream_id: r.upstream_id,
             });
+
+            let is_prefix = r.exact_path.is_none();
+            let pattern = if let Some(ref exact) = r.exact_path {
+                exact.clone()
+            } else if let Some(ref prefix) = r.path_prefix {
+                if prefix.is_empty() {
+                    "/".to_string()
+                } else {
+                    prefix.clone()
+                }
+            } else {
+                "/".to_string()
+            };
 
             let candidate = Http2HotCandidate {
                 compiled_host: r.compiled_host.clone(),
                 route_idx: idx as u32,
                 method_mask: r.method_mask,
+                is_prefix,
             };
 
-            if let Some(ref exact) = r.exact_path {
-                exact_map.entry(exact.clone()).or_default().push(candidate);
-            } else if let Some(ref prefix) = r.path_prefix
-                && !prefix.is_empty()
-            {
-                prefix_map
-                    .entry(prefix.clone())
-                    .or_default()
-                    .push(candidate);
-            }
+            pattern_map.entry(pattern).or_default().push(candidate);
         }
 
-        for list in exact_map.values_mut() {
-            list.sort_by_key(|c| {
-                let r = &rules[c.route_idx as usize];
-                std::cmp::Reverse(host_specificity(r.host.as_deref()))
-            });
-        }
-        for list in prefix_map.values_mut() {
-            list.sort_by_key(|c| {
-                let r = &rules[c.route_idx as usize];
-                std::cmp::Reverse(host_specificity(r.host.as_deref()))
+        for list in pattern_map.values_mut() {
+            list.sort_by(|a, b| {
+                // 1. Exact candidates take precedence over prefix candidates
+                let a_exact = !a.is_prefix;
+                let b_exact = !b.is_prefix;
+                if a_exact != b_exact {
+                    return b_exact.cmp(&a_exact);
+                }
+                // 2. Specific host takes precedence over wildcard host
+                let r_a = &rules[a.route_idx as usize];
+                let r_b = &rules[b.route_idx as usize];
+                let spec_a = host_specificity(r_a.host.as_deref());
+                let spec_b = host_specificity(r_b.host.as_deref());
+                spec_b.cmp(&spec_a)
             });
         }
 
         let mut matcher = PathPrefixMatcher::new();
-        let mut prefix_routes = Vec::with_capacity(prefix_map.len());
+        let mut pattern_routes = Vec::with_capacity(pattern_map.len());
 
-        for (pattern, c_list) in prefix_map {
-            let idx = prefix_routes.len();
-            prefix_routes.push(c_list);
-            matcher.insert(&pattern, idx);
+        for (pattern, c_list) in pattern_map {
+            let idx = pattern_routes.len();
+            let has_prefix = c_list.iter().any(|c| c.is_prefix);
+            pattern_routes.push(c_list);
+            matcher.insert_pattern(&pattern, idx, has_prefix);
         }
         matcher.compile();
 
         Ok(Self {
             routes,
-            exact_routes: exact_map,
             matcher,
-            prefix_routes,
-            small_candidates: Vec::new(),
-            route_fn: route_table,
+            pattern_routes,
+            ephemeral_routes: Vec::new(),
         })
     }
 
     /// Resolves an HTTP/2 route for an incoming request view.
     ///
-    /// Evaluates using inlined workload-adaptive dispatch:
-    /// - For small listeners (<= 3 routes): executes unrolled scalar [`route_small`].
-    /// - For large listeners (> 3 routes): executes exact FxHashMap + flat Slash-Block [`route_table`].
+    /// Evaluates using unified contiguous integer-block matching across ALU Port 0/1.
     #[inline(always)]
     pub fn route(&self, req: &Http2RouteRequest<'_>) -> Option<&Http2Route> {
-        if !self.small_candidates.is_empty() {
-            route_small(self, req)
-        } else {
-            route_table(self, req)
+        // 1. Ephemeral route fast check (e.g. ACME challenge)
+        if !self.ephemeral_routes.is_empty() {
+            for ep in &self.ephemeral_routes {
+                if ep.path == req.path && ep.method_mask.matches(req.method_mask) {
+                    return Some(&ep.route);
+                }
+            }
         }
+
+        // 2. Hardware temporal prefetch
+        if let Some(first_node) = self.matcher.nodes().first() {
+            crate::path::prefetch_l1_keep(first_node as *const _ as *const u8);
+        }
+
+        // 3. Contiguous integer matching
+        let mut matches = [crate::path::MatchedPattern::default(); 32];
+        let count = self.matcher.match_path(req.path, &mut matches);
+
+        for m in matches[..count].iter().rev() {
+            if let Some(candidates) = self.pattern_routes.get(m.pattern_idx as usize) {
+                for c in candidates {
+                    if !m.is_exact && !c.is_prefix {
+                        continue;
+                    }
+                    if c.matches_req(req) {
+                        return self.routes.get(c.route_idx as usize);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Dynamically registers an ephemeral exact-path route into this listener's router.
     ///
     /// Used by background logistics plugins (such as `acme_cert_rotator`) to inject temporary in-memory
     /// endpoints (e.g. `/.well-known/acme-challenge/<token>`) directly into the router table.
-    /// Guarantees O(1) lock-free lookup on the request hot path without recompiling configuration on disk.
+    /// Guarantees zero allocation on the serving path without recompiling configuration on disk.
     pub fn insert_exact_route(
         &mut self,
         exact_path: String,
         route: Http2Route,
         method_mask: MethodMask,
     ) {
-        // 1. Scalar register unrolled strategy (`route_small`):
-        // Prepend to `small_candidates` so exact match takes precedence over existing prefix rules.
-        self.small_candidates.insert(
-            0,
-            Http2SmallCandidate {
-                route,
-                exact_path: Some(exact_path.clone()),
-                path_prefix: None,
-                compiled_host: CompiledHost::Any,
-                method_mask,
-            },
-        );
-
-        // 2. Hash-table lookup strategy (`route_table`):
-        // Register in `routes` arena and prepend candidate to `exact_routes` hash map.
-        let route_idx = self.routes.len() as u32;
-        self.routes.push(route);
-        let candidate = Http2HotCandidate {
-            compiled_host: CompiledHost::Any,
-            route_idx,
+        self.ephemeral_routes
+            .retain(|e| !(e.path == exact_path && e.route.id == route.id));
+        self.ephemeral_routes.push(EphemeralHttp2Route {
+            path: exact_path,
+            route,
             method_mask,
-        };
-        self.exact_routes
-            .entry(exact_path)
-            .or_default()
-            .insert(0, candidate);
+        });
     }
 
     /// Dynamically removes an ephemeral exact-path route previously registered for this listener.
@@ -467,74 +378,9 @@ impl ListenerHttp2Router {
     /// Invoked unconditionally upon challenge completion or expiration (via RAII Drop guard)
     /// to guarantee zero memory leakage and restore pristine routing state.
     pub fn remove_exact_route(&mut self, exact_path: &str, route_id: RouteId) {
-        // 1. Purge from `exact_routes` hash table
-        if let Some(candidates) = self.exact_routes.get_mut(exact_path) {
-            candidates.retain(|c| {
-                if let Some(r) = self.routes.get(c.route_idx as usize) {
-                    r.id != route_id
-                } else {
-                    false
-                }
-            });
-            if candidates.is_empty() {
-                self.exact_routes.remove(exact_path);
-            }
-        }
-
-        // 2. Purge from scalar `small_candidates`
-        self.small_candidates.retain(|c| c.route.id != route_id);
-
-        // 3. Reclaim arena slot if this route was the most recent element pushed
-        if self.routes.last().is_some_and(|r| r.id == route_id) {
-            self.routes.pop();
-        }
+        self.ephemeral_routes
+            .retain(|e| !(e.path == exact_path && e.route.id == route_id));
     }
-}
-
-#[inline]
-fn route_small<'a>(
-    router: &'a ListenerHttp2Router,
-    req: &Http2RouteRequest<'_>,
-) -> Option<&'a Http2Route> {
-    for c in &router.small_candidates {
-        if c.matches_req(req) {
-            return Some(&c.route);
-        }
-    }
-    None
-}
-
-#[inline]
-fn route_table<'a>(
-    router: &'a ListenerHttp2Router,
-    req: &Http2RouteRequest<'_>,
-) -> Option<&'a Http2Route> {
-    // Hardware temporal L1 prefetch: warm prefix table into L1D cache in parallel
-    if let Some(first_node) = router.matcher.nodes().first() {
-        crate::path::prefetch_l1_keep(first_node as *const _ as *const u8);
-    }
-
-    // Tier 1: Exact match lookup (O(1))
-    if let Some(candidates) = router.exact_routes.get(req.path)
-        && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
-    {
-        return router.routes.get(c.route_idx as usize);
-    }
-
-    // Tier 2: Prefix match lookup via flat Slash-Block table (O(P)) with longest-prefix-first fallback
-    let mut matches = [0usize; 32];
-    let count = router.matcher.match_prefixes(req.path, &mut matches);
-
-    // Iterate reverse: longest prefix match is at the end of matches buffer
-    for &pattern_idx in matches[..count].iter().rev() {
-        if let Some(candidates) = router.prefix_routes.get(pattern_idx)
-            && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
-        {
-            return router.routes.get(c.route_idx as usize);
-        }
-    }
-
-    None
 }
 
 /// Unified, thread-safe HTTP/2 routing table coordinating all HTTP/2 listeners.
@@ -618,18 +464,8 @@ mod tests {
     #[test]
     fn test_http2_exact_and_prefix_routing() {
         let routes = vec![
-            Http2Route::new_exact(
-                RouteId::new(1),
-                "h2-listener",
-                "/healthz",
-                UpstreamId::new(10),
-            ),
-            Http2Route::new(
-                RouteId::new(2),
-                "h2-listener",
-                "/grpc.service/v1",
-                UpstreamId::new(20),
-            ),
+            Http2Route::new_exact(RouteId::new(1), "h2-listener", "/healthz"),
+            Http2Route::new(RouteId::new(2), "h2-listener", "/grpc.service/v1"),
         ];
 
         let router = Http2Router::new(routes).unwrap();
@@ -637,12 +473,10 @@ mod tests {
         let req1 = Http2RouteRequest::new("/healthz");
         let r1 = router.route("h2-listener", &req1).unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         let req2 = Http2RouteRequest::new("/grpc.service/v1/CreateUser");
         let r2 = router.route("h2-listener", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_id, UpstreamId::new(20));
 
         let req3 = Http2RouteRequest::new("/unknown");
         assert!(router.route("h2-listener", &req3).is_none());
@@ -651,19 +485,9 @@ mod tests {
     #[test]
     fn test_http2_prefix_shadowing_fallback() {
         let routes = vec![
-            Http2Route::new(
-                RouteId::new(1),
-                "listener-1",
-                "/api/v1/internal",
-                UpstreamId::new(10),
-            )
-            .with_host("internal.velda.io"),
-            Http2Route::new(
-                RouteId::new(2),
-                "listener-1",
-                "/api/v1",
-                UpstreamId::new(20),
-            ),
+            Http2Route::new(RouteId::new(1), "listener-1", "/api/v1/internal")
+                .with_host("internal.velda.io"),
+            Http2Route::new(RouteId::new(2), "listener-1", "/api/v1"),
         ];
 
         let router = Http2Router::new(routes).unwrap();
@@ -672,11 +496,9 @@ mod tests {
             Http2RouteRequest::new("/api/v1/internal/secrets").with_host("internal.velda.io");
         let r1 = router.route("listener-1", &req1).unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         let req2 = Http2RouteRequest::new("/api/v1/internal/data").with_host("public.velda.io");
         let r2 = router.route("listener-1", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_id, UpstreamId::new(20));
     }
 }

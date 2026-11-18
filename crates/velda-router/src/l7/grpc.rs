@@ -1,26 +1,32 @@
 //! Layer 7 gRPC routing rules, match requests, and in-memory lookup tables.
 //!
-//! ### Hot/Cold Data-Oriented Separation & L1D Cache Line Alignment
-//! - Full route definitions ([`GrpcRoute`]) contain cold metadata (`listener_id`, `upstream_name`,
-//!   `plugins: Vec<String>`). Storing them directly in lookup tables pollutes L1D cache lines.
-//! - The hot lookup structures ([`service_routes`], [`catch_all`]) store compact, 16-byte-aligned
-//!   [`GrpcHotCandidate`] descriptors.
-//! - Cold route metadata is accessed exactly ONCE from the listener's `routes: Vec<GrpcRoute>` arena
-//!   after the winning candidate is identified.
+//! ```text
+//!                            gRPC ROUTE MATCHING
+//!                                     │
+//!                        ┌────────────▼────────────┐
+//!                        │ Service Exact Lookup    │──[HIT]──► Check Authority/Method
+//!                        └────────────┬────────────┘
+//!                                     │ [MISS]
+//!                        ┌────────────▼────────────┐
+//!                        │ Catch-All Scan (*)      │──[HIT]──► Check Authority/Method
+//!                        └────────────┬────────────┘
+//!                                     │ [MISS]
+//!                                     ▼
+//!                                 None (404)
+//! ```
 
 use rustc_hash::FxHashMap;
-use velda_core::{ListenerId, RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId};
 
 use crate::error::RouterError;
 use crate::host::{CompiledHost, ReverseHostLabels, host_specificity};
 
-/// Concrete compiled gRPC Layer 7 route (12 bytes, `Copy`, zero heap strings).
+/// Concrete compiled gRPC Layer 7 route (8 bytes, `Copy`, zero heap strings).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrpcRoute {
     pub id: RouteId,
     pub listener_id: ListenerId,
-    pub upstream_id: UpstreamId,
 }
 
 impl GrpcRoute {
@@ -31,7 +37,6 @@ impl GrpcRoute {
         id: RouteId,
         listener_id: impl Into<ListenerId>,
         service: impl Into<String>,
-        upstream_id: UpstreamId,
     ) -> GrpcRouteRule {
         GrpcRouteRule {
             id,
@@ -39,7 +44,6 @@ impl GrpcRoute {
             service: service.into(),
             method: None,
             authority: None,
-            upstream_id,
             compiled_authority: CompiledHost::Any,
         }
     }
@@ -48,7 +52,7 @@ impl GrpcRoute {
 /// Builder specification for a gRPC route rule consumed during router compilation.
 ///
 /// Pattern strings (`service`, `authority`) are consumed and dropped once compiled into
-/// [`ListenerGrpcRouter`], leaving only 12-byte [`GrpcRoute`]s in the route table.
+/// [`ListenerGrpcRouter`], leaving only 8-byte [`GrpcRoute`]s in the route table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpcRouteRule {
     pub id: RouteId,
@@ -56,7 +60,6 @@ pub struct GrpcRouteRule {
     pub service: String,
     pub method: Option<String>,
     pub authority: Option<String>,
-    pub upstream_id: UpstreamId,
     pub compiled_authority: CompiledHost,
 }
 
@@ -113,7 +116,7 @@ impl GrpcRouteRule {
     }
 }
 
-/// Compact, 16-byte-aligned hot candidate descriptor for L1D cache line residency in gRPC.
+/// Compact candidate descriptor for gRPC route matching.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpcHotCandidate {
@@ -126,47 +129,6 @@ impl GrpcHotCandidate {
     /// Evaluates candidate matching against an incoming request view in 1-2 CPU cycles.
     #[inline(always)]
     pub fn matches_req(&self, req: &GrpcRouteRequest<'_>) -> bool {
-        if let Some(ref exp_method) = self.method {
-            let Some(act_method) = req.method else {
-                return false;
-            };
-            if exp_method != act_method {
-                return false;
-            }
-        }
-        if self.compiled_authority == CompiledHost::Any {
-            return true;
-        }
-        if req.parsed_authority.count > 0 || req.parsed_authority.is_ip_or_unbracketed {
-            self.compiled_authority.matches(&req.parsed_authority)
-        } else if let Some(a) = req.authority {
-            self.compiled_authority
-                .matches(&ReverseHostLabels::parse(a))
-        } else {
-            false
-        }
-    }
-}
-
-/// Compact candidate descriptor for gRPC listeners with small route tables (<= 3 routes).
-///
-/// Eliminates FxHashMap hashing and catch-all scans, resolving routes via linear
-/// register-unrolled evaluation in GPRs (%rax, %rcx, %rdx).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrpcSmallCandidate {
-    pub route: GrpcRoute,
-    pub service: String,
-    pub method: Option<String>,
-    pub compiled_authority: CompiledHost,
-}
-
-impl GrpcSmallCandidate {
-    /// Evaluates small candidate matching against an incoming request view.
-    #[inline(always)]
-    pub fn matches_req(&self, req: &GrpcRouteRequest<'_>) -> bool {
-        if self.service != "*" && !self.service.is_empty() && self.service != req.service {
-            return false;
-        }
         if let Some(ref exp_method) = self.method {
             let Some(act_method) = req.method else {
                 return false;
@@ -302,84 +264,21 @@ impl<'a> GrpcRouteRequest<'a> {
     }
 }
 
-/// Function pointer signature for gRPC route lookup strategies.
-pub type GrpcRouteFn =
-    for<'a> fn(&'a ListenerGrpcRouter, &GrpcRouteRequest<'_>) -> Option<&'a GrpcRoute>;
-
 /// Route table for a single gRPC listener with Hot/Cold Data-Oriented Separation.
 ///
 /// Aligned to 64 bytes to sit on an exact L1D cache line boundary, preventing split-line
 /// header loads and false sharing between worker threads.
 #[repr(C, align(64))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ListenerGrpcRouter {
     routes: Vec<GrpcRoute>,
     service_routes: FxHashMap<String, Vec<GrpcHotCandidate>>,
     catch_all: Vec<GrpcHotCandidate>,
-    small_candidates: Vec<GrpcSmallCandidate>,
-    route_fn: GrpcRouteFn,
-}
-
-impl Default for ListenerGrpcRouter {
-    fn default() -> Self {
-        Self {
-            routes: Vec::new(),
-            service_routes: FxHashMap::default(),
-            catch_all: Vec::new(),
-            small_candidates: Vec::new(),
-            route_fn: route_small,
-        }
-    }
 }
 
 impl ListenerGrpcRouter {
     /// Builds a new compiled gRPC listener routing table.
-    ///
-    /// Automatically selects between Workload-Adaptive strategies:
-    /// - `rules.len() <= 3`: Scalar register unrolled matching ([`route_small`]), eliminating hashing overhead.
-    /// - `rules.len() > 3`: FxHashMap exact service matcher + catch-all bucket ([`route_table`]).
     pub fn new(rules: Vec<GrpcRouteRule>) -> Result<Self, RouterError> {
-        if rules.len() <= 3 {
-            let mut sorted_rules = rules;
-            sorted_rules.sort_by(|a, b| {
-                let a_is_exact_service = a.service != "*" && !a.service.is_empty();
-                let b_is_exact_service = b.service != "*" && !b.service.is_empty();
-                if a_is_exact_service != b_is_exact_service {
-                    return b_is_exact_service.cmp(&a_is_exact_service);
-                }
-                let a_has_method = a.method.is_some();
-                let b_has_method = b.method.is_some();
-                if a_has_method != b_has_method {
-                    return b_has_method.cmp(&a_has_method);
-                }
-                let a_host_spec = host_specificity(a.authority.as_deref());
-                let b_host_spec = host_specificity(b.authority.as_deref());
-                b_host_spec.cmp(&a_host_spec)
-            });
-
-            let small_candidates = sorted_rules
-                .into_iter()
-                .map(|r| GrpcSmallCandidate {
-                    route: GrpcRoute {
-                        id: r.id,
-                        listener_id: r.listener_id,
-                        upstream_id: r.upstream_id,
-                    },
-                    service: r.service,
-                    method: r.method,
-                    compiled_authority: r.compiled_authority,
-                })
-                .collect();
-
-            return Ok(Self {
-                routes: Vec::new(),
-                service_routes: FxHashMap::default(),
-                catch_all: Vec::new(),
-                small_candidates,
-                route_fn: route_small,
-            });
-        }
-
         let mut service_map: FxHashMap<String, Vec<GrpcHotCandidate>> = FxHashMap::default();
         let mut catch_all = Vec::new();
         let mut routes = Vec::with_capacity(rules.len());
@@ -388,7 +287,6 @@ impl ListenerGrpcRouter {
             routes.push(GrpcRoute {
                 id: r.id,
                 listener_id: r.listener_id,
-                upstream_id: r.upstream_id,
             });
 
             let candidate = GrpcHotCandidate {
@@ -422,59 +320,28 @@ impl ListenerGrpcRouter {
             routes,
             service_routes: service_map,
             catch_all,
-            small_candidates: Vec::new(),
-            route_fn: route_table,
         })
     }
 
     /// Resolves a gRPC route for an incoming request view.
-    ///
-    /// Evaluates using inlined workload-adaptive dispatch:
-    /// - For small listeners (<= 3 routes): executes unrolled scalar [`route_small`].
-    /// - For large listeners (> 3 routes): executes exact service FxHashMap + catch-all [`route_table`].
     #[inline(always)]
     pub fn route(&self, req: &GrpcRouteRequest<'_>) -> Option<&GrpcRoute> {
-        if !self.small_candidates.is_empty() {
-            route_small(self, req)
-        } else {
-            route_table(self, req)
+        if let Some(first_route) = self.routes.first() {
+            crate::path::prefetch_l1_keep(first_route as *const _ as *const u8);
         }
-    }
-}
 
-#[inline]
-fn route_small<'a>(
-    router: &'a ListenerGrpcRouter,
-    req: &GrpcRouteRequest<'_>,
-) -> Option<&'a GrpcRoute> {
-    for c in &router.small_candidates {
-        if c.matches_req(req) {
-            return Some(&c.route);
+        if let Some(candidates) = self.service_routes.get(req.service)
+            && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
+        {
+            return self.routes.get(c.route_idx as usize);
         }
-    }
-    None
-}
 
-#[inline]
-fn route_table<'a>(
-    router: &'a ListenerGrpcRouter,
-    req: &GrpcRouteRequest<'_>,
-) -> Option<&'a GrpcRoute> {
-    if let Some(first_route) = router.routes.first() {
-        crate::path::prefetch_l1_keep(first_route as *const _ as *const u8);
-    }
+        if let Some(c) = self.catch_all.iter().find(|c| c.matches_req(req)) {
+            return self.routes.get(c.route_idx as usize);
+        }
 
-    if let Some(candidates) = router.service_routes.get(req.service)
-        && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
-    {
-        return router.routes.get(c.route_idx as usize);
+        None
     }
-
-    if let Some(c) = router.catch_all.iter().find(|c| c.matches_req(req)) {
-        return router.routes.get(c.route_idx as usize);
-    }
-
-    None
 }
 
 /// Unified, thread-safe gRPC routing table coordinating all gRPC listeners.
@@ -641,15 +508,10 @@ mod tests {
     #[test]
     fn test_grpc_routing_exact_and_catchall() {
         let routes = vec![
-            GrpcRoute::new(
-                RouteId::new(1),
-                "grpc-in",
-                "helloworld.Greeter",
-                UpstreamId::new(10),
-            )
-            .with_method("SayHello")
-            .with_authority("grpc.velda.io"),
-            GrpcRoute::new(RouteId::new(2), "grpc-in", "*", UpstreamId::new(20)),
+            GrpcRoute::new(RouteId::new(1), "grpc-in", "helloworld.Greeter")
+                .with_method("SayHello")
+                .with_authority("grpc.velda.io"),
+            GrpcRoute::new(RouteId::new(2), "grpc-in", "*"),
         ];
 
         let router = GrpcRouter::new(routes).unwrap();
@@ -665,7 +527,6 @@ mod tests {
 
         let r1 = router.route("grpc-in", &req1).unwrap();
         assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_id, UpstreamId::new(10));
 
         // Method mismatch falls back to catch-all
         let req2 = GrpcRouteRequest::from_path(
@@ -675,7 +536,6 @@ mod tests {
         .unwrap();
         let r2 = router.route("grpc-in", &req2).unwrap();
         assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_id, UpstreamId::new(20));
     }
 
     #[test]

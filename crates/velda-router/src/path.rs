@@ -1,30 +1,36 @@
-//! High-performance, SIMD-accelerated URI path normalizer and
-//! flat cache-resident Slash-Block Prefix Matcher.
+//! High-performance SIMD URI path normalizer & contiguous 16-byte integer-block matcher.
 //!
-//! ### Zero-Overhead & Hardware Register Invariants:
-//! 1. **Branchless Path Normalization Fast Path**: Uses SIMD vector search (`memchr`) to scan 32 bytes per cycle.
-//!    For >99.9% of real-world clean production paths (e.g. `/api/v1/users`),
-//!    no anomalies exist -> returns `Cow::Borrowed(path)` with zero heap allocations and <5ns latency.
-//! 2. **Eliminating CPU Branch Mispredictions**:
-//!    The fast check is predicted as TAKEN by CPU branch predictors (BTB) with ~99.9% accuracy.
-//!    The complex normalizer is marked `#[cold]` and `#[inline(never)]`, preventing instruction cache (L1I)
-//!    bloat and avoiding pipeline misprediction stalls on the happy path.
-//! 3. **Defensive RFC 3986 Compliance**:
-//!    - Merges consecutive slashes (`//` -> `/`).
-//!    - Resolves and strips relative dot segments (`/./` and `/../`).
-//!    - Rejects root breakouts (attempting to climb above `/`).
-//!    - Rejects null bytes (`\0`).
-//!    - Decodes percent-encoded path traversals (`%2e%2e`, `%2f`, `%5c`).
-//! 4. **Flat Cache-Resident Slash-Block Prefix Table (`PathPrefixMatcher` / `SlashBlockPrefixTable`)**:
-//!    Prefix routing rules are flattened into a contiguous, 64-byte-aligned node array (`Vec<SlashBlockNode>`).
-//!    Zero pointer-chasing, zero heap allocations during lookup, and longest-prefix-first ordering with
-//!    hardware-accelerated Length-Guarded Dual-Chunk SWAR & SIMD across all 4 register tiers
-//!    (`Bits256`, `Bits128`, `Bits64`, `Bits32`).
+//! ```text
+//!                              INCOMING RAW URI
+//!                                     │
+//!                     ┌───────────────▼───────────────┐
+//!                     │ is_clean_path (Branchless)    │
+//!                     │ SIMD vector scan (32B / cycle)│
+//!                     └───────┬───────────────┬───────┘
+//!                             │               │
+//!            CLEAN (>99.9%)   │               │ ANOMALOUS (<0.1%)
+//!       ┌─────────────────────┘               └─────────────────────┐
+//!       ▼                                                           ▼
+//!  Cow::Borrowed(path)                                     normalize_path_cold
+//!  Zero Heap Allocation                                    Strip /./, /../, %2e
+//!       │                                                           │
+//!       └─────────────────────────────┬─────────────────────────────┘
+//!                                     │
+//!                                     ▼
+//!                        INTEGER-BLOCK ROUTE MATCHING
+//!                        Vec<IntegerBlockNode> (16B)
+//!                    4 Nodes fit in 1 Cache Line (64B)
+//!                                     │
+//!                     ┌───────────────▼───────────────┐
+//!                     │ 1-Cycle ALU (chunk ^ path)    │
+//!                     └───────┬───────────────┬───────┘
+//!                             │               │
+//!                    [PATH ENDS]             [PATH CONTINUES]
+//!                    Exact Match             Longest Prefix Candidate
+//! ```
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
-
-use velda_core::hardware::{RegisterWidth, global_hardware_topology};
 
 use crate::error::RouterError;
 
@@ -32,19 +38,7 @@ use crate::error::RouterError;
 // 1. SIMD-Accelerated Path Normalization (RFC 3986)
 // ============================================================================
 
-/// Ultra-fast branchless check whether a path is already canonical.
-///
-/// ### Branch Prediction & Hardware Pipeline Design:
-/// 1. **Zero Conditional Jumps in Loop**:
-///    Instead of branching on each character (which risks BTB thrashing and 15-20 cycle
-///    pipeline flushes upon mispredictions), anomaly flags are accumulated using bitwise OR/AND.
-/// 2. **Single-Pass Cache Line Streaming**:
-///    Scans the URI bytes exactly once in L1D cache, testing for:
-///    - Prohibited characters: `\0` (null byte), `\` (backslash), `%` (percent encoding)
-///    - Anomalous slashes: `//` (consecutive slashes) or `/.` (dot segment start)
-/// 3. **Single Predictable Exit Branch**:
-///    For >99.9% of real-world clean paths, `bad_char_mask | bad_slash_mask == 0`.
-///    The final branch is predicted as not taken with ~100% accuracy.
+/// Fast check whether a path is canonical and free of anomalies (`\0`, `\`, `%`, `//`, `/.`).
 #[inline(always)]
 pub fn is_clean_path(bytes: &[u8]) -> bool {
     // 1. Must start with '/'
@@ -66,10 +60,7 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
     true
 }
 
-/// Normalizes a request URI path with zero allocations on clean paths.
-///
-/// On clean paths (>99.9% of traffic), returns `Ok(Cow::Borrowed(path))` without heap allocation.
-/// On malformed/anomalous paths, enters the cold slow path to safely resolve dot segments.
+/// Normalizes a request URI path with zero allocations on clean paths (`Cow::Borrowed`).
 #[inline(always)]
 pub fn normalize_path(path: &str) -> Result<Cow<'_, str>, RouterError> {
     let bytes = path.as_bytes();
@@ -80,10 +71,7 @@ pub fn normalize_path(path: &str) -> Result<Cow<'_, str>, RouterError> {
     normalize_path_cold(path)
 }
 
-/// Cold slow-path normalization for anomalous or unsafe paths.
-///
-/// Marked `#[cold]` and `#[inline(never)]` so that LLVM optimizes the happy path
-/// straight-line fallthrough without polluting L1 instruction cache.
+/// Cold slow-path normalization for anomalous or unsafe paths (RFC 3986).
 #[cold]
 #[inline(never)]
 fn normalize_path_cold(path: &str) -> Result<Cow<'static, str>, RouterError> {
@@ -166,198 +154,24 @@ fn normalize_path_cold(path: &str) -> Result<Cow<'static, str>, RouterError> {
 }
 
 // ============================================================================
-// 2. Register-Adaptive Hardware Multi-Versioning Prefix Distance
+// 2. Common Prefix Calculation (Radix Tree Compilation Helper)
 // ============================================================================
 
-/// Signature for register-width-specific common prefix length calculation.
-pub type CommonPrefixLenFn = fn(a: &[u8], b: &[u8]) -> usize;
-
-/// Pre-resolved static function pointer for hardware register-adaptive prefix matching.
+/// Computes common prefix length between two strings during Radix tree compilation.
 ///
-/// Probed and bound once at boot across all tiers (`Bits256`, `Bits128`, `Bits64`)
-/// with zero hot-path branching.
-pub static COMMON_PREFIX_LEN_FN: std::sync::LazyLock<CommonPrefixLenFn> =
-    std::sync::LazyLock::new(|| {
-        let caps = global_hardware_topology().cpu.register_capabilities;
-        match caps.select_for_workload(RegisterWidth::Bits256) {
-            RegisterWidth::Bits256 => common_prefix_len_256,
-            RegisterWidth::Bits128 => common_prefix_len_128,
-            RegisterWidth::Bits64 => common_prefix_len_64,
-        }
-    });
-
-/// Computes common prefix length between two strings with zero indirect call overhead.
-///
-/// Inlines hardware vector registers (SSE2/AVX2 on x86_64, NEON on aarch64) directly into
-/// the radix tree traversal loop, eliminating function pointer dereferences and indirect branches.
-#[inline(always)]
+/// Uses natural 64-bit SWAR chunking (8 bytes per iteration) with zero heap allocation
+/// and portable ALU operations across all architectures.
+#[inline]
 pub fn common_prefix_len(a: &str, b: &str) -> usize {
     let ab = a.as_bytes();
     let bb = b.as_bytes();
-    #[cfg(target_arch = "x86_64")]
-    {
-        if ab.len() >= 32 && bb.len() >= 32 && std::is_x86_feature_detected!("avx2") {
-            common_prefix_len_256(ab, bb)
-        } else {
-            common_prefix_len_128(ab, bb)
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        common_prefix_len_128(ab, bb)
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        common_prefix_len_64(ab, bb)
-    }
-}
-
-/// Computes common prefix length using 256-bit AVX2 vector registers (32 bytes per iteration).
-#[inline]
-pub fn common_prefix_len_256(a: &[u8], b: &[u8]) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { common_prefix_len_256_x86_impl(a, b) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        common_prefix_len_128(a, b)
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn common_prefix_len_256_x86_impl(a: &[u8], b: &[u8]) -> usize {
-    use std::arch::x86_64::*;
-
-    let len = a.len().min(b.len());
-    let vec_len = len & !31;
+    let min_len = ab.len().min(bb.len());
     let mut i = 0;
 
-    // Process 32 bytes per cycle using 256-bit YMM vector registers
-    while i < vec_len {
-        let mask = unsafe {
-            let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
-            let vb = _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i);
-            let cmp = _mm256_cmpeq_epi8(va, vb);
-            _mm256_movemask_epi8(cmp) as u32
-        };
-
-        if mask != 0xFFFF_FFFF {
-            return i + (!mask).trailing_zeros() as usize;
-        }
-        i += 32;
-    }
-
-    // Remainder handled by 128-bit vector path
-    i + unsafe { common_prefix_len_128_x86_impl(&a[i..len], &b[i..len]) }
-}
-
-/// Computes common prefix length using 128-bit vector registers (SSE2 on x86_64, NEON on aarch64).
-#[inline]
-pub fn common_prefix_len_128(a: &[u8], b: &[u8]) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe { common_prefix_len_128_x86_impl(a, b) }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe { common_prefix_len_128_neon_impl(a, b) }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        common_prefix_len_64(a, b)
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-unsafe fn common_prefix_len_128_x86_impl(a: &[u8], b: &[u8]) -> usize {
-    use std::arch::x86_64::*;
-
-    let len = a.len().min(b.len());
-    let vec_len = len & !15;
-    let mut i = 0;
-
-    // Process 16 bytes per cycle using 128-bit XMM registers
-    while i < vec_len {
-        let mask = unsafe {
-            let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
-            let vb = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
-            let cmp = _mm_cmpeq_epi8(va, vb);
-            _mm_movemask_epi8(cmp) as u32
-        };
-
-        if mask != 0xFFFF {
-            return i + ((!mask) & 0xFFFF).trailing_zeros() as usize;
-        }
-        i += 16;
-    }
-
-    // Remainder processed with Dual 64-bit SWAR
-    i + common_prefix_len_64(&a[i..len], &b[i..len])
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn common_prefix_len_128_neon_impl(a: &[u8], b: &[u8]) -> usize {
-    use std::arch::aarch64::*;
-
-    let len = a.len().min(b.len());
-    let vec_len = len & !15;
-    let mut i = 0;
-
-    while i < vec_len {
-        let (lo, hi) = unsafe {
-            let va = vld1q_u8(a.as_ptr().add(i));
-            let vb = vld1q_u8(b.as_ptr().add(i));
-            let diff = veorq_u8(va, vb);
-            let lo = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(diff));
-            let hi = vgetq_lane_u64::<1>(vreinterpretq_u64_u8(diff));
-            (lo, hi)
-        };
-
-        if lo != 0 {
-            return i + (lo.trailing_zeros() / 8) as usize;
-        }
-        if hi != 0 {
-            return i + 8 + (hi.trailing_zeros() / 8) as usize;
-        }
-        i += 16;
-    }
-
-    i + common_prefix_len_64(&a[i..len], &b[i..len])
-}
-
-/// Computes common prefix length using Dual 64-bit SWAR registers (16 bytes per iteration
-/// across two 64-bit registers in parallel on ALU Port 0 & ALU Port 1).
-#[inline]
-pub fn common_prefix_len_64(a: &[u8], b: &[u8]) -> usize {
-    let len = a.len().min(b.len());
-    let dual_len = len & !15;
-    let mut i = 0;
-
-    while i < dual_len {
-        let wa0 = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
-        let wb0 = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        let wa1 = u64::from_le_bytes(a[i + 8..i + 16].try_into().unwrap());
-        let wb1 = u64::from_le_bytes(b[i + 8..i + 16].try_into().unwrap());
-
-        let diff0 = wa0 ^ wb0;
-        let diff1 = wa1 ^ wb1;
-
-        if diff0 != 0 {
-            return i + (diff0.trailing_zeros() / 8) as usize;
-        }
-        if diff1 != 0 {
-            return i + 8 + (diff1.trailing_zeros() / 8) as usize;
-        }
-        i += 16;
-    }
-
-    if i + 8 <= len {
-        let wa = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
-        let wb = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    // Fast 64-bit SWAR chunking for 8 bytes per step
+    while i + 8 <= min_len {
+        let wa = u64::from_le_bytes(ab[i..i + 8].try_into().unwrap());
+        let wb = u64::from_le_bytes(bb[i..i + 8].try_into().unwrap());
         let diff = wa ^ wb;
         if diff != 0 {
             return i + (diff.trailing_zeros() / 8) as usize;
@@ -365,135 +179,91 @@ pub fn common_prefix_len_64(a: &[u8], b: &[u8]) -> usize {
         i += 8;
     }
 
-    while i < len && a[i] == b[i] {
+    // Remainder scalar comparison
+    while i < min_len && ab[i] == bb[i] {
         i += 1;
     }
     i
 }
 
-/// High-performance Length-Guarded Dual-Chunk SWAR prefix equality check.
-///
-/// Determines whether `s` starts with `p` using overlapping register windows for short
-/// segments and 16-byte dual-chunk registers on ALU Port 0 & ALU Port 1 for longer segments.
+// ============================================================================
+// 3. Flat Cache-Resident Integer-Block Matcher (16-Byte Nodes)
+// ============================================================================
+
+/// Precomputed bitmasks for zero-cost length-guarded integer matching (1..=8 bytes).
+pub static LEN_MASKS: [u64; 9] = [
+    0x0000_0000_0000_0000,
+    0x0000_0000_0000_00FF,
+    0x0000_0000_0000_FFFF,
+    0x0000_0000_00FF_FFFF,
+    0x0000_0000_FFFF_FFFF,
+    0x0000_00FF_FFFF_FFFF,
+    0x0000_FFFF_FFFF_FFFF,
+    0x00FF_FFFF_FFFF_FFFF,
+    0xFFFF_FFFF_FFFF_FFFF,
+];
+
+/// Reads up to 8 bytes from `bytes` as a little-endian `u64`.
 #[inline(always)]
-pub fn starts_with_prefix_swar(s: &[u8], p: &[u8]) -> bool {
-    if s.len() < p.len() {
-        return false;
-    }
-    let n = p.len();
-    if n == 0 {
-        return true;
-    }
-
-    if n <= 4 {
-        match n {
-            1 => s[0] == p[0],
-            2 => {
-                let wa = u16::from_ne_bytes(s[..2].try_into().unwrap());
-                let wb = u16::from_ne_bytes(p[..2].try_into().unwrap());
-                wa == wb
-            }
-            3 => {
-                let wa = (s[0] as u32) | ((s[1] as u32) << 8) | ((s[2] as u32) << 16);
-                let wb = (p[0] as u32) | ((p[1] as u32) << 8) | ((p[2] as u32) << 16);
-                wa == wb
-            }
-            4 => {
-                let wa = u32::from_ne_bytes(s[..4].try_into().unwrap());
-                let wb = u32::from_ne_bytes(p[..4].try_into().unwrap());
-                wa == wb
-            }
-            _ => unreachable!(),
-        }
-    } else if n <= 8 {
-        // Overlapping 32-bit SWAR: covers bytes [0..4] and [n-4..n] in 2 ALU cycles without branches
-        let wa0 = u32::from_ne_bytes(s[..4].try_into().unwrap());
-        let wb0 = u32::from_ne_bytes(p[..4].try_into().unwrap());
-        let wa1 = u32::from_ne_bytes(s[n - 4..n].try_into().unwrap());
-        let wb1 = u32::from_ne_bytes(p[n - 4..n].try_into().unwrap());
-        ((wa0 ^ wb0) | (wa1 ^ wb1)) == 0
-    } else if n <= 16 {
-        // Overlapping 64-bit SWAR: covers bytes [0..8] and [n-8..n] in 2 ALU cycles without branches
-        let wa0 = u64::from_ne_bytes(s[..8].try_into().unwrap());
-        let wb0 = u64::from_ne_bytes(p[..8].try_into().unwrap());
-        let wa1 = u64::from_ne_bytes(s[n - 8..n].try_into().unwrap());
-        let wb1 = u64::from_ne_bytes(p[n - 8..n].try_into().unwrap());
-        ((wa0 ^ wb0) | (wa1 ^ wb1)) == 0
+pub fn read_chunk_u64(bytes: &[u8]) -> u64 {
+    if bytes.len() >= 8 {
+        let raw = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const u64) };
+        u64::from_le(raw)
     } else {
-        // Dual 64-bit SWAR loop: 16 bytes per cycle across ALU Port 0 & ALU Port 1
-        let mut i = 0;
-        let limit = n & !15;
-        while i < limit {
-            let wa0 = u64::from_ne_bytes(s[i..i + 8].try_into().unwrap());
-            let wb0 = u64::from_ne_bytes(p[i..i + 8].try_into().unwrap());
-            let wa1 = u64::from_ne_bytes(s[i + 8..i + 16].try_into().unwrap());
-            let wb1 = u64::from_ne_bytes(p[i + 8..i + 16].try_into().unwrap());
-            if ((wa0 ^ wb0) | (wa1 ^ wb1)) != 0 {
-                return false;
-            }
-            i += 16;
-        }
-
-        // Overlapping 16-byte tail
-        let wa0 = u64::from_ne_bytes(s[n - 16..n - 8].try_into().unwrap());
-        let wb0 = u64::from_ne_bytes(p[n - 16..n - 8].try_into().unwrap());
-        let wa1 = u64::from_ne_bytes(s[n - 8..n].try_into().unwrap());
-        let wb1 = u64::from_ne_bytes(p[n - 8..n].try_into().unwrap());
-        ((wa0 ^ wb0) | (wa1 ^ wb1)) == 0
+        let mut buf = [0u8; 8];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        u64::from_le_bytes(buf)
     }
 }
 
-// ============================================================================
-// 3. Flat Cache-Resident Slash-Block Prefix Matcher
-// ============================================================================
-
-/// A 64-byte, cache-line-aligned node in the flat slash-block prefix table.
-///
-/// ### Microarchitectural Contrast: Eliminating Radix Trees
-/// Unlike traditional edge gateways (Envoy, Kong, Traefik, Pingora) that traverse pointer-chasing
-/// Radix/Patricia Trees (where each branch requires dereferencing scattered heap pointers, inducing
-/// 60-80ns DRAM stalls on L3 LLC cache misses), `SlashBlockNode` flattens routing into a contiguous arena:
-/// 1. **Zero Pointer Chasing**: Child nodes are referenced by contiguous integer offsets (`children_start: u32`),
-///    so child iteration is a linear vector scan streamable by CPU L1D hardware prefetchers.
-/// 2. **Single 64-Byte Cache Line Transaction**: Precisely sized and aligned to 64 bytes (`#[repr(C, align(64))]`).
-///    Loading a node fetches the entire descriptor (`head8`, `prefix_len`, `children_start`, `first_byte`, `has_route`)
-///    in a single L1D cache transaction with zero split loads.
-/// 3. **1-Cycle Integer Block Rejection**: `head8` packs the first 8 prefix bytes into a `u64`.
-///    Candidate mismatch is rejected in 1 ALU cycle via `path_u64 ^ head8 != 0` before any string scan occurs.
-#[repr(C, align(64))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlashBlockNode {
-    /// Fast 64-bit integer word of the first 8 bytes (or 0-padded) for SWAR rejection.
-    pub head8: u64,
-    /// Edge prefix segment string.
-    pub prefix: String,
-    /// Registered route index in `prefix_routes` if a route prefix terminates at this node.
-    pub route_index: u32,
+/// A 16-byte integer-block node for contiguous URI routing (4 nodes per 64B cache line).
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegerBlockNode {
+    /// 8-byte chunk of the path segment (little-endian u64).
+    pub chunk: u64,
     /// Contiguous start offset of child nodes in the flat node arena.
-    pub children_start: u32,
-    /// Byte length of `prefix`.
-    pub prefix_len: u16,
-    /// Number of child nodes in the flat node arena.
-    pub children_count: u16,
-    /// Cached first byte of `prefix` for 1-cycle candidate branch rejection.
-    pub first_byte: u8,
-    /// Boolean flag whether this node holds a route index.
-    pub has_route: u8,
-    /// Explicit padding to ensure 64-byte cache line alignment with zero interior hole.
-    pub _pad: [u8; 18],
+    pub children_start: u16,
+    /// Pattern index in `pattern_routes` (0xFFFF = NONE).
+    pub pattern_idx: u16,
+    /// Byte length of `chunk` (1..=8, or 0 for root).
+    pub len: u8,
+    /// Number of child nodes in the flat arena (0..=255).
+    pub children_count: u8,
+    /// 1 if prefix matching is allowed (can be used as prefix when path continues); 0 if exact-only.
+    pub is_prefix: u8,
+    /// Padding byte to guarantee exact 16-byte alignment.
+    pub _pad: u8,
+}
+
+const _: () = assert!(std::mem::size_of::<IntegerBlockNode>() == 16);
+const _: () = assert!(std::mem::align_of::<IntegerBlockNode>() == 16);
+
+/// Canonical alias for backwards compatibility.
+pub type SlashBlockNode = IntegerBlockNode;
+
+/// Result record of a matched pattern during URI traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MatchedPattern {
+    /// Matched pattern index.
+    pub pattern_idx: u16,
+    /// `true` if the entire URI matched exactly up to this pattern.
+    pub is_exact: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 struct PrefixBuilderNode {
     prefix: String,
-    route_index: Option<usize>,
+    pattern_idx: Option<usize>,
+    is_prefix: bool,
     children: Vec<PrefixBuilderNode>,
 }
 
 impl PrefixBuilderNode {
-    fn insert(&mut self, path: &str, route_index: usize) {
+    fn insert(&mut self, path: &str, pattern_idx: usize, is_prefix: bool) {
         if path.is_empty() {
-            self.route_index = Some(route_index);
+            self.pattern_idx = Some(pattern_idx);
+            self.is_prefix = self.is_prefix || is_prefix;
             return;
         }
 
@@ -507,7 +277,7 @@ impl PrefixBuilderNode {
             let common_len = common_prefix_len(&child.prefix, path);
 
             if common_len == child.prefix.len() {
-                child.insert(&path[common_len..], route_index);
+                child.insert(&path[common_len..], pattern_idx, is_prefix);
             } else {
                 let common_prefix = child.prefix[..common_len].to_string();
                 let child_suffix = child.prefix[common_len..].to_string();
@@ -515,10 +285,15 @@ impl PrefixBuilderNode {
 
                 let split_node = PrefixBuilderNode {
                     prefix: common_prefix,
-                    route_index: if path_suffix.is_empty() {
-                        Some(route_index)
+                    pattern_idx: if path_suffix.is_empty() {
+                        Some(pattern_idx)
                     } else {
                         None
+                    },
+                    is_prefix: if path_suffix.is_empty() {
+                        is_prefix
+                    } else {
+                        false
                     },
                     children: Vec::new(),
                 };
@@ -530,7 +305,8 @@ impl PrefixBuilderNode {
                 if !path_suffix.is_empty() {
                     self.children[child_idx].children.push(PrefixBuilderNode {
                         prefix: path_suffix,
-                        route_index: Some(route_index),
+                        pattern_idx: Some(pattern_idx),
+                        is_prefix,
                         children: Vec::new(),
                     });
                 }
@@ -538,29 +314,52 @@ impl PrefixBuilderNode {
         } else {
             self.children.push(PrefixBuilderNode {
                 prefix: path.to_string(),
-                route_index: Some(route_index),
+                pattern_idx: Some(pattern_idx),
+                is_prefix,
                 children: Vec::new(),
             });
         }
     }
+
+    fn normalize_chunk_lengths(&mut self) {
+        for child in &mut self.children {
+            child.normalize_chunk_lengths();
+        }
+
+        while self.prefix.len() > 8 {
+            let tail_prefix = self.prefix[8..].to_string();
+            self.prefix.truncate(8);
+
+            let old_children = std::mem::take(&mut self.children);
+            let old_pattern_idx = self.pattern_idx.take();
+            let old_is_prefix = std::mem::replace(&mut self.is_prefix, false);
+
+            let mut intermediate_child = PrefixBuilderNode {
+                prefix: tail_prefix,
+                pattern_idx: old_pattern_idx,
+                is_prefix: old_is_prefix,
+                children: old_children,
+            };
+
+            intermediate_child.normalize_chunk_lengths();
+            self.children.push(intermediate_child);
+        }
+    }
 }
 
-/// Flat, cache-resident Slash-Block Prefix Matcher for Layer 7 routing.
-///
-/// Stores all prefix edges in a contiguous memory block (`Vec<SlashBlockNode>`), eliminating
-/// pointer-chasing linked tree traversal. Matching traverses nodes via contiguous slice
-/// iterations, executing in strictly $\mathcal{O}(P)$ prefix length time.
+/// Flat, cache-resident Integer-Block Matcher for Layer 7 routing.
 #[derive(Debug, Clone, Default)]
 pub struct PathPrefixMatcher {
     builder: Option<PrefixBuilderNode>,
-    nodes: Vec<SlashBlockNode>,
+    nodes: Vec<IntegerBlockNode>,
 }
 
-/// Canonical alias for [`PathPrefixMatcher`].
+/// Canonical aliases for [`PathPrefixMatcher`].
+pub type IntegerBlockMatcher = PathPrefixMatcher;
 pub type SlashBlockPrefixTable = PathPrefixMatcher;
 
 impl PathPrefixMatcher {
-    /// Creates a new empty prefix matcher.
+    /// Creates a new empty integer-block matcher.
     pub fn new() -> Self {
         Self {
             builder: Some(PrefixBuilderNode::default()),
@@ -568,15 +367,20 @@ impl PathPrefixMatcher {
         }
     }
 
-    /// Inserts a pattern into the prefix matcher during route setup.
-    pub fn insert(&mut self, path: &str, route_index: usize) {
+    /// Inserts a pattern into the matcher with explicit prefix matching flag.
+    pub fn insert_pattern(&mut self, path: &str, pattern_idx: usize, is_prefix: bool) {
         if let Some(ref mut builder) = self.builder {
-            builder.insert(path, route_index);
+            builder.insert(path, pattern_idx, is_prefix);
         } else {
             let mut b = PrefixBuilderNode::default();
-            b.insert(path, route_index);
+            b.insert(path, pattern_idx, is_prefix);
             self.builder = Some(b);
         }
+    }
+
+    /// Inserts a prefix pattern (defaulting to `is_prefix = true` for backwards compatibility).
+    pub fn insert(&mut self, path: &str, pattern_idx: usize) {
+        self.insert_pattern(path, pattern_idx, true);
     }
 
     /// Compiles the internal hierarchical tree into a flat, cache-resident node arena.
@@ -584,41 +388,25 @@ impl PathPrefixMatcher {
     /// BFS ordering ensures that all child nodes for any given parent are placed
     /// contiguously in memory (`nodes[children_start .. children_start + children_count]`).
     pub fn compile(&mut self) {
-        let Some(builder) = self.builder.take() else {
+        let Some(mut builder) = self.builder.take() else {
             return;
         };
+
+        builder.normalize_chunk_lengths();
 
         let mut nodes = Vec::new();
         let mut queue = VecDeque::new();
 
-        // Push root node (index 0)
-        let root_head8 = if builder.prefix.is_empty() {
-            0
-        } else {
-            let b = builder.prefix.as_bytes();
-            let mut buf = [0u8; 8];
-            let copy_len = b.len().min(8);
-            buf[..copy_len].copy_from_slice(&b[..copy_len]);
-            u64::from_le_bytes(buf)
-        };
-
-        let (has_route, route_index) = match builder.route_index {
-            Some(idx) => (1u8, idx as u32),
-            None => (0u8, u32::MAX),
-        };
-
-        nodes.push(SlashBlockNode {
-            first_byte: builder.prefix.as_bytes().first().copied().unwrap_or(0),
-            prefix_len: builder.prefix.len() as u16,
-            has_route,
-            route_index,
-            head8: root_head8,
+        let root_node = IntegerBlockNode {
+            chunk: 0,
             children_start: 0,
+            pattern_idx: builder.pattern_idx.map_or(0xFFFF, |idx| idx as u16),
+            len: 0,
             children_count: 0,
-            _pad: [0u8; 18],
-            prefix: builder.prefix.clone(),
-        });
-
+            is_prefix: if builder.is_prefix { 1 } else { 0 },
+            _pad: 0,
+        };
+        nodes.push(root_node);
         queue.push_back((builder, 0usize));
 
         while let Some((parent_b, parent_idx)) = queue.pop_front() {
@@ -629,36 +417,26 @@ impl PathPrefixMatcher {
             let start = nodes.len();
             let count = parent_b.children.len();
 
-            nodes[parent_idx].children_start = start as u32;
-            nodes[parent_idx].children_count = count as u16;
+            nodes[parent_idx].children_start = start as u16;
+            nodes[parent_idx].children_count = count as u8;
 
             for child_b in &parent_b.children {
-                let head8 = if child_b.prefix.is_empty() {
-                    0
-                } else {
-                    let b = child_b.prefix.as_bytes();
-                    let mut buf = [0u8; 8];
-                    let copy_len = b.len().min(8);
-                    buf[..copy_len].copy_from_slice(&b[..copy_len]);
-                    u64::from_le_bytes(buf)
-                };
+                let mut buf = [0u8; 8];
+                let b = child_b.prefix.as_bytes();
+                let copy_len = b.len().min(8);
+                buf[..copy_len].copy_from_slice(&b[..copy_len]);
+                let chunk = u64::from_le_bytes(buf);
 
-                let (child_has_route, child_route_index) = match child_b.route_index {
-                    Some(idx) => (1u8, idx as u32),
-                    None => (0u8, u32::MAX),
-                };
-
-                nodes.push(SlashBlockNode {
-                    first_byte: child_b.prefix.as_bytes().first().copied().unwrap_or(0),
-                    prefix_len: child_b.prefix.len() as u16,
-                    has_route: child_has_route,
-                    route_index: child_route_index,
-                    head8,
+                let node = IntegerBlockNode {
+                    chunk,
                     children_start: 0,
+                    pattern_idx: child_b.pattern_idx.map_or(0xFFFF, |idx| idx as u16),
+                    len: copy_len as u8,
                     children_count: 0,
-                    _pad: [0u8; 18],
-                    prefix: child_b.prefix.clone(),
-                });
+                    is_prefix: if child_b.is_prefix { 1 } else { 0 },
+                    _pad: 0,
+                };
+                nodes.push(node);
             }
 
             for (i, child_b) in parent_b.children.into_iter().enumerate() {
@@ -670,64 +448,92 @@ impl PathPrefixMatcher {
         self.nodes = nodes;
     }
 
-    /// Matches `path` against the flat prefix table, collecting all matched route indices
+    /// Matches `path` against the flat integer table, collecting all matched pattern records
     /// from root down to the deepest node into `buf`.
     ///
     /// Returns the number of matches found.
     /// Traversal is strictly $\mathcal{O}(P)$ (where $P$ is matched prefix length) and early-terminates
-    /// as soon as no child branch matches, without scanning the remainder of the URI path.
-    /// Uses [`starts_with_prefix_swar`] for branch validation in 1-2 CPU cycles.
+    /// as soon as no child branch matches.
     #[inline]
-    pub fn match_prefixes(&self, path: &str, buf: &mut [usize; 32]) -> usize {
+    pub fn match_path(&self, path: &str, buf: &mut [MatchedPattern; 32]) -> usize {
         if self.nodes.is_empty() {
             return 0;
         }
         let mut count = 0;
         let mut current_idx = 0;
-        let mut remaining = path;
+        let mut remaining = path.as_bytes();
 
         // Check root node
-        if self.nodes[0].has_route != 0 {
-            buf[count] = self.nodes[0].route_index as usize;
+        if self.nodes[0].pattern_idx != 0xFFFF {
+            buf[count] = MatchedPattern {
+                pattern_idx: self.nodes[0].pattern_idx,
+                is_exact: remaining.is_empty(),
+            };
             count += 1;
         }
 
         while !remaining.is_empty() {
-            let target_byte = remaining.as_bytes()[0];
             let node = &self.nodes[current_idx];
             let start = node.children_start as usize;
-            let end = start + (node.children_count as usize);
+            let c_count = node.children_count as usize;
+            if c_count == 0 {
+                break;
+            }
 
+            let chunk = read_chunk_u64(remaining);
+            let rem_len = remaining.len();
             let mut matched_child = None;
-            for child_idx in start..end {
+
+            for child_idx in start..start + c_count {
                 let child = &self.nodes[child_idx];
-                if child.first_byte == target_byte {
-                    let p = child.prefix.as_bytes();
-                    if starts_with_prefix_swar(remaining.as_bytes(), p) {
-                        matched_child = Some((child_idx, p.len()));
+                let clen = child.len as usize;
+                if rem_len >= clen {
+                    let mask = LEN_MASKS[clen];
+                    if ((chunk ^ child.chunk) & mask) == 0 {
+                        matched_child = Some(child_idx);
                         break;
                     }
                 }
             }
 
-            if let Some((child_idx, plen)) = matched_child {
-                if self.nodes[child_idx].has_route != 0 && count < buf.len() {
-                    buf[count] = self.nodes[child_idx].route_index as usize;
+            let Some(child_idx) = matched_child else {
+                break;
+            };
+
+            let child = &self.nodes[child_idx];
+            remaining = &remaining[child.len as usize..];
+            current_idx = child_idx;
+
+            if child.pattern_idx != 0xFFFF && count < buf.len() {
+                let is_exact = remaining.is_empty();
+                if is_exact || child.is_prefix != 0 {
+                    buf[count] = MatchedPattern {
+                        pattern_idx: child.pattern_idx,
+                        is_exact,
+                    };
                     count += 1;
                 }
-                remaining = &remaining[plen..];
-                current_idx = child_idx;
-            } else {
-                break;
             }
         }
 
         count
     }
 
+    /// Matches `path` against the flat prefix table, collecting all matched route indices
+    /// from root down to the deepest node into `buf`.
+    #[inline]
+    pub fn match_prefixes(&self, path: &str, buf: &mut [usize; 32]) -> usize {
+        let mut p_buf = [MatchedPattern::default(); 32];
+        let count = self.match_path(path, &mut p_buf);
+        for i in 0..count {
+            buf[i] = p_buf[i].pattern_idx as usize;
+        }
+        count
+    }
+
     /// Returns a slice of the compiled nodes in the flat arena.
     #[inline(always)]
-    pub fn nodes(&self) -> &[SlashBlockNode] {
+    pub fn nodes(&self) -> &[IntegerBlockNode] {
         &self.nodes
     }
 }
@@ -858,77 +664,13 @@ mod tests {
 
         for (a, b, expected) in cases {
             assert_eq!(common_prefix_len(a, b), expected, "Mismatch for ({a}, {b})");
-            assert_eq!(
-                common_prefix_len_256(a.as_bytes(), b.as_bytes()),
-                expected,
-                "256-bit mismatch for ({a}, {b})"
-            );
-            assert_eq!(
-                common_prefix_len_128(a.as_bytes(), b.as_bytes()),
-                expected,
-                "128-bit mismatch for ({a}, {b})"
-            );
-            assert_eq!(
-                common_prefix_len_64(a.as_bytes(), b.as_bytes()),
-                expected,
-                "64-bit mismatch for ({a}, {b})"
-            );
         }
     }
 
     #[test]
-    fn test_starts_with_prefix_swar() {
-        let cases = [
-            ("", "", true),
-            ("/api", "", true),
-            ("", "/api", false),
-            ("/a", "/a", true),
-            ("/a", "/b", false),
-            ("/ab", "/ab", true),
-            ("/ab", "/ac", false),
-            ("/abc", "/abc", true),
-            ("/abc", "/abd", false),
-            ("/abcd", "/abcd", true),
-            ("/abcd", "/abce", false),
-            ("/abcde", "/abcde", true),
-            ("/abcde", "/abcdf", false),
-            ("/api/v1/users", "/api/v1", true),
-            ("/api/v1/users", "/api/v2", false),
-            (
-                "/api/v1/clusters/us-east/tenants/corp-alpha",
-                "/api/v1/clusters/us-east",
-                true,
-            ),
-            (
-                "/api/v1/clusters/us-east/tenants/corp-alpha",
-                "/api/v1/clusters/us-west",
-                false,
-            ),
-            (
-                "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
-                "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
-                true,
-            ),
-            (
-                "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
-                "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v3",
-                false,
-            ),
-        ];
-
-        for (s, p, expected) in cases {
-            assert_eq!(
-                starts_with_prefix_swar(s.as_bytes(), p.as_bytes()),
-                expected,
-                "starts_with_prefix_swar mismatch for ({s}, {p})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_slash_block_node_cache_line_size() {
-        assert_eq!(std::mem::size_of::<SlashBlockNode>(), 64);
-        assert_eq!(std::mem::align_of::<SlashBlockNode>(), 64);
+    fn test_integer_block_node_size() {
+        assert_eq!(std::mem::size_of::<IntegerBlockNode>(), 16);
+        assert_eq!(std::mem::align_of::<IntegerBlockNode>(), 16);
     }
 
     #[test]
@@ -1003,5 +745,63 @@ mod tests {
         let count =
             matcher.match_prefixes("/api/v1/clusters/us-east/tenants/corp-beta/other", &mut buf);
         assert_eq!(&buf[..count], &[3]);
+    }
+
+    #[test]
+    fn test_integer_block_matcher_exact_and_prefix_unification() {
+        let mut matcher = PathPrefixMatcher::new();
+        // Exact /api/v1/users -> pattern 10 (exact)
+        matcher.insert_pattern("/api/v1/users", 10, false);
+        // Prefix /api/v1 -> pattern 20 (prefix)
+        matcher.insert_pattern("/api/v1", 20, true);
+        // Exact /healthz -> pattern 30 (exact)
+        matcher.insert_pattern("/healthz", 30, false);
+        matcher.compile();
+
+        let mut buf = [MatchedPattern::default(); 32];
+
+        // 1. Exact match /healthz
+        let count = matcher.match_path("/healthz", &mut buf);
+        assert_eq!(count, 1);
+        assert_eq!(
+            buf[0],
+            MatchedPattern {
+                pattern_idx: 30,
+                is_exact: true
+            }
+        );
+
+        // 2. Traversal past /healthz (e.g. /healthz/deep) -> should NOT match exact-only pattern 30
+        let count = matcher.match_path("/healthz/deep", &mut buf);
+        assert_eq!(count, 0);
+
+        // 3. Exact match /api/v1/users -> hits prefix /api/v1 (not exact) and exact /api/v1/users (exact)
+        let count = matcher.match_path("/api/v1/users", &mut buf);
+        assert_eq!(count, 2);
+        assert_eq!(
+            buf[0],
+            MatchedPattern {
+                pattern_idx: 20,
+                is_exact: false
+            }
+        );
+        assert_eq!(
+            buf[1],
+            MatchedPattern {
+                pattern_idx: 10,
+                is_exact: true
+            }
+        );
+
+        // 4. Ongoing path /api/v1/users/42 -> exact 10 does not match, prefix 20 matches
+        let count = matcher.match_path("/api/v1/users/42", &mut buf);
+        assert_eq!(count, 1);
+        assert_eq!(
+            buf[0],
+            MatchedPattern {
+                pattern_idx: 20,
+                is_exact: false
+            }
+        );
     }
 }

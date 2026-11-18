@@ -32,13 +32,11 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         RouteId::new(1),
         "https-in",
         "/healthz",
-        UpstreamId::new(10),
     ));
     http_routes.push(Http1Route::new_exact(
         RouteId::new(2),
         "https-in",
         "/metrics",
-        UpstreamId::new(20),
     ));
 
     // Deep nested prefixes
@@ -46,56 +44,41 @@ fn build_baseline_router(prefix_count: usize) -> Router {
         RouteId::new(3),
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
-        UpstreamId::new(30),
     ));
     http_routes.push(Http1Route::new(
         RouteId::new(4),
         "https-in",
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics",
-        UpstreamId::new(40),
     ));
     http_routes.push(Http1Route::new(
         RouteId::new(5),
         "https-in",
         "/api/v1/clusters",
-        UpstreamId::new(50),
     ));
 
     // Host-restricted route
     http_routes.push(
-        Http1Route::new(
-            RouteId::new(6),
-            "https-in",
-            "/secure/vault",
-            UpstreamId::new(60),
-        )
-        .with_host("*.api.velda.internal"),
+        Http1Route::new(RouteId::new(6), "https-in", "/secure/vault")
+            .with_host("*.api.velda.internal"),
     );
 
     // Dynamic prefixes
     for i in 10..prefix_count + 10 {
         http_routes.push(Http1Route::new(
-            RouteId::new(i as u32),
+            RouteId::new(i as u16),
             "https-in",
             format!("/services/tenant_{i:04}/resource"),
-            UpstreamId::new(i as u32),
         ));
     }
     let http_router = Http1Router::new(http_routes).unwrap();
 
     let grpc_routes = vec![
-        GrpcRoute::new(
-            RouteId::new(100),
-            "grpc-in",
-            "velda.auth.v1.AuthService",
-            UpstreamId::new(100),
-        )
-        .with_method("Authenticate"),
+        GrpcRoute::new(RouteId::new(100), "grpc-in", "velda.auth.v1.AuthService")
+            .with_method("Authenticate"),
         GrpcRoute::new(
             RouteId::new(101),
             "grpc-in",
             "velda.billing.v2.PaymentService",
-            UpstreamId::new(101),
         ),
     ];
     let grpc_router = GrpcRouter::new(grpc_routes).unwrap();

@@ -280,9 +280,13 @@ pub fn compile_to_runtime_router(
 ) -> Result<Router, String> {
     let mut builder = RouterBuilder::new();
 
-    for route in routes {
-        let route_id = RouteId::new(fnv1a_hash(&route.id));
-        let upstream_id = UpstreamId::new(fnv1a_hash(&route.upstream));
+    for (idx, route) in routes.iter().enumerate() {
+        let route_id = RouteId::new(idx as u16);
+        let up_idx = upstreams
+            .iter()
+            .position(|u| u.id == route.upstream)
+            .unwrap_or(0);
+        let upstream_id = UpstreamId::new(up_idx as u16);
 
         if route.kind.eq_ignore_ascii_case("l4") {
             let proto = match route.match_rule.protocol.as_deref().unwrap_or("tcp") {
@@ -329,8 +333,7 @@ pub fn compile_to_runtime_router(
                     .unwrap_or("*");
                 let service = raw_service.strip_prefix('/').unwrap_or(raw_service);
 
-                let mut grpc_route =
-                    GrpcRoute::new(route_id, &route.listener, service, upstream_id);
+                let mut grpc_route = GrpcRoute::new(route_id, &route.listener, service);
 
                 if let Some(ref host) = route.match_rule.host {
                     grpc_route = grpc_route.with_authority(host.clone());
@@ -339,11 +342,11 @@ pub fn compile_to_runtime_router(
                 builder = builder.add_grpc_route(grpc_route);
             } else {
                 let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    Http1Route::new_exact(route_id, &route.listener, exact.clone(), upstream_id)
+                    Http1Route::new_exact(route_id, &route.listener, exact.clone())
                 } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    Http1Route::new(route_id, &route.listener, prefix.clone(), upstream_id)
+                    Http1Route::new(route_id, &route.listener, prefix.clone())
                 } else {
-                    Http1Route::new(route_id, &route.listener, "/", upstream_id)
+                    Http1Route::new(route_id, &route.listener, "/")
                 };
 
                 if let Some(ref host) = route.match_rule.host {
