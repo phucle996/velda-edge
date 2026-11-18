@@ -1,53 +1,19 @@
-//! Pre-warmed User-Space Payload Slab Allocator.
+//! Pre-warmed User-Space Payload Slab Allocator (`velda_core::buffer::slab`).
 //!
-//! # Architecture and Invariants
-//! 1. **Continuous Mathematical Sizing & Anti-OOM Cap**:
-//!    - Baseline and maximum burst capacities are mathematically bounded via
-//!      [`crate::buffer::adaptive::AdaptiveBufferDimensions`].
-//!    - Prevents Out-Of-Memory (OOM) crashes by strictly enforcing `max_burst_cap`
-//!      (Dual-Constraint formula: $\le 3\times$ baseline and $\le 20\%$ headroom RAM).
-//! 2. **Tier 1 (Permanent Contiguous Baseline Floor)**:
-//!    - Slabs across all four canonical classes (`Small4K`, `Medium16K`, `Standard32K`, `Large64K`)
-//!      in Tier 1 are carved out of **ONE single contiguous memory arena** per pool
-//!      ([`ContiguousArena`]).
-//!    - These baseline slabs never get evicted or freed throughout the lifetime of the gateway process.
-//!    - Memory slices are offset-based, page-aligned (4096 bytes), and cache-line aligned.
-//! 3. **Eager Physical Page Commit (Anti-Page-Fault)**:
-//!    - During cold-start initialization and proactive shadow replenishment, every 4096-byte memory
-//!      page in the slabs is touched with volatile writes to force the Linux Kernel MMU to establish
-//!      page table entries (PTEs) upfront, eliminating runtime minor page faults.
-//! 4. **Tier 2 (Transient Burst Standby Queue with 15s TTL)**:
-//!    - Dynamic heap allocations (`Box<[u8]>`) created dynamically during traffic spikes exceeding
-//!      the baseline floor.
-//!    - Excess slabs are stored with a return timestamp from [`crate::coarse_time::coarse_now_sec`] and reused
-//!      across multi-wave micro-bursts, eliminating allocator heap churn (`malloc`/`free` thrashing).
-//!    - When burst traffic subsides, `sweep_expired()` drops these excess slabs so jemalloc and the
-//!      operating system can reclaim dirty pages across the process RSS decay window.
-//! 5. **Strict Core-Jailing & Shadow Maintenance**:
-//!    - Slabs are partitioned per CPU core into [`crate::buffer::CoreBufferPool`].
-//!    - Traffic Workers exclusively acquire from and recycle into their own core's pool (zero cross-core contention).
-//!    - Companion Shadow Logistics Worker (`velda-shadow-{id}`) maintains its core's pool inline
-//!      under `SCHED_IDLE` using non-blocking `try_lock()`:
-//!      - **Low-Watermark Proactive Replenishment**: When available pooled slabs drop $\le 25\%$ of baseline,
-//!        the shadow worker proactively commits a batch of physical slabs into the burst queue (15s TTL).
-//!      - **15s TTL Eviction**: Unused burst slabs idle $> 15s$ are dropped back to `jemalloc` RSS.
-//! 6. **Four Canonical Slab Classes with Contiguous Slicing**:
-//!    - `Small4K` (4 KB): small JSON payloads, auth tokens, small RPC.
-//!    - `Medium16K` (16 KB): standard REST payloads, chunks.
-//!    - `Standard32K` (32 KB): medium payloads (e.g. 18 KB - 32 KB), bridging the gap to 64 KB
-//!      while preserving a single contiguous memory slice `&[u8]` required for zero-copy SIMD WAF / JSON parsing.
-//!    - `Large64K` (64 KB): large uploads and full-frame buffering.
-//! 7. **Deliberate 4-Tier Hardware Cache Hierarchy Invariant (`T0` / `T1` / `T2` / `NTA`)**:
-//!    - **L1D (`_MM_HINT_T0` / `pldl1keep`)**: Strictly reserved for `velda-router` hot lookup tables
-//!      (`SlashBlockNode`, `HotCandidate`) so route matching executes in ~1-3 ns with zero L1D thrashing.
-//!    - **L2 (`_MM_HINT_T1` / `pldl2keep` + LIFO `pop_back`)**: Houses **Pool Management Metadata**
-//!      (`SlabBucket` vectors of 24-byte `PayloadSlab` descriptors) and [`crate::HeaderWorkspace`].
-//!      Because pool management runs on every request, pinning the lightweight 24-byte slab descriptors
-//!      and LIFO burst queue in L2 yields ~3-4 ns acquisition without touching Core L1D.
-//!    - **L3 LLC (`_MM_HINT_T2` / `pldl3keep`) & Physical DRAM (`_MM_HINT_NTA` / WC Streaming)**:
-//!      The multi-megabyte backing payload buffers (4 KB - 64 KB) reside in L3/DRAM. Bulk payload writes
-//!      (`>= 256` bytes) stream through CPU Write-Combining (WC) buffers (`COPY_NON_TEMPORAL_FN` /
-//!      `ZERO_NON_TEMPORAL_FN`), bypassing Read-For-Ownership (RFO) and never evicting L1D or L2.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           CORE-JAILED PAYLOAD SLAB ALLOCATOR                            │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ Classes: Small4K (4K) │ Medium16K (16K) │ Standard32K (32K) │ Large64K (64K)            │
+//! │                                                                                         │
+//! │   Frontline Worker ──► acquire() ──► [ Tier 1: Contiguous Arena ] (Permanent Floor)     │
+//! │                                 └──► [ Tier 2: Burst Queue      ] (15s TTL Standby)     │
+//! │                                                                                         │
+//! │   Shadow Worker (SCHED_IDLE) ──► maintain() via try_lock()                              │
+//! │     ├── Evict idle burst slabs (>15s TTL) back to jemalloc                              │
+//! │     └── Low watermark (<=25%): pre-warm & commit 4KB physical pages                     │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::alloc::Layout;
 use std::collections::VecDeque;
@@ -1140,7 +1106,7 @@ impl PayloadSlabPool {
         guard.baseline.len() + guard.burst.len()
     }
 
-    /// Performs non-blocking maintenance on this core's slab pool using [`crate::coarse_time::coarse_now_sec`].
+    /// Performs non-blocking maintenance on this core's slab pool using [`crate::clock::coarse_sec`].
     ///
     /// # Strict Core-Jailing & Coarse Clock Invariant
     /// Executed exclusively by `velda-shadow-{core_id}` companion worker pinned to the same CPU core.
@@ -1157,13 +1123,12 @@ impl PayloadSlabPool {
     ///    When available pooled slabs drop $\le 25\%$ of baseline capacity (due to traffic spike),
     ///    the shadow worker proactively pre-warms a batch of dynamic slabs, eagerly touching each 4KB page
     ///    (physical commit) and placing them into the burst standby queue with a 15s expiration timestamp.
-    ///    This guarantees that the frontline traffic worker never has to perform cold page allocations
-    ///    on the hot path.
+    ///    so the frontline traffic worker avoids cold page allocations on the hot path.
     ///
     /// Returns `(slabs_evicted, slabs_replenished)`.
     #[inline(always)]
     pub fn maintain(&self) -> (usize, usize) {
-        let now_sec = crate::coarse_time::coarse_now_sec();
+        let now_sec = crate::clock::coarse_sec();
         let mut evicted = 0;
         let mut replenished = 0;
 
@@ -1212,7 +1177,7 @@ impl PayloadSlabPool {
     /// Evicts burst slabs across all classes that have been idle longer than `idle_ttl_secs`.
     #[inline(always)]
     pub fn sweep_expired(&self) -> usize {
-        let now_sec = crate::coarse_time::coarse_now_sec();
+        let now_sec = crate::clock::coarse_sec();
         let mut evicted = 0;
         for class in [
             SlabClass::Small4K,
@@ -1260,7 +1225,7 @@ impl PayloadSlabPool {
         } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
             // Priority 2: Retain dynamic slab in Tier 2 burst standby queue.
             // Stamped with coarse integer clock (relaxed atomic load without syscall overhead).
-            let now_sec = crate::coarse_time::coarse_now_sec();
+            let now_sec = crate::clock::coarse_sec();
             guard.burst.push_back((now_sec, slab));
         }
         // Priority 3: Above max_burst_limit -> slab drops and frees its Box<[u8]> back to jemalloc RSS arena

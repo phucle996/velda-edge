@@ -74,7 +74,7 @@ static A: CountingAllocator = CountingAllocator::new();
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
-fn test_type_sizes_and_alignment() {
+fn type_sizes() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 1. Strongly Typed IDs must have 0 overhead over raw primitives
     assert_eq!(size_of::<RequestId>(), 16);
@@ -105,7 +105,7 @@ fn test_type_sizes_and_alignment() {
 }
 
 #[test]
-fn test_zero_allocation_hot_path_operations() {
+fn zero_alloc_hot_path() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     A.reset();
     CountingAllocator::enable_tracking();

@@ -300,7 +300,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: id.0,
-            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
+            ingress_time_sec: crate::clock::coarse_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -321,7 +321,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
+            ingress_time_sec: crate::clock::coarse_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -346,7 +346,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
+            ingress_time_sec: crate::clock::coarse_sec(),
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -895,7 +895,7 @@ impl HeaderWorkspace {
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         let (id, req_id) = crate::request_id::next_request_id();
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::coarse_time::coarse_now_sec();
+        self.ingress_time_sec = crate::clock::coarse_sec();
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
         let mut new_map = HeaderMap::with_capacity(self.initial_capacity);
@@ -911,7 +911,7 @@ impl HeaderWorkspace {
         self.numeric_len = 0;
         let (id, req_id) = crate::request_id::next_request_id();
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::coarse_time::coarse_now_sec();
+        self.ingress_time_sec = crate::clock::coarse_sec();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;

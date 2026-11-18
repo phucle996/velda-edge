@@ -1,11 +1,7 @@
 //! Shared strongly typed identifiers used across the Velda data plane.
 //!
-//! These types intentionally wrap primitive integers instead of using
-//! raw `u64`/`u32` values throughout the codebase. This prevents
-//! accidentally mixing identifiers belonging to different domains.
-//!
-//! Using `#[repr(transparent)]` guarantees zero ABI overhead over raw integers,
-//! allowing the compiler to pass IDs directly in CPU registers.
+//! These types wrap primitive integers with `#[repr(transparent)]` so they share
+//! the exact ABI layout of the underlying integer while preventing domain mixing.
 
 use std::fmt;
 
@@ -22,12 +18,6 @@ impl RequestId {
     #[inline(always)]
     pub const fn new(value: u128) -> Self {
         Self(value)
-    }
-
-    /// Creates a request identifier from a 64-bit integer (useful for tests and backward compatibility).
-    #[inline(always)]
-    pub const fn from_u64(value: u64) -> Self {
-        Self(value as u128)
     }
 
     /// Returns the underlying 128-bit identifier value.
@@ -293,7 +283,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_strongly_typed_ids() {
+    fn typed_ids() {
         let req = RequestId::new(1001);
         let conn = ConnectionId::new(2002);
         let listener = ListenerId::new(2505);
@@ -314,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_fnv1a_ids() {
+    fn fnv1a_ids() {
         let l1 = ListenerId::from_name("http-80");
         let l2 = ListenerId::from("http-80");
         assert_eq!(l1, l2);

@@ -262,8 +262,7 @@ static TOPOLOGY: OnceLock<HardwareTopology> = OnceLock::new();
 
 /// Returns the global hardware topology cached in RAM.
 ///
-/// If not previously initialized, automatically probes host environment once and caches the result.
-/// Subsequent invocations are 100% in-memory with zero syscalls and zero file reads.
+/// Probes the host environment on first call and serves subsequent reads from `OnceLock`.
 pub fn global_hardware_topology() -> &'static HardwareTopology {
     TOPOLOGY.get_or_init(HardwareTopology::probe)
 }
@@ -288,15 +287,9 @@ pub fn init_hardware_topology(topology: HardwareTopology) -> Result<(), Hardware
     TOPOLOGY.set(topology)
 }
 
-/// Configures the calling OS thread to run at the lowest possible scheduling priority (Idle CPU).
+/// Configures the calling OS thread to run under `SCHED_IDLE` (fallback: `nice(19)`).
 ///
-/// Under Linux, this applies the `SCHED_IDLE` scheduling class (with fallback to POSIX `nice(19)`).
-/// The Linux Completely Fair Scheduler (CFS) guarantees that threads configured with `SCHED_IDLE`
-/// will only receive CPU cycles when there are no runnable normal-priority threads (such as
-/// traffic network I/O workers).
-///
-/// This ensures background telemetry (Prometheus), buffer sweepers, IPC reload, and access log
-/// flusher tasks NEVER contend for CPU with core-pinned request processing workers.
+/// Under Linux CFS, `SCHED_IDLE` threads run only when no normal-priority threads are runnable.
 pub fn set_current_thread_idle_priority() -> bool {
     #[cfg(target_os = "linux")]
     {

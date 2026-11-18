@@ -1,53 +1,17 @@
-//! High-Performance W3C TraceContext Request ID Generator & Thread-Local Pool.
+//! W3C TraceContext Request ID Generator & Thread-Local Pool (`velda_core::request_id`).
 //!
-//! # Architecture & Mathematical Formulation
-//!
-//! Every HTTP request processed by Velda Edge is identified by a 128-bit (16-byte)
-//! Request Identifier formatted as a canonical 32-character lowercase hex string,
-//! adhering strictly to the **W3C TraceContext Specification** (`trace_id`).
-//!
-//! ## 128-bit W3C ID Binary Layout
 //! ```text
-//! +-----------------------------------+-----------------------------------+
-//! |  Part 1: Timestamp (64 bits)      |  Part 2: Entropy / Seq (64 bits)  |
-//! |  [High 64-bit integer]            |  [Low 64-bit integer]             |
-//! |  Byte 0..8 (Hex chars 0..16)      |  Byte 8..16 (Hex chars 16..32)    |
-//! +-----------------------------------+-----------------------------------+
+//! ┌───────────────────────────────────┬───────────────────────────────────┐
+//! │ Timestamp (High 64 bits)          │ Entropy / Sequence (Low 64 bits)  │
+//! │ Unix Epoch Seconds (Hex 0..16)    │ [WorkerId: 16b] [SeqCounter: 48b] │
+//! └───────────────────────────────────┴───────────────────────────────────┘
+//!
+//!   next_request_id() ──► Thread-Local Pool (Capacity = 64, Low Watermark = 16)
+//!                             │
+//!             ┌───────────────┴───────────────┐
+//!             ▼ [Same Second]                 ▼ [Second Changed]
+//!        Pop Entry (~1ns)              In-Place Prefix Patch (Hex 0..16)
 //! ```
-//!
-//! ## Mathematical / Bitwise Composition Formula
-//! ```text
-//! RequestId_u128 = ((Timestamp_u64 as u128) << 64) | (Entropy_u64 as u128)
-//!
-//! Where:
-//!   Timestamp_u64 = Unix Epoch timestamp in seconds (SystemTime since 1970-01-01).
-//!                   Guarantees strict time-ordering and global uniqueness across seconds.
-//!   Entropy_u64   = ((Worker_ID as u64) << 48) | (Sequence_Counter & 0x0000_FFFF_FFFF_FFFF)
-//!                   Where:
-//!                     Worker_ID (16 bits): Unique per-thread worker identifier (0..=65535).
-//!                     Sequence_Counter (48 bits): Strictly monotonic 48-bit counter per thread.
-//! ```
-//!
-//! ## Absolute Mathematical Collision Immunity Guarantee
-//! Across all threads and all time:
-//! 1. **Cross-Time Windows ($T_1 \neq T_2$)**:
-//!    $Timestamp(T_1) \neq Timestamp(T_2) \implies RequestId(T_1) \neq RequestId(T_2)$.
-//! 2. **Cross-Worker Threads ($W_1 \neq W_2$)**:
-//!    $Worker(W_1) \neq Worker(W_2) \implies (Entropy \gg 48)(W_1) \neq (Entropy \gg 48)(W_2)$.
-//! 3. **Intra-Worker Sequence ($S_1 \neq S_2$)**:
-//!    Within the same worker and second, $Sequence(S_1) \neq Sequence(S_2)$.
-//!
-//! $\therefore \mathbf{P(\text{Collision}) = 0}$. Absolute mathematical uniqueness is guaranteed
-//! without atomic locks or cross-core coordination.
-//!
-//! ## Thread-Local Amortized Pre-Generation Pool
-//! To achieve **~1-2ns hot-path retrieval**:
-//! - Each worker thread maintains a thread-local pool with a High Watermark (`CAPACITY = 64`)
-//!   and Low Watermark (`LOW_WATERMARK = 16`). Total memory footprint is only ~2 KB (fits in L1 Data Cache).
-//! - **Two-Part Decoupled Assembly / Prefix Patching**:
-//!   When server idle time exceeds 1 second ($T_{\text{now}} > T_{\text{batch}}$), instead of discarding
-//!   pre-generated entropy, the pool executes a sub-microsecond in-place memory patch on the first 16 hex
-//!   bytes (`prefix_hex`), preserving the pre-allocated entropy and monotonic sequence in the suffix.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -147,7 +111,7 @@ pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
 /// Helper to get current Unix epoch in seconds via the lock-free coarse clock (~0.5ns).
 #[inline(always)]
 fn now_epoch_secs() -> u64 {
-    crate::coarse_time::coarse_now_sec()
+    crate::clock::coarse_sec()
 }
 
 /// Pre-computed request ID entry held in the pool.
@@ -288,7 +252,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test_format_hex_16_accuracy() {
+    fn hex_formatting() {
         for &val in &[0u64, 0x0123456789abcdef, 0xfedcba9876543210, u64::MAX] {
             let expected = format!("{val:016x}");
             let mut out_dispatch = [0u8; 16];
@@ -301,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_id_pool_basic_pop_and_watermark_refill() {
+    fn pool_refill() {
         let mut pool = RequestIdPool::new(42);
         assert_eq!(pool.available(), ID_POOL_CAPACITY);
 
@@ -318,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_id_pool_idle_prefix_patching() {
+    fn prefix_patching() {
         let mut pool = RequestIdPool::new(7);
 
         // Artificially simulate that pool entries were generated 10 seconds ago
@@ -350,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multithreaded_collision_immunity() {
+    fn threaded_uniqueness() {
         const THREADS: usize = 8;
         const IDS_PER_THREAD: usize = 10_000;
         let generated_ids = Arc::new(Mutex::new(HashSet::with_capacity(THREADS * IDS_PER_THREAD)));

@@ -206,7 +206,7 @@ impl L7Request {
             version,
             headers: headers.into(),
             body,
-            ingress_time_sec: crate::coarse_time::coarse_now_sec(),
+            ingress_time_sec: crate::clock::coarse_sec(),
             state: RequestState::default(),
         }
     }

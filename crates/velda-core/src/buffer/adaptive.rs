@@ -45,9 +45,9 @@ impl AdaptiveBufferDimensions {
     /// # Dual-Constraint Anti-OOM Formula
     /// `max_cap = min(baseline * 3, baseline + (total_memory_bytes * 0.20) / (num_cores * item_bytes))`
     ///
-    /// Guarantees that even under sustained saturation spikes:
-    /// 1. The buffer pool scales up to 3x baseline capacity to absorb micro-bursts.
-    /// 2. Total buffer memory across all worker cores never exceeds 20% of available RAM.
+    /// Bounds burst capacity:
+    /// 1. Scales up to `3 * baseline` capacity to absorb micro-bursts.
+    /// 2. Caps total buffer memory across worker cores at 20% of available RAM.
     #[inline]
     pub fn adaptive_burst_cap(
         baseline: usize,

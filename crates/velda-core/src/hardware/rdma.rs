@@ -1,28 +1,11 @@
-//! RDMA hardware and subsystem probe for the Velda Edge Data Plane.
+//! RDMA hardware probe (`velda_core::hardware::rdma`).
 //!
-//! # Problem & Architectural Intent
-//! In hyperscale edge proxying and internal cluster meshes, standard kernel TCP/UDP
-//! networking incurs CPU context switches, interrupt handling, and multiple memory copies
-//! (RAM -> kernel sk_buff -> user space buffer). Remote Direct Memory Access (RDMA) provides:
-//! 1. **Zero-Copy**: The network interface card (RNIC) reads/writes directly into process RAM.
-//! 2. **Kernel Bypass**: I/O operations bypass OS kernel context switches and syscalls.
-//! 3. **Sub-microsecond Latency**: Transfers execute in < 1–2 microseconds.
-//!
-//! # Probed Hardware Types
-//! Velda Edge autonomously probes the Linux sysfs subsystem (`/sys/class/infiniband/`)
-//! during cold-start bootstrap without hardcoding or vendor lock-in:
-//! - **InfiniBand (IB)**: Native InfiniBand link layer, hardware credit flow control.
-//! - **RoCE v2**: RDMA over Converged Ethernet (UDP encapsulated on port 4791, L3 routable).
-//! - **RoCE v1**: RDMA over Ethernet L2 framing (non-routable).
-//! - **iWARP**: RDMA over standard TCP/IP streams (IETF RFC 5040).
-//! - **AWS EFA**: Amazon Elastic Fabric Adapter (SRD protocol for AWS EC2).
-//!
-//! # Invariant
-//! Probing is strictly a cold-path operation. Results are cached in [`crate::hardware::HardwareTopology`].
-//! If no RDMA device is present (standard VPS, dev laptops, containers without device passthrough),
-//! the probe returns [`RdmaProfile::none`], triggering safe, zero-overhead fallback to standard sockets.
-//!
-//! Safety valve: `VELDA_RDMA=disabled` forces standard socket operation even when hardware exists.
+//! ```text
+//!  Cold-Start Probe (/sys/class/infiniband/ | VELDA_RDMA=disabled)
+//!        │
+//!        ├── [No RNIC] ──► RdmaProfile::none() (Standard Kernel Sockets)
+//!        └── [RNIC]    ──► InfiniBand │ RoCE v2 │ RoCE v1 │ iWARP │ AWS EFA
+//! ```
 
 use std::path::Path;
 

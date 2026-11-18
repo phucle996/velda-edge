@@ -19,7 +19,7 @@
 //! `velda-plugin`, and `velda-upstream` build on these contracts.
 
 pub mod buffer;
-pub mod coarse_time;
+pub mod clock;
 pub mod context;
 pub mod endpoint;
 pub mod error;

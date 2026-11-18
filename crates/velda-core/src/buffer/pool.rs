@@ -87,7 +87,7 @@ impl HeaderPool {
         })
     }
 
-    /// Performs non-blocking maintenance on this core's header pool using [`crate::coarse_time::coarse_now_sec`].
+    /// Performs non-blocking maintenance on this core's header pool using [`crate::clock::coarse_sec`].
     ///
     /// 1. Evicts expired burst workspaces (> idle_ttl_secs) using non-blocking `try_lock()`.
     /// 2. If available pooled workspaces drop <= 25% of baseline (low watermark),
@@ -96,7 +96,7 @@ impl HeaderPool {
     /// Returns `(evicted, replenished)`.
     #[inline(always)]
     pub fn maintain(&self) -> (usize, usize) {
-        let now_sec = crate::coarse_time::coarse_now_sec();
+        let now_sec = crate::clock::coarse_sec();
         let mut evicted = 0;
         let mut replenished = 0;
         let guard = match self.bucket.try_lock() {
@@ -135,7 +135,7 @@ impl HeaderPool {
     /// Evicts expired burst workspaces across all cores that have been idle longer than `idle_ttl_secs`.
     #[inline(always)]
     pub fn sweep_expired(&self) -> usize {
-        let now_sec = crate::coarse_time::coarse_now_sec();
+        let now_sec = crate::clock::coarse_sec();
         let mut evicted = 0;
         let guard = match self.bucket.try_lock() {
             Ok(g) => Some(g),
@@ -167,7 +167,7 @@ impl HeaderPool {
         if guard.baseline.len() < guard.baseline_limit {
             guard.baseline.push(ws);
         } else if guard.baseline.len() + guard.burst.len() < guard.max_burst_limit {
-            let now_sec = crate::coarse_time::coarse_now_sec();
+            let now_sec = crate::clock::coarse_sec();
             guard.burst.push_back((now_sec, ws));
         }
     }

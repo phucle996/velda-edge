@@ -144,7 +144,7 @@ impl RequestContext {
 /// Keep this structure explicit and strongly typed. Avoid using
 /// `HashMap<String, Box<dyn Any>>` as a generic plugin state store.
 ///
-/// Guaranteed to fit within a single 64-byte L1 Data Cacheline (`size_of <= 64`).
+/// Compact state layout targeting a single 64-byte L1 Data Cache line (`size_of <= 64`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RequestState {
     /// Unique identifier for this request.

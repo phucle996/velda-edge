@@ -49,7 +49,7 @@
 //! ║                                                          ║ ║                                                          ║
 //! ║  • Multi-Shard Worker Distribution (run_ingress_shard)   ║ ║  • Dedicated Background Thread: velda-shadow-0           ║
 //! ║  • 1:1 Core Pinning:                                     ║ ║  • Linux Scheduling Policy: SCHED_IDLE                   ║
-//! ║    ├── Core 0: velda-worker-0 (SCHED_NORMAL, Priority 1) ║ ║    └── Yields 100% CPU when frontline worker needs it    ║
+//! ║    ├── Core 0: velda-worker-0 (SCHED_NORMAL, Priority 1) ║ ║    └── Yields CPU when frontline worker is runnable    ║
 //! ║    └── Core 1: velda-worker-1 (SCHED_NORMAL, Priority 1) ║ ║                                                          ║
 //! ║                                                          ║ ║  [ Sequential Inline Accept Loop — Zero Tokio Spawn ]    ║
 //! ║  [ Hot-Path Request Forwarding Pipeline ]                ║ ║  loop {                                                  ║
